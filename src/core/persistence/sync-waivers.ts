@@ -27,6 +27,18 @@ import { noteDrainSql } from './drain-step.ts';
 import { REVISION_BACKFILL_PENDING } from '../page-state/types.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
+import { isPassBatchKey, passBatchHead } from './sync-pass-batch.ts';
+
+/**
+ * The cursor row a waiver commits beside, locked FOR UPDATE (the fixed order: the page guard, then the cursor). #6712 PR 4b:
+ * a live pass's batch has no row; its head is read under the drain lease instead (`passBatchHead`).
+ */
+async function heldCursorHead(tx: BrainEngine, key: string, sourceId: string): Promise<{ run_id: string | null; index: number | string | null; request_id: string | null } | undefined> {
+  if (isPassBatchKey(key)) return passBatchHead(tx, key, sourceId);
+  const [held] = await tx.executeRaw<{ run_id: string | null; index: number | string | null; request_id: string | null }>(`SELECT completed_keys->0->>'runId' AS run_id,
+    completed_keys->0->'index' AS index,completed_keys->0->'pending'->>'requestId' AS request_id FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 FOR UPDATE`, [key]);
+  return held;
+}
 
 export interface WaiverCursor { sourceId: string; incarnation: string; root: string; gitRoot: string; slugMode: 'git-root' | 'source-root';
   binding: { worktree_id: string }; authority: SyncAuthority; runId: string; index: number }
@@ -117,8 +129,7 @@ export async function waiveNoopEntry<C extends WaiverCursor>(engine: BrainEngine
   const intent = pending.intent;
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId: cursor.sourceId, slug: pending.slug }]);
-    const [held] = await tx.executeRaw<{ run_id: string | null; index: number | string | null; request_id: string | null }>(`SELECT completed_keys->0->>'runId' AS run_id,
-      completed_keys->0->'index' AS index,completed_keys->0->'pending'->>'requestId' AS request_id FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 FOR UPDATE`, [key]);
+    const held = await heldCursorHead(tx, key, cursor.sourceId);
     if (held?.run_id !== cursor.runId || Number(held.index) !== cursor.index || held.request_id !== pending.requestId) return reread(tx);
     const snapshot = await tx.readPageSnapshot(pending.slug, { sourceId: cursor.sourceId, includeDeleted: true });
     if (waived.kind === 'delete') {
@@ -194,8 +205,7 @@ export async function waiveNoopRun<C extends WaiverCursor>(engine: BrainEngine, 
     return await engine.transaction(async tx => {
       await tx.executeRaw("SELECT set_config('lock_timeout','2s',true),set_config('statement_timeout','10s',true)");
       await tx.lockPageKeys(run.map(entry => ({ sourceId: cursor.sourceId, slug: entry.pending.slug })));
-      const [held] = await tx.executeRaw<{ run_id: string | null; index: number | string | null; request_id: string | null }>(`SELECT completed_keys->0->>'runId' AS run_id,
-        completed_keys->0->'index' AS index,completed_keys->0->'pending'->>'requestId' AS request_id FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 FOR UPDATE`, [key]);
+      const held = await heldCursorHead(tx, key, cursor.sourceId);
       if (held?.run_id !== cursor.runId || Number(held.index) !== cursor.index || held.request_id != null) return { cursor: await reread(tx), waived: 0 };
       await faultPoint('sync:mid_waiver_run', { sourceId: cursor.sourceId });
       // The run's screens may span many entries: an owner change since the first one sends the run back to the per-entry path.
@@ -277,8 +287,7 @@ export async function waivePrescreenedRun<C extends WaiverCursor & { binding: { 
     return await engine.transaction(async tx => {
       await tx.executeRaw("SELECT set_config('lock_timeout','2s',true),set_config('statement_timeout','10s',true)");
       await tx.lockPageKeys(run.map(entry => ({ sourceId: cursor.sourceId, slug: entry.slug })));
-      const [held] = await tx.executeRaw<{ run_id: string | null; index: number | string | null; request_id: string | null }>(`SELECT completed_keys->0->>'runId' AS run_id,
-        completed_keys->0->'index' AS index,completed_keys->0->'pending'->>'requestId' AS request_id FROM op_checkpoints WHERE op='managed-sync' AND fingerprint=$1 FOR UPDATE`, [key]);
+      const held = await heldCursorHead(tx, key, cursor.sourceId);
       if (held?.run_id !== cursor.runId || Number(held.index) !== cursor.index || held.request_id != null) return { cursor: await reread(tx), waived: 0 };
       await faultPoint('sync:prescreened', { sourceId: cursor.sourceId });
       const binding = await getWorktreeBinding(tx, cursor.sourceId);

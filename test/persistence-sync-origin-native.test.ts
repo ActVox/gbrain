@@ -1,3 +1,14 @@
+/**
+ * Native sync-origin identity (separators, case, root spellings) and deletion provenance of managed sync.
+ *
+ * #6712 PR 4b: a non-company source syncs by the live pass, so these tests assert the pass where they used to assert the
+ * cursor. Protects, for the pass: a remote sync keeps its accepted path and payload unchanged across root spellings and,
+ * on a page no sync import recorded, asks for the brain host and writes nothing; deleting a filename no page claims is not
+ * a candidate (no request, the live or tombstoned page unchanged; a tombstone whose file is still present is held
+ * file_drift deleted/tombstone_edited); a committed or working-tree deletion of a page no sync import recorded is held
+ * file_drift deleted/file_gone and the page stays live. The cursor-only tests (frozen manifests, resumed and legacy
+ * cursors, hand-built cursor intents) still pin the cursor engine.
+ */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -25,6 +36,7 @@ import { computeSyncDelta } from '../src/core/sync-delta.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
+import { readGitSourceHolds } from '../src/core/persistence/sync-holds.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { interruptAfterSyncDiscovery } from './helpers/persistence-sync-interruption.ts';
 import { makeGitFixture } from './helpers/git-fixture.ts';
@@ -154,7 +166,7 @@ check('native root spellings retain the registered owner and resume the same syn
   }
 });
 
-check('native sync retains the exact accepted remote path and payload hash across root spellings', async engine => {
+check('a native remote sync keeps the accepted path and payload across root spellings; on a page no sync import recorded it asks for the brain host and writes nothing', async engine => {
   const f = await fixture(engine);
   const clientId = `fixture-admin-${randomUUID()}`;
   await engine.executeRaw(`INSERT INTO oauth_clients(client_id,client_name,client_secret_hash,scope,source_id,allowed_operations)
@@ -167,16 +179,12 @@ check('native sync retains the exact accepted remote path and payload hash acros
   if (process.platform === 'win32' && process.env.GBRAIN_TEST_REQUIRE_CASE_INSENSITIVE === '1') {
     expect(remote.data.repoPath).not.toBe(binding.local_path);
   }
+  // The page has no sync import record, so only the brain host can reconcile it: the remote pass stops before admitting anything.
   expect(await withSubmissionAuthority(remote.authority, () => performManagedSync(engine, remote.data as SyncOpts)))
-    .toMatchObject({ status: 'first_sync', added: 0, deleted: 0 });
-  const receipts = await engine.executeRaw<{ intent: { syncAuthority: { remoteData: unknown; remoteJob: unknown } }; state: string }>(
-    'SELECT intent,state FROM persistence_requests WHERE source_id=$1', [f.id]);
-  expect(receipts.length).toBeGreaterThan(0);
-  for (const receipt of receipts) {
-    expect(receipt.state).toBe('committed');
-    expect(receipt.intent.syncAuthority.remoteData).toEqual(accepted.data);
-    expect(receipt.intent.syncAuthority.remoteJob).toEqual(accepted.authority);
-  }
+    .toMatchObject({ status: 'blocked_by_failures', reason: 'reconcile_host_required', added: 0, deleted: 0,
+      pass: { kind: 'full', outcome: 'blocked', stop_reason: 'reconcile_host_required' } });
+  expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
+  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
   expect(remote).toEqual(accepted);
   expect(await getWorktreeBinding(engine, f.id)).toEqual(binding);
   expect((await engine.getPage(f.slug, { sourceId: f.id }))?.id).toBe(f.snapshot.page.id);
@@ -270,14 +278,19 @@ for (const alias of [false, true]) check(`native historical ${alias ? 'alias' : 
     expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
     expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
   } else {
+    // #6712 PR 4b: the first pass reads the whole level, so the unchanged notes/untouched.md, which has no page yet, is
+    // imported beside the changed file (the cursor's incremental delta saw only the change). The historical origin's page
+    // is untouched (below).
     const result = await performManagedSync(engine, opts);
-    expect(result).toMatchObject({ status: 'synced', fromCommit: f.head, toCommit: target, deleted: 0, filesImported: 1 });
+    expect(result).toMatchObject({ status: 'synced', fromCommit: f.head, toCommit: target, deleted: 0, filesImported: 2 });
     const requests = await engine.executeRaw<{ intent: SyncIntent; state: string }>('SELECT intent,state FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [f.id]);
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(requests.every(row => row.state === 'committed')).toBe(true);
-    expect(requests[0].intent).toMatchObject({ kind: 'managed_sync_import', path: 'notes/example.md', from: f.head, target });
-    expect(requests[1].intent.kind).toBe('managed_sync_checkpoint');
-    expect(await engine.getPage('notes/untouched', { sourceId: f.id })).toBeNull();
+    expect(requests.slice(0, 2).map(row => row.intent).sort((a, b) => a.path!.localeCompare(b.path!))).toEqual([
+      expect.objectContaining({ kind: 'managed_sync_import', path: 'notes/example.md', from: f.head, target }),
+      expect.objectContaining({ kind: 'managed_sync_import', path: 'notes/untouched.md', from: f.head, target })]);
+    expect(requests[2].intent.kind).toBe('managed_sync_checkpoint');
+    expect((await engine.getPage('notes/untouched', { sourceId: f.id }))?.source_path).toBe('notes/untouched.md');
     expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(target);
     if (process.platform === 'win32' && alias) expect(await engine.getPage('notes/example', { sourceId: f.id })).toBeNull();
   }
@@ -288,7 +301,7 @@ for (const alias of [false, true]) check(`native historical ${alias ? 'alias' : 
   if (process.platform !== 'win32') expect(readFileSync(join(f.root, literal), 'utf8')).toBe(content);
 });
 
-check('deleting an unowned filename preserves the live or tombstoned foreign-origin page', async engine => {
+check('deleting an unowned filename is not a pass candidate and preserves the live or tombstoned foreign-origin page', async engine => {
   for (const deleted of [false, true]) {
     const f = await fixture(engine, 'notes/recorded.md', 'notes/example', {
       'notes/recorded.md': content, 'notes/example.md': content,
@@ -305,14 +318,18 @@ check('deleting an unowned filename preserves the live or tombstoned foreign-ori
     const target = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const opts = { ...f.opts, full: false };
     expect(await performManagedSync(engine, { ...opts, dryRun: true })).toMatchObject({ status: 'dry_run' });
-    expect(await performManagedSync(engine, opts)).toMatchObject({ status: 'synced', deleted: 0, filesImported: 1, toCommit: target });
+    const result = await performManagedSync(engine, opts);
+    expect(result).toMatchObject({ status: 'synced', deleted: 0, filesImported: 0, toCommit: target, pass: { kind: 'full', outcome: 'synced', candidates: 0 } });
     expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id, includeDeleted: true })).toEqual(before);
     expect(await engine.getVersions(f.slug, { sourceId: f.id })).toEqual(history);
     expect(readFileSync(join(f.root, 'notes/recorded.md'), 'utf8')).toBe(content);
-    const [receipt] = await engine.executeRaw<{ state: string; outcome: unknown }>(
-      "SELECT state,outcome FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_delete'", [f.id]);
-    expect(receipt).toMatchObject({ state: 'committed', outcome: { noop: true, reason: 'unowned_deleted_path' } });
+    // No page claims notes/example.md, so the pass has nothing to delete: the checkpoint is its only request.
+    const requests = await engine.executeRaw<{ kind: string; state: string }>("SELECT intent->>'kind' AS kind,state FROM persistence_requests WHERE source_id=$1 ORDER BY sequence", [f.id]);
+    expect(requests).toEqual([{ kind: 'managed_sync_checkpoint', state: 'committed' }]);
     expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(target);
+    // A tombstone whose recorded file is still in the tree is a deletion the file never saw: held, never revived.
+    const holds = ((await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]?.holds ?? []).map(hold => ({ path: hold.path, code: hold.code, side: hold.meta.side, state: hold.meta.state }));
+    expect(holds).toEqual(deleted ? [{ path: 'notes/recorded.md', code: 'file_drift', side: 'deleted', state: 'tombstone_edited' }] : []);
   }
 });
 
@@ -354,7 +371,7 @@ check('unowned deletion rechecks absent ownership and file bytes at publication'
   }
 });
 
-check('a genuine committed Git deletion commits one deletion and the exact checkpoint', async engine => {
+check('a committed Git deletion of a page no sync import recorded is held file_drift (deleted, file_gone): the page stays live and only the checkpoint commits', async engine => {
   const f = await fixture(engine);
   await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [f.id, f.head]), TEST_WRITE_ATTRIBUTION));
   const history = await engine.getVersions(f.slug, { sourceId: f.id });
@@ -367,21 +384,21 @@ check('a genuine committed Git deletion commits one deletion and the exact check
   expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
   expect(await engine.getVersions(f.slug, { sourceId: f.id })).toEqual(history);
   expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
-  expect(await performManagedSync(engine, { ...f.opts, full: false })).toMatchObject({ status: 'synced', deleted: 1, filesImported: 1, fromCommit: f.head, toCommit: target });
-  const deleted = (await engine.readPageSnapshot(f.slug, { sourceId: f.id, includeDeleted: true }))!;
-  expect(deleted.page.id).toBe(f.snapshot.page.id);
-  expect(deleted.page.deleted_at).not.toBeNull();
-  expect(deleted.revision).not.toBe(f.snapshot.revision);
-  expect(await engine.getVersions(f.slug, { sourceId: f.id })).toHaveLength(history.length + 1);
+  // The page was imported outside sync (no import record), so nothing proves the database still holds the deleted file's bytes.
+  const result = await performManagedSync(engine, { ...f.opts, full: false });
+  expect(result).toMatchObject({ status: 'synced', deleted: 0, filesImported: 0, fromCommit: f.head, toCommit: target, pass: { kind: 'full', outcome: 'synced', candidates: 0 } });
+  expect(result.held?.map(item => [item.path, item.code])).toEqual([['notes/example.md', 'file_drift']]);
+  const [hold] = (await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]!.holds;
+  expect(hold!.meta).toMatchObject({ side: 'deleted', state: 'file_gone' });
+  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
+  expect(await engine.getVersions(f.slug, { sourceId: f.id })).toEqual(history);
   const requests = await engine.executeRaw<{ intent: SyncIntent; state: string }>('SELECT intent,state FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [f.id]);
-  expect(requests).toHaveLength(2);
-  expect(requests.every(row => row.state === 'committed')).toBe(true);
-  expect(requests[0].intent).toMatchObject({ kind: 'managed_sync_delete', working: false, target, from: f.head });
-  expect(requests[1].intent.kind).toBe('managed_sync_checkpoint');
+  expect(requests.map(row => [row.intent.kind, row.state])).toEqual([['managed_sync_checkpoint', 'committed']]);
   expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(target);
   expect(await performManagedSync(engine, { ...f.opts, full: false })).toMatchObject({ status: 'up_to_date', deleted: 0 });
-  expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toHaveLength(2);
-  expect(await engine.getVersions(f.slug, { sourceId: f.id })).toHaveLength(history.length + 1);
+  expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toHaveLength(1);
+  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
+  expect(await engine.getVersions(f.slug, { sourceId: f.id })).toEqual(history);
 });
 
 check('old manifest reuse refuses a present-file deletion before admitting any request', async engine => {
@@ -413,14 +430,19 @@ check('already-admitted legacy deletion fails under its original ID and the next
   expect(readFileSync(join(f.root, 'notes/example.md'), 'utf8')).toBe(content);
 });
 
-check('explicit working-tree deletion remains valid even when the pinned Git target contains the file', async engine => {
+check('an explicit working-tree deletion of a page no sync import recorded is held file_drift (deleted, file_gone), even when the pinned Git target contains the file', async engine => {
   const f = await fixture(engine);
   unlinkSync(join(f.root, 'notes/example.md'));
   const result = await performManagedSync(engine, { ...f.opts, workingTree: true });
-  expect(result).toMatchObject({ status: 'first_sync', deleted: 1 });
-  expect(await engine.getPage(f.slug, { sourceId: f.id })).toBeNull();
-  const [request] = await engine.executeRaw<{ intent: SyncIntent }>("SELECT intent FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_delete'", [f.id]);
-  expect(request.intent.working).toBe(true);
+  // --working-tree differs from the configured mode, so the pass converges selection-scoped and stamps no checkpoint.
+  expect(result).toMatchObject({ status: 'synced', reason: 'selection_scoped', deleted: 0, pass: { kind: 'full', outcome: 'synced', candidates: 0 } });
+  expect(result.held?.map(item => [item.path, item.code])).toEqual([['notes/example.md', 'file_drift']]);
+  const [hold] = (await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]!.holds;
+  expect(hold!.meta).toMatchObject({ side: 'deleted', state: 'file_gone' });
+  expect((await engine.getPage(f.slug, { sourceId: f.id }))?.id).toBe(f.snapshot.page.id);
+  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
+  expect(await engine.executeRaw("SELECT intent FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_delete'", [f.id])).toEqual([]);
+  expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBeNull();
 });
 
 check('native case aliases refuse rather than merge distinct origins', async engine => {

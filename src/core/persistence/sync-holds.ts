@@ -69,7 +69,9 @@ export const GIT_HOLD_ESCALATE_MIN_SCREENED = 40;
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 
 export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regression' | 'managed_image_sync_unsupported' | 'concurrent_write' | 'preparation_stalled' | 'worktree_dirty' | 'file_drift'
-  | 'legacy_slug_conflict';
+  | 'legacy_slug_conflict'
+  /** #6712 PR 4b (design v3.2 §3.1): a path a live pass settled in three consecutive passes at one level that never classified settled. */
+  | 'settle_mismatch';
 /** #6278: what the owner recorded about a preparation it gave up on (step names and vocabulary only, never content). */
 export interface PreparationStallMeta {
   request_id: string;
@@ -148,6 +150,8 @@ export interface GitHoldMeta {
   blocked_on?: string;
   /** #6727 `legacy_slug_conflict`: the live pages without a recorded origin whose slugs fold to the file's slug. */
   legacy_slugs?: string[];
+  /** #6712 PR 4b `settle_mismatch`: the consecutive passes that settled the path at this level without it classifying settled. */
+  mismatch_streak?: number;
 }
 
 /** #6188: why the last fence repair left a hold in place, and when the maintenance run tries it again (null: it does not). */
@@ -758,6 +762,17 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
           why: `Re-screens ${record.path} after the other pages are removed (this hold is re-screened on every sync).` },
         verify };
     }
+    case 'settle_mismatch': {
+      const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+      return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#settle_mismatch',
+        why: `Sync settled ${record.path} at the same level in ${record.meta.mismatch_streak ?? 3} passes in a row, but the next round never classified it settled, so sync held it instead of re-importing it every pass; the rest of the source synced. `
+          + `Doctor (read-only) names a broken writer, a stuck effect or a damaged record; gbrain sources writer status ${source} --json (read-only) shows the write owner. Report what they show with the gbrain version. Once the cause is fixed, retry-held re-tests the file.`,
+        then: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', source, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+          why: 'Shows the write owner, its gbrain version and any write still stuck (read-only).',
+          then: { argv: ['gbrain', 'sources', 'retry-held', source], consent: [], actor: 'agent', requires_exclusive: false, verify,
+            why: `Schedules ${record.path} for a re-test on the next sync of ${source}; a mismatch that comes back is held again after three passes.` } },
+        verify };
+    }
     case 'rename_held':
       return repair(true, `The page that ${record.path} renames changed after the rename was recorded, so it was not moved; the preview proposes re-binding the rename to the current page for approval.`);
     case 'frontmatter_slug_conflict':
@@ -922,6 +937,8 @@ export interface SyncImportProvenance {
   revision?: string;
   /** What parsed the bytes: the import parser version, the Markdown chunker and the schema pack in effect (null for none). Absent on older records. */
   parser?: SyncImportParser;
+  /** #6712 PR 4b: the open `--full` episode this import was written under (design §6); a live pass's `matched` requires it while the episode is open. */
+  full_episode?: string;
 }
 
 /**

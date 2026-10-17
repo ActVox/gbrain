@@ -43,7 +43,17 @@ export type DrainStopReason = 'deadline' | 'drain_stalled' | 'database_contentio
   /** #6696 (A7): a cumulative write cap (or the background pause line) refused the next admission after the preflight passed; resumable once capacity returns. */
   | 'capacity_paused'
   /** #6712 PR 1: another drainer holds the source's drain lease (or took it from this run); resumable, the next run follows it. */
-  | 'drain_lease_held';
+  | 'drain_lease_held'
+  /** #6712 PR 4b (design v3.2 §9): the live pass's stops. `not_converged` and `admission_paused` are resumable; the rest need the host or a report. */
+  | 'not_converged' | 'admission_paused' | 'grant_scope' | 'reconcile_host_required' | 'reconcile_read_incomplete';
+/** The pass's status reasons that end a drain, with their outcome (design v3.2 §9). */
+const PASS_STOPS: Partial<Record<string, { outcome: DrainOutcome; reason: DrainStopReason }>> = {
+  not_converged: { outcome: 'resumable', reason: 'not_converged' }, admission_paused: { outcome: 'resumable', reason: 'admission_paused' },
+  grant_scope: { outcome: 'blocked', reason: 'grant_scope' }, reconcile_host_required: { outcome: 'blocked', reason: 'reconcile_host_required' },
+  reconcile_read_incomplete: { outcome: 'blocked', reason: 'reconcile_read_incomplete' },
+};
+/** Consecutive `not_converged` passes after which the agent reports instead of rerunning (design v3.2 §9). */
+export const NOT_CONVERGED_REPORT_STREAK = 3;
 /** #6696 (A7): the refusal that paused the drain (`capacity_paused`); `fix` is the host's config raise. */
 export interface DrainCapacityPause { code: string; reason: string | null; detail: string | null; message: string; fix?: Action }
 /** A capacity refusal raised by an admission after the run's preflight (the preflight's own refusal stops the command up front). */
@@ -581,6 +591,8 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
           : finish(result, 'resumable', 'drain_lease_held', { retry_after_ms: result.leaseHeld.retry_after_ms });
         // #6278: the breaker's systemic stop is one diagnostic, not a failed page.
         if (result.breaker) return finish(result, 'blocked', 'preparation_systemic');
+        const passStop = result.pass ? PASS_STOPS[result.reason ?? ''] : undefined;
+        if (passStop) return finish(result, passStop.outcome, passStop.reason);
         if (result.status === 'blocked_by_failures') return finish(result, 'blocked', 'blocked_by_failures');
         if (result.managedWrite && result.managedWrite.write_error !== 'write_pending') return finish(result, 'blocked', 'blocked_by_failures');
         if (result.status === 'partial' && (result.reason === 'timeout' || signal?.aborted)) return finish(result, 'resumable', 'deadline');
@@ -897,7 +909,46 @@ const STOP_DOCS: Record<DrainStopReason, CatalogueName> = {
   unexpected_staging_bytes: 'sync_drain_writer_blocked', blocked_by_failures: 'sync_drain_blocked_by_failures',
   preparation_abandoned: 'sync_drain_preparation_abandoned', preparation_systemic: 'sync_drain_preparation_systemic', write_capacity: 'sync_drain_write_capacity',
   connection_lost: 'sync_drain_connection_lost', capacity_paused: 'sync_drain_capacity_paused', drain_lease_held: 'sync_drain_lease_held',
+  not_converged: 'sync_drain_not_converged', admission_paused: 'sync_drain_admission_paused', grant_scope: 'sync_drain_grant_scope',
+  reconcile_host_required: 'sync_drain_reconcile_host_required', reconcile_read_incomplete: 'sync_drain_reconcile_read_incomplete',
 };
+
+/**
+ * #6712 PR 4b (design v3.2 §9): `next` for the live pass's stops. `not_converged` reruns the same sync until the server-side
+ * streak reaches NOT_CONVERGED_REPORT_STREAK, then reports; the others never loop: the host runs the sync, the owner restores
+ * `sync.admission` (never run automatically), or the agent reports.
+ */
+function passNext(stop: DrainStopReason | undefined, result: SyncResult, resumeCommand: string, sourceId: string):
+  Omit<DrainNext, 'eta_seconds' | 'rate_pages_per_min' | 'docs'> | null {
+  const status = ['gbrain', 'sync', 'status', '--source', sourceId, '--json'];
+  const verify = { argv: status };
+  const render = (action: Omit<Action, 'requires_exclusive' | 'consent'>) => renderAction({ consent: [], requires_exclusive: false, verify, ...action }, cliRenderContext());
+  const hostSync = `gbrain sync --source ${sourceId} --no-pull`;
+  switch (stop) {
+    case 'not_converged': {
+      const streak = result.pass?.not_converged_streak ?? 0;
+      if (streak < NOT_CONVERGED_REPORT_STREAK) return { command: resumeCommand, safe_to_loop: true, retry_after_ms: 0, code: 'not_converged',
+        why: `The pass ran ${result.pass?.round ?? 'its'} rounds without the level settling (another writer kept changing it); everything it admitted stands. The next sync reads the level again: rerun ${resumeCommand}.`,
+        fix: render({ argv: resumeCommand.split(' '), actor: 'agent', why: 'Reruns the pass; it starts from what the last one settled.' }) };
+      return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: 'not_converged',
+        why: `${streak} passes in a row ended without the level settling, so rerunning is not converging. Report it with the status (read-only) and gbrain doctor --json; the writer changing the checkout is named there.`,
+        fix: render({ actor: 'agent', why: `${streak} consecutive passes did not converge; report it instead of rerunning.` }) };
+    }
+    case 'admission_paused': return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: 'admission_paused',
+      why: 'sync.admission is not normal, so the pass admitted only what it allows and stopped; nothing failed. Restoring it is the owner\'s decision: gbrain config set sync.admission normal, then the next sync continues.',
+      fix: render({ argv: ['gbrain', 'config', 'set', 'sync.admission', 'normal'], actor: 'user', why: 'Restores what managed sync may write; never run automatically.',
+        user_message: `Managed sync of ${sourceId} is paused by sync.admission. To resume it, run: gbrain config set sync.admission normal` }) };
+    case 'grant_scope': case 'reconcile_host_required': return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: stop,
+      why: stop === 'grant_scope'
+        ? `This writer's grant covers only part of source ${sourceId}, so the pass admitted what it could see and cannot finish the source; the owner host's sync finishes it: ${hostSync}.`
+        : `What is left in source ${sourceId} needs the owner host (holds, markers or decisions a remote caller never writes); everything this run admitted stands. On the owner host run: ${hostSync}.`,
+      fix: render({ argv: hostSync.split(' '), actor: 'user', why: 'Only the source\'s owner host finishes the pass.', user_message: `On the host that owns source ${sourceId}, run: ${hostSync}` }) };
+    case 'reconcile_read_incomplete': return { command: status.join(' '), safe_to_loop: false, retry_after_ms: 0, code: 'reconcile_read_incomplete',
+      why: `A Git listing of source ${sourceId}'s checkout did not finish cleanly, so the pass classified nothing and wrote nothing. Check the checkout (git status), then report it with gbrain doctor --json if it repeats.`,
+      fix: render({ actor: 'agent', why: 'The checkout could not be listed; report it with gbrain doctor --json.' }) };
+    default: return null;
+  }
+}
 
 /** What the agent runs next, or null when the sync is done (DX-A2). */
 export function drainNext(result: SyncResult, resumeCommand: string, sourceId: string): DrainNext | null {
@@ -920,6 +971,8 @@ export function drainNext(result: SyncResult, resumeCommand: string, sourceId: s
       why: held?.fix.why ?? 'Another drainer holds this source\'s drain lease and resumes the same cursor; rerun after retry_after_ms.',
       ...(held ? { fix: renderAction({ ...held.fix, argv: resumeCommand.split(' ') }, cliRenderContext()) } : {}), docs: ERROR_CATALOGUE.sync_drain_lease_held.docs };
   }
+  const pass = passNext(d?.stop_reason, result, resumeCommand, sourceId);
+  if (pass) return { ...pass, ...estimate, docs: ERROR_CATALOGUE[STOP_DOCS[d!.stop_reason!]].docs };
   // #6712 PR 1: the drain-lease holder this run followed heartbeats but has committed nothing (and saved no cursor) for the
   // stall window. Waiting again would read as a clean exit on every tick, so this stops blocked with the holder named.
   if (d?.stop_reason === 'drain_stalled' && d.stall?.lease_holder) {

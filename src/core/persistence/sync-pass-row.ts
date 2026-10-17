@@ -65,6 +65,12 @@ export interface ManagedSyncPassValue {
     /** When the current run of unhealthy endings (`blocked`, `not_converged`) began; kept across them, cleared at `synced`/`up_to_date`. The §3.7 readers age a stuck source from it. */
     stuck_since?: string | null;
     faults: Record<string, { level: string | null; class: string; attempts: number }>;
+    /** #6712 PR 4b (design §2.7): when the incarnation's first full round swept every `legacy_unverified` page; later passes sweep at most 500. */
+    legacy_sweep?: { first_full_at: string };
+    /** #6712 PR 4b (design §2.6): the set hash of a withheld mass delete; with the env valve set the next tick runs a full round to apply it. */
+    deletes_withheld?: string | null;
+    /** #6712 PR 3 (L7) on the pass: the page request a blocked pass stopped on, which the next pass replays while what refused it is unchanged. */
+    blocked?: { request_id: string; pass_id: string };
   };
   telemetry: {
     pass_id: string;
@@ -83,7 +89,18 @@ export interface ManagedSyncPassValue {
     counts: Record<string, number>;
     duration_ms: number | null;
     timings_ms: Record<string, number>;
+    /** #6712 PR 4b (design §9): the newest round's classes (`{count, action}`) and level summary, for `sync status`'s live `convergence`. */
+    classes?: Record<string, { count: number; action: 'none' | 'owner' | 'repair' }>;
+    summary?: PassRoundSummary;
   };
+}
+
+/** What `sync status`'s live `convergence` reads of the newest round besides its classes (design §9). */
+export interface PassRoundSummary {
+  db_ahead: { pending: number; db_only: number; unproven: number; by_prefix: Record<string, number> };
+  full_skipped_db_ahead: number;
+  legacy_unverified: number;
+  legacy_pageless: number;
 }
 
 export const OPEN_AT_STAMP_CAP = 256;

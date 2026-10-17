@@ -10,6 +10,10 @@
  * The reference model below is written from the state space (page state × level × dirtiness, then the
  * fileSame × dbSame × proof regions the totality argument names), not from the row list, so the ordered first-match
  * table in sync-classify.ts and this decision tree must agree on every input.
+ *
+ * #6712 PR 4b rulings (Garry's Q3 = A: a settled path is matched, held, or in an action-tagged class): a legacy marker
+ * settles only with a recorded deletion and never under a full obligation (b1, b5); a path with a hold never settles in
+ * another class (b2).
  */
 import { describe, expect, test } from 'bun:test';
 import fc from 'fast-check';
@@ -21,6 +25,15 @@ const CLEAN: ReadonlySet<SyncDirtiness | null> = new Set(['clean', 'clean_eol', 
 /** The reference model: page state first, then level, then dirtiness, then the fileSame × dbSame × proof regions. */
 function reference(s: SyncPathState): SyncClass {
   if (s.hold && s.hold.atLevel && !s.hold.rescreenDue && !s.hold.retried) return 'held';
+  const rest = referenceAfterHold(s);
+  if (!s.hold) return rest;
+  if (s.level !== null && (rest === 'matched' || rest === 'import')) return 'held';
+  const live = s.page?.live === true;
+  const dirtySettled = (s.tree !== null && !!s.record?.blobOids.includes(s.tree)) || (s.diskOid !== null && !!s.record?.blobOids.includes(s.diskOid)) || s.published || (s.dirty === 'deleted' && !live);
+  return SETTLED.has(rest) || (rest === 'dirty' && dirtySettled) ? 'held' : rest;
+}
+
+function referenceAfterHold(s: SyncPathState): SyncClass {
   if (s.spelling) return 'spelling';
   const absorbed = new Set(s.record?.blobOids ?? []);
   const fileSame = s.level !== null && absorbed.has(s.level);
@@ -36,7 +49,7 @@ function reference(s: SyncPathState): SyncClass {
     if ((state === 'tombstone' && fileSame) || markerHolds) return 'deleted_same';
     const deletedEvidence = state === 'tombstone' || s.marker?.kind === 'deleted';
     if (deletedEvidence && !s.published) return 'deleted_edited';
-    if (s.marker?.kind === 'legacy' && s.marker.blobOids.includes(s.level)) return 'legacy_same';
+    if (s.marker?.kind === 'legacy' && s.marker.deletion && !s.fullObligation && s.marker.blobOids.includes(s.level)) return 'legacy_same';
     return dirtyCommitted ? dirtyClass() : 'import';
   }
   if (s.level === null && s.mode === 'committed' && s.present) return 'kept';
@@ -68,7 +81,9 @@ const at = (patch: Partial<SyncPathState>) => ({ ...base, ...patch });
 describe('rows (v3.2 §2.3)', () => {
   const cases: Array<[string, Partial<SyncPathState>, SyncClass, boolean]> = [
     ['1 held at its level', { hold: { atLevel: true, rescreenDue: false, retried: false }, level: 'B', tree: 'B' }, 'held', true],
-    ['1 a re-screen-due hold does not settle', { hold: { atLevel: true, rescreenDue: true, retried: false } }, 'matched', true],
+    ['1 a re-screen-due hold does not settle: the pass re-runs it', { hold: { atLevel: true, rescreenDue: true, retried: false } }, 'held', false],
+    ['1 a re-screen-due hold on a page-less file is held, not imported or legacy (b2)', { hold: { atLevel: true, rescreenDue: true, retried: false }, page: null, record: null }, 'held', false],
+    ['1 a hold over a database-ahead level stands (never imported over)', { hold: { atLevel: false, rescreenDue: false, retried: false }, page: { live: true, revision: 'R2', originMatches: true } }, 'held', true],
     ['2 spelling', { spelling: true }, 'spelling', false],
     ['3 untracked: committed, not in T, no live page', { tree: null, level: null, page: null, record: null }, 'untracked', true],
     ['4 kept: live, committed, absent from T, file present', { tree: null, level: null, present: true, dirty: null }, 'kept', true],
@@ -79,7 +94,9 @@ describe('rows (v3.2 §2.3)', () => {
     ['8 deleted_same (marker)', { page: null, record: null, marker: { kind: 'deleted', blobOids: ['A'] } }, 'deleted_same', true],
     ['9 deleted_edited (tombstone)', { tree: 'B', level: 'B', page: { live: false, revision: 'R1', originMatches: true } }, 'deleted_edited', false],
     ['9 deleted_edited (marker without OIDs, fail closed)', { page: null, record: null, marker: { kind: 'deleted', blobOids: [] } }, 'deleted_edited', false],
-    ['10 legacy_same', { page: null, record: null, marker: { kind: 'legacy', blobOids: ['A'] } }, 'legacy_same', true],
+    ['10 legacy_same: a marker that records a deletion', { page: null, record: null, marker: { kind: 'legacy', blobOids: ['A'], deletion: 'req-1' } }, 'legacy_same', true],
+    ['10 a baseline-equal legacy marker without a deletion settles nothing (b1)', { page: null, record: null, marker: { kind: 'legacy', blobOids: ['A'] } }, 'import', false],
+    ['10 a legacy-marked path under a full obligation imports (b5)', { page: null, record: null, marker: { kind: 'legacy', blobOids: ['A'], deletion: 'req-1' }, fullObligation: true }, 'import', false],
     ['10 a legacy-marked file that changed imports', { tree: 'B', level: 'B', page: null, record: null, marker: { kind: 'legacy', blobOids: ['A'] } }, 'import', false],
     ['11 dirty, absorbed', { dirty: 'modified', diskOid: 'C' }, 'dirty', true],
     ['11 dirty, not absorbed', { tree: 'B', level: 'B', dirty: 'modified', diskOid: 'C' }, 'dirty', false],
@@ -150,9 +167,9 @@ const stateArb: fc.Arbitrary<SyncPathState> = fc.record({
   published: fc.boolean(),
   hold: fc.constantFrom<SyncPathState['hold']>(null, { atLevel: true, rescreenDue: false, retried: false }, { atLevel: false, rescreenDue: false, retried: false },
     { atLevel: true, rescreenDue: true, retried: false }, { atLevel: true, rescreenDue: false, retried: true }),
-  marker: fc.constantFrom<SyncPathState['marker']>(null, { kind: 'deleted', blobOids: ['A'] }, { kind: 'deleted', blobOids: [] }, { kind: 'legacy', blobOids: ['A'] }),
+  marker: fc.constantFrom<SyncPathState['marker']>(null, { kind: 'deleted', blobOids: ['A'] }, { kind: 'deleted', blobOids: [] }, { kind: 'legacy', blobOids: ['A'] }, { kind: 'legacy', blobOids: ['A'], deletion: 'req-1' }),
   baseline: fc.constantFrom<string | null>(null, 'A', 'B'),
-  spelling: fc.boolean(), episodeUnsatisfied: fc.boolean(), keepDb: fc.boolean(), openWork: fc.boolean(),
+  spelling: fc.boolean(), episodeUnsatisfied: fc.boolean(), fullObligation: fc.boolean(), keepDb: fc.boolean(), openWork: fc.boolean(),
 }).map(({ working, ...raw }) => {
   // Consistency the pass guarantees: committed L = T[p] and Dp only for T paths; working L = the bytes, present ⇔ L.
   const level = raw.mode === 'committed' ? raw.tree : working;
@@ -168,7 +185,8 @@ describe('P0 properties', () => {
       expect(a).toEqual(b);
       expect(SYNC_CLASSES).toContain(a.cls);
       expect(a.cls).toBe(reference(s));
-      if (a.cls !== 'dirty' && a.cls !== 'spelling') expect(a.settled).toBe(SETTLED.has(a.cls));
+      if (a.cls !== 'dirty' && a.cls !== 'spelling' && a.cls !== 'held') expect(a.settled).toBe(SETTLED.has(a.cls));
+      if (a.cls === 'held') expect(a.settled).toBe(!a.rescreenDue);
       expect(a.inFlight).toBe(!a.settled && s.openWork);
     }), { numRuns: 60_000, seed: 6712 });
   });
@@ -181,11 +199,11 @@ describe('P0 properties', () => {
     for (const page of [null, { live: true, revision: 'R1', originMatches: true }, { live: true, revision: 'R2', originMatches: true }, { live: false, revision: 'R1', originMatches: true }])
     for (const record of [null, { blobOids: ['A'], revision: null, parserSame: true }, { blobOids: ['A'], revision: 'R1', parserSame: true }, { blobOids: ['A'], revision: 'R1', parserSame: false }])
     for (const attested of [null, { hash: sha('A'), arm1: false }, { hash: null, arm1: true }])
-    for (const marker of [null, { kind: 'deleted' as const, blobOids: ['A'] }, { kind: 'legacy' as const, blobOids: ['A'] }])
-    for (const published of [false, true]) for (const baseline of [null, 'A']) for (const keepDb of [false, true]) for (const episodeUnsatisfied of [false, true]) {
+    for (const marker of [null, { kind: 'deleted' as const, blobOids: ['A'] }, { kind: 'legacy' as const, blobOids: ['A'] }, { kind: 'legacy' as const, blobOids: ['A'], deletion: 'req-1' }])
+    for (const published of [false, true]) for (const baseline of [null, 'A']) for (const keepDb of [false, true]) for (const episodeUnsatisfied of [false, true]) for (const fullObligation of [false, true]) {
       const level = mode === 'committed' ? tree : working;
       const s: SyncPathState = { mode, tree, level, present, dirty, diskOid: 'C', page, record, attested, levelSha256: sha(level), published, hold: null, marker, baseline,
-        spelling: false, episodeUnsatisfied, keepDb, openWork: false };
+        spelling: false, episodeUnsatisfied, fullObligation, keepDb, openWork: false };
       const got = classifySyncPath(s);
       if (got.cls !== reference(s)) throw new Error(`mismatch ${got.cls} vs ${reference(s)} for ${JSON.stringify(s)}`);
       n++;

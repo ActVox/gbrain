@@ -590,7 +590,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   }
   return discovered;
 }
-type LegacyIdentity = { id: number; slug: string; source_path: string | null; deleted_at: Date | string | null; fm_id: string | null };
+export type LegacyIdentity = { id: number; slug: string; source_path: string | null; deleted_at: Date | string | null; fm_id: string | null };
 /**
  * #6727: per discovery, its live pages with no recorded origin whose slug the current fold changes, by folded slug. Built on
  * first need; database-only pages (never imported from a file) are left out by one read over just those candidates, so a
@@ -611,7 +611,7 @@ async function foldLegacyPages(engine: BrainEngine, identities: LegacyIdentity[]
  * the folded slug and are named on the entry, so the freeze holds the file `legacy_slug_conflict`. #6729: so does the one
  * page when its explicit frontmatter id differs from the file's (`explicitIdVeto`): it is another document.
  */
-async function adoptLegacyPage(engine: BrainEngine, discovery: SyncDiscovery, identities: LegacyIdentity[], holder: LegacyIdentity | undefined, slug: string, entry: SyncEntry): Promise<string> {
+export async function adoptLegacyPage(engine: BrainEngine, discovery: SyncDiscovery, identities: LegacyIdentity[], holder: LegacyIdentity | undefined, slug: string, entry: SyncEntry): Promise<string> {
   if (holder && holder.deleted_at == null) return slug;
   let folded = legacyByFold.get(identities);
   if (!folded) legacyByFold.set(identities, folded = foldLegacyPages(engine, identities));

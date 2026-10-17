@@ -33,13 +33,32 @@ import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHo
   type GitHoldRecord, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { syncOriginPath } from './sync-origin.ts';
-import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, type GitTreeEntry } from './sync-git-stream.ts';
+import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexLevel, readTreeLevel, workingChanged, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
-import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP } from './sync-pass-row.ts';
+import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from './sync-pass-row.ts';
 
 export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
+
+/** What a live pass feeds the level read (sync-pass-run.ts): its episode, the retry paths it already re-screened, and its selection. */
+export interface PassLevelInput {
+  /** The open episode's `full_id`: a live page whose record carries another is `episodeUnsatisfied`. Null: no full obligation. */
+  episodeFullId: string | null;
+  /** Hold paths (source-relative) whose retry row this pass already re-screened: no longer `retried` in its later rounds. */
+  retryConsumed?: ReadonlySet<string>;
+  exclude?: readonly string[];
+  includeHidden?: readonly string[];
+  strategy?: string;
+  /**
+   * The incarnation's first pass (no pass row yet): a page-less path whose level equals its baseline blob and whose slug a
+   * committed deletion names reads a virtual `legacy` marker, which the pass then writes (design §2.7, b1). After it, only
+   * stored markers count.
+   */
+  bootstrap?: boolean;
+  /** The pass imports without the schema pack (`no-schema-pack` or an episode carrying it): its parser expects no pack. */
+  noSchemaPack?: boolean;
+}
 /** PGLite's keyset page size (design v3.2 §2.1); Postgres reads `I⋈P` in one statement of its snapshot. */
 const PGLITE_KEYSET_ROWS = 2_000;
 /** Blob bytes read for adoption by hash and the screen, per blob. */
@@ -48,7 +67,7 @@ const SYNC_WRITE_KINDS = ['managed_sync_import', 'managed_sync_delete'];
 
 /** One classified path of the shadow level. */
 export interface ShadowPath { path: string; slug: string | null; pageId: number | null; revision: string | null; state: SyncPathState; result: SyncClassified;
-  /** A page-less path whose file is unchanged since the baseline: PR 4b's bootstrap writes it a `legacy` marker (`legacy_pageless`). */
+  /** A page-less path unchanged since the baseline whose page a committed request deleted: the bootstrap writes it a `legacy` marker (`legacy_pageless`). */
   legacyPageless?: true }
 
 export interface ShadowLevel {
@@ -56,6 +75,17 @@ export interface ShadowLevel {
   mode: 'committed' | 'working'; head: string; baselineCommit: string | null; full: boolean;
   kind: 'idle' | 'hold_only' | 'full'; kindBlockers: SyncIdleBlocker[];
   paths: ShadowPath[];
+  /** The schema pack in effect (the pass's `pack` fingerprint) and the selection the level read (design §6). */
+  pack: string | null;
+  selection: SyncSelection;
+  /** Re-screen-due hold paths (Git-root paths): a hold-only round's candidates. */
+  rescreenDue: string[];
+  /** Held renames (#5988), by the held destination's Git path: the destination still owes its page the move, and the origin's deletion waits for the hold. */
+  heldRenames: Array<{ path: string; rename: { sourcePath: string; slug: string; pageId: number; revision: string } }>;
+  /** Holds on paths outside the level's domain (no file at L, no page, or no longer eligible): the stamp releases them, as discovery did (#6278 B7). */
+  releasableHolds: string[];
+  /** Working mode: the stat cache this round's rehash left (`hashWorkingLevel`); the stamp's round is the one a pass remembers. */
+  workingCache: WorkingStatCache | null;
   /** Live file-backed pages whose origin is eligible: the mass-delete valve's denominator (#2828). */
   reconcilable: number;
   timings_ms: Record<string, number>;
@@ -64,7 +94,7 @@ export interface ShadowLevel {
 
 /** A page of the source with the import-record fields the classifier reads; `arm1` / `attested_hash` (`A`) are filled for the pages that need a proof. */
 interface PageRow { id: number | string; slug: string; source_path: string; revision: string; deleted: boolean; request_id: string | null;
-  record: Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser'> | null; arm1: boolean | null; attested_hash: string | null }
+  record: (Pick<SyncImportProvenance, 'origin' | 'blob_oid' | 'disk_blob_oid' | 'revision' | 'parser'> & { full_episode?: string | null }) | null; arm1: boolean | null; attested_hash: string | null }
 
 const recordOids = (record: PageRow['record']): string[] =>
   record ? [record.blob_oid, record.disk_blob_oid].filter((oid): oid is string => typeof oid === 'string' && oid.length > 0) : [];
@@ -93,15 +123,17 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
   const select = `SELECT p.id, p.slug, p.source_path, p.knowledge_revision::text AS revision, p.deleted_at IS NOT NULL AS deleted,
       p.revision_write_request_id::text AS request_id,
       c.completed_keys IS NOT NULL AS has_record, c.completed_keys->0->>'origin' AS rec_origin, c.completed_keys->0->>'blob_oid' AS rec_blob_oid,
-      c.completed_keys->0->>'disk_blob_oid' AS rec_disk_blob_oid, c.completed_keys->0->>'revision' AS rec_revision, c.completed_keys->0->'parser' AS rec_parser
+      c.completed_keys->0->>'disk_blob_oid' AS rec_disk_blob_oid, c.completed_keys->0->>'revision' AS rec_revision, c.completed_keys->0->'parser' AS rec_parser,
+      c.completed_keys->0->>'full_episode' AS rec_full_episode
     FROM pages p LEFT JOIN op_checkpoints c ON c.op=$2 AND c.fingerprint=$3||p.id::text
     WHERE p.source_id=$1 AND p.source_path IS NOT NULL`;
   const params = [sourceId, SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:`];
   type Raw = Omit<PageRow, 'record' | 'arm1' | 'attested_hash'> & { has_record: boolean; rec_origin: string | null; rec_blob_oid: string | null;
-    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null };
+    rec_disk_blob_oid: string | null; rec_revision: string | null; rec_parser: SyncImportProvenance['parser'] | null; rec_full_episode: string | null };
   const rows: PageRow[] = [];
-  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
-    record: has_record ? { origin: rec_origin ?? '', blob_oid: rec_blob_oid ?? undefined, disk_blob_oid: rec_disk_blob_oid, revision: rec_revision ?? undefined, parser: rec_parser ?? undefined } : null }); };
+  const take = (page: Raw[]) => { for (const { has_record, rec_origin, rec_blob_oid, rec_disk_blob_oid, rec_revision, rec_parser, rec_full_episode, ...row } of page) rows.push({ ...row, arm1: null, attested_hash: null,
+    record: has_record ? { origin: rec_origin ?? '', blob_oid: rec_blob_oid ?? undefined, disk_blob_oid: rec_disk_blob_oid, revision: rec_revision ?? undefined, parser: rec_parser ?? undefined,
+      full_episode: rec_full_episode } : null }); };
   if (kind === 'postgres') { take(await exec.executeRaw<Raw>(select, params)); return { rows, statements: 1 }; }
   let after = 0, statements = 0;
   for (;;) {
@@ -137,14 +169,12 @@ async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceI
   return statements;
 }
 
-/**
- * `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and of the source incarnation with no
- * worktree (a write-through-off put_page, page-mutations.ts; `persistence_requests_database_pending`), and pending Git
- * effects of the source.
- */
-async function readOpenWork(exec: Exec, sourceId: string, worktreeId: string, incarnation: string): Promise<{ pageIds: Set<number>; origins: Set<string>; statements: number }> {
+/** `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and pending Git effects of the source. */
+async function readOpenWork(exec: Exec, sourceId: string, incarnation: string, worktreeId: string): Promise<{ pageIds: Set<number>; origins: Set<string>; statements: number }> {
+  // A write admitted with sync.write_through=false carries no worktree (page-mutations.ts), so the incarnation's
+  // worktree-less requests are open work too.
   const [requests, effects] = await Promise.all([exec.executeRaw<{ page_id: number | null; source_path: string | null; path: string | null }>(`SELECT page_id, intent->>'sourcePath' AS source_path, intent->>'path' AS path
-    FROM persistence_requests WHERE (worktree_id=$1 OR (worktree_id IS NULL AND source_incarnation=$3::uuid)) AND state IN ('queued','running','recovering') AND source_id=$2`,
+    FROM persistence_requests WHERE state IN ('queued','running','recovering') AND source_id=$2 AND (worktree_id=$1 OR worktree_id IS NULL AND source_incarnation=$3::uuid)`,
     [worktreeId, sourceId, incarnation]),
   exec.executeRaw<{ page_id: number | null; path: string | null }>(`SELECT r.page_id, e.data->>'relative_path' AS path
     FROM persistence_requests r JOIN persistence_effects e ON e.request_id=r.id
@@ -157,15 +187,29 @@ async function readOpenWork(exec: Exec, sourceId: string, worktreeId: string, in
 }
 
 /** Deletion markers of the incarnation (a primary-key range read); none exist before PR 4b. */
-async function readMarkers(exec: Exec, sourceId: string, incarnation: string): Promise<Map<string, { kind: 'deleted' | 'legacy'; blobOids: string[] }>> {
+async function readMarkers(exec: Exec, sourceId: string, incarnation: string): Promise<Map<string, { kind: 'deleted' | 'legacy'; blobOids: string[]; deletion: string | null }>> {
   const prefix = `${sourceId}:${incarnation}:`;
   // `starts_with`, not a range: under a linguistic collation (en_US) a `< prefix || U+FFFF` bound matches nothing.
-  const rows = await exec.executeRaw<{ fingerprint: string; value: { kind?: string; blob_oids?: unknown } | null }>(
+  const rows = await exec.executeRaw<{ fingerprint: string; value: { kind?: string; blob_oids?: unknown; deletion?: unknown } | null }>(
     'SELECT fingerprint, completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND starts_with(fingerprint, $2)',
     [SYNC_ORIGIN_DELETED_OP, prefix]);
   return new Map(rows.map(row => [syncOriginPath(row.fingerprint.slice(prefix.length)), {
     kind: row.value?.kind === 'legacy' ? 'legacy' as const : 'deleted' as const,
-    blobOids: Array.isArray(row.value?.blob_oids) ? (row.value!.blob_oids as unknown[]).filter((oid): oid is string => typeof oid === 'string') : [] }]));
+    blobOids: Array.isArray(row.value?.blob_oids) ? (row.value!.blob_oids as unknown[]).filter((oid): oid is string => typeof oid === 'string') : [],
+    deletion: typeof row.value?.deletion === 'string' ? row.value.deletion : null }]));
+}
+
+/**
+ * Design §2.7 with the parent's b1 ruling: a page-less path unchanged since the baseline is a page deleted before PR 4 only
+ * when a committed deleting request of this incarnation names the slug its path imports to (the newest one is the proof). A
+ * file sync refused before it ever had a page has none, so it imports.
+ */
+async function readLegacyDeletions(exec: Exec, sourceId: string, incarnation: string, slugs: string[]): Promise<Map<string, string>> {
+  if (!slugs.length) return new Map();
+  const rows = await exec.executeRaw<{ slug: string; id: string }>(`SELECT DISTINCT ON (slug) slug, id::text AS id FROM persistence_requests
+    WHERE source_id=$1 AND source_incarnation=$2::uuid AND state='committed' AND slug=ANY($3::text[])
+      AND (operation='delete_page' OR intent->>'kind'='managed_sync_delete') ORDER BY slug, sequence DESC`, [sourceId, incarnation, slugs]);
+  return new Map(rows.map(row => [row.slug, row.id]));
 }
 
 /** The pass row of the incarnation (PR 4b writes it); null in PR 4a. */
@@ -178,6 +222,19 @@ async function readPassRow(exec: Exec, sourceId: string, incarnation: string): P
 function revParse(gitRoot: string, rev: string): string | null {
   const out = hardenedGitSync(gitRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`], { timeoutMs: 10_000, maxBytes: 4096 });
   return out.ok ? out.stdout.toString('utf8').trim() || null : null;
+}
+
+/**
+ * #6712 PR 4b (design v3.2 §2.2): a working-mode idle tick's check. Every path the cache vouches for, plus `U` (untracked)
+ * and the index's paths in scope, is re-stat'd (`workingChanged`); no cache (a cold process) reads as changed.
+ */
+export async function workingIdleChange(context: Pick<ManagedSyncContext, 'root' | 'gitRoot'>, cache: WorkingStatCache | null): Promise<{ changed: boolean; cache: WorkingStatCache | null }> {
+  if (!cache) return { changed: true, cache: null };
+  const scope = relative(realpathSync.native(context.gitRoot), realpathSync.native(context.root)).split(sep).join('/');
+  const [untracked, index] = await Promise.all([readUntracked(context.gitRoot, scope), readIndexLevel(context.gitRoot)]);
+  const inScope = (path: string) => !scope || path.startsWith(`${scope}/`);
+  const checked = workingChanged(cache, [...untracked, ...[...index.keys()].filter(inScope)]);
+  return { changed: checked.cache === null || checked.changed.length > 0, cache: checked.cache };
 }
 
 /** Working mode's `U`: untracked, not ignored files (index and exclude files only; no worktree conversion). */
@@ -196,7 +253,7 @@ const timer = () => { const started = performance.now(); return () => Math.round
  * The shadow level of a managed source: every path classified, nothing written. Null for a company-brain source, which
  * keeps its frozen manifest (design v3.2 §3.6).
  */
-export async function readShadowLevel(engine: BrainEngine, input: { sourceId: string; full?: boolean; workingTree?: boolean; context?: ManagedSyncContext }): Promise<ShadowLevel | null> {
+export async function readShadowLevel(engine: BrainEngine, input: { sourceId: string; full?: boolean; workingTree?: boolean; context?: ManagedSyncContext; pass?: PassLevelInput }): Promise<ShadowLevel | null> {
   const total = timer();
   const timings: Record<string, number> = {};
   let t = timer();
@@ -211,18 +268,18 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead] = await Promise.allSettled([
     currentCompanyBrainSync(sourceId) ? Promise.resolve(true) : getCompanyBrainProfile(engine, sourceId).then(profile => !!profile),
     scope ? resolveSlugRootMode(engine, { sourceId, explicitGitRoot: false, slugPrefix: resolveSlugForPath(join(scope, 'x.md')).slice(0, -2), dryRun: true }) : Promise.resolve('git-root' as const),
-    syncExcludePatterns(engine),
+    syncExcludePatterns(engine, [...input.pass?.exclude ?? []]),
     engine.getConfig('sync.include_hidden'),
     input.workingTree === undefined ? engine.getConfig('sync.include_working_tree') : Promise.resolve(null),
-    loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
+    input.pass?.noSchemaPack ? Promise.resolve(null) : loadActivePackForEngine(engine, { remote: false, sourceId }).catch(() => null),
     sourceMirrorReadOnly(engine, sourceId),
   ]);
   timings.setup = t();
   const settled = <T>(read: PromiseSettledResult<T>): T => { if (read.status === 'rejected') throw read.reason; return read.value; };
   if (settled(company)) return null;
   const slugMode = settled(slugModeRead), exclude = settled(excludeRead), pack = settled(packRead), mirror = settled(mirrorRead);
-  const strategy = (context.source.config?.strategy as string | undefined) ?? 'markdown';
-  const includeHidden = [...new Set((settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean).map(v => v.endsWith('/') ? `${v}**` : v))];
+  const strategy = input.pass?.strategy ?? (context.source.config?.strategy as string | undefined) ?? 'markdown';
+  const includeHidden = [...new Set([...input.pass?.includeHidden ?? [], ...(settled(includeHiddenRead) ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))];
   const keepDbPrefixes = (() => { try { return loadStorageConfig(root)?.keep_db ?? []; } catch { return []; } })();
   const sourceRelative = (gitPath: string) => (scope ? gitPath.slice(scope.length + 1) : gitPath);
   // Pure per path and asked several times per path in a round, so each is computed once.
@@ -252,7 +309,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
     timed('I⋈P', () => withRoundSnapshot(engine, async exec => {
       const [read, work, markers, passRow] = await Promise.all([timed('pages', () => readPages(exec, engineKind, sourceId, incarnation)),
-        timed('open_work', () => readOpenWork(exec, sourceId, context.binding.worktree_id, incarnation)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
+        timed('open_work', () => readOpenWork(exec, sourceId, incarnation, context.binding.worktree_id)), timed('markers', () => readMarkers(exec, sourceId, incarnation)),
         timed('pass_row', () => readPassRow(exec, sourceId, incarnation))]);
       return { pages: read.rows, open: work, markers, passRow, statements: read.statements + work.statements + 2 };
     })),
@@ -261,7 +318,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       const holds = (sourceHolds[0]?.holds ?? []).filter(hold => hold.incarnation === incarnation);
       const holdByPath = new Map(holds.map(hold => [hold.path, hold]));
       const [basisMoved, driftMoved] = await Promise.all([holdBasisMoved(engine, sourceId, holdByPath, [...holdByPath.keys()]), movedDriftHolds(engine, sourceId, holds)]);
-      return { holds, retry: new Set(retryPaths), moved: [...basisMoved, ...driftMoved] };
+      return { holds, retry: new Set(retryPaths.filter(path => !input.pass?.retryConsumed?.has(path))), moved: [...basisMoved, ...driftMoved] };
     }),
   ]);
   timings.reads = t();
@@ -283,21 +340,33 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (!prior || (prior.deleted && !row.deleted) || (prior.deleted === row.deleted && Number(row.id) > Number(prior.id))) byOrigin.set(key, row);
   }
   const domain = new Set<string>([...tree.keys(), ...untracked, ...(mode === 'working' ? [...index.keys()].filter(eligible) : []), ...[...byOrigin.keys()].filter(eligible), ...[...markers.keys()].map(gitPathOf).filter(eligible)]);
-  // Spellings of one origin that differ only by case or separator: the domain holds each path once, so a count is enough.
+  // Spellings of one origin that differ only by case or separator (the domain holds each path once).
   const fold = (path: string) => path.replaceAll('\\', '/').toLowerCase();
-  const spellings = new Map<string, number>();
+  const spellings = new Map<string, string[]>();
+  // Files at L count, and so does a live page's separator-spelled origin; a case-only respelling whose old file this sync
+  // removes is no refusal (discovery's one exception).
   for (const path of domain) {
     const live = byOrigin.get(path);
-    if (!tree.has(path) && !(live && !live.deleted)) continue;
+    if (!tree.has(path) && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !(live && !live.deleted && live.source_path.includes('\\'))) continue;
     const folded = fold(path);
-    spellings.set(folded, (spellings.get(folded) ?? 0) + 1);
+    spellings.set(folded, [...spellings.get(folded) ?? [], path]);
+  }
+  // As discovery does, only spellings that name one page are twins: a live origin's page slug, else the slug its path names.
+  const twins = new Set<string>();
+  for (const paths of spellings.values()) {
+    if (paths.length < 2) continue;
+    const slugOf = (path: string) => { const live = byOrigin.get(path); return live && !live.deleted ? live.slug : resolveSlugForPath(originOf(path)); };
+    const bySlug = new Map<string, string[]>();
+    for (const path of paths) bySlug.set(slugOf(path), [...bySlug.get(slugOf(path)) ?? [], path]);
+    for (const group of bySlug.values()) if (group.length > 1) for (const path of group) twins.add(path);
   }
   const reconcilable = [...byOrigin.entries()].filter(([path, row]) => !row.deleted && eligible(path)).length;
   timings.domain = t();
 
   // Working mode rehashes every path (the full round's unconditional rehash); committed mode probes candidates only.
   t = timer();
-  const probes = mode === 'working' ? (await hashWorkingLevel(root, gitRoot, [...domain], tree)).probes : new Map();
+  const hashed = mode === 'working' ? await hashWorkingLevel(root, gitRoot, [...domain], tree) : null;
+  const probes = hashed?.probes ?? new Map();
   timings.Dp = t();
 
   const levelOf = (path: string, probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): string | null => {
@@ -339,9 +408,9 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const attested = row && (row.arm1 || row.attested_hash) ? { hash: row.attested_hash ?? null, arm1: row.arm1 === true } : null;
     const hold = holdByGitPath.get(path);
     const marker = markers.get(originOf(path)) ?? null;
-    let virtualMarker: SyncPathState['marker'] = null;
-    let legacyPageless: true | undefined;
-    if (!row && !marker && level !== null && level === await baselineOf(path)) { virtualMarker = { kind: 'legacy', blobOids: [level] }; legacyPageless = true; }
+    const deletion = !row && !marker && level !== null ? legacyDeletions.get(path) : undefined;
+    const virtualMarker: SyncPathState['marker'] = deletion ? { kind: 'legacy', blobOids: [level!], deletion } : null;
+    const legacyPageless = deletion ? true as const : undefined;
     const needsBaseline = row && !row.deleted && (record?.revision == null) && level !== null && !recordBlobOids.includes(level);
     const state: SyncPathState = {
       mode, tree: committed?.oid ?? null, level, present: presentNow, dirty, diskOid: probe?.rawOid ?? null,
@@ -351,13 +420,33 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       published: !!attested?.hash && probe?.rawSha256 === attested.hash,
       hold: hold ? { atLevel: holdAtLevel(hold, level, probe?.rawSha256 ?? null) && !moved.has(path), rescreenDue: holdRescreenDue(hold, retry.has(hold.path)), retried: retry.has(hold.path) } : null,
       marker: marker ?? virtualMarker, baseline: needsBaseline ? await baselineOf(path) : null,
-      spelling: (spellings.get(fold(path)) ?? 0) > 1,
-      episodeUnsatisfied: input.full === true && !!row && !row.deleted,
+      spelling: twins.has(path),
+      episodeUnsatisfied: input.pass ? !!input.pass.episodeFullId && !!row && !row.deleted && record?.full_episode !== input.pass.episodeFullId
+        : input.full === true && !!row && !row.deleted,
+      fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true,
       keepDb: !mirror && keepDbPrefixes.length > 0 && !!row && isKeepDbSlug(row.slug, keepDbPrefixes),
       openWork: !!row && open.pageIds.has(Number(row.id)) || open.origins.has(originOf(path)),
     };
     return { state, ...(row ? { row } : {}), ...(legacyPageless ? { legacyPageless } : {}) };
   };
+
+  // Bootstrap (the incarnation's first pass; for a read-only level, no pass row yet): page-less paths at their baseline blob
+  // whose slug a committed deletion names get a `legacy` marker (§2.7, b1).
+  t = timer();
+  const legacyDeletions = new Map<string, string>();
+  if (baselineCommit && (input.pass ? input.pass.bootstrap === true : !passRow)) {
+    const pageless: Array<{ path: string; slug: string }> = [];
+    for (const path of domain) {
+      if (byOrigin.has(path) || markers.has(originOf(path))) continue;
+      const level = levelOf(path, probes.get(path));
+      if (level === null || level !== await baselineOf(path)) continue;
+      const slug = resolveSlugForPath(originOf(path));
+      if (slug) pageless.push({ path, slug });
+    }
+    const bySlug = await readLegacyDeletions(engine, sourceId, incarnation, [...new Set(pageless.map(entry => entry.slug))]);
+    for (const { path, slug } of pageless) { const id = bySlug.get(slug); if (id) legacyDeletions.set(path, id); }
+    timings.legacy = t();
+  }
 
   t = timer();
   const paths: ShadowPath[] = [];
@@ -406,10 +495,13 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const kind = syncPassKind({ converged: null, head, parserFp: '', pack: pack?.identity ?? null, selectionFp: '', now: Date.now(), openEpisode: input.full === true, owedTail: false,
     retryRow: retry.size > 0, notConvergedStreak: 0, mismatchStreak: 0, requestNewer: false, openAtStampFinished: false, workingChange: false,
     rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.has(hold.path))), full: input.full === true });
-  void passRow;
   timings.total = total();
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
-    paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3 };
+    heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
+    releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
+    paths, reconcilable, timings_ms: timings, statements: statements + attestationStatements + 3, pack: pack?.identity ?? null,
+    selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
+    rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
 }
 
 /** `workingTreeFilePresent` (sync-discovery.ts) for a Git-root path: a file that exists, or one that cannot be read (fail closed). */
@@ -457,24 +549,40 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
   timings.rev_parse = t();
   // The pass row, the request probe above its watermark and the open-set probe are one statement (one round trip).
   t = timer();
-  const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean }>(`WITH pass AS (
-      SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2)
-    SELECT (SELECT value FROM pass) AS pass_row,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'converged'->>'request_hwm')::bigint, 0)
-        AND (worktree_id = $4 OR (worktree_id IS NULL AND source_incarnation = $5::uuid))) AS newer,
-      EXISTS (SELECT 1 FROM persistence_requests WHERE (worktree_id = $4 OR (worktree_id IS NULL AND source_incarnation = $5::uuid))
-        AND state IN ('queued','running','recovering')) AS pending`,
-    [MANAGED_SYNC_PASS_OP, `${context.sourceId}:${context.incarnation}`, input.assumeConverged?.requestHwm ?? null, context.binding.worktree_id, context.incarnation]);
+  const probe = await passIdleProbe(engine, { sourceId: context.sourceId, incarnation: context.incarnation, worktreeId: context.binding.worktree_id,
+    requestHwm: input.assumeConverged?.requestHwm ?? null, openAtStamp: [] });
   timings.probes = t();
-  const row = probe?.pass_row ?? null;
-  const converged = input.assumeConverged ?? (row?.converged as { target: string; request_hwm: number } | undefined
-    ? { target: String((row!.converged as Record<string, unknown>).target), requestHwm: Number((row!.converged as Record<string, unknown>).request_hwm) } : null);
-  const newer = probe?.newer === true, pending = probe?.pending === true;
+  const row = probe.passRow;
+  const stored = (row?.obligations as { converged?: { target: string; request_hwm: string } } | undefined)?.converged;
+  const converged = input.assumeConverged ?? (stored ? { target: String(stored.target), requestHwm: Number(stored.request_hwm) } : null);
+  const newer = probe.newer, pending = probe.pending;
   const kind = syncPassKind({ converged: converged ? { target: converged.target, parserFp: '', pack: null, selectionFp: '', passesSinceFull: 0, lastFullAt: Date.now() } : null,
     head: head ?? '', parserFp: '', pack: null, selectionFp: '', now: Date.now(), openEpisode: false, owedTail: false, retryRow: false, notConvergedStreak: 0, mismatchStreak: 0,
     requestNewer: newer, openAtStampFinished: pending && !input.assumeConverged, workingChange: false, rescreenDueHold: false, full: false });
   timings.total = total();
   return { idle: kind.kind === 'idle', reasons: kind.blockers, timings_ms: timings, rows: (newer ? 1 : 0) + (pending ? 1 : 0) + (row ? 1 : 0) };
+}
+
+/**
+ * #6712 PR 4b (design v3.2 §2.2): the idle tick's database reads in one statement: the pass row, whether a request of the
+ * worktree is newer than the converged watermark (a range on the unique `sequence` index; `requestHwm` overrides the
+ * row's), whether any request is open (`persistence_requests_pending`), and how many of the ids recorded in
+ * `converged.open_at_stamp` are still open (`r:<request>` requests, `e:<effect>` Git effects).
+ */
+export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; incarnation: string; worktreeId: string;
+  requestHwm: string | number | null; openAtStamp: readonly string[] }): Promise<{ passRow: Record<string, unknown> | null; newer: boolean; pending: boolean; stillOpen: number }> {
+  const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean; still_open: number | string }>(`WITH pass AS (
+      SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2)
+    SELECT (SELECT value FROM pass) AS pass_row,
+      EXISTS (SELECT 1 FROM persistence_requests WHERE sequence > COALESCE($3::bigint, ((SELECT value FROM pass)->'obligations'->'converged'->>'request_hwm')::bigint, 0)
+        AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)) AS newer,
+      EXISTS (SELECT 1 FROM persistence_requests WHERE state IN ('queued','running','recovering') AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)) AS pending,
+      (SELECT count(*) FROM persistence_requests WHERE state IN ('queued','running','recovering') AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)
+        AND 'r:'||request_id::text = ANY($5::text[]))
+        + (SELECT count(*) FROM persistence_effects e JOIN persistence_requests r ON r.id = e.request_id
+            WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text = ANY($5::text[])) AS still_open`,
+    [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, [...input.openAtStamp], input.sourceId, input.incarnation]);
+  return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0) };
 }
 
 /**

@@ -42,6 +42,11 @@ import { classifyRecordedFault, classifyTerminal, type TerminalCategory } from '
 import type { PublicCategory } from './public-category.ts';
 import { readSyncFile, resolveManagedSyncContext } from './sync-discovery.ts';
 import { sha256 } from './digest.ts';
+import { passResumeArgs } from './sync-pass-readers.ts';
+import { passConvergence, passStatusNext, passStatusState } from './sync-pass-status.ts';
+import { MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
+import { SYNC_ADMISSION_SETTING_PARAMS, syncAdmissionSettingSql, syncAdmissionStatus } from './sync-admission.ts';
+import type { DeletesWithheld } from './sync-markers.ts';
 import { listIdentityDowngrades } from '../sync-identity-downgrades.ts';
 
 export interface SyncStatusHold extends SyncFaultVerdict {
@@ -137,7 +142,7 @@ export interface SyncStatus {
    * only \`--detail\` runs it (\`convergence_read\`). Null when not read, on a brain that is not managed, or for a company-brain
    * source; \`status: 'unavailable'\` names why a read could not run. No other field's meaning depends on it.
    */
-  convergence: import('./sync-convergence.ts').ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | null;
+  convergence: import('./sync-convergence.ts').ConvergenceReceipt | { dry_run: true; status: 'unavailable'; code: string; message: string } | import('./sync-pass-status.ts').PassConvergence | null;
   convergence_read: SyncStatusRead;
   /** #6712 PR 4b: `sync.admission` (brain-wide), when it was set, and whether it is in effect for this source (sync-admission.ts). */
   admission: import('./sync-admission.ts').SyncAdmissionStatus;
@@ -145,7 +150,9 @@ export interface SyncStatus {
 export type SyncStatusState = 'synced' | 'resumable' | 'blocked';
 /** Why the source is in its state; one closed list. */
 export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'request_pending',
-  'status_unknown', 'needs_human', 'head_blocked', 'recovery_blocked'] as const;
+  'status_unknown', 'needs_human', 'head_blocked', 'recovery_blocked',
+  // #6712 PR 4b (design v3.2 §9): the live pass's reasons.
+  'pass_unfinished', 'not_converged', 'settle_mismatch', 'deletes_withheld', 'selection_scoped', 'admission_paused'] as const;
 export type SyncStatusReason = typeof SYNC_STATUS_REASONS[number];
 export type SyncStatusRead = { status: 'read' } | { status: 'not_read'; fix: Action };
 /** The bound of each default probe (the oldest blocker, the recovery records). */
@@ -235,7 +242,15 @@ function holdStatus(record: GitHoldRecord, auto?: FenceAutoRepair): SyncStatusHo
  */
 export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts: { detail?: boolean } = {}): Promise<SyncStatus> {
   const detail = opts.detail !== false;
-  const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1 AND archived IS NOT TRUE', [sourceId]);
+  // #6712 PR 4b (design §9): the pass row and the withheld-delete record ride the source read (primary-key probes), so the plain status keeps its statement budget.
+  const admissionSql = syncAdmissionSettingSql(4);
+  const [source] = await engine.executeRaw<{ incarnation: string; pass_value: PassRow['value'] | null; pass_updated_at: Date | string | null; withheld: DeletesWithheld | null;
+    admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null }>(
+    `SELECT s.incarnation::text AS incarnation, p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns} FROM sources s
+      LEFT JOIN op_checkpoints p ON p.op=$2 AND p.fingerprint=s.id||':'||s.incarnation::text
+      LEFT JOIN op_checkpoints w ON w.op=$3 AND w.fingerprint=s.id||':'||s.incarnation::text
+      ${admissionSql.joins}
+      WHERE s.id=$1 AND s.archived IS NOT TRUE`, [sourceId, MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, ...SYNC_ADMISSION_SETTING_PARAMS]);
   if (!source) throw Object.assign(new Error(`Source ${sourceId} does not exist.`), { code: 'not_found' });
   const failures = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
   const selected = await cursorHeader(engine, sourceId, source.incarnation, failures[0]?.cursor_key ?? null);
@@ -272,7 +287,11 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const remaining = header ? Math.max(0, Number(header.total) - Number(header.index)) : null;
   const p = header?.progress;
   const estimate = unfinished && p ? drainEstimate(remaining, p.lastIndex - p.startIndex, p.lastAt - p.startedAt) : { rate_pages_per_min: null, eta_seconds: null };
-  const resume = managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
+  // #6712 PR 4b (design §9): the pass row (one primary-key read) and the withheld-delete record make the live `convergence` block.
+  const passRow: PassRow | null = source.pass_value && source.pass_updated_at ? { value: source.pass_value, updated_at: new Date(source.pass_updated_at).toISOString() } : null;
+  const withheld = passRow ? source.withheld : null;
+  const passState = passRow ? passStatusState(passRow, withheld) : null;
+  const resume = !header && passRow ? passResumeArgs(sourceId, passRow) : managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
   const human = holds.find(hold => hold.needs_human) ?? (lastError?.needs_human ? lastError : undefined);
   // #6643: a knock-on or a superseded run is not a failure of its page: the resume re-freezes the entry.
   const selfHealing = lastError?.detail === 'knock_on' || lastError?.detail === 'run_replaced';
@@ -306,35 +325,43 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const { recovery_next, ...terminal } = detail ? await terminalSummary(engine, sourceId, blockers.checkpoint_blockers)
     : { status: 'unknown' as const, reason: 'not_read: run sync status with --detail', recovery_next: recovery.status === 'ok' && recovery.first ? recoveryAction(sourceId, recovery.first) : undefined };
   const connectorLastError = await (await import('./connector-status.ts')).readConnectorLastError(engine, sourceId);
-  const [state, stateReason] = statusState({ human: !!human, oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!lastError, actionable: actionable.length > 0, holds: holds.length > 0 });
+  const [state, stateReason] = statusState({ human: !!human, oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!lastError, actionable: actionable.length > 0, holds: holds.length > 0, pass: passState });
+  const admission = await syncAdmissionStatus(engine, sourceId, source.incarnation,
+    { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at });
+  const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume) : null;
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, identity_downgrades: await listIdentityDowngrades(engine, [sourceId]), last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     resume_argv: resume, ...blockers, cursors: detail ? await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures) : [],
-    terminal_failures: terminal, connector_last_error: connectorLastError, next: next ?? recovery_next ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
+    terminal_failures: terminal, connector_last_error: connectorLastError, next: next ?? recovery_next ?? passNext ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `Write request ${oldest.request.request_id} of this source is still ${oldest.request.state}${oldest.request.step ? ` (step ${oldest.request.step})` : ''}; a running owner finishes it on its own, and the next sync of this source drains it.` } satisfies Action
       : stateReason === 'status_unknown' ? { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `The oldest-blocker or recovery probe did not answer within ${SYNC_STATUS_PROBE_MS / 1000} s, so this status does not know the state (it is not reported synced). Rerun it after a short wait; gbrain doctor --json checks the database if it keeps timing out.` } satisfies Action : null),
     state, reason: stateReason,
     oldest_blocker: oldest, recovery, checkpoint_blockers_read: detail ? { status: 'read' } : notRead('checkpoint blocker list'),
     cursors_read: detail ? { status: 'read' } : notRead('live cursor'), terminal_failures_read: detail ? { status: 'read' } : notRead('terminal-failure summary'),
-    convergence: detail ? await (await import('./sync-pass.ts')).statusConvergence(engine, sourceId) : null, convergence_read: detail ? { status: 'read' } : notRead('convergence shadow'),
-    admission: await (await import('./sync-admission.ts')).syncAdmissionStatus(engine, sourceId, source.incarnation) };
+    convergence: passRow ? await passConvergence(engine, { sourceId, incarnation: source.incarnation, row: passRow, holds: records, admission, withheld })
+      : detail ? await (await import('./sync-pass.ts')).statusConvergence(engine, sourceId) : null,
+    convergence_read: passRow || detail ? { status: 'read' } : notRead('convergence shadow'),
+    admission };
 }
 
 /** #6712 PR 2: the state and its reason, from what this read saw; a probe that did not answer never yields `synced`. */
 function statusState(s: { human: boolean; oldest: SyncStatus['oldest_blocker']; recovery: SyncStatus['recovery']; liveJob: boolean; unfinished: boolean; lastError: boolean;
-  actionable: boolean; holds: boolean }): [SyncStatusState, SyncStatusReason] {
+  actionable: boolean; holds: boolean; pass?: [SyncStatusState, SyncStatusReason] | null }): [SyncStatusState, SyncStatusReason] {
   if (s.human) return ['blocked', 'needs_human'];
   if (s.recovery.status === 'ok' && s.recovery.first?.blocked) return ['blocked', 'recovery_blocked'];
   if (s.oldest.status === 'ok' && s.oldest.request?.blocked_by?.intervention && s.oldest.request.state === 'queued') return ['blocked', 'head_blocked'];
   if (s.liveJob) return ['resumable', 'live_job'];
   if (s.unfinished) return ['resumable', 'cursor_unfinished'];
   if (s.lastError) return ['resumable', 'last_error'];
+  // #6712 PR 4b: never `synced` while the newest pass is open or ended unconverged (a scoped convergence stays `synced`).
+  if (s.pass && s.pass[0] !== 'synced') return s.pass;
   if (s.actionable) return ['resumable', 'holds_actionable'];
   if (s.recovery.status === 'ok' && s.recovery.count > 0) return ['resumable', 'recovery_pending'];
   if (s.oldest.status === 'ok' && s.oldest.request) return ['resumable', 'request_pending'];
   if (s.oldest.status !== 'ok' || s.recovery.status !== 'ok') return ['resumable', 'status_unknown'];
+  if (s.pass) return s.pass;
   return ['synced', s.holds ? 'held_by_design' : 'nothing_pending'];
 }
 

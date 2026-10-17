@@ -3,8 +3,12 @@
  * (`gbrain sync --dry-run --json`'s `convergence`), `sync status --detail`'s `convergence` and doctor's counts share.
  * Built from the shadow level (sync-pass.ts); every value is a prediction (`dry_run: true`), nothing is admitted.
  *
- * - `classes`: `{<class>: {count, action}}` with `action ∈ none | owner | repair` (the glossary, sync-classify.ts
- *   `syncClassAction`); `in_flight`, `keep_db_pending` and `deletes_withheld` are classes here too.
+ * - `classes`: `{<class>: {count, action, by_action}}` with `action ∈ none | owner | repair`. The action is per path
+ *   (sync-classify.ts `classAction`: a settled `dirty` path is `none`, an unsettled one `repair`), so `by_action` counts the
+ *   class's paths by it and `action` is the most demanding one present; `in_flight`, `keep_db_pending` and
+ *   `deletes_withheld` are classes here too.
+ * - `legacy_twin_pairs`: the #6885 forked pairs `gbrain repair legacy-twins` would list (its read-only scan, bounded by
+ *   `LEGACY_TWINS_LIMIT`); null when this host cannot scan the source. Dry runs and status only, never an idle tick.
  * - `decisions`: the `file_drift` holds the pass would write, by side, after the read-only `sameContentAtOrigin` screen
  *   of each drift path (a dry run only, at most `SCREEN_CAP` paths): equal content is a `same_content_noops` settle, an
  *   unscreened path is counted in `screen_unknown`, never as a decision.
@@ -40,7 +44,8 @@ export interface ConvergenceReceipt {
   mode: ShadowLevel['mode']; target: string; baseline_commit: string | null; converged_at: null; round: 1; full: boolean;
   candidates: number; settled: number; remaining: number; in_flight: number; eta_seconds: null; eta_reason: 'shadow';
   counts: Partial<Record<ConvergenceClassKey, number>>;
-  classes: Partial<Record<ConvergenceClassKey, { count: number; action: SyncClassAction }>>;
+  classes: Partial<Record<ConvergenceClassKey, { count: number; action: SyncClassAction; by_action: Partial<Record<SyncClassAction, number>> }>>;
+  legacy_twin_pairs: number | null;
   decisions: { both: number; unknown: number; deleted: number };
   same_content_noops: number; screen_unknown: number; screen_skipped?: 'not_a_dry_run' | 'screen_unavailable';
   would_hold: number;
@@ -60,7 +65,7 @@ const redact = (path: string) => `sha256:${createHash('sha256').update(path).dig
 function reasonOf(entry: ShadowPath): string {
   const { state, result } = entry;
   switch (result.cls) {
-    case 'held': return 'held at this level';
+    case 'held': return result.rescreenDue ? 'held; re-screen due' : 'held at this level';
     case 'spelling': return 'origins differ only by case or separator';
     case 'delete': return 'file gone from the tree; the page has no database-only change';
     case 'delete_drift': return 'file gone from the tree; the page changed in the database';
@@ -78,9 +83,9 @@ function reasonOf(entry: ShadowPath): string {
 }
 
 /** The receipt of one shadow level. `screen` runs only for dry runs; status and doctor pass `false`. */
-export async function buildConvergenceReceipt(_engine: BrainEngine, level: ShadowLevel, opts: { redactPaths: boolean; sampleCap: number; screen: ConvergenceScreen | false }): Promise<ConvergenceReceipt> {
+export async function buildConvergenceReceipt(engine: BrainEngine, level: ShadowLevel, opts: { redactPaths: boolean; sampleCap: number; screen: ConvergenceScreen | false }): Promise<ConvergenceReceipt> {
   const started = performance.now();
-  const keyed: Array<{ entry: ShadowPath; key: ConvergenceClassKey }> = [];
+  const keyed: Array<{ entry: ShadowPath; key: ConvergenceClassKey; action: SyncClassAction }> = [];
   let keepDbSeen = 0;
   const deletes = level.paths.filter(entry => entry.result.cls === 'delete' && !entry.result.inFlight);
   const ratio = level.reconcilable ? deletes.length / level.reconcilable : 0;
@@ -93,11 +98,18 @@ export async function buildConvergenceReceipt(_engine: BrainEngine, level: Shado
       if (keepDbSeen > KEEP_DB_PASS_CAP) key = 'keep_db_pending';
     }
     if (key === 'delete' && verdict === 'withheld') key = 'deletes_withheld';
-    keyed.push({ entry, key });
+    keyed.push({ entry, key, action: key === 'keep_db_pending' || key === 'deletes_withheld' ? syncClassAction(key) : entry.result.classAction });
   }
   const counts: ConvergenceReceipt['counts'] = {};
-  for (const { key } of keyed) counts[key] = (counts[key] ?? 0) + 1;
-  const classes: ConvergenceReceipt['classes'] = Object.fromEntries(Object.entries(counts).map(([key, count]) => [key, { count, action: syncClassAction(key as ConvergenceClassKey) }]));
+  const classes: ConvergenceReceipt['classes'] = {};
+  const RANK: Record<SyncClassAction, number> = { none: 0, owner: 1, repair: 2 };
+  for (const { key, action } of keyed) {
+    counts[key] = (counts[key] ?? 0) + 1;
+    const entry = classes[key] ?? (classes[key] = { count: 0, action, by_action: {} });
+    entry.count++;
+    entry.by_action[action] = (entry.by_action[action] ?? 0) + 1;
+    if (RANK[action] > RANK[entry.action]) entry.action = action;
+  }
 
   const drift = keyed.filter(({ key }) => key === 'drift').map(({ entry }) => entry);
   let screened = new Map<string, 'same' | 'differs' | 'unknown'>();
@@ -131,11 +143,11 @@ export async function buildConvergenceReceipt(_engine: BrainEngine, level: Shado
 
   const show = (path: string) => (opts.redactPaths ? redact(path) : path);
   const samples: ConvergenceReceipt['samples'] = {};
-  for (const { entry, key } of keyed) {
+  for (const { entry, key, action } of keyed) {
     if (key === 'matched') continue;
     const list = samples[key] ?? (samples[key] = []);
     if (list.length >= opts.sampleCap) continue;
-    list.push({ path: show(entry.path), ...(opts.redactPaths || !entry.slug ? {} : { slug: entry.slug }), reason: reasonOf(entry), action: syncClassAction(key) });
+    list.push({ path: show(entry.path), ...(opts.redactPaths || !entry.slug ? {} : { slug: entry.slug }), reason: reasonOf(entry), action });
   }
   const sortedDeletes = deletes.map(entry => entry.path).sort();
   const setHash = sortedDeletes.length ? sha256(sortedDeletes.join('\0')) : null;
@@ -144,6 +156,10 @@ export async function buildConvergenceReceipt(_engine: BrainEngine, level: Shado
   const inFlight = counts.in_flight ?? 0;
   const candidates = level.paths.length - settled - inFlight;
   const keepDbAdmitted = Math.min(keepDbSeen, KEEP_DB_PASS_CAP);
+  const twinsStarted = performance.now();
+  const { scanLegacyTwins } = await import('../repair/legacy-twins.ts');
+  const twins = await scanLegacyTwins(engine, level.sourceId).then(scan => scan.pairs.length + scan.decisions.length, () => null);
+  const twinsMs = Math.round((performance.now() - twinsStarted) * 10) / 10;
   return {
     schema: 'convergence/1', dry_run: true, source_id: level.sourceId, pass_id: null, kind: level.kind, kind_blockers: level.kindBlockers, mode: level.mode,
     target: level.head, baseline_commit: level.baselineCommit, converged_at: null, round: 1, full: level.full,
@@ -152,11 +168,11 @@ export async function buildConvergenceReceipt(_engine: BrainEngine, level: Shado
     would_hold: decisions.both + decisions.unknown + decisions.deleted + unknown + dirtyHolds,
     keep_db_admitted: keepDbAdmitted, keep_db_pending: counts.keep_db_pending ?? 0, keep_db_authorized: keepDbAdmitted,
     db_ahead: dbAhead, db_ahead_by_prefix: dbAhead.by_prefix, full_skipped_db_ahead: fullSkipped,
-    legacy_unverified: counts.legacy_unverified ?? 0, legacy_pageless: level.paths.filter(entry => entry.legacyPageless && entry.result.cls === 'legacy_same').length,
+    legacy_twin_pairs: twins, legacy_unverified: counts.legacy_unverified ?? 0, legacy_pageless: level.paths.filter(entry => entry.legacyPageless && entry.result.cls === 'legacy_same').length,
     deletes: { count: deletes.length, reconcilable: level.reconcilable, ratio: Math.round(ratio * 1000) / 1000, verdict, set_hash: setHash, samples: deleteSamples },
     deletes_withheld: verdict === 'withheld' ? { count: deletes.length, ratio: Math.round(ratio * 1000) / 1000, set_hash: setHash, samples: deleteSamples } : null,
     samples, settle_mismatch: [], episode: null, admission: null, last_full_at: null, redacted: opts.redactPaths,
-    duration_ms: Math.round(level.timings_ms.total ?? 0), timings_ms: { ...level.timings_ms, screen: screenMs, receipt: Math.round((performance.now() - started) * 10) / 10 },
+    duration_ms: Math.round(level.timings_ms.total ?? 0), timings_ms: { ...level.timings_ms, screen: screenMs, legacy_twins: twinsMs, receipt: Math.round((performance.now() - started) * 10) / 10 },
     statements: level.statements,
   };
 }

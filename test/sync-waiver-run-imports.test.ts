@@ -5,6 +5,11 @@
  * screen of an entry the cursor does not yet name validates against this run's cursor
  * with nothing pending; the run's transaction re-checks each file's bytes and the
  * owner epoch, so an edit or an owner change after the screens still ends the run.
+ *
+ * #6712 PR 4b: a non-company source syncs by the live pass, whose batch drains through
+ * the same waiver runs on a batch cursor with no cursor row; the pass's result (`pass`)
+ * says what the cursor row said: an edited file still ends the run and the pass converges,
+ * and an owner change blocks the pass with nothing settled.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -95,8 +100,9 @@ test('a file edited after its screen ends the waiver run before it: earlier file
       const admitted = (await importRequests(engine, f.id)).slice(before);
       expect(new Set(admitted.map(row => row.slug))).toEqual(new Set(['n03']));
       expect(admitted[0]!.state).toBe('conflict');
-      const [cursor] = await engine.executeRaw<{ index: number; done: boolean }>("SELECT (completed_keys->0->>'index')::int AS index,(completed_keys->0->>'done')::boolean AS done FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [f.id]);
-      expect(cursor).toMatchObject({ index: 8, done: true });
+      // The pass keeps no cursor row: it settled all eight candidates of its round and converged.
+      expect(await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1", [f.id])).toEqual([]);
+      expect(result.pass).toMatchObject({ kind: 'full', outcome: 'synced', stop_reason: null, candidates: 8, remaining: 0 });
     } finally { installFaultHook(undefined); await disposePersistenceConsumer(engine); }
   }
 }), 120_000);
@@ -121,10 +127,11 @@ test('an owner change during a waiver run\'s screens waives nothing: the run fal
       const outcome = await performManagedSync(proxy, { sourceId: f.id, ...OPTS, full: true }).then(result => ({ result }), (error: unknown) => ({ error }));
       expect(bumped).toBe(true);
       // The run re-reads the owner epoch under its lock and passes nothing; the head's per-entry screen then admits it,
-      // and its publication refuses the stale owner, so the cursor stays at the head.
+      // and its publication refuses the stale owner, so the pass stops blocked with nothing settled.
       expect('result' in outcome).toBe(true);
       const result = (outcome as { result: Awaited<ReturnType<typeof performManagedSync>> }).result;
-      expect(result).toMatchObject({ status: 'blocked_by_failures', waived: { imports: 0, deletes: 0 }, managedCursor: { index: 0 }, failureCodes: [{ code: 'owner_unavailable' }] });
+      expect(result).toMatchObject({ status: 'blocked_by_failures', waived: { imports: 0, deletes: 0 }, failureCodes: [{ code: 'owner_unavailable' }],
+        pass: { kind: 'full', outcome: 'blocked', stop_reason: 'blocked_by_failures', candidates: 8, settled: 0, remaining: 8 } });
     } finally { await disposePersistenceConsumer(proxy); }
   }
 }), 120_000);
