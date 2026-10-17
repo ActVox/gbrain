@@ -58,7 +58,7 @@ async function seed(engine: BrainEngine) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-  await engine.addLinksBatch(links);
+  await engine.addLinksBatch(links); // gbrain-allow-direct-insert: benchmark fixture seeding a throwaway brain
   const seen = new Set<string>();
   const from: number[] = [];
   const to: number[] = [];
