@@ -207,7 +207,7 @@ async function followRetirement(
   let current: string | null = slug;
   while (current && !seen.has(current) && seen.size <= MAX_RETIREMENT_HOPS) {
     seen.add(current);
-    const [row] = await engine.executeRaw<{ slug: string; type: string | null; retired: boolean; target: string | null }>(
+    const [row]: Array<{ slug: string; type: string | null; retired: boolean; target: string | null }> = await engine.executeRaw(
       `SELECT p.slug, p.type, ${retiredPageSql('p')} AS retired,
               COALESCE(NULLIF(btrim(p.frontmatter->>'superseded_by'), ''), NULLIF(btrim(p.frontmatter->>'merged_into'), '')) AS target
          FROM pages p

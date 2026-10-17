@@ -10,6 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased] - 2026-10-17
+
+**Facts about a person now land on that person's page, not on an old copy you retired.** If you keep an old page around for its history and mark it as replaced by the real one (`canonical: false`, `superseded_by: people/<name>`, or a status like `historical-retired-alias`), gbrain could still pick that old page when it filed new facts. It happened when the real page listed the name only in slug form (`alice-example`) and the extractor wrote it as `people/alice-example` or `Alice Example`: those spellings never matched the alias, and the name-matching fallback then chose the old page because its title carried the same words. One brain saw 91 fact writes go to the retired page in a day against 3 to the real one, and because that page was very large each write took minutes and slowed every other write behind it. Now a retired page is never chosen by a guess, a direct reference to it follows `superseded_by` to the real page, and aliases match whether the words are joined by spaces, hyphens, underscores or a directory prefix. Reported by @liuwenyong1985 (#6898).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| the extractor names `people/alice-example` or `Alice Example`, and the real page has the alias `alice-example` | the alias missed; a retired page with the same name words could win | resolves to the real page through its alias |
+| an alias written `Dana Example` or `acme_example`, referenced as `dana-example` or `Acme Example` | no alias match | matches |
+| a reference that is exactly a retired page's slug | that retired page | the page its `superseded_by` (or `merged_into`) names, up to 5 hops, same source, readable by the caller |
+| the same, when the retired page names no target, the target is missing or private to the caller, or the chain loops | that retired page | no entity (the fact is saved without one, as for any unknown name) |
+| a retired page is the only page whose name matches a guess (name match, bare-name prefix, phantom merge) | it could be chosen | it is skipped |
+| a person page whose `status` describes the person (`retired`, `archived`) | a candidate | still a candidate |
+
+### What to do
+
+Nothing. No migration, nothing is rewritten on upgrade, and stored aliases are read as they are. Facts that already landed on a retired page stay there; move them by hand for now (`gbrain forget <id>`, then `gbrain remember "<fact>" --entity <slug>`).
+
+### Itemized changes
+
+- `src/core/entities/resolve.ts`: a page is retired when its frontmatter has `canonical: false`, a `superseded_by` or `merged_into` target, or a `status` naming it an alias, a redirect, superseded or merged. The fuzzy and same-name arms of both resolvers, bare-name prefix expansion and the phantom-merge candidate queries exclude retired pages in SQL before uniqueness is counted. The exact-slug, basename and alias arms follow a retired page's `superseded_by` (else `merged_into`; `[[...]]`, `.md` and a leading `/` are stripped) within the same source, at most 5 hops, refusing on a cycle, a missing or deleted target, or (strict resolver with `excludePrivate`) a private one. An exact hit that cannot be followed returns null from `resolveEntitySlug`/`resolveEntitySlugWithSource` and `not_entity` from `resolveStrictEntityReference`.
+- Alias lookup tries the literal normalized reference first, then its words rejoined with a space, `-` and `_`; a slug-shaped reference uses its last segment, and a folded hit must sit in the same parent directory (`projects/acme-example` never resolves to a `companies/` page's alias). `normalizeAlias` itself is unchanged, so stored `page_aliases` rows, search's alias hop, mentions and CJK handling behave as before.
+- Tests: `test/entity-resolve-retired-alias-6898.test.ts` (PGLite, including the facts backstop landing both spellings on the canonical page) and `test/e2e/entity-resolve-retired-alias-6898-postgres.test.ts` share the fixture and cases in `test/helpers/retired-alias-6898.ts`; both fail on the previous resolver.
+
 ## [0.60.280.0] - 2026-10-17
 
 **A managed brain can now make a commit searchable in seconds, and every managed source reports how long that takes.** Until now a commit reached search only when the next scheduled sync ran, which on a managed brain could be most of an hour. Turn on `sync.on_commit` and `gbrain serve` notices the commit within about 3 seconds, waits 3 more for the commit burst to settle, and runs one managed sync for that source. The setting is off by default, so nothing changes until you turn it on.
