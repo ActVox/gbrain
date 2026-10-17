@@ -20,6 +20,7 @@ import { operationsByName } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { readForecastJournal, scorecardGroups } from '../src/core/forecast-journal.ts';
 import { scanStatedHorizons } from '../src/core/takes-horizon.ts';
+import { disableBeliefLedger } from '../src/core/belief/coverage.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { beliefBrain, beliefEngineCase, beliefPage, type BeliefBrain } from './helpers/belief-ledger.ts';
 
@@ -69,19 +70,34 @@ for (const engineCase of testBackends().map(beliefEngineCase)) {
 
     test('a managed source certifies the recorded prediction time; a take that predates the ledger falls back to since_date', () => beliefBrain(async b => {
       await b.put('companies/acme-example', takesPage([{ claim: 'Acme-example will reach $9M ARR by the end of 2027', who: 'alice-example', since: '2026-09' }]));
-      const asserted = (await b.events()).find(e => e.subject_kind === 'take' && e.event_type === 'take.asserted')!;
+      const created = (await b.events()).find(e => e.slug === 'companies/acme-example' && e.event_type === 'page.published' && e.value?.revision_before == null)!;
       const j = await readForecastJournal(b.engine, { sourceId: b.sourceId, asOf: AS_OF });
       const byClaim = Object.fromEntries(j.entries.map(e => [e.claim, e]));
-      expect(byClaim['Acme-example will reach $9M ARR by the end of 2027']!.prediction).toEqual({ at: new Date(asserted.recorded_at).toISOString(), basis: 'recorded', certified: true });
+      expect(byClaim['Acme-example will reach $9M ARR by the end of 2027']!.prediction).toEqual({ at: new Date(created.recorded_at).toISOString(), basis: 'recorded', certified: true });
       expect(byClaim['Old-example will merge by the end of 2026']!.prediction).toEqual({ at: '2025-01', basis: 'since_date', certified: false });
       expect(j.totals.certified_prediction_times).toBe(1);
     }, { managed: true, databaseUrl: engineCase.databaseUrl,
       setup: async b => { await b.put('companies/old-example', takesPage([{ claim: 'Old-example will merge by the end of 2026', who: 'bob-example', since: '2025-01' }])); } }), 180_000);
 
-    test('an unmanaged source records the prediction time but does not certify it', () => beliefBrain(async b => {
+    test('an unmanaged source records the prediction time but does not certify it; a take added later gets its own take.asserted time', () => beliefBrain(async b => {
+      const first = { claim: 'Acme-example will hire 50 people by Q4 2027', who: 'alice-example', since: '2026-09' };
+      await b.put('companies/acme-example', takesPage([first]));
+      const created = (await b.events()).find(e => e.event_type === 'page.published')!;
+      const mark = await b.lastId();
+      await b.put('companies/acme-example', takesPage([first, { claim: 'Acme-example will open a second office by 2028', who: 'bob-example', since: '2026-10' }]));
+      const asserted = (await b.events(mark)).filter(e => e.event_type === 'take.asserted');
+      expect(asserted).toHaveLength(1);
+      const byClaim = Object.fromEntries((await readForecastJournal(b.engine, { sourceId: b.sourceId, asOf: AS_OF })).entries.map(e => [e.claim, e]));
+      expect(byClaim[first.claim]!.prediction).toEqual({ at: new Date(created.recorded_at).toISOString(), basis: 'recorded', certified: false });
+      expect(byClaim['Acme-example will open a second office by 2028']!.prediction).toEqual({ at: new Date(asserted[0]!.recorded_at).toISOString(), basis: 'recorded', certified: false });
+    }, { databaseUrl: engineCase.databaseUrl }), 120_000);
+
+    test('a coverage stop after the page was created drops the snapshot time: the take falls back to since_date', () => beliefBrain(async b => {
       await b.put('companies/acme-example', takesPage([{ claim: 'Acme-example will hire 50 people by Q4 2027', who: 'alice-example', since: '2026-09' }]));
+      await disableBeliefLedger(b.engine, b.sourceId);
+      await b.enable();
       const [e] = (await readForecastJournal(b.engine, { sourceId: b.sourceId, asOf: AS_OF })).entries;
-      expect(e!.prediction).toMatchObject({ basis: 'recorded', certified: false });
+      expect(e!.prediction).toEqual({ at: '2026-09', basis: 'since_date', certified: false });
     }, { databaseUrl: engineCase.databaseUrl }), 120_000);
 
     test('grouped scorecard: shrunk accuracy, interval, Brier skill, recency, citations, low_n; remote group_by is refused', () => beliefBrain(async b => {

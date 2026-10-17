@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 241057,
-    "stdoutSha256": "49eb8473ee380c158399b9e9e48d8ed817820ebb11018fac1a81cee2e169f78e",
+    "stdoutBytes": 241508,
+    "stdoutSha256": "fe1070079cf281df12dcfe6508a3cfaa22fc38d4f01c9e0998f596bfa25a0ea5",
     "toolNames": [
       "remember",
       "entity",
@@ -4427,7 +4427,9 @@
         "name": "takes_scorecard",
         "parameters": {
           "domain_prefix": "string?",
+          "group_by": "string?",
           "holder": "string?",
+          "min_n": "number?",
           "since": "string?",
           "until": "string?"
         },
@@ -4438,9 +4440,21 @@
               "description": "Slug prefix (e.g. companies/) to scope the scorecard",
               "type": "string"
             },
+            "group_by": {
+              "description": "Trusted local CLI only: per-group journal statistics",
+              "enum": [
+                "holder",
+                "source"
+              ],
+              "type": "string"
+            },
             "holder": {
               "description": "Filter to this holder (world|garry|brain|<slug>)",
               "type": "string"
+            },
+            "min_n": {
+              "description": "Trusted local CLI only: groups with fewer resolved predictions are flagged low_n (default 10)",
+              "type": "number"
             },
             "since": {
               "description": "Window start (YYYY-MM-DD)",
