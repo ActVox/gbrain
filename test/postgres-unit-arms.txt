@@ -90,6 +90,7 @@ test/large-pages/credential-reseal-segments.test.ts
 test/large-pages/doctor-skipped-segmented.test.ts
 test/large-pages/forget-reason-segmented.test.ts
 test/large-pages/forget-scope.test.ts
+test/large-pages/gbra117-segmented-classes-window.test.ts
 test/large-pages/held-budget-shrink.test.ts
 test/large-pages/managed-import-outside-root.test.ts
 test/large-pages/managed-links-timeline-heap.test.ts

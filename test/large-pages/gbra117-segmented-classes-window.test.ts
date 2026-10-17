@@ -123,7 +123,7 @@ for (const kind of testBackends()) {
       };
     }
     const QUEUED = { pending: 1, failed: 0, sealable: 0, reimport: 0, protected: 0, archived: 0 };
-    const EXPECTED = { backlog: QUEUED, preview: QUEUED, status: QUEUED, doctor: { status: 'warn', ...QUEUED, segmented_pending: 1 }, readiness: 'projection_pending' };
+    const EXPECTED = { backlog: QUEUED, preview: QUEUED, status: QUEUED, doctor: { status: 'warn' as const, ...QUEUED, segmented_pending: 1 }, readiness: 'projection_pending' as const };
 
     test('condition 1: a queued segmented page counts with Markdown and never as failed: pending, claimed, lapsed, deferred retirement', async () => {
       await unbuiltSegmented(`zzpending${kind}`);

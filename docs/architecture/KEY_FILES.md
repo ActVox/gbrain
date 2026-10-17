@@ -32,8 +32,8 @@ link it here rather than raising the cap.
 | [Commands (2/6, continued)](key-files/commands-2-continued.md) | `doctor/checks/routing-federation.ts`, `git-convergence.ts`, `keyword-plan.ts`, `dream-retriage.ts` to `embed.ts` |
 | [Commands (3/6)](key-files/commands-3.md) | `src/commands/engine-status.ts` through `src/commands/extract-timeline-db.ts` |
 | [Commands (3/6, continued)](key-files/commands-3-continued.md) | `src/commands/features.ts` through `src/commands/frontmatter-install-hook.ts` |
-| [Commands (4/6)](key-files/commands-4.md) | `src/commands/frontmatter.ts` through `src/commands/pglite-repair.ts` |
-| [Commands (4/6, continued)](key-files/commands-4-continued.md) | `protocol.ts` through `reindex-search-vector.ts`, `init-mode-picker.ts`, `src/core/embedding-migration-cli.ts` |
+| [Commands (4/6)](key-files/commands-4.md) | `src/commands/frontmatter.ts` through `persistence-delegate.ts` |
+| [Commands (4/6, continued)](key-files/commands-4-continued.md) | `pglite-repair.ts` to `reindex-search-vector.ts`, `init-mode-picker.ts`, `src/core/embedding-migration-cli.ts` |
 | [Commands (5/6)](key-files/commands-5.md) | `src/commands/reindex.ts` through `src/commands/storage.ts` |
 | [Commands (6/6)](key-files/commands-6.md) | `src/commands/sync.ts` through `src/commands/whoknows.ts` |
 | [Core Ai](key-files/core-ai.md) | `src/core/ai/` gateway, embedding, dims, errors, fallbacks |
@@ -60,7 +60,7 @@ link it here rather than raising the cap.
 | [Core Services (2/3, continued)](key-files/core-services-2-continued.md) | `page-state/`, `page-{body,window}/`, `progressive-batch/` |
 | [Core Services (3/3)](key-files/core-services-3.md) | `src/core/think/index.ts` through `src/core/verbs/usage-log.ts` |
 | [Core Utilities (1/2)](key-files/core-utilities-1.md) | `archive-crawler-config.ts` through `remediation-checkpoint.ts`; [`cycle.ts`](key-files/core-cycle-primitive.md) |
-| [Core Utilities (2/2)](key-files/core-utilities-2.md) | `src/core/repair/` through `src/core/verbs.ts` |
+| [Core Utilities (2/2)](key-files/core-utilities-2.md) | `src/core/repair/` through `src/core/utils.ts` |
 | [Engines (1/2)](key-files/engines-1.md) | `src/core/connection-manager.ts` through `src/core/pglite-repair.ts` |
 | [Engines (2/2)](key-files/engines-2.md) | `src/core/pglite-resetwal.ts` through `src/core/worker-pool.ts` |
 | [Entrypoints And Docs](key-files/entrypoints-and-docs.md) | `.agents/gbrain-launcher` through `templates/` |
