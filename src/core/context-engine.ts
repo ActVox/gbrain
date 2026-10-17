@@ -21,6 +21,7 @@ import { buildReflexAddition, warmReflex, type ResolveEntitiesFn as ReflexResolv
 import { backupNagReadOnlyConsult, backupNoticeText, loadBackupStatus } from './backup/status-file.ts';
 import { estimateMessageTokens, openClawCoreLane } from './context/openclaw-core.ts';
 import { TURN_CONTEXT_ENVELOPE } from './context/turn-context-envelope.ts';
+import { loadContextModule } from './context/load-warning.ts';
 // Types inlined from openclaw/plugin-sdk to avoid hard dependency during development.
 // At runtime inside OpenClaw, the real SDK is available; these types ensure build compat.
 
@@ -839,8 +840,8 @@ async function engineCorpusDir(cfg: { dream?: { synthesize?: Record<string, unkn
 
 /** #6268: the session's frozen corpus source, or undefined while unresolved / unknown. */
 async function sessionSourceFor(cfg: { dream?: { synthesize?: Record<string, unknown> } } | null, sessionId: string): Promise<string | undefined> {
-  const { corpusSpoolDir } = await import('./context/corpus-segments.ts');
-  const { readSessionSource } = await import('./context/corpus-source.ts');
+  const { corpusSpoolDir } = await loadContextModule('src/core/context/corpus-segments.ts', () => import('./context/corpus-segments.ts'));
+  const { readSessionSource } = await loadContextModule('src/core/context/corpus-source.ts', () => import('./context/corpus-source.ts'));
   return readSessionSource(corpusSpoolDir(await engineCorpusDir(cfg)), sessionId)?.source_id ?? undefined;
 }
 
@@ -1004,10 +1005,10 @@ export function createGBrainContextEngine(ctx: {
   async function pollManifest(sessionId: string): Promise<CheckpointLinkLite[] | null> {
     const work = (async (): Promise<CheckpointLinkLite[] | null> => {
       try {
-        const { loadConfig } = await import('./config.ts');
+        const { loadConfig } = await loadContextModule('src/core/config.ts', () => import('./config.ts'));
         const cfg = loadConfig();
         if (cfg?.engine === 'pglite' && cfg.database_path) {
-          const ipc = await import('./context/resolve-ipc.ts');
+          const ipc = await loadContextModule('src/core/context/resolve-ipc.ts', () => import('./context/resolve-ipc.ts'));
           const secret = ipc.readIpcSecret(cfg.database_path);
           if (!secret) return null;
           // bankOnly rides along DELIBERATELY (version-skew fix, pre-landing
@@ -1029,12 +1030,12 @@ export function createGBrainContextEngine(ctx: {
           if (!('checkpointLinks' in res.block)) return null;
           return (res.block.checkpointLinks ?? []) as CheckpointLinkLite[];
         }
-        const { getDirectPostgresEngine } = await import('./context/reflex.ts');
+        const { getDirectPostgresEngine } = await loadContextModule('src/core/context/reflex.ts', () => import('./context/reflex.ts'));
         const pg = await getDirectPostgresEngine(cfg);
         if (!pg) return null;
-        const { resolveSourceId } = await import('./source-resolver.ts');
+        const { resolveSourceId } = await loadContextModule('src/core/source-resolver.ts', () => import('./source-resolver.ts'));
         const sourceId = (await sessionSourceFor(cfg, sessionId)) ?? await resolveSourceId(pg, null, workspaceDir);
-        const ss = await import('./context/session-state.ts');
+        const ss = await loadContextModule('src/core/context/session-state.ts', () => import('./context/session-state.ts'));
         return await ss.getCheckpointManifest(pg, sourceId, null, sessionId);
       } catch {
         return null;
