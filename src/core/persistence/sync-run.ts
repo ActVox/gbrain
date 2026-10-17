@@ -73,6 +73,7 @@ import type { PassStamp } from './sync-prepare.ts';
 import { runSyncPass } from './sync-pass-run.ts';
 import { serr } from '../console-prefix.ts';
 import { noteIdentityDowngrades } from '../sync-identity-downgrades.ts';
+import { isContentRefusal } from '../import-screen.ts';
 
 export interface ManagedSyncWriteDiagnostic {
   source_id: string;
