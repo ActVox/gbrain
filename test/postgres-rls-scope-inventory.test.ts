@@ -27,7 +27,7 @@
  * scoped keyword count and keyword-mode page reads (countKeywordPages,
  * searchKeywordPages): 27 and 27. Wave B PR 2 lane X adds keywordBoundedRead
  * (an unscoped read in one transaction under the keyword statement bound,
- * for the explain_target probe and the segmented-region read): 33 and 33.
+ * for the segmented-region read): 33 and 33.
  * The golden pins the exact numbers.
  */
 

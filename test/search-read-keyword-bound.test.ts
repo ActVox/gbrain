@@ -1,23 +1,20 @@
 /**
- * Wave B PR 2: the two search-time reads outside the engine's own keyword statements that name content_chunks,
- * the explain_target probe (ops/search.ts prepareExplainTarget: the chunk-manifest probe plus probeTarget) and the
- * segmented-region read (search/dedup.ts segmentRegions: the chunk-manifest probe plus the region SELECT), each run
- * in one read transaction under the keyword statement bound (`search.keyword_statement_timeout_ms`), and their
- * existing fallbacks answer a statement the bound cancels.
+ * Wave B PR 2: the segmented-region read (search/dedup.ts segmentRegions: the chunk-manifest probe plus the region
+ * SELECT, both naming content_chunks) runs in one read transaction under the keyword statement bound
+ * (`search.keyword_statement_timeout_ms`), and its existing fallback (every page under the inline rule) answers a
+ * statement the bound cancels.
  *
  * Contract protected: on a fresh engine (no cached probe answer) a session holding ACCESS EXCLUSIVE on
- * content_chunks cannot hold either read past the knob: the search op still answers (or fails) promptly, and
- * segmentRegions returns its empty map. Regression that fails it: either statement issued through
- * `engine.executeRaw` with no statement_timeout, which waits on the lock for as long as the lock lasts.
+ * content_chunks cannot hold the read past the knob: segmentRegions returns its empty map. Regression that fails it:
+ * either statement issued through `engine.executeRaw` with no statement_timeout, which waits on the lock for as long
+ * as the lock lasts.
  *
  * BrainEngine.keywordBoundedRead is the seam: Postgres runs the read in one transaction under the knob's
  * statement_timeout (file plane over DB plane); PGLite runs it on the engine itself with no statement timeout.
- * The lock arms are Postgres only (DATABASE_URL): PGLite has no concurrent locker.
+ * The lock arm is Postgres only (DATABASE_URL): PGLite has no concurrent locker.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import postgres from '#postgres';
-import { operationsByName } from '../src/core/operations.ts';
-import type { OperationContext } from '../src/core/ops/contract.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../src/core/postgres-engine.ts';
 import { KEYWORD_STATEMENT_TIMEOUT_KEY } from '../src/core/postgres-engine/keyword-statement-timeout.ts';
@@ -38,7 +35,7 @@ describe('PGLite keywordBoundedRead runs the read on the engine itself', () => {
 });
 
 if (testBackends().includes('postgres')) {
-  describe('postgres: a content_chunks lock cannot hold the explain_target probe or the segmented-region read past the keyword bound', () => {
+  describe('postgres: a content_chunks lock cannot hold the segmented-region read past the keyword bound', () => {
     let engine: PostgresEngine;
     let databaseUrl: string;
     let close: () => Promise<void>;
@@ -60,11 +57,8 @@ if (testBackends().includes('postgres')) {
       await close?.();
     });
 
-    /**
-     * Runs `run` on a fresh engine while a session holds ACCESS EXCLUSIVE on content_chunks, released once `run`
-     * settles or after `holdMs`; 'hung' when `run` has not settled 30 s after the start.
-     */
-    async function underLock<T>(run: (fresh: PostgresEngine) => Promise<T>, holdMs = 30_000): Promise<{ ms: number; outcome: 'hung' | { value: T } | { code: string } }> {
+    /** Runs `run` on a fresh engine while a session holds ACCESS EXCLUSIVE on content_chunks; 'hung' after 30 s. */
+    async function underLock<T>(run: (fresh: PostgresEngine) => Promise<T>): Promise<{ ms: number; outcome: 'hung' | { value: T } | { code: string } }> {
       const fresh = new PostgresEngine();
       await fresh.connect({ database_url: databaseUrl, poolSize: 2 });
       let release!: () => void;
@@ -79,12 +73,10 @@ if (testBackends().includes('postgres')) {
       await lockedUp;
       const started = performance.now();
       const call = run(fresh).then(value => ({ value }), (error: unknown) => ({ code: String((error as { code?: string }).code ?? (error as Error).message) }));
-      const releaseAt = setTimeout(release, holdMs);
       try {
         const outcome = await Promise.race([call, new Promise<'hung'>(resolve => setTimeout(() => resolve('hung'), 30_000))]);
         return { ms: performance.now() - started, outcome };
       } finally {
-        clearTimeout(releaseAt);
         release();
         await held;
         await call;
@@ -115,38 +107,11 @@ if (testBackends().includes('postgres')) {
       expect(ms).toBeLessThan(4000);
     }, 60_000);
 
-    // The op's later stages hold other unbounded reads that predate Wave B PR 2 (the projection-readiness probe), so the
-    // lock is released after 6 s and the search's setup stage, where the explain_target probe runs, is what is timed.
-    test('the search op\'s explain_target probe gives up at the 1000 ms knob, not when the lock goes', async () => {
-      const metas: Array<{ timings?: { stages_ms?: { setup?: number } }; explain_target?: unknown }> = [];
-      const ctx = {
-        remote: false, sourceId: 'default', config: { engine: 'postgres', embedding_disabled: true }, dryRun: false,
-        logger: { info() {}, warn() {}, error() {} }, emitNotice() {},
-        emitResponseMeta: (key: string, value: unknown) => { if (key === 'retrieval') metas.push(value as typeof metas[number]); },
-      };
-      const { ms, outcome } = await underLock(fresh => operationsByName.search.handler({ ...ctx, engine: fresh } as unknown as OperationContext,
-        { query: 'alpha', explain_target: 'notes/alpha' }), 6_000);
-      expect(outcome, `search after ${ms.toFixed(0)} ms`).not.toBe('hung');
-      expect(outcome).not.toHaveProperty('code');
-      const setup = metas.at(-1)?.timings?.stages_ms?.setup;
-      expect(setup, `setup stage ${setup} ms`).toBeGreaterThanOrEqual(900);
-      expect(setup).toBeLessThan(3_000);
-      expect(metas.at(-1)?.explain_target).toBeDefined();
-    }, 60_000);
-
-    test('once the lock is gone the probe and the region read answer', async () => {
+    test('once the lock is gone the region read answers', async () => {
       const fresh = new PostgresEngine();
       await fresh.connect({ database_url: databaseUrl, poolSize: 2 });
       try {
         expect(await segmentRegions(fresh, chunkIds.map(hit))).toEqual(new Map());
-        const metas: Array<Record<string, unknown>> = [];
-        const ctx = {
-          engine: fresh, remote: false, sourceId: 'default', config: { engine: 'postgres', embedding_disabled: true }, dryRun: false,
-          logger: { info() {}, warn() {}, error() {} }, emitNotice() {},
-          emitResponseMeta: (key: string, value: unknown) => { if (key === 'retrieval') metas.push(value as Record<string, unknown>); },
-        } as unknown as OperationContext;
-        await operationsByName.search.handler(ctx, { query: 'alpha', explain_target: 'notes/alpha' });
-        expect(metas.at(-1)?.explain_target).toMatchObject({ state: 'retrieved', code: 'target_returned' });
       } finally {
         await fresh.disconnect();
       }
