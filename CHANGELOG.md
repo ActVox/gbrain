@@ -10,6 +10,37 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.284.0] - 2026-10-17
+
+**Your brain keeps a private forecast journal: every prediction, when it was made, by when it had to come true, and how it turned out.** Takes that make a call ("Acme-example will reach $5M ARR by the end of 2024") now get a horizon, the last day the claim can come true. `gbrain takes journal` lists every prediction as resolved, overdue, open or undated, and it always counts the unresolved ones, so a track record can't look better by leaving its misses unresolved. `gbrain takes scorecard --group-by holder` (or `source`) ranks who has been right, with sample-size honesty built in. All of this stays on the brain host: remote agents and thin clients see exactly what they saw before.
+
+### What you'd see
+
+| You run | You get |
+|---|---|
+| `gbrain takes horizon scan` | each take's stated deadline ("by the end of 2024" → 2024-12-31, "within 18 months" counted from its since date); nothing is written until you add `--apply` |
+| `gbrain takes horizon set <slug> --row N --date YYYY-MM-DD` / `clear` | your own horizon for a take with no stated deadline; a scan never overwrites it |
+| `gbrain takes journal` | every prediction with its time, claim, holder, weight, horizon, state and resolution; the totals count every open, overdue and undated prediction whatever `--state` or `--limit` shows |
+| `gbrain takes scorecard --group-by holder` | one row per holder: accuracy, accuracy shrunk toward the brain-wide rate, a 95% interval, recency-weighted accuracy, Brier and Brier skill, how many resolutions cite a source, open and overdue counts, and `low_n` below `--min-n` (default 10) |
+
+**When was a prediction made?** Where the belief ledger records a source, the journal gives the recorded time, and calls it certified on a managed source. Everywhere else it shows the take's since date, labelled `uncertified`, so you always know which dates you can lean on.
+
+### What to do after upgrading
+
+Nothing runs on upgrade. A new migration adds the private `take_horizons` table; no take is touched. To date your takes, run `gbrain takes horizon scan`, look at the list, then run `gbrain takes horizon scan --apply`. Then `gbrain takes journal`.
+
+### Itemized changes
+
+- New `gbrain takes horizon scan [--apply]`, `set` and `clear`, and new `gbrain takes journal`: trusted local only. They have no MCP op, and thin clients refuse them as host-bound.
+- `gbrain takes scorecard` gains `--group-by holder|source`, `--min-n N` and `--source-id`. Without them the scorecard prints what it did before.
+- `takes_scorecard` gains `group_by` and `min_n` for trusted local callers. A remote caller that passes either gets the new `scorecard_group_by_local_only` refusal. Without them, its answer is byte for byte what it was.
+- `takes_list`, `takes_search` and `takes_scorecard` return the same output, locally and remotely, whether or not horizons exist.
+
+### For contributors
+
+- `src/core/takes-horizon.ts` (the deadline parser and the horizon store) and `src/core/forecast-journal.ts` (the journal and the grouped statistics).
+- `evals/forecast-journal/`: a $0 synthetic gate with a frozen preregistration. It uses 20 seeded cohorts of placeholder holders with known skill. On those cohorts the median Spearman ρ between true skill and shrunk accuracy is 0.905. The who-was-right set-F1 is 1.000, the denominator, `low_n` and labelling counts are exact, and 8/8 remote probes pass. Run it with `bun evals/forecast-journal/harness.ts --run`.
+
 ## [0.60.278.0] - 2026-10-17
 
 **A stuck upgrade queue drains, held embeddings say what they need, and doctor and status answer in bounded time (#6803, #6847).** Four things got better for anyone whose brain grew big or went through the recent upgrades. Image pages that an old upgrade left queued (and missing from search) can now be put back with one keyless command when gbrain already knows they're safe, and the rest are counted and named instead of hidden. Large pages waiting for your embedding approval are reported everywhere with one exact command to approve them, and that command now works on free local embedding models too. `gbrain doctor --json` and `gbrain sync --status` stop running for minutes on a large brain. And the "un-extracted edges" nudge after a sync now agrees with doctor and names the command that actually finishes the job.
