@@ -38,6 +38,23 @@ To turn it on, run `gbrain config set sync.on_commit true` on the brain host. Th
 - New doctor check `managed_sync_latency` (`src/commands/doctor/checks/managed-sync-latency.ts`); the doctor goldens are regenerated for it. With grading on it also warns when the synced commits are not in this host's git checkout (the latency cannot be measured), and `doctor --source` grades only that source.
 - Tests: `test/serve-head-watcher.test.ts` (debounce, single flight, follow-up, resume cap, error handling, stop), `test/serve-head-watcher-managed.serial.test.ts` (a real managed source on PGLite and Postgres: a commit becomes searchable with no manual sync), `test/serve-http-head-watcher.serial.test.ts` (the watcher starts with `gbrain serve --http` and its poll interval is cleared on shutdown), `test/sync-freshness-6858.test.ts` (percentiles, exclusions, doctor thresholds, the additive `sync status --json` block). The two database tests are listed in `test/postgres-unit-arms.txt`.
 
+## [0.60.274.0] - 2026-10-17
+
+**A refresh no longer gets stuck when a commit lands on top of its target, and `gbrain repair file-drift` can now resolve a page whose file is gone.** Two fixes ahead of the level-triggered reconcile (#6712).
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sources refresh` while a commit lands on top of the refresh target | members synced past the target, the refresh stayed `syncing` with the worktree fenced, and `--resume` could not finish it | the refresh completes once every member reached the target or a commit on top of it; `--resume` completes one left `syncing` |
+| A live page whose canonical file is gone from the last commit | `sources reconcile` refused with "repair does not restore files" and nothing offered a per-page fix | `gbrain repair file-drift --slug <slug> --prefer database` recreates the file from the page; `--prefer file` soft-deletes exactly that page (mass-delete valve applies; `gbrain restore <slug> --force` undoes it). Both are preview-first and bound to the page revision and the file's absence |
+| A file deleted only in the worktree (still committed) | the same refusal | listed `deletion_uncommitted`, routed to committing the deletion or `gbrain repair ghost-pages` |
+| A held deletion's next step | a reconcile preview that refused | the file-drift preview |
+
+### What you need to do
+
+Nothing. Both repairs only run when you ask for them, and nothing changes at upgrade. With Git durability off, commit a recreated file yourself; the preview prints the command.
+
 ## [0.60.273.0] - 2026-10-16
 
 **Ask what changed this week and get the beliefs that changed, with their old and new values and the evidence, instead of a list of pages.** `delta {beliefs: true}` and `gbrain beliefs changes` read the belief ledger for a window and report each fact, take, link and relationship date that ended the window different from how it started. An edit and its revert report nothing, and a relationship end that only the nightly check inferred is now shown as an upper bound (`by 2025-03-01`) everywhere relationship notes appear. Recording beliefs also costs less: on large pages `put_page` is about 45% faster on PGLite, and the ledger's share of a large Postgres edit drops under 10%.
