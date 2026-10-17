@@ -23,6 +23,20 @@ command drains the whole backlog:
 gbrain sync --source <id> --no-pull --json
 ```
 
+A managed source that is not a company brain syncs by a **level-triggered
+pass**: under the source's drain lease it pins `HEAD`, compares the whole tree
+with what the database absorbed (the pages and their import records) and
+admits only the paths that are not settled, in batches of at most 10,000 and
+at most four rounds. A pass with nothing unsettled and nothing in flight
+stamps `last_commit`. A killed pass loses nothing: the next plain sync reads the
+level again and admits only what is still unsettled, so a reset, a lost run or
+an out-of-band change converges without a flag. Its progress is the
+`convergence` block of `gbrain sync status --json` (`round`, `candidates`,
+`settled`, `remaining`, `classes`); the cursor fields there are null. A
+company-brain source keeps its cursor and frozen manifest. The pass's status
+reasons, `sync.admission`, the mass-delete valve and episodes are in the
+[sync unblock runbook](sync-unblock-runbook.md#the-pass-outcomes-and-status-reasons).
+
 Managed sync never pulls: the checkout is fast-forwarded by
 `gbrain sources refresh <id>`, never by sync. Sync then catches the index up
 to whatever the checkout holds. The CLI implies `--no-pull` on a managed brain
@@ -88,8 +102,11 @@ The run ends in exactly one outcome:
 
 | Outcome | Exit | Meaning | What to do |
 | --- | --- | --- | --- |
-| `synced` | 0 | The cursor reached its target. | Nothing. |
-| `resumable` | 0 | A deadline, `--timeout` or Ctrl-C stopped it; the cursor and accepted writes are intact. | Rerun `next.command`; safe in a loop. |
+| `synced` | 0 | The pass converged and stamped (a company-brain source: the cursor reached its target). A pass at a selection other than the configured one adds `selection_scoped` and does not advance `last_commit`. | Nothing. |
+| `resumable` | 0 | A deadline, `--timeout` or Ctrl-C stopped it; accepted writes are intact. | Rerun `next.command`; safe in a loop. |
+| `resumable` / `not_converged` | 0 | The pass used its four rounds while another writer kept changing the level; everything it admitted stands. | Rerun `next.command`. After three in a row `next` is a report (`gbrain doctor --json`), not another sync. |
+| `resumable` / `admission_paused` | 0 | `sync.admission` is `imports_only` or `classify_only`. | Ask the user; `gbrain config set sync.admission normal` ends the pause. |
+| `blocked` / `reconcile_host_required` or `grant_scope` | 1 | A remote caller or a partial grant admitted what it could; the rest (holds, markers, keep_db writes, the stamp) needs the owner host. | Tell the user to run `gbrain sync --source <id> --no-pull` on the brain host. |
 | `resumable` / `preparation_abandoned` | 0 | A write this process's own writer holds was still preparing past its allowance (its budget plus 30 s) and cannot be cancelled in-process, so the sync exited to end it; `drain.stall.step` says where. | Rerun `next.command`; safe in a loop. The next pass holds the entry if it stalls again. |
 | `blocked` | 1 | A page failed or the writer needs intervention. | Follow `next.why`, then run `next.command`. See [drain stops](write-refusals.md#managed-sync-drain-stops). |
 | `blocked` / `drain_stalled` | 1 | The head write made no progress (no commit, no step advance) for the whole window. With a live owner on this host the drain waits until the 600 s ceiling (printing `stalled <N>s on <step>` with the owner's pid and kind meanwhile) and stops with `cause: owner_wedged_here`, the owner `{kind, pid, nonce}` and `retry_after_ms` to the ceiling; a lapsed claim stops at once as `owner_missing`. | Before the ceiling: wait `retry_after_ms`, then rerun `next.command` (`safe_to_loop` is true). Past it, or with a wedged owner: restart the named owner process, `gbrain sources retry-held <id>`, then the same sync. `gbrain sources writer status --source <id> --json` ends the claim in a `next_action` that says which. See [drain stops](write-refusals.md#drain-stalled). |
@@ -396,9 +413,10 @@ would need the moved file as evidence, which is what the sync route provides.
 Concurrent runs are safe. Two syncs on the same commit no-op because content
 hashes match. If both a cron and `--watch` fire simultaneously, no conflict.
 
-Long syncs also survive being killed: progress checkpoints into the database
-as files drain, so a killed or aborted run resumes from where it stopped, and
-the sync bookmark only advances on true completion. A progress-aware stall
+Long syncs also survive being killed: every published page keeps its
+receipt and import record, so the next plain sync admits only what is still
+unsettled (a company-brain cursor resumes where it stopped), and the sync
+bookmark only advances when a pass converges. A progress-aware stall
 watchdog (`GBRAIN_SYNC_STALL_ABORT_SECONDS`, default 900, `0` disables) aborts
 a run that stops making forward progress and releases the per-source lock so
 the next `gbrain sync` picks up from the checkpoint. The checkpoint cadence
