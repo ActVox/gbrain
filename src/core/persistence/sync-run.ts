@@ -1663,8 +1663,8 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         }
         // #6712 PR 4b (design v3.2 §2): a pass's write refused because its file changed after admission is the level moving, not a
         // page failure: the entry is passed over and the next round classifies the new level (a level that never settles ends the
-        // pass not_converged).
-        if (done.state !== 'committed' && cursor.passId && done.error_code === 'source_changed') {
+        // pass not_converged). A pinned-worktree conflict is not: it settles as a worktree_dirty hold below.
+        if (cursor.passId && fileChangedAfterAdmission(done)) {
           cursor = await saveCursor(engine, key, cursor, committedPast({ ...cursor, counts: { ...cursor.counts } }, pending));
           assertActive();
           continue;

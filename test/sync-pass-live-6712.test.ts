@@ -19,6 +19,8 @@
  * - probe 40: a connection or pooler fault (SQLSTATE 08006, 57P01) in a pass never becomes a hold; the next run converges.
  * - #6727 on the pass route: a new file whose slug folds to a legacy page (no recorded origin) the importer cannot write is
  *   held legacy_slug_conflict and forks no second page.
+ * - a committed edit under a different uncommitted edit (committed mode) is held worktree_dirty, the page and the local
+ *   file untouched, and the next pass settles instead of counting a not_converged streak; sync.holds=fail stops the run.
  * - probe 54: a pass intent keeps what the #6862 FIFO guard reads: a `managed_sync_` kind, the slug and page, and `renameFrom.slug`.
  *
  * Each test fails on capy/6712-pr4b (8cda2764b), where a non-company source still runs the cursor engine: the fences do not
@@ -260,6 +262,29 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     const pages = await engine.executeRaw<{ slug: string; source_path: string | null; body: string }>(
       "SELECT slug, source_path, compiled_truth AS body FROM pages WHERE source_id='default' AND deleted_at IS NULL AND lower(slug) LIKE 'notes/legacy%' ORDER BY slug");
     expect(pages.map(page => ({ slug: page.slug, source_path: page.source_path, body: page.body.trim() }))).toEqual([{ slug: 'notes/Legacy Name', source_path: null, body: 'A legacy page.' }]);
+  }, { setup }), 180_000);
+
+  test('a committed edit under a different uncommitted edit is held worktree_dirty, untouched, and the next pass settles', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'An uncommitted draft of notes/a.'));
+    const first = await performManagedSync(engine, OPTS);
+    expect((first.held ?? []).map(hold => [hold.path, hold.code])).toEqual([['notes/a.md', 'worktree_dirty']]);
+    expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))!.page.compiled_truth).toContain('The committed body of notes/a.');
+    expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('An uncommitted draft of notes/a.');
+    const second = await performManagedSync(engine, OPTS);
+    expect({ status: second.status, streak: second.pass?.not_converged_streak ?? 0 }).toEqual({ status: second.status === 'up_to_date' ? 'up_to_date' : 'synced', streak: 0 });
+  }, { setup }), 180_000);
+
+  test('with sync.holds=fail the same committed edit under an uncommitted edit stops the run, the page and the file untouched', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.setConfig('sync.holds', 'fail');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'An uncommitted draft of notes/a.'));
+    const refused = await performManagedSync(engine, OPTS).then(result => ({ status: result.status, reason: result.reason ?? null }), (error: { code?: string }) => ({ status: 'threw', reason: error.code ?? null }));
+    expect(refused).toEqual({ status: 'blocked_by_failures', reason: null });
+    expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))!.page.compiled_truth).toContain('The committed body of notes/a.');
+    expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('An uncommitted draft of notes/a.');
   }, { setup }), 180_000);
 
   test('probe 54: a pass intent keeps what the #6862 FIFO guard reads, renameFrom included', () => managedBrain(async ({ engine, root }) => {
