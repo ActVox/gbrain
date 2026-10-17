@@ -22,8 +22,12 @@ resumable is resumed up to three times. Nothing is written into the checkout or
 and `gbrain serve --http` run the watcher.
 
 For a small page, expect a commit to be searchable in about 5 to 15 seconds: up
-to 3 s to notice, the 3 s debounce, then the page write. Embedding follows the
-sync's own embedding path, so commit→embedded is longer.
+to 3 s to notice, the 3 s debounce, then the page write. The write queues an
+`embedding` publication effect that the serve runs right after it, so a small
+page is embedded about a second later, under the same consent and spend gates as
+any managed write; there is no separate inline-embed setting. A sync run with
+`--no-embed`, or one whose cost gate deferred embedding, queues no such effect: its
+pages stay stale for `embed-backfill` and make no provider call.
 
 Each managed source's freshness over the last 24 hours shows in `gbrain sync
 status --source <id>` (the `freshness` block in `--json`) and in `gbrain
