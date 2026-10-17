@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.275.0] - 2026-10-17
+
+**The take grader now has an eval, and you can review what it has graded.** Wave 4b W6: a preregistered take-grading eval measures which judge models may ever auto-resolve a take, the dream cycle's take grader stops counting evidence about a look-alike company, and `gbrain takes grades` lists its cached verdicts. Auto-resolve stays off.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| The take grader's evidence mentions a different company whose name only resembles the one in the claim | the judge could grade the claim on the other company's outcome | prompt `hybrid-evidence-v2` tells it that evidence does not count, so the verdict is `unresolvable` |
+| The judge wraps its JSON answer in prose, or repeats an answer that agrees | no verdict ("judge output parse failed"), retried next cycle | the answer parses; two answers that disagree still give no verdict |
+| You want to see what the grader concluded | only the database table `take_grade_cache` | `gbrain takes grades [--verdict v] [--min-confidence n] [--applied\|--unapplied] [--limit n] [--json]` lists the newest verdict per take and marks judges the eval has not measured |
+
+### What you need to do
+
+Nothing. Verdicts are cached per prompt version, so the next cycles grade each eligible take once more within the phase's existing budget (`cycle.grade_takes.budget_usd`). No take's resolution changes. `gbrain takes grades` runs on the brain host; thin clients refuse it.
+
+### For contributors
+
+`evals/take-grading/` holds the eval (908 seeded synthetic takes, dev and counted splits, `--check` at $0) and its preregistration. `GRADE_TAKES_MEASURED_MODELS` (`src/core/cycle/grade-takes-measured.ts`) stays empty until the counted run.
+
 ## [0.60.274.0] - 2026-10-17
 
 **A refresh no longer gets stuck when a commit lands on top of its target, and `gbrain repair file-drift` can now resolve a page whose file is gone.** Two fixes ahead of the level-triggered reconcile (#6712).
