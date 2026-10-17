@@ -81,6 +81,14 @@ export async function findIncompleteSyncReceipt(tx: Pick<BrainEngine, 'executeRa
   }
 }
 
+/** The pass stamp's validation statement (`findOpenPassWork`): `$1` the worktree, `$2` the stamp's own request id. */
+export const OPEN_PASS_WORK_SQL = `(SELECT r.request_id::text AS request_id FROM persistence_requests r
+    WHERE r.worktree_id=$1::uuid AND r.recovery IS NOT NULL LIMIT 1)
+  UNION ALL (SELECT r.request_id::text FROM persistence_requests r
+    WHERE r.worktree_id=$1::uuid AND r.state IN ('queued','running','recovering') AND r.request_id<>$2::uuid
+      AND r.intent->>'kind' IN ('managed_sync_import','managed_sync_delete','managed_sync_checkpoint') LIMIT 1)
+  LIMIT 1`;
+
 /**
  * #6712 PR 4b (design v3.2 §3.3, clause 2): a live pass's stamp commits only with no recovery row on the worktree and no
  * other open managed-sync request of it (page kinds and the checkpoint, filtered on the row). The open read is served by
@@ -90,12 +98,7 @@ export async function findIncompleteSyncReceipt(tx: Pick<BrainEngine, 'executeRa
  */
 export async function findOpenPassWork(tx: Pick<BrainEngine, 'executeRaw'>, worktreeId: string, selfRequestId: string): Promise<string | null> {
   try {
-    const [row] = await tx.executeRaw<{ request_id: string }>(`(SELECT r.request_id::text AS request_id FROM persistence_requests r
-        WHERE r.worktree_id=$1::uuid AND r.recovery IS NOT NULL LIMIT 1)
-      UNION ALL (SELECT r.request_id::text FROM persistence_requests r
-        WHERE r.worktree_id=$1::uuid AND r.state IN ('queued','running','recovering') AND r.request_id<>$2::uuid
-          AND r.intent->>'kind' IN ('managed_sync_import','managed_sync_delete','managed_sync_checkpoint') LIMIT 1)
-      LIMIT 1`, [worktreeId, selfRequestId]);
+    const [row] = await tx.executeRaw<{ request_id: string }>(OPEN_PASS_WORK_SQL, [worktreeId, selfRequestId]);
     return row?.request_id ?? null;
   } catch (error) {
     const failure = error as { code?: string; message?: string };
