@@ -24,7 +24,7 @@ import { getWriteRequestById } from './journal.ts';
 import type { WriteRequest } from './model.ts';
 import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
 import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
-import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncSlugCollision } from './sync-discovery.ts';
+import { adoptLegacyPage, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import type { PassStamp, SyncCursorOptions, SyncIntent } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
@@ -414,10 +414,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     await engine.transaction(async tx => { await assertDrainLease(tx, sourceId); await writePassRow(tx, value, { pin }); });
   };
   const identityDowngrades: DowngradedRename[] = [];
+  const fileRefusals = new Map<string, SyncFileRefusal>();
   const result = (status: SyncResult['status'], reason?: SyncResult['reason']): SyncResult => ({ status, fromCommit: remote ? null : context.source.last_commit, toCommit: remote ? '' : head,
     added: counts.added, modified: counts.modified, deleted: counts.deleted, renamed: counts.renamed, chunksCreated: counts.chunks, embedded: 0, pagesAffected: [],
     filesImported: sliceBase.pages, bankedFiles: sliceBase.pages, waived: { imports: counts.waivedImports, deletes: counts.waivedDeletes }, prescreened: 0,
-    ...(collisions.length ? { slugCollisions: collisions } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
+    ...(collisions.length ? { slugCollisions: collisions } : {}), ...(fileRefusals.size ? { fileRefusals: [...fileRefusals.values()] } : {}), ...(identityDowngrades.length ? { identityDowngrades } : {}), ...(inherited.length ? { inherited_options: inherited } : {}), ...(reason ? { reason } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
       settled: S.size + yieldSettled, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
   try {
@@ -503,6 +504,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       head = value.telemetry.target = level.head;
       levelSlugMode = level.slugMode;
       lastLevel = level;
+      for (const refusal of level.fileRefusals ?? []) fileRefusals.set(refusal.path, refusal);
       value.telemetry.timings_ms = level.timings_ms;
       // Design §2.7 (b1): until the incarnation's markers are written (an aborted or failed first pass wrote none), not only on its first row.
       if (markersOwed() && !remote) {

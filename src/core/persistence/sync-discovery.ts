@@ -74,8 +74,15 @@ export interface SyncDiscovery { binding: WorktreeBinding; root: string; gitRoot
   /** #6729: inexact Git renames split into a delete plus an add (origin form); recorded after the run commits. */
   identityDowngrades?: DowngradedRename[]; }
 /** #5032: the per-file refusal text for a Windows-unstorable ':' path, by the side sync skipped. */
-const COLON_REFUSAL_MESSAGES = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
-  delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.` };
+export const COLON_REFUSAL_MESSAGES = { import: (path: string) => `${path} has a ':' in its name, which Windows cannot store; sync skipped it.`,
+  delete: (path: string) => `${path} has a ':' in its name, which Windows cannot reconcile; sync skipped its deletion and its page stays live.`,
+  rename: (path: string, from: string, to: string) => `${path} is one side of the rename ${from} -> ${to}, which Windows cannot reconcile; sync skipped both sides so the page keeps its identity.` };
+/** #5032: the named refusal of one Windows-unstorable ':' path (discovery and the pass, sync-pass.ts). */
+export function colonFileRefusal(sourceId: string, path: string, message: string): SyncFileRefusal {
+  return { path, code: 'colon_slug_windows_write_through', message,
+    suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
+    docs: ERROR_CATALOGUE.colon_slug_windows_write_through.docs };
+}
 export interface ManagedSyncContext { binding: WorktreeBinding; root: string; gitRoot: string; sourceId: string; incarnation: string;
   source: { last_commit: string | null; config: Record<string, unknown> }; }
 /** The persisted `sync.exclude` globs (plus a run's `--exclude`), as discovery matches them against a path relative to the source root. */
@@ -323,9 +330,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   // keeps its identity until the change is synced from macOS or Linux.
   const refused = new Map<string, SyncFileRefusal>();
   const record = (path: string, message: string) => {
-    if (eligible(path)) refused.set(path, { path, code: 'colon_slug_windows_write_through', message,
-      suggestion: `Rename it without ':' on a macOS or Linux checkout and commit, then run gbrain sync --source ${sourceId} --no-pull.`,
-      docs: ERROR_CATALOGUE.colon_slug_windows_write_through.docs });
+    if (eligible(path)) refused.set(path, colonFileRefusal(sourceId, path, message));
   };
   const refuse = (path: string, action: SyncEntry['action'] = 'import') => {
     if (!isWindowsColonTarget(path)) return false;
@@ -342,7 +347,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const putRename = (rename: SyncManifest['renamed'][number], working = false) => {
     if (isWindowsColonTarget(rename.from) || isWindowsColonTarget(rename.to)) {
       for (const path of [rename.from, rename.to]) {
-        record(path, `${path} is one side of the rename ${rename.from} -> ${rename.to}, which Windows cannot reconcile; sync skipped both sides so the page keeps its identity.`);
+        record(path, COLON_REFUSAL_MESSAGES.rename(path, rename.from, rename.to));
       }
       return;
     }
