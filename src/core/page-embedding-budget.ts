@@ -37,7 +37,7 @@ import { JUNK_SAMPLE_CHARS, assessJunkWindows, assessSampledJunk } from './conte
 import type { BodyStorage, ManifestRow } from './page-body/types.ts';
 import { isSegmentedPage, pageBodyBytes } from './page-body/page-shape.ts';
 import { estimateCostFromChars } from './embedding-pricing.ts';
-import { PAGE_INLINE_MAX_BYTES, largePageBodyFilter, isLargePageBytes } from './page-size-policy.ts';
+import { PAGE_INLINE_MAX_BYTES, budgetRowAppliesFilter, isLargePageBytes } from './page-size-policy.ts';
 import { isEmbedSkipped } from './embed-skip.ts';
 import { parseUsdLimit, resolveSpendPosture } from './spend-posture.ts';
 import { chunkGenerationFilter } from './search/safe-chunks.ts';
@@ -188,7 +188,7 @@ export function estimatePageEmbedUsd(chars: number, signature: string | null | u
 /** Held and capped pages with their stale chunk counts (`gbrain embed --held`); `limit: null` lists every one. */
 export async function listBudgetLimitedPages(engine: Pick<BrainEngine, 'executeRaw'>, opts: { state?: 'held' | 'capped'; sourceId?: string; limit?: number | null } = {}): Promise<PageBudgetReport[]> {
   const params: unknown[] = [opts.limit === undefined ? 1000 : opts.limit];
-  const filters = [`b.state <> 'open'`, largePageBodyFilter('p'), 'p.deleted_at IS NULL'];
+  const filters = [budgetRowAppliesFilter('b', 'p'), 'p.deleted_at IS NULL'];
   if (opts.state) filters.push(`b.state = $${params.push(opts.state)}`);
   if (opts.sourceId) filters.push(`p.source_id = $${params.push(opts.sourceId)}`);
   const pending = `(CASE WHEN p.body_storage = 'segmented' THEN cc.${quoteIdentifier((await embeddingWriteTarget(engine)).column.name)} IS NULL ELSE cc.embedded_at IS NULL END)`;

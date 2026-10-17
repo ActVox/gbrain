@@ -45,11 +45,18 @@ export function largePageBodyFilter(alias: string): string {
 }
 
 /**
- * SQL over a `pages` row aliased `alias`: the page has a held or capped
- * `page_embedding_budget` row (page-embedding-budget.ts) that still applies.
+ * SQL over a `page_embedding_budget` row aliased `budget` joined to its
+ * `pages` row aliased `page`: the row is held or capped and still applies.
  * The budget meters large pages only, so a row left on a page edited down to
- * the inline threshold or under no longer keeps it out of the embedding queue.
+ * the inline threshold or under no longer applies. The one rule the embedding
+ * queue, the held list (`gbrain embed --held`) and the held count (doctor
+ * `partial_embedding`) share.
  */
+export function budgetRowAppliesFilter(budget: string, page: string): string {
+  return `${budget}.state <> 'open' AND ${largePageBodyFilter(page)}`;
+}
+
+/** SQL over a `pages` row aliased `alias`: the page has a held or capped budget row that still applies (budgetRowAppliesFilter). */
 export function pageBudgetLimitedFilter(alias: string): string {
-  return `EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = ${alias}.id AND peb.state <> 'open' AND ${largePageBodyFilter(alias)})`;
+  return `EXISTS (SELECT 1 FROM page_embedding_budget peb WHERE peb.page_id = ${alias}.id AND ${budgetRowAppliesFilter('peb', alias)})`;
 }
