@@ -26,7 +26,10 @@ import type { BrainEngine } from '../../../core/engine.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry, doctorHealth } from '../context.ts';
 import { embeddingsDisabled } from '../../../core/embedding-disabled.ts';
 import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from '../../../core/search/embedding-column.ts';
-import { checkError, infoCheck, keylessEnablementFix } from '../check-fix.ts';
+import { agentFix, checkError, infoCheck, keylessEnablementFix } from '../check-fix.ts';
+import type { MissingTable, MissingTablesReport } from '../../../core/schema-missing-tables.ts';
+
+const MISSING_TABLES_DOCS = 'docs/guides/repair.md#missing-tables';
 
 async function runPgvector(ctx: DoctorContext): Promise<Check[]> {
   const { progress } = ctx;
@@ -251,6 +254,14 @@ async function runSchemaVersion(ctx: DoctorContext): Promise<Check[]> {
       } catch {
         checks.push(checkError('schema_columns', 'verify live schema columns'));
       }
+      // 6c. #6911: tables the applied migrations created that the brain no longer has (the ledger cannot see a drop).
+      progress.heartbeat('schema_missing_tables');
+      try {
+        const { readMissingTables } = await import('../../../core/schema-missing-tables.ts');
+        checks.push({ name: 'schema_missing_tables', ...missingTablesFields(await readMissingTables(engine)) });
+      } catch (error) {
+        checks.push(checkError('schema_missing_tables', 'check for tables the applied migrations created', error));
+      }
     }
   } catch {
     checks.push(checkError('schema_version', 'check schema version'));
@@ -259,9 +270,26 @@ async function runSchemaVersion(ctx: DoctorContext): Promise<Check[]> {
   return checks;
 }
 
+/** #6911: the schema_missing_tables verdict; a missing user-data table fails, a missing rebuildable cache warns. */
+function missingTablesFields(report: MissingTablesReport): Omit<Check, 'name'> {
+  if (report.status === 'skipped') return { status: 'ok', message: `Skipped: schema v${report.version} is not at head v${report.latest} (schema_version covers it).` };
+  if (!report.missing.length) return { status: 'ok', message: `All ${report.checked} table(s) the applied migrations create exist.` };
+  const recreatable = report.missing.filter(m => m.recreatable), kept = report.missing.filter(m => !m.recreatable);
+  const details = { missing: report.missing, checked: report.checked, docs: MISSING_TABLES_DOCS };
+  const names = (list: MissingTable[]) => list.map(m => m.table).join(', ');
+  const message = `${report.missing.length} table(s) the applied migrations create are missing although schema_version is at head, so apply-migrations will not recreate them`
+    + (recreatable.length ? `. Rebuildable cache(s) ${names(recreatable)}: preview recreating them empty with gbrain repair missing-tables, then apply the printed command after the user agrees.` : '')
+    + (kept.length ? `. ${names(kept)} hold user data and are never recreated empty: restore them from a backup (see ${MISSING_TABLES_DOCS}).` : '.');
+  return { status: kept.length ? 'fail' : 'warn', message, details,
+    ...(recreatable.length
+      ? { fix: agentFix(['gbrain', 'repair', 'missing-tables', '--json'], 'Read-only preview: lists each rebuildable cache table it would recreate empty and prints the apply command with its hash. Apply only after the user agrees.',
+        'schema_missing_tables', { docs: MISSING_TABLES_DOCS }) }
+      : { fix_unavailable_reason: 'operator_judgement' as const }) };
+}
+
 export const schemaVersionEntry: DoctorEntry = {
   name: 'schema_version',
-  emits: ['schema_version', 'schema_columns'],
+  emits: ['schema_version', 'schema_columns', 'schema_missing_tables'],
   run: runSchemaVersion,
 };
 

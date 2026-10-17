@@ -28,6 +28,7 @@ import type { PurgePlan, PurgeTarget } from './purge.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
+import { isRebuildableCache, relationExists } from '../persistence/rebuildable-cache.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
@@ -79,6 +80,10 @@ async function unprobedSegmentedPages(engine: BrainEngine, sourceId: string, rep
 }
 
 type ProbeResult = { count: number } | { unverified: string };
+
+/** #6911: a rebuildable cache table that does not exist holds nothing to verify. */
+const missingCache = (store: string): StoreReport => ({ store, status: 'not_present', removed: 0, reason: 'table_missing',
+  detail: `The ${store} table does not exist on this brain; it is a rebuildable cache, so there was nothing to clear. gbrain doctor reports it under schema_missing_tables.` });
 
 /** One bounded probe: `sql` selects matching rows (no LIMIT); the adapter caps rows and the statement time. */
 async function boundedCount(engine: BrainEngine, sql: string, params: unknown[], deadline: number): Promise<ProbeResult> {
@@ -257,6 +262,7 @@ async function sweptInventoryReports(engine: BrainEngine, reported: ReadonlySet<
     if (entry.class !== 'swept' || reported.has(entry.table)) continue;
     const planned = removed[entry.table] ?? 0;
     if (dryRun) { reports.push({ store: entry.table, status: planned ? 'would_remove' : 'not_present', removed: planned }); continue; }
+    if (isRebuildableCache(entry.table) && !await relationExists(engine, entry.table)) { reports.push(missingCache(entry.table)); continue; }
     const result = await probeTable(engine, entry, sourceId, needles, deadline);
     if ('unverified' in result) reports.push({ store: entry.table, status: 'unverified', reason: result.unverified, removed: planned });
     else if (result.count) reports.push({ store: entry.table, status: 'incomplete', remaining: result.count, removed: planned });
@@ -378,7 +384,8 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
   await swept('persistence_requests', `SELECT 1 FROM persistence_requests WHERE source_id=$1 AND (${['intent', 'outcome', 'error_detail', 'error_message']
       .map(c => `strpos(lower(COALESCE(${c}::text,'')),$2)>0 OR strpos(lower(COALESCE(${c}::text,'')),$3)>0`).join(' OR ')})`,
     [src, needle, JSON.stringify(claim).slice(1, -1).toLowerCase()], plan.requests.length, removed.persistence_requests);
-  await swept('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src], 0, removed.query_cache);
+  if (!dryRun && !await relationExists(engine, 'query_cache')) stores.push(missingCache('query_cache'));
+  else await swept('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src], 0, removed.query_cache);
   const refs = plan.factIds.map(String);
   for (const table of ['decide_review_queue', 'decide_review_proposals'] as const) {
     await swept(table, `SELECT 1 FROM ${table} WHERE source_id=$1 AND (a_ref=ANY($2::text[]) OR b_ref=ANY($2::text[]))`, [src, refs], plan.review[table], plan.review[table]);
@@ -465,7 +472,8 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
   await keyed('slug_aliases', 'SELECT 1 FROM slug_aliases WHERE source_id=$1 AND canonical_slug=$2', [src, slug]);
   await keyed('files', 'SELECT 1 FROM files WHERE page_slug=$2 AND (source_id=$1 OR source_id IS NULL)', [src, slug]);
   await keyed('write_gate_holds', 'SELECT 1 FROM write_gate_holds WHERE source_id=$1 AND slug=$2', [src, slug]);
-  await keyed('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src]);
+  if (!await relationExists(engine, 'query_cache')) stores.push(missingCache('query_cache'));
+  else await keyed('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src]);
   if (context) {
     const refs = context.factIds.map(String);
     for (const table of ['decide_review_queue', 'decide_review_proposals']) await keyed(table, `SELECT 1 FROM ${table} WHERE source_id=$1 AND (a_ref=ANY($2::text[]) OR b_ref=ANY($2::text[]))`, [src, refs]);

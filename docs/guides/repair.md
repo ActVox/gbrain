@@ -149,6 +149,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `aliases` | `dangling_aliases` (orphaned rows) | Explicit-only. Deletes free-text page aliases and slug redirects whose target page has no row at all (a page purged before purge removed its aliases, #6619, or a hard-deleted page), each target rechecked under its page lock; a coordinated maintenance write on a managed brain. A redirect from an old name of a page that still exists is never touched. See [aliases](#aliases). | `soft_deleted_target`: aliases of a soft-deleted page, kept for `gbrain restore` and removed when the page is purged. |
 | `rename-identity` | `rename_identity_downgrades` | Explicit-only, preview-bound, destructive consent. For an inexact Git rename that sync split into a delete plus an add (#6729): carries the old page's identity (id, version history, timeline, links, facts, aliases) onto the new slug, imports the new file onto it as an edit and retires the provisional page; or, with `--close`, settles the pair and moves nothing. `--slug <new-slug>` (and `--from <old-slug>`) names one pair; `--apply --expect <hash> --yes`. See [rename identity](#rename-identity). | `fact_rows_collide` (a fence row of the old page the new file does not keep with the same claim); `managed_remedy_unavailable` (a carry on a managed source; `--close` is the remedy there); pages changed after the preview (`changed_since_preview`). |
 | `overwritten-edits` | `sync_overwritten_db_edits` | Explicit-only, preview-bound. Restores database edits that an incremental managed sync replaced with a committed file edit and no `file_drift` hold (#6712, fixed by #6887). It restores only what the records prove: a database-only revision (its receipt published no file) archived by a managed-sync import that wrote different content, with no later revision holding the edit again. The preview diffs the live page against the edit; `--apply --expect <hash>` reverts each page to that version through a revision-bound, database-only `revert_version` and holds the committed file `file_drift` when it differs. See [overwritten edits](#overwritten-edits). | `unknown_*` findings (no persistence outcome on the writer's receipt, the import's content no longer readable, a segmented version), listed but not restored; pages that moved after the preview (`changed_since_preview`). |
+| `missing-tables` | `schema_missing_tables` | Explicit-only, preview-bound. Recreates, empty, a rebuildable cache table (`query_cache`, `code_traversal_cache`) that the applied migrations created but the brain no longer has, on a brain whose schema version is already current, so `apply-migrations` never recreates it (#6911). DDL only (`IF NOT EXISTS`), no journal admission, brain-wide. See [missing tables](#missing-tables). | `user_data_tables`: a missing table that holds user data; it is never recreated empty. |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -247,6 +248,43 @@ missing or INVALID; otherwise compare the elapsed time with
 `persistence_session_timeouts`.
 
 **Say to your agent:** *"Dream keeps saying postprocessing deferred. What's wrong?"*
+
+<a id="missing-tables"></a>
+### Missing tables
+
+The schema version records which migrations ran, not which tables still
+exist. A table dropped after its migration ran (by hand, by a restore that
+skipped it, or by a pooler that swallowed the DDL) stays missing:
+`gbrain apply-migrations` sees nothing to do and `gbrain db-repair` checks the
+connection, not the tables. When that table is `query_cache`, every
+coordinated page purge used to fail with `42P01`, so the dream cycle's purge
+phase failed every night with `managed_purge_failed` (#6911).
+
+The purge now skips a missing rebuildable cache (`query_cache`,
+`code_traversal_cache`): there is nothing in it a rebuild cannot regenerate.
+The purge receipt lists it under `purge.missing_caches`, and the store report
+shows `query_cache` as `not_present` with reason `table_missing`. A missing
+table that holds user data (facts, takes, notices and the like) still fails the
+purge, because the purge cannot honestly say it removed rows from it.
+
+`gbrain doctor` reports `schema_missing_tables` when the schema is at head and
+a table it should have is missing: a warning for a rebuildable cache, a failure
+for a table that holds user data. The expected set is every table a fully
+migrated brain has on this engine.
+
+**Say to your agent:** *"Doctor says query_cache is missing. Fix it."*
+
+```bash
+gbrain repair missing-tables                        # read-only: the tables it would recreate empty, and a hash
+gbrain repair missing-tables --apply --expect <preview-hash>
+```
+
+The apply recreates each previewed cache table empty, in the shape a fully
+migrated brain has, then checks it exists. A table created since the preview
+is skipped as `already_present`. The cache refills as searches run. Missing
+user-data tables are listed under `user_data_tables` and never recreated:
+restore them from a backup. The repair runs only when named and never on
+upgrade, `apply-migrations`, `db-repair` or the maintenance cycle.
 
 <a id="request-growth"></a>
 ### Request-table growth
@@ -2553,7 +2591,7 @@ Each heading below is the `docs` anchor a refusal carries.
 ### Explicit-only repair kinds
 
 `google-file-modes`, `stale-atoms`, `extractor-facts`, `captured-facts`,
-`loop-facts`, `ontology-facts` and `file-drift` run only when named: `gbrain repair <kind>` previews, and
+`loop-facts`, `ontology-facts`, `file-drift` and `missing-tables` run only when named: `gbrain repair <kind>` previews, and
 `gbrain repair <kind> --apply` applies (every kind but `google-file-modes`
 also needs `--expect <hash>`, so it applies exactly the previewed set; `google-file-modes` re-checks each file's owner,
 type and mode at apply time). They are excluded everywhere else:
