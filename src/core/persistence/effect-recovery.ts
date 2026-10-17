@@ -15,7 +15,10 @@ import { withFilesystemPublication } from './filesystem-guard.ts';
 import { persistenceFileHash, publishPersistenceFile } from './coordinator.ts';
 import type { EffectRecovery, PersistenceEffect } from './effect-model.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
-import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, upgradeRecoveryStaging } from './staging.ts';
+import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, publishStreamedStage, upgradeRecoveryStaging } from './staging.ts';
+import { existsAt, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
+import { unreadPageFile } from './page-prepare.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { declarePersistenceProtocol } from './protocol.ts';
 import { advanceEffectCursor } from './effect-journal.ts';
 import { faultPoint } from './fault-points.ts';
@@ -97,15 +100,52 @@ async function clearRecovery(tx: BrainEngine, effect: PersistenceEffect): Promis
   await tx.executeRaw('UPDATE persistence_effects SET recovery=NULL,recovery_bytes=0 WHERE id=$1', [effect.id]);
 }
 
+/** Whether a mirror record belongs to the effect's current canonical binding (owner epoch, root and file path). */
+function recordBelongs(record: EffectRecovery, effect: PersistenceEffect, binding: WorktreeBinding | null): binding is WorktreeBinding & { local_path: string } {
+  return !!binding?.local_path && record.kind === 'withdrawal-mirror' && record.sourceIncarnation === effect.source_incarnation
+    && String(binding.owner_epoch) === record.ownerEpoch && isWriteTargetContained(record.path, binding.local_path)
+    && isWriteTargetContained(record.path, record.root) && isWriteTargetContained(record.root, binding.local_path)
+    && resolve(record.root) === resolve(join(binding.local_path, binding.relative_path));
+}
+
+/**
+ * A version 2 record's publication stage (effect-model.ts) is written before the recovery transaction, as a streamed
+ * publication's is (coordinator.ts `stageLargeFiles`), one piece at a time: from `content`, the file the effect measured,
+ * or after a crash from the page's segments at the recorded revision (`unreadPageFile`). Nothing is staged when the file
+ * no longer holds its prior bytes, a leaf already holds the stage's name (the transaction verifies or refuses it), the
+ * record no longer belongs to the binding (the transaction refuses it) or the page moved on (the transaction clears it).
+ */
+async function stageStreamedMirror(engine: BrainEngine, effect: PersistenceEffect, hostId: string, content?: StreamedFileContent): Promise<void> {
+  const [row] = await engine.executeRaw<{ recovery: EffectRecovery | null }>(
+    'SELECT recovery FROM persistence_effects WHERE id=$1 AND execution_token=$2::uuid', [effect.id, effect.execution_token]);
+  const record = row?.recovery;
+  const stage = record?.version === 2 ? record.staging?.publication : undefined;
+  if (!record || !stage || !recordBelongs(record, effect, await getWorktreeBinding(engine, effect.source_id, hostId))) return;
+  const detail = { effectId: effect.id, requestId: effect.request_id, sourceId: effect.source_id, slug: record.slug, path: stage.path };
+  await faultPoint('effect_recovery:before_stage', detail);
+  await withFilesystemPublication([record.root], async () => {
+    if (existsAt(stage.path) || record.beforeHash === record.afterHash || persistenceFileHash(record.path) !== record.beforeHash) return;
+    let file = content;
+    if (!file) {
+      const snapshot = await engine.readPageSnapshot(record.slug, { sourceId: effect.source_id, includeDeleted: true });
+      if (!snapshot || snapshot.page.id !== record.pageId || snapshot.revision !== record.revision) return;
+      file = await unreadPageFile(engine, snapshot);
+    }
+    await stageStreamedContent(engine, record.path, file, stage, record.mode);
+  });
+  await faultPoint('effect_recovery:staged', detail);
+}
+
 /** Under the native lock: finish forward, never restore withdrawn bytes. */
 export async function recoverEffectPublication(engine: BrainEngine, effect: PersistenceEffect, hostId: string,
-  hooks: { boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit') => Promise<void> } = {}): Promise<void> {
+  hooks: { boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit') => Promise<void>; content?: StreamedFileContent } = {}): Promise<void> {
   const releaseCapacity = tryAcquirePublicationCapacity(engine);
   if (!releaseCapacity) throw opError('writer_pool_capacity', 'Mirror recovery is waiting for publication capacity.',
     `Every publication slot of the writer pool is busy, so mirror recovery for source ${effect.source_id} has not started; the worker tries again once a slot frees. Nothing needs resubmitting.`,
     { fix: effectStatusFix(effect) });
   try {
     if (effect.recovery) await upgradeRecoveryStaging(engine, 'persistence_effects', effect.id, effect.worktree_id!, 'forward');
+    await stageStreamedMirror(engine, effect, hostId, hooks.content);
     await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     const binding = await guardEffectSource(tx, effect, hostId);
@@ -113,15 +153,16 @@ export async function recoverEffectPublication(engine: BrainEngine, effect: Pers
     const current = await lockedEffect(tx, effect);
     const record = current.recovery;
     if (!record) return;
-    if (!binding?.local_path || record.kind !== 'withdrawal-mirror' || record.sourceIncarnation !== current.source_incarnation
-      || String(binding.owner_epoch) !== record.ownerEpoch || !isWriteTargetContained(record.path, binding.local_path)
-      || !isWriteTargetContained(record.path, record.root) || !isWriteTargetContained(record.root, binding.local_path)
-      || resolve(record.root) !== resolve(join(binding.local_path, binding.relative_path))
-      || sha256(Buffer.from(record.after, 'base64')) !== record.afterHash) throw opError('recovery_required', 'Mirror recovery no longer belongs to this canonical binding.',
+    const streamed = record.version === 2;
+    if (!recordBelongs(record, current, binding) || (streamed ? record.staging?.publication?.hash !== record.afterHash
+      : sha256(Buffer.from(record.after ?? '', 'base64')) !== record.afterHash)) throw opError('recovery_required', 'Mirror recovery no longer belongs to this canonical binding.',
       `The recorded mirror recovery for page ${record.slug} no longer matches source ${current.source_id}'s current canonical binding (owner epoch, root or file path changed), so recovery left the file untouched and the effect stays blocked. Inspect the owner and tell the user; repairing the binding is their decision.`,
       { fix: effectStatusFix(current) });
-    await withFilesystemPublication([record.root], async () => cleanupRecoveryStaging(record));
     const actual = persistenceFileHash(record.path);
+    const forward = actual === record.beforeHash && actual !== record.afterHash;
+    // A streamed record's verified publication stage holds the bytes a forward publication renames into place.
+    const cleanup = () => withFilesystemPublication([record.root], async () => cleanupRecoveryStaging(record));
+    if (!streamed || !forward) await cleanup();
     if (actual !== record.beforeHash && actual !== record.afterHash) {
       throw opError('unexpected_file_bytes', 'Physical mirror recovery found unexpected bytes; the root remains blocked.',
         `The file of page ${record.slug} in source ${current.source_id} holds bytes that match neither its pre-withdrawal nor its mirrored version, so recovery did not overwrite it and the root stays blocked. Inspect the owner and ask the user which version to keep; do not delete the file to unblock it.`,
@@ -132,20 +173,23 @@ export async function recoverEffectPublication(engine: BrainEngine, effect: Pers
     // A newer withdrawal may have committed independently of this root. Do
     // not publish the older prepared representation; render the latest next.
     if (!snapshot || snapshot.page.id !== record.pageId || snapshot.revision !== record.revision) {
+      if (streamed && forward) await cleanup();
       await clearRecovery(tx, current);
       await tx.executeRaw(`UPDATE persistence_effects SET state='queued',execution_token=NULL,claim_expires_at=NULL,
         next_attempt_at=now(),error_code=NULL,updated_at=now() WHERE id=$1`, [current.id]);
       return;
     }
-    if (actual === record.beforeHash && actual !== record.afterHash) {
+    if (forward) {
       await hooks.boundary?.('before_mirror_file');
       await withFilesystemPublication([record.root], async () => {
-        publishPersistenceFile({ path: record.path, root: record.root, content: Buffer.from(record.after, 'base64') }, record.staging?.publication?.path);
+        if (streamed) publishStreamedStage(record);
+        else publishPersistenceFile({ path: record.path, root: record.root, content: Buffer.from(record.after!, 'base64') }, record.staging?.publication?.path);
         if (record.mode !== null && existsSync(record.path)) chmodSync(record.path, record.mode);
       });
       await hooks.boundary?.('after_mirror_file');
     }
-    await materializePageSnapshot(tx, snapshot);
+    // A segmented page's withdrawn rows were struck in its segments when the withdrawal committed: nothing to persist.
+    if (!isSegmentedPage(snapshot.page)) await materializePageSnapshot(tx, snapshot);
     await clearRecovery(tx, current);
     // One page per transaction/cursor checkpoint bounds work and restart cost;
     // a retried parked target is consumed without rewinding the cursor.

@@ -32,7 +32,9 @@ import type { ResolvedColumn } from '../types.ts';
 import { acquireWorktree, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
 import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts';
 import { sha256 } from './digest.ts';
-import { prepareFileTarget } from './page-prepare.ts';
+import { prepareFileTarget, unreadPageFile } from './page-prepare.ts';
+import { isStreamedContent } from './large-file.ts';
+import { atomicStagingPath } from '../atomic-write.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
 import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect } from './effect-journal.ts';
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
@@ -121,7 +123,9 @@ async function materializeAndAdvance(engine: BrainEngine, effect: PersistenceEff
     if (current?.revision !== snapshot.revision || current.page.id !== snapshot.page.id) throw opError('revision_conflict', 'The withdrawal page changed during preparation.',
       `Page ${snapshot.page.slug} in source ${effect.source_id} changed while its withdrawal was materializing; the effect worker picks up the new revision on its next pass. Nothing needs resubmitting.`,
       { fix: effectStatusFix(effect) });
-    await materializePageSnapshot(tx, current);
+    // A segmented page's withdrawn rows were struck in its segments when the withdrawal committed (withdrawal.ts,
+    // purge.ts), so it has no overlay left to persist.
+    if (!isSegmentedPage(current.page)) await materializePageSnapshot(tx, current);
     if (skipped) await recordSkippedTarget(tx, effect, { slug: current.page.slug, reason: skipped });
     await finishPage(tx, effect, current);
   });
@@ -178,9 +182,8 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
     `Source ${effect.source_id} was replaced after this withdrawal mirror was queued, so the effect ends without writing; the new source has its own effects. Check the owner if files still look stale.`,
     { fix: effectStatusFix(effect) });
   if (isMetafilePage(snapshot)) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId, 'metafile'); return; }
-  // Wave B PR 1: a segmented body has no whole-body mirror yet (per-segment mirror in PR 2).
-  if (isSegmentedPage(snapshot.page)) { await skipTarget(engine, effect, snapshot, 'page_body_segmented'); return; }
-  const content = serializePageToMarkdown(snapshot.page, snapshot.tags);
+  // A segmented page's file is streamed from its segments (unreadPageFile), never rendered as one string.
+  const content = isSegmentedPage(snapshot.page) ? await unreadPageFile(engine, snapshot) : serializePageToMarkdown(snapshot.page, snapshot.tags);
   let file: Awaited<ReturnType<typeof prepareFileTarget>>;
   try {
     file = binding?.local_path ? await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot, content, opts.hostId, { allowMissing: true }) : undefined;
@@ -194,11 +197,19 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
     await materializeAndAdvance(engine, effect, snapshot, opts.hostId);
     return;
   }
-  const after = Buffer.from(content);
-  const record: EffectRecovery = { version: 1, kind: 'withdrawal-mirror', path: file.path, root: file.root,
-    beforeHash: file.expectedBeforeHash ?? null, afterHash: sha256(after), after: after.toString('base64'),
+  const target = { kind: 'withdrawal-mirror' as const, path: file.path, root: file.root, beforeHash: file.expectedBeforeHash ?? null,
     mode: statSync(file.path).mode & 0o7777, ownerEpoch: String(binding!.owner_epoch), pageId: snapshot.page.id,
-    sourceIncarnation: snapshot.sourceIncarnation, slug: snapshot.page.slug, revision: snapshot.revision,
+    sourceIncarnation: snapshot.sourceIncarnation, slug: snapshot.page.slug, revision: snapshot.revision };
+  if (isStreamedContent(content)) {
+    // Version 2: the file is staged by path and digest, never embedded; the reservation counts its one staged copy.
+    const record: EffectRecovery = { ...target, version: 2, afterHash: content.hash, after: null,
+      staging: { publication: { path: atomicStagingPath(file.path), hash: content.hash, bytes: content.bytes } } };
+    await reserveEffectRecovery(engine, effect, record, Buffer.byteLength(JSON.stringify(record)) + content.bytes + 4096, opts.hostId);
+    await recoverEffectPublication(engine, effect, opts.hostId, { boundary: opts.boundary, content });
+    return;
+  }
+  const after = Buffer.from(content);
+  const record: EffectRecovery = { ...target, version: 1, afterHash: sha256(after), after: after.toString('base64'),
     staging: { publication: recoveryStagingFile(file.path, after) } };
   await reserveEffectRecovery(engine, effect, record, Buffer.byteLength(JSON.stringify(record)) * 2 + 4096, opts.hostId);
   await recoverEffectPublication(engine, effect, opts.hostId, opts);
@@ -253,11 +264,11 @@ async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: 
   if (!snapshot) { await completeEffect(engine, effect); return; }
   attempt.target = snapshot.page.slug;
   if (isMetafilePage(snapshot)) { await skipTarget(engine, effect, snapshot, 'metafile'); return; }
-  if (isSegmentedPage(snapshot.page)) { await skipTarget(engine, effect, snapshot, 'page_body_segmented'); return; }
   let file: Awaited<ReturnType<typeof prepareFileTarget>>;
   try {
     file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
-      snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true });
+      snapshot.page.deleted_at ? null : isSegmentedPage(snapshot.page) ? await unreadPageFile(engine, snapshot) : serializePageToMarkdown(snapshot.page, snapshot.tags),
+      opts.hostId, { allowMissing: true });
   } catch (error) {
     if (!isFileDatabaseDrift(error)) throw error;
     await skipTarget(engine, effect, snapshot, 'file_database_drift');

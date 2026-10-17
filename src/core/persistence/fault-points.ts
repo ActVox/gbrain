@@ -14,7 +14,11 @@ import type { WriteRequest } from './model.ts';
 
 export type PublicationBoundary = Parameters<NonNullable<PublicationHooks['boundary']>>[0];
 export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${EffectKind}:mid` | 'effect:embedding:settle'
-  | 'effect_recovery:before_clear' | 'publication_recovery:before_clear' | 'sync:mid_checkpoint' | 'sync:before_group_admission' | 'sync:mid_waiver_run' | 'sync:prescreened' | 'consumer:prepared'
+  | 'effect_recovery:before_clear' | 'publication_recovery:before_clear'
+  // A streamed (version 2) withdrawal mirror (effect-recovery.ts): once its record is durable and before its file is
+  // streamed into the publication stage, and after that step (the stage written and flushed, or left as it was found),
+  // before the recovery transaction renames it.
+  | 'effect_recovery:before_stage' | 'effect_recovery:staged' | 'sync:mid_checkpoint' | 'sync:before_group_admission' | 'sync:mid_waiver_run' | 'sync:prescreened' | 'consumer:prepared'
   | 'consumer:preparing' | 'lane:applied'
   // Before each claim attempt of the consumer, a FIFO claim or a lane head's: a stalling hook keeps this process from starting
   // another request or lane group meanwhile, while the requests it already holds run on.

@@ -545,8 +545,9 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
 /**
  * serializePageToMarkdown's bytes for a page whose body was not read back, streamed from its segments by export's
  * serializer: measured here, produced again into the publication's staging file (large-file.ts), never concatenated.
+ * A withdrawal mirror of a segmented page (effects.ts, effect-recovery.ts) renders its file the same way.
  */
-async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Promise<StreamedFileContent> {
+export async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Promise<StreamedFileContent> {
   const head = serializePageToMarkdown({ ...withoutBody(snapshot.page), compiled_truth: '', timeline: '' }, snapshot.tags).slice(0, -1);
   const ledger = snapshotLedger(snapshot);
   return StreamedFileContent.measure(engine, exec => segmentedExportMarkdown(exec, snapshot.page, ledger, head));

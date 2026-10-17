@@ -191,6 +191,18 @@ page is searchable when the restore commits, or, when its chunks were never
 built, right after it (`gbrain projections drain` builds it if that build
 dies).
 
+<a id="segmented-withdrawal-mirror"></a>
+**Withdrawals rewrite a segmented page's file.** `forget`, `forget_fact` and
+`purge_fact` on a page stored in segments, on a source backed by files,
+rewrite its canonical file as they rewrite an inline page's: the file shows the
+row forgotten, or loses the purged row, and holds the bytes `gbrain export`
+writes for the page; the withdrawal's Git effect commits it. The file is
+streamed from the segments into its staging file, one segment at a time, and
+never held whole. Its recovery record names that staging file by path and
+SHA-256 instead of holding the file, so the mirror reserves the file once in
+the recovery budget. A mirror interrupted before or after writing the staging
+file finishes on the writer's next pass.
+
 <a id="segmented-doctor-skips"></a>
 **What doctor does not read on a segmented page.** Some doctor checks read a
 page's whole body as one string, and a page stored in segments has none.

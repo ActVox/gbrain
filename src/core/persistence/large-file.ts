@@ -212,6 +212,6 @@ export async function stageBeforeCopy(path: string, stage: RecoveryStagingFile, 
   flushDirectory(dirname(stage.path));
   return true;
 }
-function existsAt(path: string): boolean {
+export function existsAt(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
