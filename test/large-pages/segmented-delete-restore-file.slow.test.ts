@@ -34,6 +34,7 @@ import { submitPageMutation } from '../../src/core/persistence/page-mutations.ts
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import * as largeFile from '../../src/core/persistence/large-file.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
+import { waitFor } from '../helpers/wait-for.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { fileSha, writeCanonicalPage } from '../helpers/large-page-file.ts';
 
@@ -142,6 +143,11 @@ async function roundTrip(engine: BrainEngine, bodyBytes: number, seed: number): 
     expect(existsSync(file)).toBe(false);
     expect(await pageRow(engine, f, slug)).toBeNull();
     expect(stagingLeft(f)).toEqual([]);
+    // The reply is sent once the purge commits; its recovery record and reservation are cleared after that
+    // (coordinator.ts, clearResolvedRecovery), so the counters are read at that release point.
+    await waitFor(async () => (await engine.executeRaw<{ n: number }>(
+      'SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND recovery IS NOT NULL', [f.sourceId]))[0]!.n === 0,
+    { timeoutMs: 30_000, label: 'the purge cleared its recovery record' });
     const counters = await engine.executeRaw<{ bytes: string }>('SELECT recovery_bytes::text AS bytes FROM persistence_counters');
     expect(counters.every(row => Number(row.bytes) === 0)).toBe(true);
   } finally {

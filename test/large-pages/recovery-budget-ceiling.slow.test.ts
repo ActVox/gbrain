@@ -30,6 +30,7 @@ import { submitPageMutation } from '../../src/core/persistence/page-mutations.ts
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { testBackends } from '../helpers/test-backends.ts';
+import { waitFor } from '../helpers/wait-for.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { fileSha, writeCanonicalPage } from '../helpers/large-page-file.ts';
 
@@ -79,6 +80,13 @@ const deletedAt = async (engine: BrainEngine, f: Fixture, slug: string) => (awai
 const stagingLeft = (f: Fixture) => readdirSync(join(f.root, 'notes')).filter(name => name.includes('.tmp.'));
 const reserved = async (engine: BrainEngine) => (await engine.executeRaw<{ bytes: string }>('SELECT recovery_bytes::text AS bytes FROM persistence_counters'))
   .reduce((sum, row) => sum + Number(row.bytes), 0);
+/**
+ * The reply is sent once the write commits; its recovery record (and reservation) is cleared after that, once the
+ * publication has removed its staged prior file (coordinator.ts, clearResolvedRecovery). Wait for that release point.
+ */
+const recoveryCleared = (engine: BrainEngine, f: Fixture) => waitFor(async () => (await engine.executeRaw<{ n: number }>(
+  'SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND recovery IS NOT NULL', [f.sourceId]))[0]!.n === 0,
+{ timeoutMs: 30_000, label: 'the purge cleared its recovery record' });
 
 /**
  * A canonical page file of exactly `fileBytes` bytes: the helper's conversation, then one filler paragraph that
@@ -125,6 +133,7 @@ async function roundTrip(engine: BrainEngine): Promise<void> {
 
     expect(await submit(engine, f, 'delete_page', slug, { purge: true })).toMatchObject({ status: 'purged' });
     expect(existsSync(file)).toBe(false);
+    await recoveryCleared(engine, f);
     expect(await reserved(engine)).toBe(0);
   } finally {
     await engine.executeRaw("DELETE FROM config WHERE key='persistence.limits.worktree_recovery_bytes'");
