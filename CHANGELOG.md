@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased] - 2026-10-17
+## [0.60.291.0] - 2026-10-17
 
 **A brain that lost its `query_cache` table can finish its nightly purge again.** On a brain where `query_cache` was missing although the schema was at head, every coordinated page purge failed with `42P01`, so the dream cycle's purge phase failed every night with `managed_purge_failed` and the tombstone was never purged (#6911). `apply-migrations` and `db-repair` both reported healthy, because the schema version said the table's migration had run.
 
