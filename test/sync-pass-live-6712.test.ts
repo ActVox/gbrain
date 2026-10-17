@@ -11,6 +11,7 @@
  *   the pass row counts the streak server-side, and from the third consecutive pass the drain's `next` is `report`.
  *
  * - probe 49: a re-screen-due hold alone runs a hold-only round (not a full round), which clears it.
+ * - item 7: a local CLI pass waits (to 30 s) on its own write while this process's consumer holds it or has yet to claim it.
  * - probe 46 (reparse half): a parser change on a fileSame and dbSame page is a `reparse`: re-imported, no hold.
  * - probe 48: a request admitted before the stamp that publishes after it (`open_at_stamp`) makes the next tick a full round, not idle.
  * - probe 53: a repair that changes a candidate mid-pass meets no busy refusal (busy is open requests only), and the path
@@ -123,6 +124,22 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     installFaultHook(undefined);
     expect({ slowed, status: synced.status, reason: synced.reason }).toEqual({ slowed: true, status: 'synced', reason: undefined });
     expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))?.page.compiled_truth).toContain('takes longer than the wait');
+  }, { setup }), 180_000);
+
+  test('item 7: a CLI pass keeps waiting on its own queued write while this process\'s consumer is busy past the 5 s wait before claiming it: synced, not writer_pending', () => managedBrain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A body admitted while the consumer is busy.')); commit(root, 'edit a');
+    // The consumer is busy (an effect pass under load) for longer than the pass's 5 s wait before it claims the import.
+    let slowed = false;
+    installFaultHook(async point => {
+      if (point !== 'consumer:claiming' || slowed) return;
+      if (!(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE state='queued' AND intent->>'kind'='managed_sync_import'")).length) return;
+      slowed = true; await new Promise(resolve => setTimeout(resolve, 6500));
+    });
+    const synced = await performManagedSync(engine, OPTS);
+    installFaultHook(undefined);
+    expect({ slowed, status: synced.status, reason: synced.reason }).toEqual({ slowed: true, status: 'synced', reason: undefined });
+    expect((await engine.readPageSnapshot('notes/a', { sourceId: 'default' }))?.page.compiled_truth).toContain('admitted while the consumer is busy');
   }, { setup }), 180_000);
 
   test('a sliced pass that yields writer_yield reports the entries it settled in the stopped round', () => managedBrain(async ({ engine, root }) => {
