@@ -18,8 +18,9 @@
  * one deleted there is held file_drift on its deleted side (tombstone_edited) and stays deleted;
  * a dropped connection leaves no failure-ledger row and the relaunch imports only what is left; a file committed after
  * admission is passed over and imported in a later round, and one that moves under every request stops the pass
- * not_converged after PASS_MAX_ROUNDS requests without a hold. The cursor conversion probes (--retry-failed in place)
- * still describe the cursor engine.
+ * not_converged after PASS_MAX_ROUNDS requests without a hold. A source an older release left blocked on a pinned-worktree or
+ * canonical-writeback conflict (simulated with sync.holds=fail) is held worktree_dirty by the next --retry-failed pass once holds
+ * are on, under its own receipt, with the blocked receipt unchanged and attempts counted on the one hold.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
@@ -32,7 +33,7 @@ import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { DEFER_PER_ENTRY, performManagedSync } from '../src/core/persistence/sync-run.ts';
-import { readGitHold, readGitSourceHolds } from '../src/core/persistence/sync-holds.ts';
+import { readGitHold, readGitSourceHolds, requestGitHoldRetry } from '../src/core/persistence/sync-holds.ts';
 import { readManagedSyncFailures } from '../src/core/persistence/sync-failures.ts';
 import { headCommittedBytes, HOLD_ATTEMPTS_NEEDS_HUMAN, pinnedWorktreeConflict } from '../src/core/persistence/sync-page-fault.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
@@ -63,21 +64,14 @@ async function fixture(engine: BrainEngine, files: Record<string, string>) {
   await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
   return { id, root, head, opts: { sourceId: id, noPull: true, noEmbed: true, noExtract: true } };
 }
-/** Counts the manifest identity freeze (`discoverManagedSync`'s one-statement page snapshot) for `sourceId`: zero means no rediscovery. */
-function countDiscoveries(engine: BrainEngine, sourceId: string): { count: () => number; restore: () => void } {
-  const executeRaw = engine.executeRaw;
-  let reads = 0;
-  engine.executeRaw = async function (this: BrainEngine, sql: string, params?: unknown[]) {
-    if (params?.[0] === sourceId && sql.includes('SELECT id,slug,source_path,knowledge_revision,deleted_at FROM pages')) reads++;
-    return executeRaw.call(this, sql, params);
-  } as BrainEngine['executeRaw'];
-  return { count: () => reads, restore: () => { engine.executeRaw = executeRaw; } };
-}
 const cursorOf = (engine: BrainEngine, sourceId: string) => engine.executeRaw<{ run_id: string; index: number; total: number; target: string; done: boolean | null }>(
   `SELECT completed_keys->0->>'runId' AS run_id,(completed_keys->0->>'index')::int AS index,(completed_keys->0->>'total')::int AS total,completed_keys->0->>'target' AS target,
      (completed_keys->0->>'done')::boolean AS done FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1`, [sourceId]).then(rows => rows[0]);
 const dbWrite = (engine: BrainEngine, sourceId: string, slug: string, body: string) => engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => tx.putPage(slug, {
   type: 'note', title: 'Example', compiled_truth: body, timeline: '', frontmatter: {}, content_hash: `h-${body.length}` }, { sourceId }), TEST_WRITE_ATTRIBUTION));
+/** The receipts of `path`, oldest first: what a later pass must leave as it was. */
+const receiptsOf = (engine: BrainEngine, sourceId: string, path: string) => engine.executeRaw<{ request_id: string; state: string; error_code: string | null; error_message: string | null; pass_id: string | null }>(
+  "SELECT request_id::text AS request_id,state,error_code,error_message,intent->>'passId' AS pass_id FROM persistence_requests WHERE source_id=$1 AND intent->>'path'=$2 ORDER BY sequence", [sourceId, path]);
 /** Interrupts the first sync after `pages` committed pages, so the cursor's pinned target trails the commits the test makes next. */
 async function interruptedAfter(engine: BrainEngine, opts: { sourceId: string; noPull: boolean }, pages: number) {
   const abort = new AbortController();
@@ -228,33 +222,48 @@ test('#6513: working-tree bytes that already are the canonical correction import
   }
 }), 120_000);
 
-test('#6513: a cursor an older run left blocked on the canonical-writeback conflict converts in place under --retry-failed', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+// #6712 PR 4b: a non-company source has no cursor to convert in place (the first pass retires a legacy cursor row,
+// sync-pass-cursor-retirement-6712). What survives is the release path: under sync.holds=fail the canonical-writeback
+// refusal blocks the pass on its receipt; once holds are on, --retry-failed (a plain sync) re-admits the file under a new
+// request of its own pass and holds it worktree_dirty (one attempt), imports the rest, keeps the agent's edit, and leaves the
+// blocked receipt exactly as it was.
+test('#6513: a pass blocked on the canonical-writeback conflict under sync.holds=fail is held worktree_dirty by the --retry-failed pass once holds are on, leaving the blocked receipt as it was', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': note('Alpha one.'), 'b.md': note('Beta one.') });
     expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
     writeFileSync(join(f.root, 'a.md'), note('Alpha two.')); writeFileSync(join(f.root, 'b.md'), note('Beta two.'));
     mkdirSync(join(f.root, 'people')); writeFileSync(join(f.root, 'people/fixable.md'), fixable());
-    commit(f.root, 'version two with a fixable fence');
+    const pin = commit(f.root, 'version two with a fixable fence');
     const edit = fixable('A synthetic page, edited while the catch-up drained.');
     writeFileSync(join(f.root, 'people/fixable.md'), edit);
-    // The old release: holds off, the refusal blocked the run and left the failed request on the cursor.
     await engine.setConfig('sync.holds', 'fail');
     let blocked;
     try { blocked = await performManagedSync(engine, f.opts); } finally { await engine.executeRaw("DELETE FROM config WHERE key='sync.holds'"); }
     expect(blocked).toMatchObject({ status: 'blocked_by_failures', managedWrite: { write_error: 'source_changed', reason: 'pinned_git_worktree_conflict' },
-      failures: [{ path: 'people/fixable.md', code: 'source_changed', message: WRITEBACK_CONFLICT }] });
-    const before = await cursorOf(engine, f.id);
-    expect(before.done).toBeFalsy();
-    const discoveries = countDiscoveries(engine, f.id);
-    let converted;
-    try { converted = await performManagedSync(engine, { ...f.opts, retryFailed: true }); }
-    finally { discoveries.restore(); }
-    expect(discoveries.count()).toBe(0);
-    expect(converted).toMatchObject({ status: 'synced', held_count: 1, held: [{ path: 'people/fixable.md', code: 'worktree_dirty' }], converted_from_failed: [blocked.managedWrite!.write_request.request_id] });
-    expect((await cursorOf(engine, f.id))?.run_id).toBe(before.run_id);
+      failures: [{ path: 'people/fixable.md', code: 'source_changed', message: WRITEBACK_CONFLICT }], pass: { outcome: 'blocked' } });
+    const failedId = blocked.managedWrite!.write_request.request_id;
+    const before = await receiptsOf(engine, f.id, 'people/fixable.md');
+    expect(before).toEqual([{ request_id: failedId, state: 'conflict', error_code: 'source_changed', error_message: WRITEBACK_CONFLICT, pass_id: blocked.pass!.pass_id }]);
+    const held = await performManagedSync(engine, { ...f.opts, retryFailed: true });
+    expect(held).toMatchObject({ status: 'synced', toCommit: pin, held_count: 1, held: [{ path: 'people/fixable.md', code: 'worktree_dirty' }], pass: { outcome: 'synced' } });
+    expect(held.managedWrite).toBeUndefined();
+    expect(held.held![0]!.message).toContain('canonical correction');
+    const after = await receiptsOf(engine, f.id, 'people/fixable.md');
+    expect(after).toEqual([before[0], { request_id: expect.any(String), state: 'conflict', error_code: 'source_changed', error_message: WRITEBACK_CONFLICT, pass_id: held.pass!.pass_id }]);
+    expect(after[1]!.request_id).not.toBe(failedId);
+    const [source] = await engine.executeRaw<{ incarnation: string; last_commit: string }>('SELECT incarnation::text AS incarnation,last_commit FROM sources WHERE id=$1', [f.id]);
+    expect(source.last_commit).toBe(pin);
+    expect(await readGitHold(engine, f.id, source.incarnation, 'people/fixable.md')).toMatchObject({ code: 'worktree_dirty', run_id: held.pass!.pass_id,
+      meta: { attempts: 1, blob_oid: git(f.root, 'rev-parse', pin + ':people/fixable.md') } });
+    expect((await engine.getPage('a', { sourceId: f.id }))?.compiled_truth).toContain('Alpha two.');
     expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain('Beta two.');
+    expect(await engine.getPage('people/fixable', { sourceId: f.id })).toBeNull();
     expect(readFileSync(join(f.root, 'people/fixable.md'), 'utf8')).toBe(edit);
     expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
+    expect(loadSyncFailures().filter(row => row.source_id === f.id)).toHaveLength(0);
+    // Still dirty: the next plain sync is up to date and mints no receipt.
+    expect((await performManagedSync(engine, f.opts)).status).toBe('up_to_date');
+    expect(await receiptsOf(engine, f.id, 'people/fixable.md')).toEqual(after);
   }
 }), 120_000);
 
@@ -304,41 +313,46 @@ test('a page edited in the database after an interrupted pass, whose file change
   }
 }), 120_000);
 
-test('a cursor an older run left blocked on a pinned-worktree conflict converts in place under --retry-failed instead of rediscovering, and counts attempts', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
+// #6712 PR 4b: the same release path for a pinned-worktree conflict (no cursor to convert, nothing to rediscover). The
+// --retry-failed pass holds the file worktree_dirty under its own receipt, the blocked receipt stays as it was, and each
+// retry-held re-screen holds it again under a new receipt with the same code, counting attempts on the one hold row up to
+// the needs_human threshold.
+test('a pass blocked on a pinned-worktree conflict under sync.holds=fail is held worktree_dirty by the --retry-failed pass once holds are on, and each retry-held re-screen counts an attempt on the one hold', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_FAILURES_DIR: home }, async () => {
   for (const engine of engines) {
     const f = await fixture(engine, { 'a.md': note('Alpha one.'), 'b.md': note('Beta one.'), 'c.md': note('Gamma one.') });
     expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
-    for (const name of ['a', 'b', 'c']) writeFileSync(join(f.root, `${name}.md`), note(`${name} two.`));
-    commit(f.root, 'version two');
+    for (const name of ['a', 'b', 'c']) writeFileSync(join(f.root, name + '.md'), note(name + ' two.'));
+    const pin = commit(f.root, 'version two');
     const edit = note('Beta, an uncommitted edit.');
     writeFileSync(join(f.root, 'b.md'), edit);
-    // The brain ran the old release: holds off, so the conflict blocked the run and left the failed request on the cursor.
     await engine.setConfig('sync.holds', 'fail');
     let blocked;
     try { blocked = await performManagedSync(engine, f.opts); } finally { await engine.executeRaw("DELETE FROM config WHERE key='sync.holds'"); }
-    expect(blocked).toMatchObject({ status: 'blocked_by_failures', managedWrite: { write_error: 'source_changed', reason: 'pinned_git_worktree_conflict' } });
+    expect(blocked).toMatchObject({ status: 'blocked_by_failures', managedWrite: { write_error: 'source_changed', reason: 'pinned_git_worktree_conflict' }, pass: { outcome: 'blocked' } });
     expect(pinnedWorktreeConflict({ state: 'conflict', error_code: 'source_changed', error_message: 'Newer working-tree bytes and the current page disagree with this pinned Git import.' })).toBe(true);
-    const before = await cursorOf(engine, f.id);
-    expect(before).toMatchObject({ index: 1, total: 3 }); expect(before.done).toBeFalsy();
-    // Upgraded: the operator's loop reruns with --retry-failed. The cursor converts in place (same run), nothing is rediscovered.
-    const discoveries = countDiscoveries(engine, f.id);
-    let converted;
-    try { converted = await performManagedSync(engine, { ...f.opts, retryFailed: true }); }
-    finally { discoveries.restore(); }
-    expect(discoveries.count()).toBe(0);
-    expect(converted).toMatchObject({ status: 'synced', held_count: 1, held: [{ path: 'b.md', code: 'worktree_dirty' }], converted_from_failed: [blocked.managedWrite!.write_request.request_id] });
-    expect((await cursorOf(engine, f.id))?.run_id).toBe(before.run_id);
+    // The blocked pass stopped at b.md: c.md waits for the next pass.
+    expect((await engine.getPage('c', { sourceId: f.id }))?.compiled_truth).toContain('Gamma one.');
+    const unsettled = async () => (await receiptsOf(engine, f.id, 'b.md')).filter(row => row.state !== 'committed');
+    const failed = await unsettled();
+    expect(failed).toEqual([expect.objectContaining({ request_id: blocked.managedWrite!.write_request.request_id, state: 'conflict', error_code: 'source_changed', pass_id: blocked.pass!.pass_id })]);
+    const held = await performManagedSync(engine, { ...f.opts, retryFailed: true });
+    expect(held).toMatchObject({ status: 'synced', toCommit: pin, held_count: 1, held: [{ path: 'b.md', code: 'worktree_dirty' }], pass: { outcome: 'synced' } });
     expect((await engine.getPage('c', { sourceId: f.id }))?.compiled_truth).toContain('c two.');
+    expect((await engine.getPage('b', { sourceId: f.id }))?.compiled_truth).toContain('Beta one.');
     expect(readFileSync(join(f.root, 'b.md'), 'utf8')).toBe(edit);
     expect(await readManagedSyncFailures(engine, [f.id])).toEqual([]);
-    // Held again and again with the same code: the attempt count reaches the needs_human threshold.
     const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [f.id]);
+    expect(await readGitHold(engine, f.id, source.incarnation, 'b.md')).toMatchObject({ code: 'worktree_dirty', run_id: held.pass!.pass_id, meta: { attempts: 1 } });
+    expect(await unsettled()).toEqual([failed[0], expect.objectContaining({ state: 'conflict', error_code: 'source_changed', pass_id: held.pass!.pass_id })]);
+    // Held again and again with the same code: the attempt count on the one hold reaches the needs_human threshold, each
+    // re-screen under a receipt of its own pass, the earlier receipts unchanged.
     for (let round = 2; round <= HOLD_ATTEMPTS_NEEDS_HUMAN; round++) {
-      const { requestGitHoldRetry } = await import('../src/core/persistence/sync-holds.ts');
+      const earlier = await unsettled();
       await requestGitHoldRetry(engine, f.id, source.incarnation, ['b.md']);
       const again = await performManagedSync(engine, f.opts);
       expect(again.held?.map(hold => hold.code)).toEqual(['worktree_dirty']);
       expect((await readGitHold(engine, f.id, source.incarnation, 'b.md'))?.meta.attempts).toBe(round);
+      expect(await unsettled()).toEqual([...earlier, expect.objectContaining({ state: 'conflict', error_code: 'source_changed', pass_id: again.pass!.pass_id })]);
     }
     expect((await readGitSourceHolds(engine, { sourceIds: [f.id] }))[0]?.holds.map(hold => hold.path)).toEqual(['b.md']);
   }

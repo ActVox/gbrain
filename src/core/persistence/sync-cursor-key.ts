@@ -5,7 +5,8 @@
  * sync job, `sync --all` and a serve-delegated run of one source each held their own unfinished cursor and none could
  * resume another's (#5632, #6696). It is now `managedCursorKey(incarnation, company)`.
  *
- * `resolveManagedCursor` folds in the cursors written under an older key (`legacyManagedCursorKey`). It runs under the
+ * `resolveManagedCursor` folds in the cursors written under an older key (a digest of the writer, its authority and the
+ * options, before #6712 PR 1). It runs under the
  * drain lease, before the pass reads its cursor, and every write it makes checks the lease's fence:
  * - The incarnation's unfinished cursor under the current key wins; otherwise the newest unfinished one under an older
  *   key is adopted and finished in place, under its own key and frozen manifest. The requests it admitted name that
@@ -28,11 +29,9 @@ import { digest } from './digest.ts';
 import { completeWrite, lockCounters } from './journal.ts';
 import { retireManagedSyncOrphan } from './managed-sync-orphans.ts';
 import { isTerminal, principalKey, requestPrincipal, type WriteRequest } from './model.ts';
-import type { SyncAuthority } from './sync-authority.ts';
 import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
 import { assertDrainLease } from './sync-lease.ts';
 import { faultPoint } from './fault-points.ts';
-import type { SyncCursorOptions } from './sync-prepare.ts';
 import { SYNC_SLICE_OP } from './sync-slices.ts';
 
 type CompanySync = ReturnType<typeof currentCompanyBrainSync>;
@@ -46,11 +45,6 @@ export function __setManagedCursorKeyForTests(key: ((incarnation: string) => str
 /** The key of the source incarnation's managed cursor (and of its company approval, on a company brain). */
 export function managedCursorKey(incarnation: string, company: CompanySync): string {
   return keyForTests?.(incarnation) ?? digest({ source: incarnation, ...companyPart(company) });
-}
-
-/** The key a cursor was written under before #6712 PR 1. Read-only: it names the options of an older failure row. */
-export function legacyManagedCursorKey(incarnation: string, authority: SyncAuthority, company: CompanySync, syncOptions: SyncCursorOptions): string {
-  return digest({ source: incarnation, principal: authority.writer.principal, authority, ...companyPart(company), options: syncOptions });
 }
 
 export const SUPERSEDED_BY_ADOPTION_MESSAGE = 'Another unfinished sync run of this source was adopted; this queued page of a superseded run was not published, and the adopted run (or the next sync) imports it.';

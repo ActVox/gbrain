@@ -141,20 +141,28 @@ describe('#6712 PR 4b lane C: the first live pass retires legacy cursor rows (§
       .toEqual(NAMES.map(name => `notes/${name}`));
   }), 180_000);
 
+});
+
+describe('#6712 PR 4b: the first live pass retires an orphaned slice record', () => {
+  let orphan: PGLiteEngine;
+  beforeAll(async () => {
+    await withEnv(env(), async () => { orphan = new PGLiteEngine(); await orphan.connect({}); await orphan.initSchema(); });
+  });
+  afterAll(async () => {
+    await withEnv(env(), async () => { await disposePersistenceConsumer(orphan); });
+    await orphan.disconnect();
+  });
+
   test('an orphaned slice record, with no cursor row beside it, is retired by the first pass; the company slice stays', () => withEnv(env(), async () => {
-    const db = new PGLiteEngine();
-    await db.connect({}); await db.initSchema();
-    try {
-      const root = await plantManagedBrain(db, 'orphan');
-      const incarnation = await incarnationOf(db, 'default');
-      const head = git(root, 'rev-parse', 'HEAD');
-      await writeSyncSlice(db, 'default', incarnation, syncCursorOptions(OPTS as never), { phase: 'import', after: null, head, target: head });
-      await writeSyncSlice(db, COMPANY, await incarnationOf(db, COMPANY), syncCursorOptions({}), { phase: 'import', after: null, head: 'c0ffee', target: 'c0ffee' });
-      const company = (await legacyRows(db)).filter(isCompanyRow);
-      expect((await legacyRows(db)).map(row => row.op)).toEqual(['managed-sync-slice', 'managed-sync-slice']);
-      const result = await performSync(db, OPTS as never);
-      expect(result.status).toBe('first_sync');
-      expect(await legacyRows(db)).toEqual(company);
-    } finally { await disposePersistenceConsumer(db); await db.disconnect(); }
+    const root = await plantManagedBrain(orphan, 'orphan');
+    const incarnation = await incarnationOf(orphan, 'default');
+    const head = git(root, 'rev-parse', 'HEAD');
+    await writeSyncSlice(orphan, 'default', incarnation, syncCursorOptions(OPTS as never), { phase: 'import', after: null, head, target: head });
+    await writeSyncSlice(orphan, COMPANY, await incarnationOf(orphan, COMPANY), syncCursorOptions({}), { phase: 'import', after: null, head: 'c0ffee', target: 'c0ffee' });
+    const company = (await legacyRows(orphan)).filter(isCompanyRow);
+    expect((await legacyRows(orphan)).map(row => row.op)).toEqual(['managed-sync-slice', 'managed-sync-slice']);
+    const result = await performSync(orphan, OPTS as never);
+    expect(result.status).toBe('first_sync');
+    expect(await legacyRows(orphan)).toEqual(company);
   }), 180_000);
 });
