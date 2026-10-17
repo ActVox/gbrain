@@ -495,6 +495,11 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
  * delete only set `deleted_at` (its body, chunks, links and projections stay), so the restore clears it without
  * re-serializing or re-importing the body: version, clear, reseal (or queue the projection when chunks are missing or a
  * deferred retirement left rows of retired occurrences).
+ * Whether it reseals is decided here, before publication: both probes read one index entry per live occurrence, so on
+ * a loaded host they can outlast the publication transaction's 5 s statement_timeout, and a cancelled publication is
+ * prepared and its whole file streamed again. Deciding here is exact: the transaction publishes only at the observed
+ * revision, so the page is still soft-deleted at the same body generation, and a deleted page gains no chunk rows
+ * (its projection skips it) and loses only rows its live generation does not hold.
  * The canonical file is serializePageToMarkdown's bytes streamed from the segments by export's serializer into one
  * buffer, never one string. The restore adds no text, so an agent-tier writer's advisory gate scan (flag only) is not
  * re-run over the stored body; a step that needs the whole body refuses (`page_body_segmented`): a core page's budget
@@ -516,7 +521,10 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
   const file = await prepareFileTarget(engine, row, snapshot, await unreadPageFile(engine, snapshot), undefined,
     { allowMissing: options.allowMissingFile, activePack: options.activePack, remote: row.authority.remote });
   const pageId = Number(snapshot.page.id);
-  let complete = true;
+  enterClaimStep(options.clock, 'seal_probe', undefined, 'db');
+  const generation = Number(snapshot.bodyGeneration), live = noop ? [] : await engine.readManifest(pageId, { generation });
+  const complete = noop || !(await occurrencesWithoutChunks(engine, pageId, generation, live)).length
+    && !await hasStaleChunks(engine, pageId, generation, live.map(row => Number(row.occurrenceId)));
   const prepared: PreparedMutation = { observedRevision: snapshot.revision, noop, file, ...await pageDatabaseOnlyPublication(engine, row, file),
     ...(core ? { exclusiveSources: core.exclusiveSources } : {}), ...(trust ? { trust } : {}),
     validate: async tx => { await core?.validate(tx); },
@@ -525,11 +533,6 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
       await tx.createVersion(row.slug, source);
       await tx.restorePage(row.slug, source);
       const lowered = storedTier ? await recordAgentPageLowering(tx, row, { tier: storedTier, revision: snapshot.revision }) : null;
-      const [page] = await tx.executeRaw<{ body_generation: number | string }>('SELECT body_generation FROM pages WHERE id=$1', [pageId]);
-      const generation = Number(page!.body_generation), live = await tx.readManifest(pageId);
-      // Unsealed while an occurrence lacks chunks or a deferred retirement left rows of retired occurrences: the projection retires them first.
-      complete = !(await occurrencesWithoutChunks(tx, pageId, generation, live)).length
-        && !await hasStaleChunks(tx, pageId, generation, live.map(row => Number(row.occurrenceId)));
       if (complete) await sealSegmentedPage(tx, pageId);
       if (core) await core.record(tx, (await tx.readPageSnapshot(row.slug, source))?.revision ?? null);
       return { ...pageNoopAdvisories(row), status: 'restored', slug: row.slug, source_id: row.source_id, chunks: 0, noop: false,
