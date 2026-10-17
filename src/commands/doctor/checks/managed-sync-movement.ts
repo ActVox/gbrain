@@ -9,7 +9,9 @@
  * warned, unless (#6552 §2, #6712 PR 2) admitted requests wait in its queue
  * with no consumer and no progress for longer than that ceiling: nothing will
  * ever drain them, so the check fails and names the resume sync (which runs
- * its own consumer) as the safe action. Reads the database only.
+ * its own consumer) as the safe action. A source whose backlog read failed
+ * (#6781, `movement_state: unknown`) warns with `details.health: unknown`,
+ * never `ok`. Reads the database only.
  * #6712 PR 4b (design v3.2 §3.7): a non-company source's pending pass row
  * counts like a cursor; a pass that keeps stopping (`blocked`, a
  * `not_converged` or `settle_mismatch` streak) warns as not moving, with
@@ -30,9 +32,10 @@ async function runManagedSyncMovementCheck(ctx: DoctorContext): Promise<Check[]>
     const stuck = pending.filter(m => m.movement_state === 'not_moving');
     const parked = pending.filter(m => m.movement_state === 'parked');
     const stranded = parked.filter(strandedQueue);
-    const details = { count: stuck.length, parked: parked.length, stranded: stranded.length, sources: pending.map(m => ({ source_id: m.source_id, movement_state: m.movement_state, data_moving: m.data_moving,
+    const unknown = pending.filter(m => m.movement_state === 'unknown');
+    const details = { count: stuck.length, parked: parked.length, stranded: stranded.length, ...(unknown.length ? { unknown: unknown.length, health: 'unknown' } : {}), sources: pending.map(m => ({ source_id: m.source_id, movement_state: m.movement_state, data_moving: m.data_moving,
       not_moving_since: m.not_moving_since, last_commit_at: m.last_commit_at, last_progress_at: m.last_progress_at, cursor: m.cursor, pass: m.pass, head: m.head, live: m.live, admitted: m.admitted,
-      ceiling_ms: m.ceiling_ms, writer_status_command: m.writer_status_command })), docs: DOCS };
+      ceiling_ms: m.ceiling_ms, writer_status_command: m.writer_status_command, ...(m.unknown ? { unknown: m.unknown } : {}) })), docs: DOCS };
     if (stranded.length) {
       const first = stranded[0]!;
       checks.push({ name: 'managed_sync_not_moving', status: 'fail', readiness_state: 'degraded', details,
@@ -56,6 +59,11 @@ async function runManagedSyncMovementCheck(ctx: DoctorContext): Promise<Check[]>
           + `managed sync data has not moved for longer than the ${Math.round(first.ceiling_ms / 1000)}s ceiling while a sync or consumer is live. The health signals are green; the data is not.`,
         fix: agentFix(['gbrain', 'sources', 'writer', 'status', '--source', first.source_id, '--json'],
           'Read-only: names the request at the head, its step, what it waits on, the owner process and the next step (`claim.next`) on the running claim.', 'managed_sync_not_moving', { docs: DOCS }) });
+    } else if (unknown.length) {
+      checks.push({ name: 'managed_sync_not_moving', status: 'warn', readiness_state: 'degraded', details,
+        message: `${unknown.map(m => m.source_id).join(', ')}: the managed sync backlog could not be read (${unknown[0]!.unknown?.error ?? 'no detail'}), so whether sync data moves is unknown; this is not an all-clear.`,
+        fix: agentFix(['gbrain', 'sources', 'writer', 'movement', unknown[0]!.source_id, '--json'],
+          'Read-only: reads the backlog again and judges movement over one window; if the read keeps failing, gbrain doctor --json checks the database.', 'managed_sync_not_moving', { docs: DOCS }) });
     } else if (pending.length) {
       checks.push({ name: 'managed_sync_not_moving', status: 'ok', severity: 'info', details,
         message: `Managed sync data is moving${parked.length ? `; ${parked.map(m => { const work = (m.cursor ?? m.pass)!; return `${m.source_id} is parked at ${work.index}/${work.total} (no sync or consumer live; resume: ${work.resume_command})`; }).join('; ')}` : ''}.` });

@@ -47,7 +47,7 @@ import { passConvergence, passStatusNext, passStatusState } from './sync-pass-st
 import { MANAGED_SYNC_PASS_OP, readPassRow, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
 import { SYNC_ADMISSION_SETTING_PARAMS, syncAdmissionSettingSql, syncAdmissionStatus } from './sync-admission.ts';
 import type { DeletesWithheld } from './sync-markers.ts';
-import { listIdentityDowngrades } from '../sync-identity-downgrades.ts';
+import { listIdentityDowngrades, withIdentityRemedies } from '../sync-identity-downgrades.ts';
 
 export interface SyncStatusHold extends SyncFaultVerdict {
   code: string;
@@ -94,8 +94,12 @@ export interface SyncStatus {
   rate_pages_per_min: number | null;
   eta_seconds: number | null;
   holds: SyncStatusHold[];
-  /** #6729: renames whose page identity was not kept and whose pair has no disposition yet (old page soft-deleted with its facts and links, held from the purge; `gbrain restore` keeps one). */
-  identity_downgrades: import('../sync-identity-downgrades.ts').IdentityDowngrade[];
+  /**
+   * #6729: renames whose page identity was not kept and whose pair has no disposition yet (old page soft-deleted with its
+   * facts and links, held from the purge), each with its remedy: `gbrain repair rename-identity` preview and apply argv,
+   * consent and when the purge hold releases.
+   */
+  identity_downgrades: import('../sync-identity-downgrades.ts').IdentityDowngradeEntry[];
   last_error: SyncStatusError | null;
   /** Whether anything (a hold or the last error) waits on a person; the first such reason. */
   needs_human: boolean;
@@ -331,7 +335,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume) : null;
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
-    committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, identity_downgrades: await listIdentityDowngrades(engine, [sourceId]), last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
+    committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, identity_downgrades: await withIdentityRemedies(engine, await listIdentityDowngrades(engine, [sourceId])), last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     resume_argv: resume, ...blockers, cursors: detail ? await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures) : [],
     terminal_failures: terminal, connector_last_error: connectorLastError, next: next ?? recovery_next ?? passNext ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `Write request ${oldest.request.request_id} of this source is still ${oldest.request.state}${oldest.request.step ? ` (step ${oldest.request.step})` : ''}; a running owner finishes it on its own, and the next sync of this source drains it.` } satisfies Action

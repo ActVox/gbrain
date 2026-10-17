@@ -491,6 +491,10 @@
       },
       {
         "category": "brain",
+        "name": "coordination_lock_location"
+      },
+      {
+        "category": "brain",
         "name": "unbound_source"
       },
       {
@@ -751,6 +755,10 @@
       },
       {
         "category": "brain",
+        "name": "managed_sync_latency"
+      },
+      {
+        "category": "brain",
         "name": "git_convergence"
       },
       {
@@ -864,6 +872,10 @@
       {
         "category": "brain",
         "name": "unindexed_files"
+      },
+      {
+        "category": "brain",
+        "name": "sync_overwritten_db_edits"
       },
       {
         "category": "meta",
