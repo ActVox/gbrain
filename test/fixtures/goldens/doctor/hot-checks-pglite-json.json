@@ -1696,7 +1696,7 @@
               "configured": "unset",
               "docs": "docs/guides/memory-boundaries.md#segmented-page-storage",
               "effective": "off",
-              "floor": "0.60.290.0",
+              "floor": "<segmented-writer-floor>",
               "max_bytes": 25165824,
               "truncated": false,
               "window_days": 7
@@ -5967,7 +5967,7 @@
               "configured": "unset",
               "docs": "docs/guides/memory-boundaries.md#segmented-page-storage",
               "effective": "off",
-              "floor": "0.60.290.0",
+              "floor": "<segmented-writer-floor>",
               "max_bytes": 25165824,
               "truncated": false,
               "window_days": 7
