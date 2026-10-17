@@ -10,6 +10,98 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.279.0] - 2026-10-17
+
+**An ordinary incremental sync no longer overwrites a page you edited in the database (#6712).** If an agent saved a page with `put_page` while `sync.write_through` was off, and someone later edited and committed that page's file, the next plain `gbrain sync` published the file over the database edit. It raised no hold, took no backup and reported `synced`. The database edit survived only as an old page version. Now sync holds that file as `file_drift` and the page keeps its edit until you choose which version wins. A first sync, `--full` and a failed Git delta already guarded this case. The ordinary delta sync didn't.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| page edited in the database (write-through off), then its file edited and committed, then `gbrain sync` | file published over the database edit, no hold | file held `file_drift` (side `both`); the page keeps its edit |
+| page deleted in the database (write-through off), then its file edited and committed | page recreated from the file | file held `file_drift`; the page stays deleted |
+| a database-only tag or link, then a committed file edit | edit imported, tag kept | unchanged: edit imported, tag kept, no hold |
+| page whose last revision came from sync or write-through, then a committed file edit | edit imported | unchanged |
+
+### What to do after upgrading
+
+Nothing runs on upgrade. When `gbrain sources status <id>` lists a `file_drift` hold, preview both sides with `gbrain repair file-drift --source <id> --slug <slug> --prefer database` (or `--prefer file`), decide which version wins, apply it with the plan hash the preview prints, then run `gbrain sync --source <id> --no-pull`. The rest of the source keeps syncing while a file is held.
+
+### Itemized changes
+
+- `sync-prescreen.ts` `classifyBaseline` now classes an import as `both` in every discovery when the file and the page have both moved since a complete import record. Before, it did so only in a tree walk. An entry with no usable record (`unknown`) is still guarded only in a tree walk.
+- A `both` entry still imports when the page holds exactly what the recorded disk blob would import, which means the database changed only fields an import keeps (tags, links). The freeze checks this with the preparer's own no-op verdict (`sameContentAtOrigin` `pageOnly`, `driftBaselineContent`), so tag overlays and read-only mirrors sync as before.
+- Tests: `test/sync-prescreen-both-delta-6712.test.ts` runs on PGLite and Postgres. It fails on 0.60.278.0, because the page loses the edit and no hold is written. Three existing tests that depended on the overwrite now assert the hold, or record that the older writer they simulate kept no import record.
+
+## [0.60.278.0] - 2026-10-17
+
+**A stuck upgrade queue drains, held embeddings say what they need, and doctor and status answer in bounded time (#6803, #6847).** Four things got better for anyone whose brain grew big or went through the recent upgrades. Image pages that an old upgrade left queued (and missing from search) can now be put back with one keyless command when gbrain already knows they're safe, and the rest are counted and named instead of hidden. Large pages waiting for your embedding approval are reported everywhere with one exact command to approve them, and that command now works on free local embedding models too. `gbrain doctor --json` and `gbrain sync --status` stop running for minutes on a large brain. And the "un-extracted edges" nudge after a sync now agrees with doctor and names the command that actually finishes the job.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| tens of thousands of image pages queued by the 0.51 activation | never left the queue; every resident tick probed all of them; out of search | `gbrain projections drain` seals the ones the importer already attested safe (keyless, no re-embedding); the rest are counted as `reimport`, `protected` or `archived`; the resident probes at most 500 rows per tick |
+| doctor `text_projection_readiness` | one `pending` number | counts per class, a drain fix sized to about a minute that asks first, and by-design classes reported as info |
+| `gbrain embed --stale` with pages held for approval | silent | `budget_limited`: "N large page(s) have chunks waiting for embedding approval …" plus a per-source approve command |
+| `gbrain embed --held --dry-run` on a multi-source brain | exit 1 | lists every source with one approve command each, exit 0 |
+| `gbrain embed --held --source <id> --max-usd N` on a free (local) embedding model | reprinted the hold forever | releases it and embeds the page at $0 |
+| receipts for a held page | `gbrain reindex --held` (does not exist) | `gbrain embed --held --dry-run --source <id>` |
+| `gbrain sync --status --json` | ran a full sync of the source | prints the status envelope with a one-line hint |
+| `gbrain doctor --json` on a large brain (non-interactive) | could run past two minutes; slow checks kept running server-side | stops its check run at 90 s by default; each check cancels its own statements at its budget; the cheap incident checks run first |
+| "N page(s) have un-extracted edges" after a sync | counted attendance-blocked meetings; named only `extract --stale` | silent when doctor wouldn't warn; names `gbrain extract --stale` and `--catch-up` with time estimates |
+| `gbrain extract --stale --source <id>` | ran brain-wide | refuses with `invalid_params`, pointing at `--source-id <id>` |
+
+### What to do after upgrading
+
+Nothing runs on upgrade. Each repair below is preview-first, and you choose when to run it.
+
+- **Queued image pages.** Run `gbrain doctor --only text_projection_readiness --json` to see the counts, then `gbrain projections drain --dry-run --json`. With your go-ahead, run `gbrain projections drain --limit <n>` on the brain host and repeat until `sealable` is 0. It's keyless and makes no provider calls. `reimport` images need their importer: `gbrain embed --stale --images --dry-run`, then the paid run. `protected` and `archived` pages stay out of search by design.
+- **Held embeddings.** `gbrain embed --held --dry-run` lists every source. Then `gbrain embed --held --source <id> --max-usd <N>` per source, and `gbrain embed --held --dry-run --source <id> --json` shows held 0. `--max-usd N` is both the run's cap and a saved per-page allowance.
+- **Slow status and doctor.** Use `gbrain sync status --source <id> --json`, and `gbrain doctor --tier ops --json` or `--budget-ms 90000`. `gbrain config set doctor.default_budget_ms 0` turns the new default off.
+- **Un-extracted edges.** `gbrain extract --stale --dry-run --json` shows the work. On the host, `gbrain extract --stale --catch-up [--source-id <id>]` finishes it in one interruptible run. Done means `actionable: 0`.
+
+### Itemized changes
+
+#### Projection queue (part 2)
+
+- `page-state/projection-class.ts` partitions every queued row into `text`, `sealable`, `reimport`, `protected` and `archived` in one SQL fragment, shared by `projectionBacklog`, the drain preview, the drain, doctor and search readiness.
+- `page-state/image-seal.ts` `sealImageProjections` restores the importer's own seal on `sealable` images in groups of up to 500 under the page guard. It writes no chunk and leaves `embedding_image` untouched. Measured: about 1,800 to 2,000 images a second, which sets `IMAGE_SEAL_PAGES_PER_SECOND` and the drain `--limit`.
+- `page-state/projection-window.ts` bounds each resident tick and each idle probe to a recency lane plus a 500-row primary-key window with a wrap-around cursor. Segmented rows are probed queue-wide.
+- `page-state/projection-status.ts` caches the class counts off the tick path for the resident's `projection_status` reply.
+- Embed paths count image pages as blocked instead of queuing `embedding_recovery` rows.
+- `embed --stale --images` skips sealable pages and reports `reimport`, `incomplete_sealed`, `ocr_required`, `protected` and `archived`.
+- `gbrain projections drain` reports per-class `remaining_by_class` and never says "empty" while image rows remain.
+- A read-only `[AGENT]` notice after upgrading names the drain preview.
+- `gbrain migrate --to <engine>` (the legacy copier) now carries an image chunk's `embedding_image` vector (#6871). Before, a migrated image page arrived without it and needed a paid re-embed to show up in image search.
+- A preparation read issued after its budget ran out (for example a page purge's journal sweep) is now refused before it is sent. Before, it went out with a 1 ms statement timeout, and a fast read could finish inside that, so the purge committed past its deadline instead of releasing.
+
+#### Held embedding budgets (part 3, #6847)
+
+- `held-embedding.ts` provides `readBudgetLimited` and the shared phrase. `held-embedding-action.ts` provides `heldApproveAction`, which builds the approve command used by `embed --stale`, embed-backfill, doctor and the oversized receipt.
+- `partial_embedding` is its own doctor registry entry.
+- An explicit `--max-usd` is the hold approval on any provider, and free-recipe models cost $0 in the per-page ledger. The printed paid N is `derivedCapUsd` of the estimate (×1.5, $0.25 floor).
+- An approval is refused before release when embeddings can't run (`embedding_unavailable`) or the paid model has no price (`no_pricing`).
+
+#### Bounded doctor and status (part 5)
+
+- `statement-deadline.ts` gives each doctor entry its own deadline engine: Postgres cancels the statement, and PGLite refuses the next one. Frontmatter and fence scans stop at the deadline and report partial results.
+- `doctor/default-budget.ts`: `doctor.default_budget_ms` (file plane, default 90000) applies only to plain non-interactive CLI `doctor --json`.
+- `capacitySnapshotWithin` waits at most 1.5 s per caller and never caches a timed-out fetch. `capacity-memo.ts` forecasts once per doctor run.
+- `sync/operator.ts` `syncOperatorVerb` canonicalizes `sync --status`. `--preview` and `--check` refuse.
+- `scripts/bench/doctor-scale.ts` measures doctor, `sync status` and the cheap checks at scale, with a pass criterion.
+
+#### Extraction nudge (part 6)
+
+- `extraction-lag.ts` gives doctor `links_extraction_lag` and the sync nudge one statement and one verdict, with attendance-blocked pages excluded.
+- `extract-stale-options.ts` validates `--source` before direct and owner dispatch. Extract's routing flag is `--source-id`.
+- `SyncTailReport.underived` drives the per-source line.
+- `EXTRACTOR_BUMP_NOTES` pins the link-extractor version, and its test requires a note for every bump.
+
+#### Agent protocol
+
+- `AGENT_TOOL_LIMIT_MS` (120 s): a fix expected to run longer than that is the user's or host admin's (`tell_user_to_run`), never the agent's.
+
 ## [0.60.277.0] - 2026-10-17
 
 **Notes hidden by a stray `slug:` line come back on the next sync, and gbrain now tells you about committed files it never indexed (#6865).** A note can carry a leftover `slug:` line in its frontmatter that names a page that does not exist, often copied from a template or left behind by an import. Sync held those files, and nothing put them back in search on its own. Now the sync itself removes that one line when the slug it names has no page and no file, imports the note under the name its path gives, commits the edit and keeps the old slug as an alias so existing links still work. A line that names a real page is still left for you to decide.
