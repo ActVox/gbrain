@@ -141,7 +141,6 @@
   "test/persistence-skill-bundles.serial.test.ts": 8866,
   "test/persistence-skill-crash.slow.test.ts": 43178,
   "test/persistence-skip-cost.test.ts": 7714,
-  "test/persistence-sync-cursor-adoption.test.ts": 60388,
   "test/persistence-sync-cursor-options.test.ts": 11035,
   "test/persistence-sync-cursor-strategy-6696.test.ts": 11399,
   "test/persistence-sync-fence-holds.test.ts": 32583,
