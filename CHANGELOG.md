@@ -166,6 +166,56 @@ Four smaller fixes ride along: dream synthesis no longer fails a pass when looki
 - Tests whose fixture was an inexact move onto a broken file now use an exact move held by a stale `slug:` line (every hold-lane assertion unchanged); the inexact case keeps one test per path asserting its new outcome. `test/pages-purge-deleted-args.test.ts` expectations gained `retryParked: false`. `test/persistence-connector-fencing.test.ts` orders its request-id reads, since the new index changed the unordered row order.
 - Migration note: `skills/migrations/v0.60.270.0.md`.
 
+## [0.60.273.0] - 2026-10-16
+
+**Ask what changed this week and get the beliefs that changed, with their old and new values and the evidence, instead of a list of pages.** `delta {beliefs: true}` and `gbrain beliefs changes` read the belief ledger for a window and report each fact, take, link and relationship date that ended the window different from how it started. An edit and its revert report nothing, and a relationship end that only the nightly check inferred is now shown as an upper bound (`by 2025-03-01`) everywhere relationship notes appear. Recording beliefs also costs less: on large pages `put_page` is about 45% faster on PGLite, and the ledger's share of a large Postgres edit drops under 10%.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `delta` with `beliefs: true` | no such option | `beliefs`: each changed belief with before, after, cause and an evidence pointer, plus a `## Belief changes since …` text section |
+| `gbrain beliefs changes acme-example --since 7d` | no such command | one cited line per belief that changed on or about that page this week; on a thin client it asks the host |
+| a relationship closed only by the nightly check | `ended: works_at acme-example (2025-03-01)` | `ended: works_at acme-example (by 2025-03-01)` |
+| an explicit end line later than the inferred closure | the earlier inferred date stayed | the explicit date replaces it |
+| `gbrain migrate --to <engine>` through the legacy copier on a brain with page versions | copied pages without their versions | refuses with `writer_coordinator_required`, `reason: page_history` and the version count |
+| `takes.updated_at` after a page write that leaves a take unchanged | moved | stays |
+
+Measured write overhead of belief recording (ledger share of the write, master → this release; ranges of round medians):
+
+| Cell | Ledger share |
+|---|---|
+| PGLite typical edit | 6.1–6.7% → 6.0–6.7% |
+| PGLite large edit | 3.9–4.3% → 5.6–6.4% (`put_page` itself about 45% faster) |
+| Postgres typical edit | 9.5–10.7% → 7.9–8.5% |
+| Postgres large edit | 10.3–11.3% → 8.4–9.3% |
+
+### What to do
+
+Nothing. Belief recording stays opt-in per source (`gbrain beliefs enable`); without it, `beliefs` reports `not_recorded`. Nothing is rewritten on upgrade and there is no migration.
+
+### Itemized changes
+
+#### Added
+
+- `delta` takes `beliefs: true` (full surface only); `gbrain beliefs changes [<entity>...] [--since 7d]` is its CLI twin and routes to the host on a thin client. Remote callers get the world view: events world-visible when recorded, on pages visible now, takes of holders they may read, never a claim made private later; the event cap counts only events the caller may read.
+
+#### Changed
+
+- Relationship notes (entity cards, `context_pack`, ambient turn context, compiled context files) render an end that only the nightly check dated as `(by <date>)`; only evidence the caller's scope counts can make it exact. An explicit end for the same stint replaces the inferred one, earlier or later.
+- The legacy engine copier refuses a brain holding page versions (`reason: page_history`).
+
+#### Performance
+
+- Fact and take projections write only rows whose values change; the ledger's post read reuses the pre read's rows for tables the transaction did not write (`pg_stat_get_xact_tuples_*`, full read when `track_counts` is off).
+- The batch's source read also reads the managed mode and plan mode; unchanged subjects are keyed once.
+- A bounded process-local fingerprint cache (text hash to fingerprint, 20,000 entries), checked against SQL by a parity probe on both engines.
+- `canonicalJson` sorts keys only when out of order and caches quoted key names; the bytes are unchanged (golden probe).
+
+#### Fixes
+
+- `test/trust-taint-dream.test.ts` counts each engine's patterns prompts separately.
+
 ## [0.60.272.0] - 2026-10-16
 
 **A page that stops a managed sync no longer stops its source silently, and gbrain stops rewriting busy files just to refresh an assessment marker.** On a managed Postgres brain one page write was resolved the documented way (`gbrain repair stuck-recovery --keep disk`), and its source then indexed nothing for 21 hours (#6858). The request ended `conflict` / `source_changed` with a message no classifier knew, so the run parked `blocked_by_failures`. Every autopilot freshness sync job returned that parked run and was recorded `completed`, so nothing retried and nothing alerted. The trigger was gbrain itself: managed sync rewrote the canonical file of an oversized page only to refresh its `embed_skip` marker, whose `assessed_at` changes whenever the body does, and that rewrite was the publication an agent's own edit of the hot file collided with.
