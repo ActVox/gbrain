@@ -264,6 +264,21 @@ export function vectorScopeLoader(
   };
 }
 
+/**
+ * The statement in both chunkManifestReads forms, each built on first use. The forms differ only in SQL text, so
+ * either one answers for the shape (windows, params, walk and scope-scan presence). A Postgres search attempt picks
+ * its form with the probe it runs inside its own transaction, after the settings, so the attempt's statement_timeout
+ * bounds the probe as well (a probe before the transaction waited on a content_chunks lock with no bound).
+ */
+export function vectorStatementForms(build: (chunkManifest: boolean) => VectorSearchStatement): (chunkManifest: boolean) => VectorSearchStatement {
+  const forms = new Map<boolean, VectorSearchStatement>();
+  return chunkManifest => {
+    let stmt = forms.get(chunkManifest);
+    if (!stmt) forms.set(chunkManifest, stmt = build(chunkManifest));
+    return stmt;
+  };
+}
+
 export function buildVectorSearchStatement(input: VectorSearchStatementInput): VectorSearchStatement {
   const { dialect, limit, offset, opts } = input;
   const resolvedCol = normalizeEngineColumn(opts?.embeddingColumn);
