@@ -225,6 +225,8 @@ test/pathological/a22-consolidate-buckets.test.ts
 test/pathological/a23-patterns-grounding.test.ts
 test/pathological/a26-safe-chunks-reseal.test.ts
 test/pathological/a27-credential-reseal.test.ts
+test/pathological/a30-watchdog-attribution.test.ts
+test/pathological/a31-migrate-loop-rows.serial.test.ts
 test/pathological/a4-synthesize-postprocess.test.ts
 test/pathological/a41-maintain-sources.test.ts
 test/pathological/a44-slug-conflicts-rotation.test.ts
@@ -234,6 +236,8 @@ test/pathological/a47-backfill-poison-row.test.ts
 test/pathological/a49-unmanaged-purge-tombstones.test.ts
 test/pathological/a50-unmanaged-expired-sources.test.ts
 test/pathological/a9-repair-core.test.ts
+test/pathological/b12-slug-segment-bytes.test.ts
+test/pathological/b5-export-unsafe-slugs.test.ts
 test/pathological/b6-triage-verdict-surrogate.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
