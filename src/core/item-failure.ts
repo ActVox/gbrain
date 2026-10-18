@@ -30,6 +30,7 @@ export const ISOLATE_SITES = {
   'repair.apply_items': 'A-9',
   'repair.all_kinds': 'A-45',
   'repair.content_lane_kinds': 'A-46',
+  'migration.credential_reseal': 'A-27',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
