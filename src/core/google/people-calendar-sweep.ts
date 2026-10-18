@@ -10,7 +10,9 @@
  * and the sweep goes on; only a content-class one counts toward a hold.
  * While a failing item is not held the service's token stays where it is, so
  * the next sync lists it again; once it is held the token moves past it. A held item that retry-held or a due
- * reconsideration re-admits and no listing returns is re-fetched by id.
+ * reconsideration re-admits and no listing returns is re-fetched by id; one the provider no longer has (its
+ * deletion passed in a delta while it was held) retires the page it owns through the same ownership-checked
+ * deletion as a contact tombstone or a cancelled event, and its hold clears only once that deletion lands.
  * Run-scoped failures stop the sweep as before.
  */
 import { existsSync, readFileSync } from 'node:fs';
@@ -71,8 +73,10 @@ export async function sweepContacts(
   for (const key of holds?.dueHeldKeys().filter(k => k.startsWith(prefix)) ?? []) {
     if (deps.opts.signal?.aborted) return;
     await throughHolds(deps, summary, holds, { key, version: null, title: null }, async () => {
-      const c = await people.getContact(key.slice(prefix.length), signal);
-      if (c) await applyContact(deps, c, sweep);
+      const resourceName = key.slice(prefix.length);
+      const c = await people.getContact(resourceName, signal)
+        ?? { resourceName, displayName: null, emails: [], phones: [], organization: null, title: null, groups: [], deleted: true };
+      await applyContact(deps, c, sweep);
     });
   }
   if (blocked) return;
@@ -332,8 +336,11 @@ export async function sweepCalendar(
   for (const key of holds?.dueHeldKeys().filter(k => k.startsWith(prefix)) ?? []) {
     if (deps.opts.signal?.aborted) return;
     await throughHolds(deps, summary, holds, { key, version: null, title: null }, async () => {
-      const ev = await calendar.getEvent(deps.cfg.account, deps.cfg.calendarId, key.slice(prefix.length), deps.opts.signal ? { signal: deps.opts.signal } : {});
-      if (ev) await applyEvent(deps, ev, range, sweepCtx, tally);
+      const eventId = key.slice(prefix.length);
+      const ev = await calendar.getEvent(deps.cfg.account, deps.cfg.calendarId, eventId, deps.opts.signal ? { signal: deps.opts.signal } : {});
+      if (ev) return applyEvent(deps, ev, range, sweepCtx, tally);
+      const owned = await calendarPageRelPathByEventId(deps, eventId);
+      if (owned) await deletePageByRelPath(deps, owned, summary);
     });
   }
   if (tally.outside > 0) {

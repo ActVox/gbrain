@@ -21,7 +21,7 @@
  *    (unmanaged, transient).
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { parseGoogleSourceConfig, readGoogleState, runGoogleSync } from '../../src/core/google/google-source.ts';
@@ -30,6 +30,7 @@ import { readAllSourceHolds } from '../../src/core/connectors/item-holds-store.t
 import { retryHeld } from '../../src/commands/sources-retry-held.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { sanitizeForJsonb } from '../../src/core/batch-rows.ts';
+import { OperationError } from '../../src/core/ops/contract.ts';
 import { slugifyPath } from '../../src/core/sync.ts';
 import { json, options, sourceCheckpoint, withGoogleAccount } from '../helpers/connector-fixture.ts';
 import { addThread, fakeGmail, gmailFetch, type FakeGmail } from '../helpers/connector-holds-fixture.ts';
@@ -72,7 +73,7 @@ function googleFetch(fx: FakeGoogle) {
     if (u.hostname === 'people.googleapis.com') {
       if (u.pathname === '/v1/people/me/connections') {
         const ids = u.searchParams.has('syncToken') ? fx.contactDelta : [...fx.contacts.keys()];
-        return json({ connections: ids.map(id => fx.contacts.get(id)!), nextSyncToken: `ppl-${++fx.tokens.people}` });
+        return json({ connections: ids.map(id => fx.contacts.get(id) ?? { resourceName: id, metadata: { deleted: true } }), nextSyncToken: `ppl-${++fx.tokens.people}` });
       }
       const name = decodeURIComponent(u.pathname.slice('/v1/'.length));
       fx.gets.push(`contact:${name}`);
@@ -83,7 +84,7 @@ function googleFetch(fx: FakeGoogle) {
       const rest = u.pathname.slice(EVENTS.length);
       if (!rest) {
         const ids = u.searchParams.has('syncToken') ? fx.eventDelta : [...fx.events.keys()];
-        return json({ items: ids.map(id => fx.events.get(id)!), nextSyncToken: `cal-${++fx.tokens.calendar}` });
+        return json({ items: ids.map(id => fx.events.get(id) ?? { id, status: 'cancelled' }), nextSyncToken: `cal-${++fx.tokens.calendar}` });
       }
       const id = decodeURIComponent(rest.slice(1));
       fx.gets.push(`event:primary:${id}`);
@@ -138,6 +139,32 @@ async function seeded(engine: BrainEngine, root: string, managed: boolean) {
   addThread(fx.gmail, 'a1b2c3d4e5f60001', Date.now() - 3_600_000);
   expect((await f.run(fx)).status).not.toBe('partial');
   return { f, fx, c1, c3, e1, e3 };
+}
+
+const HELD_THEN_DELETED = ['contact:people/c1', 'event:primary:e1'];
+
+/**
+ * A materialized contact and event go bad upstream and are held with their old pages in place; then the provider deletes
+ * both, and the delta that names the deletions (a contact tombstone, a cancelled event) passes while they are held.
+ */
+async function heldThenDeleted(engine: BrainEngine, root: string, managed: boolean) {
+  const seed = await seeded(engine, root, managed);
+  const { f, fx, c1, e1 } = seed;
+  putContact(fx, person('people/c1', 'Alice Example', undefined, 'alice.example\u0000@example.invalid'));
+  putEvent(fx, event('e1', 1, 'Planning example', '', 'guest\u0000@example.invalid'));
+  for (let run = 0; run < 4; run++) await expectUnitNotAborted(() => f.run(fx));
+  expect((await held(engine, f.id)).map(h => h.key)).toEqual(HELD_THEN_DELETED);
+  fx.contacts.delete(c1.resourceName);
+  fx.events.delete(e1.id);
+  fx.contactDelta = [c1.resourceName];
+  fx.eventDelta = [e1.id];
+  expect((await expectUnitNotAborted(() => f.run(fx))).status).not.toBe('partial');
+  fx.contactDelta = [];
+  fx.eventDelta = [];
+  expect((await held(engine, f.id)).map(h => h.key)).toEqual(HELD_THEN_DELETED);
+  expect(await live(engine, f.id, slugifyPath(`${contactSlug(c1)}.md`))).toBe(true);
+  expect(await live(engine, f.id, slugifyPath(eventRelPath(e1)))).toBe(true);
+  return seed;
 }
 
 for (const { backend, databaseUrl } of pathologicalArms()) {
@@ -208,7 +235,45 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
           expect(await live(engine, f.id, slugifyPath(`${contactSlug(badContact())}.md`))).toBe(true);
           expect(await live(engine, f.id, slugifyPath(eventRelPath(badEvent())))).toBe(true);
         }, { databaseUrl })), 240_000);
+
+      test(`deleted while held (${mode}): retry-held finds the held contact and event gone upstream and retires the pages they materialized before clearing the holds`,
+        async () => withEnv(ENV, () => managedBrain(async ({ engine, root }) => {
+          const { f, fx, c1, e1 } = await heldThenDeleted(engine, root, managed);
+          const slugs = [slugifyPath(`${contactSlug(c1)}.md`), slugifyPath(eventRelPath(e1))];
+          const before = await snapshotItems(engine, f.id);
+          const heldTokens = await tokens(engine, f);
+          expect((await retryHeld(engine, f.id)).scheduled).toBe(2);
+          fx.gets.length = 0;
+          const retried = await expectUnitNotAborted(() => f.run(fx));
+          expect(fx.gets.sort()).toEqual(HELD_THEN_DELETED);
+          expect(retried.status).not.toBe('partial');
+          expect({ held: await held(engine, f.id), live: await Promise.all(slugs.map(slug => live(engine, f.id, slug))) }).toEqual({ held: [], live: [false, false] });
+          if (!managed) expect([contactSlug(c1) + '.md', eventRelPath(e1)].map(rel => existsSync(join(f.dir, rel)))).toEqual([false, false]);
+          expectOthersUnchanged(before, await snapshotItems(engine, f.id), { changed: slugs });
+          const moved = await tokens(engine, f);
+          expect([moved.contacts === heldTokens.contacts, moved.calendar === heldTokens.calendar]).toEqual([false, false]);
+        }, { databaseUrl })), 240_000);
     }
+
+    test('deleted while held, refused (unmanaged): a held item whose page deletion is refused keeps its hold with the refusal code and its page, and clears once the deletion lands',
+      async () => withEnv(ENV, () => managedBrain(async ({ engine, root }) => {
+        const { f, fx, c1, e1 } = await heldThenDeleted(engine, root, false);
+        const slugs = [slugifyPath(`${contactSlug(c1)}.md`), slugifyPath(eventRelPath(e1))];
+        const refusing = new Proxy(engine, { get(target_, key) {
+          const value = (target_ as unknown as Record<string | symbol, unknown>)[key];
+          if (key === 'deletePages') return async () => { throw new OperationError('page_identity_changed', 'refused by the probe', 'none'); };
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target_) : value;
+        } });
+        await retryHeld(engine, f.id);
+        expect((await expectUnitNotAborted(() => f.run(fx, refusing))).status).not.toBe('partial');
+        const holds = await held(engine, f.id);
+        for (const key of HELD_THEN_DELETED) expectItemFailure(holds.find(h => h.key === key), { key, code: 'page_identity_changed' });
+        expect(holds).toHaveLength(2);
+        expect(await Promise.all(slugs.map(slug => live(engine, f.id, slug)))).toEqual([true, true]);
+        await retryHeld(engine, f.id);
+        await expectUnitNotAborted(() => f.run(fx));
+        expect({ held: await held(engine, f.id), live: await Promise.all(slugs.map(slug => live(engine, f.id, slug))) }).toEqual({ held: [], live: [false, false] });
+      }, { databaseUrl })), 240_000);
 
     test('transient (unmanaged): a stale .tmp directory fails one contact and one event; siblings and Gmail land, the tokens wait, nothing is held, and clearing it lands both',
       async () => withEnv(ENV, () => managedBrain(async ({ engine, root }) => {
