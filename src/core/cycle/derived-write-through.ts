@@ -15,10 +15,15 @@
  * phase retires has its file removed, so sync cannot bring it back.
  */
 import { execFileSync } from '../spawn.ts';
-import { relative } from 'node:path';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
+import type { PhaseResult } from '../cycle.ts';
+import { atomicWriteFileSync } from '../atomic-write.ts';
+import { fileDatabaseDriftFix, replaceableFile } from '../facts/file-body-guard.ts';
 import { isDbOnly, loadStorageConfig } from '../storage-config.ts';
-import { deletePageThrough, resolvePageWriteTarget, writePageThrough } from '../write-through.ts';
+import { deletePageThrough, isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough } from '../write-through.ts';
+import { urlCloneReadOnly } from '../url-clone.ts';
 import { gitChildEnv } from '../git-env.ts';
 
 export const DERIVED_WRITE_THROUGH_KEYS = {
@@ -90,4 +95,55 @@ export async function derivedWriteThrough(
   );
   await write(rows.map(r => r.slug));
   return write;
+}
+
+/** What a dream reverse-write did with one page's file. `held` is its `file_database_drift` entry. */
+export type DreamPageFileWrite = { written: true; path: string } | { written: false; held?: string; skipped?: string; error?: string };
+
+/**
+ * #6982: write the file of a page the dream cycle wrote in the database (a synthesis or patterns output, the cycle
+ * summary) without replacing an edit only the file holds. Nothing is written with `sync.write_through` off, for a clone
+ * gbrain owns, or for a declared `storage.db_only` slug: the database is the copy of record. The file is the page's
+ * file of record (`resolvePageWriteTarget`: recorded source_path, own-local_path roots); a source with no usable
+ * checkout (no root configured, or the root is missing) keeps the caller's brainDir layout (`<brainDir>/<slug>.md`,
+ * foreign sources under `.sources/<id>/`). The file is replaced only when `replaceableFile` finds nothing in it the
+ * database lacks, and is re-read right before the atomic write, so an edit that lands in between is kept as well.
+ *
+ * This is the reverse-write's own direct write, not `writePageThrough`: once a subagent's tool write has gone through
+ * the coordinator, the checkout carries an owner marker and `writePageThrough` refuses `writer_coordinator_required`,
+ * which would leave the file behind the database for the next coordinated write to refuse as drift.
+ */
+export async function writeDreamPageFile(engine: BrainEngine, brainDir: string, slug: string, sourceId: string,
+  opts: { nativeSourceId: string; markdown: string }): Promise<DreamPageFileWrite> {
+  if (await isWriteThroughDisabled(engine)) return { written: false, skipped: 'disabled_by_config' };
+  if (await urlCloneReadOnly(engine, sourceId)) return { written: false, skipped: 'url_clone' };
+  const target = await resolvePageWriteTarget(engine, slug, sourceId);
+  if (!target.ok && target.skipped !== 'no_repo_configured' && target.skipped !== 'repo_not_found') return { written: false, skipped: target.skipped };
+  try {
+    const storage = loadStorageConfig(target.ok ? target.writeRoot : brainDir);
+    if (storage && isDbOnly(slug, storage)) return { written: false, skipped: 'db_only' };
+  } catch { /* unreadable gbrain.yml: sync reports it */ }
+  const filePath = target.ok ? target.filePath
+    : sourceId === opts.nativeSourceId ? join(brainDir, `${slug}.md`) : join(brainDir, '.sources', sourceId, `${slug}.md`);
+  const check = await replaceableFile(engine, sourceId, slug, filePath);
+  if (!check.ok) return { written: false, held: dreamFileDriftToken(slug, sourceId, 'before') };
+  if ((existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null) !== check.expectedFileBytes) {
+    return { written: false, held: dreamFileDriftToken(slug, sourceId, 'during') };
+  }
+  mkdirSync(dirname(filePath), { recursive: true });
+  atomicWriteFileSync(filePath, opts.markdown);
+  return { written: true, path: filePath };
+}
+
+/** #6982: the hold entry for a dream page whose file holds an edit the database lacks. */
+function dreamFileDriftToken(slug: string, sourceId: string, when: 'before' | 'during'): string {
+  return `${slug} (file_database_drift: the file ${when === 'before' ? 'holds an edit the database lacks' : 'changed while the dream cycle wrote it'}, `
+    + `so the dream output stays in the database only and the file was not replaced. ${fileDatabaseDriftFix(slug, sourceId)})`;
+}
+
+/** A dream phase result with its held page files: listed in `details.file_holds`, and an ok phase warns. */
+export function withFileHolds(result: PhaseResult, held: readonly string[]): PhaseResult {
+  if (held.length === 0) return result;
+  return { ...result, status: result.status === 'ok' ? 'warn' : result.status, details: { ...result.details, file_holds: [...new Set([...((result.details.file_holds as string[] | undefined) ?? []), ...held])] },
+    summary: `${result.summary}; ${held.length} page file(s) held because they differ from the database (details.file_holds)` };
 }
