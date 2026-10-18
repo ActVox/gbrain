@@ -33,6 +33,11 @@ export const ISOLATE_SITES = {
   'backfill.rows': 'A-47',
   'purge.recorded_tombstones': 'A-49',
   'retention.expired_sources': 'A-50',
+  'consolidate.buckets': 'A-22',
+  'extract_facts.expire_deleted': 'A-21',
+  'maintain.cycle_sources': 'A-41',
+  'patterns.ground_pages': 'A-23',
+  'patterns.ground_timeline_appends': 'A-23',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
