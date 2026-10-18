@@ -3,8 +3,9 @@
  * source checkout is a temp directory, one dream output page imported twice (the second import is the child's write,
  * which keeps the first in page_versions), and the reverse-write under test run against it.
  */
-import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, expect, spyOn, test } from 'bun:test';
+import * as fs from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -154,6 +155,24 @@ export function reverseWriteCases(id: string, phase: string, reverseWrite: Rever
         const racing = editsAfterComparison(b.engine, () => writeFileSync(b.path, edited));
         const result = await expectUnitNotAborted(() => b.run(racing));
         expect({ written: result.written, held: heldFor(result.held).length, file: b.file() === edited }).toEqual({ written: 0, held: 1, file: true });
+      });
+    }, 180_000);
+
+    test(`${id} file edit while the replacement is staged: the editor's bytes survive, the staged file is removed and the page is held`, async () => {
+      await withBrain(databaseUrl, reverseWrite, async b => {
+        b.writeFirstRunFile();
+        const edited = `${b.file()}\n${LATE_EDIT}\n`;
+        const realWrite = fs.writeFileSync;
+        let landed = false;
+        const staging = spyOn(fs, 'writeFileSync').mockImplementation(((path: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+          if (!landed && String(path).startsWith(`${b.path}.`) && String(path).endsWith('.tmp')) { realWrite(b.path, edited); landed = true; }
+          return (realWrite as (...a: unknown[]) => void)(path, ...rest);
+        }) as typeof fs.writeFileSync);
+        let result: { written: number; held: string[] };
+        try { result = await expectUnitNotAborted(() => b.run()); } finally { staging.mockRestore(); }
+        expect(landed).toBe(true);
+        expect({ written: result.written, held: heldFor(result.held).length, file: b.file() === edited,
+          staged: readdirSync(dirname(b.path)).filter(name => name.endsWith('.tmp')) }).toEqual({ written: 0, held: 1, file: true, staged: [] });
       });
     }, 180_000);
 

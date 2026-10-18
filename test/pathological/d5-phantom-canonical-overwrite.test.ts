@@ -15,10 +15,14 @@
  * the body it replaces is kept in page_versions.
  * Fails when: the redirect appends to the canonical file and mirrors the whole
  * file over the database body without comparing (the pre-fix refreshPageBody
- * path), which drops the database-only edit with no page_versions row.
+ * path), which drops the database-only edit with no page_versions row; or when
+ * the file is compared only before the transaction's database work, so a save
+ * inside it is renamed over.
  * Seams: an engine proxy whose first transaction after the redirect prepared
- * the canonical write lands a concurrent edit (database or file). PGLite
- * always, Postgres when DATABASE_URL is set.
+ * the canonical write lands a concurrent edit (database or file), and one that
+ * saves the canonical file from inside that transaction, after the redirect's
+ * row lock and page_versions read. PGLite always, Postgres when DATABASE_URL
+ * is set.
  */
 import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -123,6 +127,29 @@ function editsOnceCanonicalPrepared(engine: BrainEngine, file: string, before: (
   });
 }
 
+/**
+ * The engine whose first transaction after the redirect staged the canonical `.tmp` runs `during` inside that
+ * transaction, when it first saves a page version: an edit that lands after the redirect's database work began.
+ */
+function editsInsideCanonicalTransaction(engine: BrainEngine, file: string, during: () => void): BrainEngine {
+  let fired = false;
+  return new Proxy(engine, {
+    get(target, prop) {
+      if (prop === 'transaction') return async <T>(fn: (tx: BrainEngine) => Promise<T>) => {
+        if (fired || !existsSync(`${file}.tmp`)) return target.transaction(fn);
+        fired = true;
+        return target.transaction(async tx => {
+          const createVersion = tx.createVersion;
+          tx.createVersion = async (...args) => { during(); return createVersion.apply(tx, args); };
+          try { return await fn(tx); } finally { tx.createVersion = createVersion; }
+        });
+      };
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 for (const { backend, databaseUrl } of pathologicalArms()) {
   describe(`D-5 phantom redirect and a canonical database body that differs from its file (${backend})`, () => {
     test('D-5 db-newer, write-through on: the phantom is held with file_database_drift and both canonical copies stay', async () => {
@@ -201,6 +228,22 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const result = await expectUnitNotAborted(() => b.pass(racing));
         expect(landed).toBe(true);
         expect({ file: b.file(CANONICAL) === edited, body: (await b.body(CANONICAL)) === bodyBefore }).toEqual({ file: true, body: true });
+        expect({ redirected: result.redirected, held: heldFor(result, CANONICAL).length, phantomLive: await b.live(PHANTOM) })
+          .toEqual({ redirected: 0, held: 1, phantomLive: true });
+      });
+    }, 180_000);
+
+    test('D-5 file edit inside the redirect\'s transaction: the editor\'s bytes survive, the transaction rolls back and the phantom is held', async () => {
+      await withBrain(databaseUrl, async b => {
+        const [bodyBefore, versionsBefore] = [await b.body(CANONICAL), await b.versionsHolding(CANONICAL, 'works at acme-example')];
+        const edited = `${CANONICAL_BODY}\n${LATE_EDIT}\n`;
+        let landed = false;
+        const racing = editsInsideCanonicalTransaction(b.engine, b.path(CANONICAL), () => { writeFileSync(b.path(CANONICAL), edited); landed = true; });
+        const result = await expectUnitNotAborted(() => b.pass(racing));
+        expect(landed).toBe(true);
+        expect({ file: b.file(CANONICAL) === edited, tmp: existsSync(`${b.path(CANONICAL)}.tmp`) }).toEqual({ file: true, tmp: false });
+        expect({ body: (await b.body(CANONICAL)) === bodyBefore, versions: await b.versionsHolding(CANONICAL, 'works at acme-example') })
+          .toEqual({ body: true, versions: versionsBefore });
         expect({ redirected: result.redirected, held: heldFor(result, CANONICAL).length, phantomLive: await b.live(PHANTOM) })
           .toEqual({ redirected: 0, held: 1, phantomLive: true });
       });
