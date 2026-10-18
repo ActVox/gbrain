@@ -231,10 +231,13 @@ test/pathological/a11-effect-retry-budget.test.ts
 test/pathological/a12-withdrawal-mirror-gate.test.ts
 test/pathological/a13-embedding-target-park.test.ts
 test/pathological/a15-deactivate-exits.test.ts
+test/pathological/a18-ledger-path-text.test.ts
 test/pathological/a2-transcripts-ingest.test.ts
 test/pathological/a21-facts-expire-deleted.test.ts
 test/pathological/a22-consolidate-buckets.test.ts
 test/pathological/a23-patterns-grounding.test.ts
+test/pathological/a24-phantom-redirect-cursor.test.ts
+test/pathological/a25-propose-takes-poison-pages.test.ts
 test/pathological/a26-safe-chunks-reseal.test.ts
 test/pathological/a27-credential-reseal.test.ts
 test/pathological/a3-google-items.test.ts

@@ -879,6 +879,8 @@ export async function runExtractFacts(
   result.phantomsHeldLegacyRows = phantomResult.held_legacy_rows;
   result.phantomsLockBusy = phantomResult.lock_busy;
   result.phantomsMorePending = phantomResult.more_pending;
+  for (const f of phantomResult.failures) result.warnings.push(`phantom_redirect_failed: ${f.key} (${f.code}); retry: ${f.fix}`);
+  if (phantomResult.stopped) result.warnings.push(`phantom_redirect_stopped: ${phantomResult.stopped.message.slice(0, 300)}`);
 
   // ── Facts of soft-deleted pages ────────────────────────────────
   // Deleting a page removes the fence that is the facts' system of record,
