@@ -63,4 +63,10 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'repair.all_kinds': { file: 'test/pathological/a45-repair-all-kinds.test.ts', item: 'item case: a kind whose plan throws', run: 'run case: a run-scoped' },
   'repair.content_lane_kinds': { file: 'test/pathological/a46-content-lane-kinds.test.ts', item: 'item case: fences throwing is recorded', run: 'run case: a run-scoped' },
   'migration.credential_reseal': { file: 'test/pathological/a27-credential-reseal.test.ts', item: 'item case: the unbuildable page is held', run: 'run case: a run-scoped' },
+  'sync.import_files': { file: 'test/pathological/a18-ledger-path-text.test.ts',
+    item: 'A-18 item: billing/q3.md (mode 000) is PERMISSION_DENIED', run: 'A-18 run: a run-scoped' },
+  'propose_takes.pages': { file: 'test/pathological/a25-propose-takes-poison-pages.test.ts',
+    item: 'A-25 item: the 5 newest pages fail every run', run: 'A-25 run: a run-scoped' },
+  'extract_facts.phantom_redirect': { file: 'test/pathological/a24-phantom-redirect-cursor.test.ts',
+    item: 'A-24 item: a phantom whose redirect throws is reported with its code and fix', run: 'A-24 run: a run-scoped' },
 };

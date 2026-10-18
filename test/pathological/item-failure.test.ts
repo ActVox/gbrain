@@ -7,6 +7,7 @@ import { CODES } from '../../src/core/error-registry.ts';
 import { classifyItemFailure, CONTENT_ITEM_CODES, ItemRun, RUN_SCOPED_CODES } from '../../src/core/item-failure.ts';
 import { OperationError } from '../../src/core/ops/contract.ts';
 import { PageSourceMissingError } from '../../src/core/page-state/guards.ts';
+import { AIConfigError, AITransientError } from '../../src/core/ai/errors.ts';
 import { runScopedErrors } from './harness.ts';
 
 const op = (code: string, extra: Partial<OperationError> = {}) => Object.assign(new OperationError(code as never, `refused: ${code}`), extra);
@@ -98,6 +99,25 @@ describe('ItemRun breaker', () => {
     expect(run.failures).toEqual([]);
     expect(run.systemic()).toBeNull();
   });
+});
+
+test('a provider refusal of one request\'s own input is the item\'s content failure; other provider 400s stay transient (A-25)', () => {
+  const status = (error: Error, code: number) => Object.assign(error, { status: code });
+  expect(classifyItemFailure(status(new AIConfigError('[chat(anthropic:claude-example)] prompt is too long: 250000 tokens > 200000 maximum'), 400)))
+    .toMatchObject({ code: 'request_too_large', scope: 'item', class: 'content' });
+  expect(classifyItemFailure(status(new AIConfigError('[chat(openai:gpt-example)] Request Entity Too Large'), 413))).toMatchObject({ code: 'request_too_large', class: 'content' });
+  const blocked = Object.assign(new Error('Bad Request'), { statusCode: 400, responseBody: JSON.stringify({ error: { code: 'content_policy_violation' } }) });
+  expect(classifyItemFailure(new AIConfigError('[chat(openai:gpt-example)] Bad Request', undefined, blocked))).toMatchObject({ code: 'content_rejected', class: 'content' });
+  expect(classifyItemFailure(status(new AIConfigError('[chat(openai:gpt-example)] Unknown parameter: temperature'), 400))).toMatchObject({ scope: 'item', class: 'transient' });
+  expect(classifyItemFailure(new AITransientError('[chat(openai:gpt-example)] context length exceeded upstream'))).toMatchObject({ class: 'transient' });
+});
+
+test('a model provider\'s transport failure is the item\'s transient failure, never a lost database connection (A-25)', () => {
+  expect(classifyItemFailure(new Error('fetch failed: ECONNRESET'))).toMatchObject({ code: 'provider_error', scope: 'item', class: 'transient' });
+  expect(classifyItemFailure(new AITransientError('[chat(openai:gpt-example)] socket hang up', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }))))
+    .toMatchObject({ code: 'provider_error', scope: 'item' });
+  expect(classifyItemFailure(Object.assign(new Error('Connection terminated unexpectedly'), { code: '08006' })).scope).toBe('run');
+  expect(classifyItemFailure(new Error('read ECONNRESET')).scope).toBe('run');
 });
 
 test('RUN_SCOPED_CODES holds item_failures_systemic so a tripped inner loop stops its outer loop', () => {

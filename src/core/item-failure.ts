@@ -24,6 +24,7 @@
 import { OperationError, opError } from './ops/contract.ts';
 import { CODES } from './error-registry.ts';
 import { acceptedPendingReceipt } from './persistence/accepted-pending.ts';
+import { providerItemRefusal } from './ai/errors.ts';
 
 /** Every per-item loop that isolates its items, with the inventory row it fixes (reports/GBRA-130-inventory.md). */
 export const ISOLATE_SITES = {
@@ -43,6 +44,9 @@ export const ISOLATE_SITES = {
   'repair.all_kinds': 'A-45',
   'repair.content_lane_kinds': 'A-46',
   'migration.credential_reseal': 'A-27',
+  'propose_takes.pages': 'A-25',
+  'sync.import_files': 'A-18',
+  'extract_facts.phantom_redirect': 'A-24',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
@@ -90,6 +94,8 @@ function sqlstateFailure(state: string): { code: string; scope: 'run' | 'item'; 
 const RUN_ERRNOS = new Set(['ENOSPC', 'EMFILE', 'ENFILE', 'EROFS', 'EDQUOT']);
 const ITEM_ERRNOS = new Set(['EACCES', 'EPERM', 'ENOENT', 'ELOOP', 'EISDIR', 'ENOTDIR', 'ENAMETOOLONG', 'EILSEQ']);
 const RUN_ERROR_NAMES: Record<string, string> = { AbortError: 'aborted', LockStolenError: 'lock_stolen', BudgetExhausted: 'budget_exhausted' };
+/** A model or embedding provider's own failure (the gateway's error classes, an HTTP fetch that failed): never the database connection; a provider outage trips the breaker. */
+const AI_ERROR_NAMES = new Set(['AIServiceError', 'AITransientError', 'AIConfigError']);
 /** Typed refusals of one item raised as plain errors: content, because the item fails the same way until it or its source changes. */
 const ITEM_ERROR_NAMES: Record<string, string> = { PageSourceMissingError: 'unknown_source' };
 
@@ -100,6 +106,11 @@ function classifyOne(error: unknown): ClassifiedItemFailure | null {
   if (typeof name === 'string' && ITEM_ERROR_NAMES[name]) return { code: ITEM_ERROR_NAMES[name]!, scope: 'item', class: 'content', message, requestId: null };
   const pending = acceptedPendingReceipt(error);
   if (pending) return { code: 'write_pending', scope: 'pending', class: 'transient', message, requestId: pending.request_id };
+  const refusal = providerItemRefusal(error);
+  if (refusal) return { code: refusal, scope: 'item', class: 'content', message, requestId: null };
+  if ((typeof name === 'string' && AI_ERROR_NAMES.has(name)) || /\bfetch failed\b/i.test(message)) {
+    return { code: 'provider_error', scope: 'item', class: 'transient', message, requestId: null };
+  }
   if (error instanceof OperationError) {
     const code = String(error.code === 'storage_error' && error.writeError ? error.writeError : error.canonicalCode);
     const requestId = error.writeRequest?.request_id ?? null;
