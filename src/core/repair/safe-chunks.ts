@@ -13,6 +13,12 @@
  * Code pages need their recorded source path to re-chunk; pages without one,
  * and page kinds the projection installer cannot rebuild (images), are counted
  * as residuals and left for their importer.
+ *
+ * A page whose re-seal throws item-scoped (its chunker refuses the body, the
+ * chunk install fails a constraint) is a `held` outcome with reason
+ * `projection_unbuildable`, the classified code and message: its old chunks
+ * stay withheld and the next run retries it. A run-scoped failure (a lost
+ * connection, a failed transaction, a held writer) stops the run.
  */
 import type { BrainEngine } from '../engine.ts';
 import { resealSafeChunks } from '../page-state/projections.ts';
@@ -21,6 +27,8 @@ import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
 import { embedStalePages } from '../embed-stale.ts';
 import { CREDENTIAL_RESEAL_HELD } from '../page-state/credential-reseal.ts';
 import { afterCursor, type RepairCursor, type RepairHandler, type RepairItem, type RepairScope } from './core.ts';
+import { classifyItemFailure } from '../item-failure.ts';
+import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 
 interface PendingRow { id: number; source_id: string; slug: string; page_kind: string; rebuildable: boolean; chars: number }
 
@@ -51,7 +59,11 @@ export const safeChunksRepair: RepairHandler = {
     } catch (error) {
       // A page edited since planning is re-sealed by its own write.
       if (error instanceof PageRevisionConflictError) return false;
-      throw error;
+      // GBRA-130 A-26: a page whose projection cannot be built is held (its chunks stay withheld) and the kind goes on; a run-scoped failure stops it.
+      const failure = classifyItemFailure(error);
+      if (failure.scope !== 'item') throw error;
+      return { applied: false, outcome: 'held', reason: 'projection_unbuildable', detail: { code: failure.code, message: redactConnectionInfo(failure.message).slice(0, 500),
+        fix: `gbrain repair safe-chunks --source ${item.source_id} --apply` } };
     }
     if (!resealed) return false;
     if (opts?.embed && resealed.pendingChunks > 0) {
