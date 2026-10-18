@@ -274,6 +274,7 @@ export async function runBackfill<TRow = Record<string, unknown>>(
   const startLedger = opts.dryRun ? null : await readSkipLedgerRaw(engine, spec.name).catch(() => null);
   const ledger = parseSkipLedger(opts.fresh === true ? null : startLedger);
   const items = new ItemRun('backfill.rows');
+  const { VERSION: producer } = await import('../version.ts');
 
   const saveLedger = async () => {
     const raw = JSON.stringify(ledger);
@@ -351,7 +352,7 @@ export async function runBackfill<TRow = Record<string, unknown>>(
         }
       }
       if (part.length === 1) {
-        noteSkip(ledger, idOf(part[0]), rowRevision(part[0]), items.fail(String(idOf(part[0])), error), now());
+        noteSkip(ledger, idOf(part[0]), rowRevision(part[0]), items.fail(String(idOf(part[0])), error), now(), producer);
         skipped++;
         return;
       }
@@ -374,7 +375,7 @@ export async function runBackfill<TRow = Record<string, unknown>>(
       const present = new Set(pending.map(idOf));
       for (const id of ids) if (!present.has(id)) delete ledger.items[String(id)];
       for (const row of pending) {
-        if (heldUnchanged(ledger.items[String(idOf(row))], rowRevision(row))) continue;
+        if (heldUnchanged(ledger.items[String(idOf(row))], rowRevision(row), producer)) continue;
         examined++;
         try { await attempt([row]); } catch (err) {
           if (!isolatable(err)) throw err;
