@@ -5,11 +5,15 @@
  * honestly returns `[]`. The prior atom stays live (no `retired_by`), the scan state advances for the new
  * content (the completed `managed-atoms` checkpoint and the page state, so the next run makes no model call), and
  * `gbrain repair stale-atoms` does not list the kept atom. A later non-empty extraction still retires it, and an
- * unmanaged brain agrees with the managed one.
+ * unmanaged brain agrees with the managed one. A partial publish retires nothing either: when the batch's re-written
+ * atom conflicts (it was edited between admission and publication), the batch's retirement of another atom is
+ * refused and that atom stays live.
+ * Seams: the phase's `_pages` / `_chat` test inputs (no paid call), and a `consumer:preparing` fault hook that makes
+ * the re-written atom's preparation fail `revision_conflict`, as a concurrent edit of that atom would.
  * Fails when: `publishManagedAtoms(..., [])` computes retirements for every prior atom of the origin and
  * soft-deletes them with `retired_by: managed-reextract` (master before the fix), or the stale-atoms preview counts
  * a zero-yield completion as a replacement.
- * Seams: the phase's `_pages` / `_chat` test inputs (no paid call). PGLite always, Postgres when DATABASE_URL is set.
+ * PGLite always, Postgres when DATABASE_URL is set.
  */
 import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -18,10 +22,13 @@ import { join } from 'node:path';
 import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
-import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
+import { disposePersistenceConsumer, waitForWrites } from '../../src/core/persistence/service.ts';
+import type { WriteRequest } from '../../src/core/persistence/model.ts';
+import type { GBrainConfig } from '../../src/core/config.ts';
+import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { staleAtomsRepair } from '../../src/core/repair/stale-atoms.ts';
 import { operations } from '../../src/core/operations.ts';
-import type { OperationContext } from '../../src/core/ops/contract.ts';
+import { OperationError, type OperationContext } from '../../src/core/ops/contract.ts';
 import { isolatedSharedSkillsEngine } from '../helpers/shared-skills-engine.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { managedBrain, pathologicalArms } from './harness.ts';
@@ -91,6 +98,38 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const after = await atoms(engine);
         expect(after.find(row => row.slug === atom!.slug)).toEqual({ slug: atom!.slug, live: false, retired_by: 'managed-reextract' });
         expect(after.filter(row => row.live).length).toBe(1);
+      }, { databaseUrl });
+    }, 240_000);
+
+    test('H-1 managed partial publish: a retirement whose sibling atom page conflicted retires nothing', async () => {
+      await managedBrain(async ({ engine, ctx }) => {
+        await edit(ctx, 'first');
+        await extract(engine, ['Launch exit criteria', 'Weekly review owner']);
+        const first = await atoms(engine);
+        expect(first.map(row => row.live)).toEqual([true, true]);
+        const kept = first.find(row => row.slug.includes('exit-criteria'))!.slug;
+        const retiring = first.find(row => row.slug.includes('review-owner'))!.slug;
+        await edit(ctx, 'second');
+        let fired = false;
+        installFaultHook(async (point, detail) => {
+          if (fired || point !== 'consumer:preparing' || !detail.writeId) return;
+          const [row] = await engine.executeRaw<{ slug: string; kind: string | null }>(
+            "SELECT slug, intent->>'kind' AS kind FROM persistence_requests WHERE id=$1::uuid", [detail.writeId]);
+          if (row?.kind !== 'managed_atom_page' || row.slug !== kept) return;
+          fired = true;
+          throw new OperationError('revision_conflict', `Page ${kept} changed after the atom batch was accepted.`, 'Run the atom drain again.');
+        });
+        try { await extract(engine, ['Launch exit criteria', 'Launch review cadence']).catch(() => undefined); }
+        finally { installFaultHook(undefined); }
+        expect(fired).toBe(true);
+        const pending = await engine.executeRaw<WriteRequest>("SELECT * FROM persistence_requests WHERE source_id='default' AND state IN ('queued','running')");
+        await waitForWrites(engine, pending, { engine: engine.kind } as GBrainConfig, 60_000);
+        await disposePersistenceConsumer(engine);
+        const after = await atoms(engine);
+        expect(after.find(row => row.slug === retiring)).toEqual({ slug: retiring, live: true, retired_by: null });
+        const [refused] = await engine.executeRaw<{ state: string; error_code: string | null }>(
+          `SELECT state, error_code FROM persistence_requests WHERE source_id='default' AND slug=$1 AND intent->>'kind'='managed_atom_delete'`, [retiring]);
+        expect(refused).toEqual({ state: expect.not.stringMatching(/^committed$/), error_code: 'revision_conflict' });
       }, { databaseUrl });
     }, 240_000);
 
