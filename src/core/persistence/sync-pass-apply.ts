@@ -10,7 +10,9 @@
  *   `sync-deletes-withheld` record (refreshed each pass) and settles those deletes `withheld`; imports and the stamp
  *   proceed and no per-page hold is written. A cleared trip deletes the record. Only `GBRAIN_ALLOW_MASS_RECONCILE=1` in the
  *   owner host's environment applies the deletes; a remote caller never does.
- * - **Holds** (rows 6, 9; §3.1 settle mismatch): `delete_drift` is a `file_drift` hold with side `deleted`, state
+ * - **Holds** (rows 6, 9; §3.1 settle mismatch; #6948): a path several live pages record as their origin is an
+ *   `origin_conflict` hold of that path alone, with the shared verdict (origin-twins.ts) the sync-time heal acts on;
+ *   `delete_drift` is a `file_drift` hold with side `deleted`, state
  *   `file_gone`; `deleted_edited` one with state `tombstone_edited` or `purged_differs` (purged holds carry the slug the
  *   marker names); a path that settled in three consecutive passes at one level without classifying settled is a
  *   `settle_mismatch` hold (`needs_human`). Each is written at level `L` under the drain lease, so it is `held` (row 1)
@@ -54,6 +56,10 @@ import type { SyncAdmission } from './sync-admission.ts';
 import type { Action } from '../agent-output.ts';
 import { slugUnderBoundPrefixes } from '../ops/context.ts';
 import { syncOriginPath } from './sync-origin.ts';
+import { decideOriginTwins, readOriginClaimants, slugPathOccupied, type OriginConflict } from './origin-twins.ts';
+import { originConflictHold } from './sync-screen.ts';
+import { readSyncFile } from './sync-discovery.ts';
+import { frontmatterIdentity } from '../sync-rename-identity.ts';
 
 /** Legacy pages the sweep screens per pass after the incarnation's first full round (design §2.7, [estimated]). */
 export const PASS_LEGACY_SWEEP_MAX = 500;
@@ -66,7 +72,7 @@ const LEVEL_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 /** What a pass applied across its rounds (kept in memory; its counts go into the pass row's telemetry). */
 export interface PassApplyState {
   markersRetired: number;
-  holds: { file_gone: number; tombstone_edited: number; purged_differs: number; settle_mismatch: number };
+  holds: { file_gone: number; tombstone_edited: number; purged_differs: number; settle_mismatch: number; origin_conflict: number };
   settleMismatch: string[];
   adopted: number;
   swept: { screened: number; recorded: number };
@@ -78,6 +84,8 @@ export interface PassApplyState {
   keepDb: { admitted: number; pending: number; paused: number; refused: Record<string, number> };
   /** keep_db paths admitted in this pass: never admitted twice. */
   keepDbTaken: string[];
+  /** #6948: paths this pass held `origin_conflict` (re-screen due, so a later round reads them again): held once per pass. */
+  originHeld: Set<string>;
   matchedSlugs: Set<string>;
   /** The newest round's classes and summary (design §9), after this module settled what it finished. */
   classes: Record<string, { count: number; action: SyncClassAction }>;
@@ -90,8 +98,8 @@ export interface PassApplyState {
 }
 
 export function newPassApplyState(): PassApplyState {
-  return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0 }, settleMismatch: [], adopted: 0,
-    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], matchedSlugs: new Set(), classes: {}, summary: null, recorded: new Set() };
+  return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0, origin_conflict: 0 }, settleMismatch: [], adopted: 0,
+    swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], originHeld: new Set(), matchedSlugs: new Set(), classes: {}, summary: null, recorded: new Set() };
 }
 
 export interface PassApplyInput {
@@ -138,7 +146,12 @@ export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, in
     }
   }
   await applyDeleteValve(engine, level, input, state);
-  if (input.remote) { summarizeRound(level, state); return; }
+  if (input.remote) {
+    // #6948: a remote pass writes no hold, so a path several live pages claim is left as it is for the owner's pass to hold.
+    for (const entry of level.paths) if (entry.ambiguousOrigin?.kind === 'several_live' && !entry.result.settled && !entry.result.inFlight) settleAs(entry, { settled: true, action: 'none', classAction: 'repair' });
+    summarizeRound(level, state);
+    return;
+  }
   await writePassHolds(engine, level, input, state);
   await adoptRecords(engine, level, state);
   await sweepLegacy(engine, level, input, state);
@@ -229,7 +242,7 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
 
 /** Rows 6 and 9 and the settle-mismatch streak (§3.1): holds at level `L`, written under the drain lease. */
 async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
-  type Pending = { entry: ShadowPath; code: GitHoldCode; message: string; slug: string | null; meta: Partial<GitHoldMeta>; kind: keyof PassApplyState['holds'] };
+  type Pending = { entry: ShadowPath; code: GitHoldCode; message: string; slug: string | null; meta: Partial<GitHoldMeta>; kind: keyof PassApplyState['holds']; pageId?: null };
   const pending: Pending[] = [];
   // A held rename's origin waits for its destination's hold (#5988), whatever its page did meanwhile.
   const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
@@ -237,8 +250,17 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
   for (const entry of level.paths) {
     if (step.due()) await step.pause();
     const r = entry.result;
-    if (r.settled || r.inFlight) continue;
-    const { path } = passEntryPaths(level, entry.path);
+    if (r.inFlight) continue;
+    const { path, sourcePath } = passEntryPaths(level, entry.path);
+    // A level pass sees every claimed path, so a settled one (an unchanged file) is held too: the heal then resolves it.
+    if (entry.ambiguousOrigin?.kind === 'several_live' && r.cls !== 'spelling' && r.cls !== 'held') {
+      if (state.originHeld.has(entry.path)) { settleAs(entry, { cls: 'held', settled: true, action: 'none', classAction: 'repair' }); continue; }
+      const held = originConflictHold({ path, sourcePath, working: level.mode === 'working', action: entry.state.level === null ? 'delete' : 'import',
+        originConflict: await passOriginConflict(engine, level, entry, path, sourcePath) });
+      pending.push({ entry, code: 'origin_conflict', slug: held.slug, kind: 'origin_conflict', meta: held.meta, message: held.message, pageId: null });
+      continue;
+    }
+    if (r.settled) continue;
     const streak = input.obligations.mismatch?.[entry.path];
     if (streak && streak.streak >= SETTLE_MISMATCH_STREAK && streak.level === entry.state.level) {
       pending.push({ entry, code: 'settle_mismatch', slug: entry.slug, kind: 'settle_mismatch', meta: { mismatch_streak: streak.streak },
@@ -262,7 +284,8 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
     await assertDrainLease(tx, level.sourceId);
     for (const hold of pending) {
       const { path, sourcePath } = passEntryPaths(level, hold.entry.path);
-      await writeGitHold(tx, { source_id: level.sourceId, incarnation: level.incarnation, path, source_path: sourcePath, slug: hold.slug, page_id: hold.entry.state.page?.live ? hold.entry.pageId : null,
+      await writeGitHold(tx, { source_id: level.sourceId, incarnation: level.incarnation, path, source_path: sourcePath, slug: hold.slug,
+        page_id: hold.pageId !== undefined ? hold.pageId : hold.entry.state.page?.live ? hold.entry.pageId : null,
         code: hold.code, message: hold.message, upstream_version: hold.entry.state.levelSha256, observed_at: input.observedAt, run_id: input.passId, mode: 'managed',
         meta: { recovery_version: RECOVERY_VERSION, ...levelMeta(level, hold.entry), ...hold.meta } });
     }
@@ -270,8 +293,26 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
   for (const hold of pending) {
     state.holds[hold.kind]++;
     if (hold.code === 'settle_mismatch') state.settleMismatch.push(passEntryPaths(level, hold.entry.path).path);
+    if (hold.code === 'origin_conflict') state.originHeld.add(hold.entry.path);
     settleAs(hold.entry, { cls: 'held', settled: true, action: 'none', classAction: 'repair' });
   }
+}
+
+/**
+ * #6948, as discovery's `originConflictOf`: the live claimants' verdict inputs and the shared verdict, with the file's
+ * explicit id read at the path's level `L` (undefined, so the verdict holds `file_unreadable`, when there is no file or
+ * it cannot be read).
+ */
+async function passOriginConflict(engine: BrainEngine, level: ShadowLevel, entry: ShadowPath, path: string, sourcePath: string): Promise<OriginConflict> {
+  const claimants = await readOriginClaimants(engine, level.sourceId, entry.ambiguousOrigin!.ids);
+  const oid = entry.state.level;
+  const bytes = oid === null ? null : level.mode === 'working' ? readSyncFile(level.root, path)
+    : (await readBlobs(level.gitRoot, [oid], LEVEL_BLOB_MAX_BYTES).catch(() => new Map<string, Buffer>())).get(oid) ?? null;
+  let fileId: string | null | undefined;
+  try { fileId = bytes === null ? undefined : frontmatterIdentity(bytes.toString('utf8')).id; } catch { fileId = undefined; }
+  const verdict = decideOriginTwins({ sourcePath, claimants, fileId, slugPathOccupied: slugPathOccupied(level) });
+  return { canonical: verdict.canonical, claimants: verdict.verdict === 'resolve' ? [verdict.survivor, ...verdict.twins] : verdict.claimants,
+    ...(verdict.verdict === 'hold' ? { reason: verdict.reason } : {}) };
 }
 
 /** One page's import-record write of a round: the record to store and the page revision it must still be at. */
@@ -417,7 +458,7 @@ export async function finishPassApply(engine: BrainEngine, sourceId: string, sta
 export function passApplyCounts(state: PassApplyState): Record<string, number> {
   const refused = Object.values(state.keepDb.refused).reduce((a, b) => a + b, 0);
   return { markers_retired: state.markersRetired, holds_file_gone: state.holds.file_gone, holds_tombstone_edited: state.holds.tombstone_edited,
-    holds_purged_differs: state.holds.purged_differs, holds_settle_mismatch: state.holds.settle_mismatch, adopted: state.adopted, legacy_swept: state.swept.screened,
+    holds_purged_differs: state.holds.purged_differs, holds_settle_mismatch: state.holds.settle_mismatch, holds_origin_conflict: state.holds.origin_conflict, adopted: state.adopted, legacy_swept: state.swept.screened,
     legacy_recorded: state.swept.recorded, deletes_withheld: state.withheldCount, keep_db_admitted: state.keepDb.admitted, keep_db_pending: state.keepDb.pending,
     paused_keep_db: state.keepDb.paused, keep_db_refused: refused };
 }

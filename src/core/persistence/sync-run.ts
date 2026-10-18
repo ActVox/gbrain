@@ -18,8 +18,8 @@ import { assertSyncEntryOrigin, discoverManagedSync, readManagedSyncRows, resolv
 import { checkpointRevival } from './sync-slug-mode.ts';
 import { managedCursorKey, resolveManagedCursor } from './sync-cursor-key.ts';
 import { isImageFilePath, isMultimodalEnabled } from '../sync.ts';
-import { assertSyncPageOrigin, sameSyncOrigin, syncOriginScope } from './sync-origin.ts';
-import { activeManagedBrainId, assertSyncDispatchActive, managedSyncAuthority, validateSyncAuthority, validateManagedSyncOptions, syncProcessingOptions, SYNC_PROCESSING_KEYS, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
+import { assertSyncPageOrigin, sameSyncOrigin, sharedOriginExit, syncOriginScope } from './sync-origin.ts';
+import { activeManagedBrainId, assertManagedSyncActive, assertSyncDispatchActive, managedSyncAuthority, validateSyncAuthority, validateManagedSyncOptions, syncProcessingOptions, SYNC_PROCESSING_KEYS, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { prepareManagedSyncMutation, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { streamedSyncBodyRef, type SyncBodyRef } from './sync-streamed.ts';
 import { startClaimPhase } from './claim-phase.ts';
@@ -46,7 +46,7 @@ import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
 import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
-import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
+import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
 import { frozenImageIntent, sameImageBytes } from './sync-image.ts';
 import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
 import { managedSyncWriteDiagnostic, writeWaitOf } from './sync-write-diagnostic.ts';
@@ -346,6 +346,10 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     // are on; `sync.holds=fail` and company-brain cursors keep the refusals.
     const holdsOn = !!run.screen && !cursor.companyPlan;
     if (entry.legacySlugs?.length && !holdsOn) throw syncRunRefusal('page_identity_changed', 'Legacy pages sync cannot import into match the imported file.', retry, `${entry.path} imports as page ${entry.slug}, but pages ${entry.legacySlugs.join(', ')} of source ${cursor.sourceId}, imported from a file of that name, record no file (sync.holds=fail); keep the file's page, remove the others, then sync again.`);
+    if (entry.originConflict) {
+      if (!holdsOn) throw syncRunRefusal('page_identity_changed', 'Several pages claim the same imported origin.', retry, `Pages ${entry.originConflict.claimants.map(page => page.slug).join(', ')} of source ${cursor.sourceId} all record ${entry.path} as their origin (sync.holds=fail); ${sharedOriginExit(cursor.sourceId, entry.originConflict.claimants.map(page => page.slug))} Then sync again.`);
+      return { hold: originConflictHold(entry) };
+    }
     const [occupant, snapshot] = await Promise.all([alreadyImportedAtOrigin(engine, cursor, entry, originScope).catch(error => {
       if (!holdsOn || !(error instanceof OperationError) || error.code !== 'page_identity_changed') throw error;
       return { originFault: error };

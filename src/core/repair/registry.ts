@@ -67,6 +67,7 @@ import { fileDriftRepair } from './file-drift.ts';
 import { stuckRecoveryRepair } from './stuck-recovery.ts';
 import { ghostPagesRepair, GHOST_CONSENT_TEXT, GHOST_CONSEQUENCES, GHOST_PURGE_FUSE_HOURS } from './ghost-pages.ts';
 import { legacyTwinsRepair, LEGACY_TWINS_CONSENT_TEXT, LEGACY_TWINS_PURGE_FUSE_HOURS } from './legacy-twins.ts';
+import { originTwinsRepair, ORIGIN_TWINS_CONSENT_TEXT, ORIGIN_TWINS_PURGE_FUSE_HOURS } from './origin-twins.ts';
 import { receiptCompactionRepair } from './receipt-compaction.ts';
 import { aliasesRepair } from './aliases.ts';
 import { renameIdentityRepair, RENAME_IDENTITY_CONSENT_TEXT } from './rename-identity.ts';
@@ -339,6 +340,18 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'each page with its recorded path and revision, bound to the owner; --apply --expect <hash> --yes soft-deletes exactly that set through delete_page, '
       + 'rechecking each file is still absent (a restored file keeps its page and asks for a new preview). Refused when ghosts are over half of the source\'s '
       + `file-backed pages unless GBRAIN_ALLOW_MASS_RECONCILE=1. Purged after ${GHOST_PURGE_FUSE_HOURS} h; ${GHOST_CONSEQUENCES.undo} Runs only when named.`,
+  },
+  'origin-twins': {
+    handler: originTwinsRepair, embeds: 'none', checks: ['origin_twins'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: ORIGIN_TWINS_CONSENT_TEXT,
+    summary: 'Resolve duplicate-origin twins (#6948): several live pages of one source recording the same file, which sync holds origin_conflict. Needs --source; '
+      + 'refused off the canonical owner host. A group whose pages are verified duplicates (the page the path names, one body, readable file, compatible ids, one '
+      + 'visibility and trust tier, no slug-keyed withdrawals, no file at a twin\'s slug path, no evidence the merge would lose) is merged: links, relationship dates, '
+      + 'timeline, raw data, user tags, aliases and facts move to the canonical page, the twin\'s slug becomes an alias, and the twin is soft-deleted (the file stays) '
+      + `and purged after ${ORIGIN_TWINS_PURGE_FUSE_HOURS} h; the receipt lists the twin\'s frontmatter keys the survivor lacks and the restore command. Any other group is listed with the `
+      + 'commands to decide it; --slug <kept-slug> then only detaches the other pages (they forget the file and stay live). Refused when merges are over half of '
+      + 'the source\'s file-backed pages unless GBRAIN_ALLOW_MASS_RECONCILE=1. Once no source has a group, --apply builds the pages_live_origin_key index. '
+      + 'Preview-bound: --apply --expect <hash> --yes resolves exactly the previewed set. Runs only when named.',
   },
   'receipt-compaction': {
     handler: receiptCompactionRepair, embeds: 'none', checks: ['persistence_capacity'], explicit_only: true, preview_bound: true, consent: 'destructive',

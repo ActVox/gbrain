@@ -170,6 +170,34 @@ export async function retryParkedEffects(engine: BrainEngine, sourceId: string, 
   });
 }
 
+/** Park codes an abandoned index lock produces; a reclaim removes their cause. */
+const INDEX_LOCK_PARK_CODES = ['git_index_stale', 'git_index_locked'];
+
+/**
+ * #6932: after the canonical writer reclaims an abandoned index lock in a worktree, each request there whose
+ * parked targets were all parked by that lock gets the one more attempt `retry-effects` would authorize,
+ * through the same checks (stored authority, claims, recovery). A request it cannot retry stays parked for
+ * the operator. Returns the number of requests requeued; never throws, so a reclaim's own outcome stands.
+ */
+export async function retryIndexLockParks(engine: BrainEngine, worktreeId: string): Promise<number> {
+  let requeued = 0;
+  try {
+    const requests = await engine.executeRaw<{ id: string; source_id: string; request_id: string }>(
+      `SELECT DISTINCT r.id,r.source_id,r.request_id FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
+       WHERE e.worktree_id=$1::uuid AND e.kind='git' AND e.state='failed' AND e.error_code='targets_parked' AND e.data ? 'parked'
+       AND NOT EXISTS (SELECT 1 FROM persistence_effects o CROSS JOIN LATERAL jsonb_array_elements(COALESCE(o.data->'parked','[]'::jsonb)) AS p(target)
+         WHERE o.request_id=e.request_id AND (o.state<>'committed' AND o.data ? 'parked') AND COALESCE(p.target->>'error_code','') <> ALL($2::text[]))
+       LIMIT 100`, [worktreeId, INDEX_LOCK_PARK_CODES]);
+    for (const request of requests) {
+      try {
+        const result = await retryParkedEffects(engine, request.source_id, request.request_id, false, { internalId: request.id });
+        if ((result?.effects as { action?: string }[] | undefined)?.some(effect => effect.action === 'retry_queued')) requeued++;
+      } catch { /* refused (authority, claim, host identity): it stays parked with its retry command */ }
+    }
+  } catch { /* the parked effects keep their retry commands */ }
+  return requeued;
+}
+
 /**
  * `retry-effects` dispatch: parked Git/withdrawal work that still needs action
  * wins; otherwise the embedding obligation is handled, with any settled parked

@@ -208,6 +208,8 @@ test/managed-sync-stale-group-head.test.ts
 test/migration-persistence-request-id-index.test.ts
 test/migration-persistence-request-slug-index.test.ts
 test/on-commit-embedding.serial.test.ts
+test/origin-guard-6948.test.ts
+test/origin-twins-6948.test.ts
 test/overwritten-edits-6712.test.ts
 test/owner-refusal.test.ts
 test/pack-relation-direction-engine.test.ts

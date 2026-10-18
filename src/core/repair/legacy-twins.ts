@@ -10,22 +10,26 @@
  * every pair with both ids, slugs and revisions, the recorded path and whether the two pages hold the same content,
  * bound to the canonical owner it ran under; a pair it does not merge on its own is listed as a decision with the
  * commands a person uses to decide (two-sided content, several legacy candidates for one twin, a twin whose file is
- * missing or differs from it, withdrawn claims on the twin, a file at the twin's slug path). `--apply --expect <hash>
+ * missing or differs from it, withdrawn claims on the twin, a file at the twin's slug path, a twin row the merge would
+ * lose). `--apply --expect <hash>
  * --yes` merges exactly the approved pairs, one coordinated write per pair (`managed_maintenance_merge_legacy_twin`
  * on the twin, holding the legacy page's key too; an unmanaged brain does the same in one maintenance transaction):
  *
  *   1. the legacy page records the file as its origin, keeping its id, slug, links, timeline, versions and aliases;
- *   2. the twin's links (both directions and as origin, deduplicated against the legacy page's own; links between
- *      the pair stay), timeline rows, slug aliases, facts other pages assert about it, raw data rows the legacy page
- *      lacks and file attachments move to the legacy page, and the twin's slug becomes a `slug_aliases` row for it;
+ *   2. the shared twin merge (#6948, persistence/twin-merge.ts `mergeTwinInto`, the one `gbrain repair origin-twins`
+ *      uses) moves the twin's links in every role and their dated transitions (links between the pair stay), timeline
+ *      rows, raw data, file attachments, user-added tags, slug aliases and facts other pages assert about it to the
+ *      legacy page, and the twin's slug becomes a `slug_aliases` row for it. A twin row that would land on a legacy row
+ *      saying something different is a decision (`twin_evidence_conflicts`), never dropped;
  *   3. the twin's sync import record moves to the legacy page with its post-write revision, so the next sync sees
  *      the file and the page both unchanged (the classifier's `matched`) instead of an unproven drift;
  *   4. the twin is soft-deleted as a shared origin: the file is untouched. Its tombstone forgets the file
- *      (`source_path` and `source_uri` cleared), so the 72 h retention purge removes it database-only instead of
+ *      (`source_path` and `source_uri` cleared, marked `origin_twin` so a restore writes no file), so the 72 h
+ *      retention purge removes it database-only instead of
  *      refusing it forever as a page whose file another live page records; a pair whose twin slug path holds a
  *      file is a decision, so that purge has no file to compare or remove.
  *
- * Kept on the twin (they go with it when it is purged, and come back if it is restored): its tags, chunks and
+ * Kept on the twin (they go with it when it is purged, and come back if it is restored): its import-owned tags, chunks and
  * embeddings, page versions, the facts and takes its own body projects and its derived per-page state. Both pages
  * hold the same content, so the legacy page already has the same projections.
  *
@@ -46,8 +50,6 @@ import { readFix, trustedCliRequired } from '../ops/op-fix.ts';
 import { isOpPageSlug } from '../ops/context.ts';
 import { resolveSourceLocalFilePath } from '../markdown.ts';
 import { slugifyPath } from '../sync.ts';
-import { noteBelief } from '../belief/ledger.ts';
-import { recordRenameAlias } from '../page-state/rename-alias.ts';
 import { authorizeWrite } from '../persistence/authority.ts';
 import { prepareCoreGuard } from '../persistence/core-guard.ts';
 import { existingLocalHostId } from '../persistence/identity.ts';
@@ -56,7 +58,8 @@ import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { liveFileDrift } from '../persistence/drift-conflicts.ts';
 import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
-import { readSyncImportProvenance, recordSyncImportProvenance, SYNC_IMPORT_PROVENANCE_OP } from '../persistence/sync-holds.ts';
+import { readSyncImportProvenance, recordSyncImportProvenance } from '../persistence/sync-holds.ts';
+import { mergeTwinInto, twinMergeConflicts } from '../persistence/twin-merge.ts';
 import { MASS_RECONCILE_MIN_PAGES, MASS_RECONCILE_RATIO, massReconcileAllowed } from '../sync-reconcile.ts';
 import type { GhostOwner } from '../ghost-pages.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
@@ -73,7 +76,7 @@ const DOCS = 'docs/guides/repair.md#legacy-twins';
 export interface TwinPage { page_id: number; slug: string; revision: string }
 export interface LegacyTwinPair { source_id: string; legacy: TwinPage; twin: TwinPage; path: string; import_record: boolean }
 export type TwinDecisionReason = 'content_differs' | 'several_legacy' | 'file_missing' | 'file_drift' | 'file_unverified' | 'twin_slug_path_occupied'
-  | 'legacy_records_file_uri' | 'twin_has_withdrawals' | 'twin_slug_unwritable';
+  | 'legacy_records_file_uri' | 'twin_has_withdrawals' | 'twin_slug_unwritable' | 'twin_evidence_conflicts';
 export interface LegacyTwinDecision { source_id: string; reason: TwinDecisionReason; twin: TwinPage; legacy: TwinPage[]; path: string; commands: string[] }
 
 interface ApprovedPair extends LegacyTwinPair { owner: GhostOwner; selection: string[] }
@@ -150,6 +153,7 @@ function decisionCommands(sourceId: string, reason: TwinDecisionReason, twin: Tw
     case 'legacy_records_file_uri': return [...show, `The legacy page records a file URI of its own; decide which file it belongs to with gbrain sources reconcile ${sourceId} '${legacy[0]!.slug}' --brain host --preview.`];
     case 'twin_has_withdrawals': return [...show, `Claims were forgotten on ${twin.slug}: forget the same claims on '${legacy[0]!.slug}' (gbrain forget), or soft-delete the twin by hand, then run ${preview}.`];
     case 'twin_slug_unwritable': return show;
+    case 'twin_evidence_conflicts': return [...show, `The twin holds a link, relationship date, timeline entry or raw data row the legacy page holds differently, which the merge would lose: make them agree (or soft-delete the twin by hand), then run ${preview}.`];
   }
 }
 
@@ -166,7 +170,8 @@ async function pairVerdict(engine: BrainEngine, root: string, sourceId: string, 
   if (drift.reason !== 'agrees') return 'file_unverified';
   if (existsSync(resolveSourceLocalFilePath(root, undefined, twin.slug, undefined) ?? join(root, `${twin.slug}.md`))) return 'twin_slug_path_occupied';
   const [withdrawn] = await engine.executeRaw('SELECT 1 FROM fact_withdrawals WHERE source_id=$1 AND subject=$2 LIMIT 1', [sourceId, twin.slug]);
-  return withdrawn ? 'twin_has_withdrawals' : null;
+  if (withdrawn) return 'twin_has_withdrawals';
+  return (await twinMergeConflicts(engine, Number(only.id), Number(twin.id))).length ? 'twin_evidence_conflicts' : null;
 }
 
 export interface LegacyTwinScan { owner: GhostOwner; root: string; pairs: LegacyTwinPair[]; decisions: LegacyTwinDecision[]; file_backed: number; inspected: number; truncated: boolean }
@@ -342,53 +347,22 @@ async function pairLocked(tx: BrainEngine, pair: LegacyTwinPair): Promise<string
 }
 
 /**
- * The merge itself, inside the caller's transaction with both page keys held: the legacy page records the file,
- * the twin's references move to it, the twin is soft-deleted with its recorded origin cleared, and the twin's import
+ * The merge itself, inside the caller's transaction with both page keys held: the shared twin merge (#6948,
+ * persistence/twin-merge.ts) moves what other pages and the twin's own rows say about the twin to the legacy page and
+ * soft-deletes the twin with its recorded origin cleared; then the legacy page records the file and the twin's import
  * record follows with the legacy page's post-write revision.
  */
 async function applyTwinMerge(tx: BrainEngine, pair: LegacyTwinPair, incarnation: string): Promise<Record<string, unknown>> {
   const { source_id: sourceId, legacy, twin } = pair;
   const [twinRow] = await tx.executeRaw<{ source_uri: string | null }>('SELECT source_uri FROM pages WHERE id=$1', [twin.page_id]);
   const record = await readSyncImportProvenance(tx, sourceId, incarnation, twin.page_id);
-  await tx.executeRaw('UPDATE pages SET source_path=NULL, source_uri=NULL WHERE id=$1', [twin.page_id]);
+  const merged = await mergeTwinInto(tx, { sourceId, incarnation, survivor: legacy, twin });
   await tx.executeRaw('UPDATE pages SET source_path=$2, source_uri=COALESCE(source_uri, $3) WHERE id=$1', [legacy.page_id, pair.path, twinRow?.source_uri ?? null]);
-  const linkIds = (await tx.executeRaw<{ id: number }>('SELECT id FROM links WHERE (from_page_id=$1 AND to_page_id<>$2) OR (to_page_id=$1 AND from_page_id<>$2)',
-    [twin.page_id, legacy.page_id])).map(row => Number(row.id));
-  const statements: Array<[string, unknown[]]> = [
-    [`DELETE FROM links s WHERE s.from_page_id=$1 AND s.to_page_id<>$2 AND EXISTS (SELECT 1 FROM links o WHERE o.from_page_id=$2 AND o.to_page_id=s.to_page_id
-        AND o.link_type=s.link_type AND o.link_source IS NOT DISTINCT FROM s.link_source AND o.origin_page_id IS NOT DISTINCT FROM s.origin_page_id)`, [twin.page_id, legacy.page_id]],
-    ['UPDATE links SET from_page_id=$2 WHERE from_page_id=$1 AND to_page_id<>$2', [twin.page_id, legacy.page_id]],
-    [`DELETE FROM links s WHERE s.to_page_id=$1 AND s.from_page_id<>$2 AND EXISTS (SELECT 1 FROM links o WHERE o.to_page_id=$2 AND o.from_page_id=s.from_page_id
-        AND o.link_type=s.link_type AND o.link_source IS NOT DISTINCT FROM s.link_source AND o.origin_page_id IS NOT DISTINCT FROM s.origin_page_id)`, [twin.page_id, legacy.page_id]],
-    ['UPDATE links SET to_page_id=$2 WHERE to_page_id=$1 AND from_page_id<>$2', [twin.page_id, legacy.page_id]],
-    [`DELETE FROM links s WHERE s.origin_page_id=$1 AND s.from_page_id<>$1 AND s.to_page_id<>$1 AND EXISTS (SELECT 1 FROM links o WHERE o.origin_page_id=$2
-        AND o.from_page_id=s.from_page_id AND o.to_page_id=s.to_page_id AND o.link_type=s.link_type AND o.link_source IS NOT DISTINCT FROM s.link_source)`, [twin.page_id, legacy.page_id]],
-    ['UPDATE links SET origin_page_id=$2 WHERE origin_page_id=$1 AND from_page_id<>$1 AND to_page_id<>$1', [twin.page_id, legacy.page_id]],
-    [`DELETE FROM timeline_entries s WHERE s.page_id=$1 AND EXISTS (SELECT 1 FROM timeline_entries o WHERE o.page_id=$2 AND o.date=s.date
-        AND md5(o.summary)=md5(s.summary) AND o.source=s.source)`, [twin.page_id, legacy.page_id]],
-    ['UPDATE timeline_entries SET page_id=$2 WHERE page_id=$1', [twin.page_id, legacy.page_id]],
-    ['DELETE FROM timeline_entries s WHERE s.event_page_id=$1 AND EXISTS (SELECT 1 FROM timeline_entries o WHERE o.event_page_id=$2 AND o.date=s.date)', [twin.page_id, legacy.page_id]],
-    ['UPDATE timeline_entries SET event_page_id=$2 WHERE event_page_id=$1', [twin.page_id, legacy.page_id]],
-    ['UPDATE raw_data r SET page_id=$2 WHERE r.page_id=$1 AND NOT EXISTS (SELECT 1 FROM raw_data o WHERE o.page_id=$2 AND o.source=r.source)', [twin.page_id, legacy.page_id]],
-    ['UPDATE files SET page_id=$2, page_slug=$3 WHERE page_id=$1', [twin.page_id, legacy.page_id, legacy.slug]],
-    [`UPDATE page_aliases a SET slug=$3 WHERE a.source_id=$1 AND a.slug=$2
-        AND NOT EXISTS (SELECT 1 FROM page_aliases o WHERE o.source_id=$1 AND o.slug=$3 AND o.alias_norm=a.alias_norm AND o.origin=a.origin)`, [sourceId, twin.slug, legacy.slug]],
-  ];
-  for (const [sql, params] of statements) await tx.executeRaw(sql, params);
-  const factIds = (await tx.executeRaw<{ id: number }>(`UPDATE facts SET entity_slug=$3 WHERE source_id=$1 AND entity_slug=$2
-    AND source_markdown_slug IS DISTINCT FROM $2 RETURNING id`, [sourceId, twin.slug, legacy.slug])).map(row => Number(row.id));
-  await recordRenameAlias(tx, sourceId, twin.slug, legacy.slug);
-  const movedLinks = (await tx.executeRaw<{ id: number }>('SELECT id FROM links WHERE id=ANY($1::int[]) AND (from_page_id=$2 OR to_page_id=$2)', [linkIds, legacy.page_id])).map(row => Number(row.id));
-  noteBelief({ kind: 'transferred', fromSlug: twin.slug, table: 'links', ids: movedLinks });
-  noteBelief({ kind: 'transferred', fromSlug: twin.slug, table: 'facts', ids: factIds });
-  await tx.createVersion(twin.slug, { sourceId });
-  await tx.softDeletePage(twin.slug, { sourceId });
-  await tx.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [SYNC_IMPORT_PROVENANCE_OP, `${sourceId}:${incarnation}:${twin.page_id}`]);
   if (record) {
     const [now] = await tx.executeRaw<{ revision: string }>('SELECT knowledge_revision::text AS revision FROM pages WHERE id=$1', [legacy.page_id]);
     await recordSyncImportProvenance(tx, { ...record, page_id: legacy.page_id, revision: now!.revision });
   }
-  return { status: 'merged', legacy_slug: legacy.slug, twin_slug: twin.slug, source_id: sourceId, links_moved: movedLinks.length, facts_moved: factIds.length,
+  return { status: 'merged', legacy_slug: legacy.slug, twin_slug: twin.slug, source_id: sourceId, links_moved: merged.links_moved.length, facts_moved: merged.facts_moved.length,
     import_record_moved: record !== null };
 }
 
