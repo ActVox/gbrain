@@ -159,6 +159,7 @@
       "  [OK] subagent_capability: Subagent tier resolves to default (claude-sonnet-4-6) — full tool-loop capability",
       "  [OK] facts_health: facts_health(default): 0 active, 0 today, 0 this week, 0 consolidated, top entities —",
       "  [OK] global_maintenance_timeouts: Brain-wide maintenance jobs are finishing within their deadline.",
+      "  [OK] global_maintenance_stalled: Brain-wide maintenance has not run yet.",
       "  [OK] embed_backfill_stalled: No automatic embed-backfill is repeating the same failure.",
       "  [OK] connector_account_mismatch: No connector source is waiting for its account to be repinned.",
       "  [OK] legacy_job_authority: No queued job predates submission authority.",
