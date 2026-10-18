@@ -7,8 +7,7 @@
  * the file. This guard fails on every test/ file outside test/e2e/ that has
  * such an arm and no Postgres lane:
  *
- *   - arm: a zero-argument `testBackends()` or `pathologicalArms()` (the
- *     test/pathological/ harness wrapper) call, or a `process.env.DATABASE_URL`
+ *   - arm: a zero-argument `testBackends()` or `pathologicalArms()` call, or a `process.env.DATABASE_URL`
  *     read (directly or through a variable that holds it) used as a condition,
  *     a call or constructor argument, or a `database_url`/`databaseUrl`
  *     property value. Code inside a `withEnv({ DATABASE_URL: ... })` callback
@@ -106,7 +105,7 @@ function underOwnDatabaseUrl(node: ts.Node): boolean {
   return false;
 }
 
-/** Zero-argument calls that select the PostgreSQL arm when DATABASE_URL is set. */
+/** Zero-argument calls that return the test's engine arms: `testBackends()` and the pathological harness's `pathologicalArms()`. */
 const ARM_CALLS = new Set(['testBackends', 'pathologicalArms']);
 
 /** First line of a Postgres arm in `path`, or null. */
