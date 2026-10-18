@@ -34,7 +34,7 @@ import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts'
 import { sha256 } from './digest.ts';
 import { prepareFileTarget } from './page-prepare.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
-import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, mirrorGates, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
+import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, mirrorGates, parkEffect, rearmWithheldTargets, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
 import { commitGitTargets, DURABILITY_NOT_ENABLED, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
 import { retryIndexLockParks } from './effect-retry.ts';
@@ -42,7 +42,8 @@ import { gitDurabilityPolicy } from './git-durability-policy.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
 import { dispatchFactsBackstopEffect } from './effect-facts.ts';
 import { runLinksEffect } from './effect-links.ts';
-import { PARK_AFTER_FAILURES, type EffectRecovery, type GitCommitNote, type PersistenceEffect, type SkippedTarget } from './effect-model.ts';
+import { PARK_AFTER_FAILURES, WITHHELD_BY_MIRROR, type EffectRecovery, type GitCommitNote, type PersistenceEffect, type SkippedTarget } from './effect-model.ts';
+import { fileContentHash } from './large-file.ts';
 import { isSyncMetafile } from '../sync.ts';
 import { recoveryStagingFile } from './staging.ts';
 import { selectEffectRecoveries } from './effect-recovery-scan.ts';
@@ -176,31 +177,40 @@ interface EffectAttempt {
   gate?: MirrorGate;
 }
 
-/** The code a page behind a failed withdrawal mirror is parked with: its file may still hold the withdrawn text. */
-export const WITHHELD_BY_MIRROR = 'withdrawal_mirror_failed';
+export { WITHHELD_BY_MIRROR };
 /** The code a Git or embedding attempt waits with while its request's withdrawal mirror is queued or running again. */
 export const MIRROR_PENDING = 'withdrawal_mirror_pending';
 
 /**
- * GBRA-130 A-12: Git and embedding work behind a withdrawal mirror touches only
- * pages the mirror published. While the mirror runs again the attempt waits; a
- * page the mirror passed without rewriting its file is never committed to Git
- * (`skip`), since the mirror will not revisit it; behind a failed mirror any
- * other page is parked. True when the page was not worked on.
+ * GBRA-130 A-12: whether Git or embedding work may touch a page behind its
+ * request's withdrawal mirror. `handled`: the attempt waited (the mirror is
+ * queued or running again) or the page was parked behind a failed mirror.
+ * `evidence`: a page the mirror passed, which a Git page walk commits only when
+ * the file's raw bytes are the mirror's rendering of the current snapshot (the
+ * same serialization mirrorPage writes; a recorded publication is not enough:
+ * the file may since have been reverted, and a mirror from before publications
+ * were recorded has none); a single-file effect, whose file already holds
+ * exactly the bytes its request published, needs the recorded publication. Embedding needs a recorded
+ * publication behind a failed mirror.
  */
-async function withheldByMirror(engine: BrainEngine, effect: PersistenceEffect, attempt: EffectAttempt, slug: string, skip?: () => Promise<void>): Promise<boolean> {
+async function mirrorVerdict(engine: BrainEngine, effect: PersistenceEffect, attempt: EffectAttempt, slug: string): Promise<'go' | 'evidence' | 'handled'> {
   const gate = attempt.gate;
-  if (!gate || gate.published.has(slug)) return false;
-  if (gate.state === 'pending') { await retryEffect(engine, effect, MIRROR_PENDING); return true; }
-  if (skip && gate.passed.has(slug)) { await skip(); return true; }
-  if (gate.state === 'committed') return false;
+  if (!gate) return 'go';
+  if (gate.state === 'pending') { await retryEffect(engine, effect, MIRROR_PENDING); return 'handled'; }
+  if (effect.kind === 'git' && (gate.published.has(slug) || gate.passed.has(slug))) return 'evidence';
+  if (gate.published.has(slug) || gate.state === 'committed') return 'go';
   await parkEffectTarget(engine, effect, WITHHELD_BY_MIRROR, slug);
-  return true;
+  return 'handled';
 }
+
+
 
 async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, binding: WorktreeBinding | null, opts: EffectWorkerOptions, attempt: EffectAttempt): Promise<void> {
   const snapshot = await selectedEffectPage(engine, effect);
-  if (!snapshot) { await completeEffect(engine, effect); return; }
+  if (!snapshot) {
+    await engine.transaction(async tx => { await completeEffect(tx, effect); await rearmWithheldTargets(tx, [effect.request_id]); });
+    return;
+  }
   attempt.target = snapshot.page.slug;
   if (snapshot.sourceIncarnation !== effect.source_incarnation) throw opError('source_changed', 'The mirror source was replaced.',
     `Source ${effect.source_id} was replaced after this withdrawal mirror was queued, so the effect ends without writing; the new source has its own effects. Check the owner if files still look stale.`,
@@ -243,13 +253,18 @@ async function singleFileGitTarget(engine: BrainEngine, effect: PersistenceEffec
     `The Git effect queued by request ${effect.request_id} in source ${effect.source_id} has no recorded file path, so nothing was committed to Git; the page write itself is committed. Inspect the owner's effects before resubmitting anything.`,
     { fix: effectStatusFix(effect) });
   attempt.target = effect.data.slug ?? effect.data.relative_path;
-  if (await withheldByMirror(engine, effect, attempt, attempt.target,
-    () => completeEffect(engine, effect, { git: 'skipped', reason: 'withdrawal_not_mirrored' }))) return null;
+  const verdict = await mirrorVerdict(engine, effect, attempt, attempt.target);
+  if (verdict === 'handled') return null;
   const sourceRoot = join(binding.local_path, binding.relative_path);
   let path = join(binding.local_path, effect.data.relative_path);
   if (!isWriteTargetContained(path, sourceRoot)) throw gitTargetEscaped(effect);
   path = nativeFileTarget(binding.local_path, path, 'git_target_unsafe');
   if (persistenceFileHash(path) !== effect.data.expected_hash) { await completeEffect(engine, effect, { git: 'superseded' }); return null; }
+  // The file holds exactly the bytes this request published; behind its mirror they also need the mirror's record of rewriting the page.
+  if (verdict === 'evidence' && !attempt.gate!.published.has(attempt.target)) {
+    await completeEffect(engine, effect, { git: 'skipped', reason: 'withdrawal_not_mirrored' });
+    return null;
+  }
   if (!isWriteTargetContained(path, sourceRoot)) throw gitTargetEscaped(effect);
   // Declared db_only content stays out of Git. Its gitignored local cache file
   // is invisible to `git status`, so publishing it would be refused as unsafe.
@@ -291,13 +306,14 @@ async function publishGitPage(engine: BrainEngine, effect: PersistenceEffect, bi
   const snapshot = await selectedEffectPage(engine, effect);
   if (!snapshot) { await completeEffect(engine, effect); return; }
   attempt.target = snapshot.page.slug;
-  if (await withheldByMirror(engine, effect, attempt, snapshot.page.slug, () => skipTarget(engine, effect, snapshot, 'withdrawal_not_mirrored'))) return;
+  const verdict = await mirrorVerdict(engine, effect, attempt, snapshot.page.slug);
+  if (verdict === 'handled') return;
   if (isMetafilePage(snapshot)) { await skipTarget(engine, effect, snapshot, 'metafile'); return; }
   if (isSegmentedPage(snapshot.page)) { await skipTarget(engine, effect, snapshot, 'page_body_segmented'); return; }
+  const content = snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags);
   let file: Awaited<ReturnType<typeof prepareFileTarget>>;
   try {
-    file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
-      snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true });
+    file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot, content, opts.hostId, { allowMissing: true });
   } catch (error) {
     if (!isFileDatabaseDrift(error)) throw error;
     await skipTarget(engine, effect, snapshot, 'file_database_drift');
@@ -312,6 +328,11 @@ async function publishGitPage(engine: BrainEngine, effect: PersistenceEffect, bi
   if (!isWriteTargetContained(path, join(root, binding.relative_path))) throw gitTargetEscaped(effect);
   if (isSourceDbOnlySlug(join(root, binding.relative_path), snapshot.page.slug, 'not_db_only')) {
     await finishPage(engine, effect, snapshot, { git: 'skipped', reason: 'db_only' });
+    return;
+  }
+  // A page the mirror passed is committed only when its raw bytes are the mirror's rendering of the page as it is now.
+  if (verdict === 'evidence' && (content === null || persistenceFileHash(path) !== fileContentHash(content))) {
+    await skipTarget(engine, effect, snapshot, 'withdrawal_not_mirrored');
     return;
   }
   const result = await publishGitEffect(root, relative(root, path).split(sep).join('/'), opts.signal, hardened, gitCommitNote(effect), undefined, owner);
@@ -354,7 +375,7 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
   const snapshot = await selectedEffectPage(engine, effect);
   if (!snapshot || snapshot.page.deleted_at) { await finishPage(engine, effect, snapshot); return; }
   attempt.target = snapshot.page.slug;
-  if (await withheldByMirror(engine, effect, attempt, snapshot.page.slug)) return;
+  if (await mirrorVerdict(engine, effect, attempt, snapshot.page.slug) === 'handled') return;
   if (!targetedWithdrawalEffect(effect) && !effect.data.source_scan && (snapshot.revision !== effect.revision || snapshot.page.id !== effect.data.page_id)) {
     await completeEffect(engine, effect, { embedding: 'superseded', reason: 'revision_changed' }); return;
   }
@@ -684,6 +705,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
   try { return await runEffectPass(engine, config, opts, touched, derived); }
   finally {
     await settleDerivedFailures(engine, derived).catch(() => { /* an unsettled claim expires and the effect is claimed again */ });
+    await engine.transaction(tx => rearmWithheldTargets(tx, [...touched])).catch(() => { /* idempotent; the next pass touching the request retries it */ });
     await trueUpRequests(engine, touched).catch(() => { /* idempotent; the next settlement of the request retries it */ });
   }
 }

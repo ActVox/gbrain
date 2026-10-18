@@ -6,7 +6,7 @@ import { opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import { fileContentHash } from './large-file.ts';
-import { PARK_AFTER_FAILURES, REMOTE_AUTO_LINKS_KEY, REMOTE_MENTION_OPERATIONS, type EffectKind, type PersistenceEffect, type EffectRequest } from './effect-model.ts';
+import { PARK_AFTER_FAILURES, REMOTE_AUTO_LINKS_KEY, REMOTE_MENTION_OPERATIONS, WITHHELD_BY_MIRROR, type EffectKind, type PersistenceEffect, type EffectRequest } from './effect-model.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
 import { recordChronicleDecision } from '../chronicle/ledger.ts';
 import { isFactsExtractionEnabled } from '../facts/extract.ts';
@@ -177,6 +177,36 @@ export async function mirrorGates(engine: SqlEngine, requestIds: readonly string
     const passed = (data.targets ?? []).filter(target => after !== undefined && target.slug <= after && !unfinished.has(target.slug)).map(target => target.slug);
     return [request_id, { state: state === 'queued' || state === 'running' ? 'pending' : state, published: new Set(data.published ?? []), passed: new Set(passed) }];
   }));
+}
+
+/**
+ * GBRA-130 A-12: once a request's withdrawal mirror has committed, the Git and
+ * embedding targets parked behind it (`withdrawal_mirror_failed`) get another
+ * attempt with no operator retry: a scan revisits them first
+ * (`data.retry_slugs`), a single-target effect runs again. Other parked targets
+ * stay parked, and a claimed effect is left to its claim. The mirror's commit
+ * calls this in its own transaction; each effect pass calls it again for the
+ * requests it touched, for a park that settled after a concurrent mirror commit.
+ */
+export async function rearmWithheldTargets(engine: SqlEngine, requestIds: readonly string[]): Promise<number> {
+  if (!requestIds.length) return 0;
+  const rows = await engine.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e WHERE e.request_id=ANY($1::uuid[])
+    AND e.kind IN ('git','embedding') AND e.state IN ('queued','failed') AND e.execution_token IS NULL AND e.recovery IS NULL
+    AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(e.data->'parked','[]'::jsonb)) AS p(target) WHERE p.target->>'error_code'=$2)
+    AND EXISTS (SELECT 1 FROM persistence_effects m WHERE m.request_id=e.request_id AND m.kind='withdrawal-mirror' AND m.state='committed')
+    ORDER BY e.id FOR UPDATE OF e SKIP LOCKED`, [[...new Set(requestIds)], WITHHELD_BY_MIRROR]);
+  for (const effect of rows) {
+    const { parked = [], ...data } = effect.data;
+    const kept = parked.filter(entry => entry.error_code !== WITHHELD_BY_MIRROR);
+    const scanning = data.targets !== undefined || data.source_scan === true;
+    const slugs = scanning ? parked.flatMap(entry => entry.error_code === WITHHELD_BY_MIRROR && entry.slug ? [entry.slug] : []) : [];
+    const retrying = [...new Set([...(data.retry_slugs ?? []), ...slugs])];
+    await engine.executeRaw(`UPDATE persistence_effects SET state='queued',data=$2::text::jsonb,error_code=NULL,claim_expires_at=NULL,
+      next_attempt_at=now(),updated_at=now() WHERE id=$1 AND execution_token IS NULL AND recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE}`,
+    [effect.id, JSON.stringify({ ...data, ...(kept.length ? { parked: kept } : {}), ...(retrying.length ? { retry_slugs: retrying } : {}),
+      ...(effect.kind === 'embedding' ? { embedding_attempt_base: effect.attempts } : {}) })]);
+  }
+  return rows.length;
 }
 
 /**

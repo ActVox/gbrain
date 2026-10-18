@@ -30,6 +30,8 @@ export function contentRepairCommit(path: string, receipt: Pick<ContentRepairRec
 }
 export interface ParkedTarget { slug?: string; error_code: string }
 export interface SkippedTarget { slug: string; reason: 'metafile' | 'file_database_drift' | 'page_body_segmented' | 'withdrawal_not_mirrored' }
+/** The code a page behind a failed withdrawal mirror is parked with: its file may still hold the withdrawn text. */
+export const WITHHELD_BY_MIRROR = 'withdrawal_mirror_failed';
 /** A Git or withdrawal target parks after this many consecutive execution failures. */
 export const PARK_AFTER_FAILURES = 5;
 export interface EffectRecovery {

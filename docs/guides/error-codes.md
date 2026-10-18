@@ -3884,7 +3884,7 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A page's Git or embedding work is withheld because its withdrawal mirror failed before rewriting the page's file; the file may still hold the withdrawn text. | A withdrawal's Git and embedding effects touch only the pages whose file its mirror recorded rewriting (GBRA-130 A-12); Git never commits a page the mirror passed without rewriting its file. Retrying the request's effects reruns the mirror for this page and re-arms the withheld work once the mirror commits it. | Read the parked effects with gbrain doctor --only parked_effects, fix the cause the mirror recorded, then preview gbrain sources writer retry-effects <source> --request-id <id> --dry-run and run it without --dry-run. | agent | `gbrain doctor --json` | 1 | no |
+| A page's Git or embedding work is withheld because its withdrawal mirror failed before rewriting the page's file; the file may still hold the withdrawn text. | A withdrawal's Git and embedding effects touch only the pages whose file its mirror recorded rewriting (GBRA-130 A-12); Git never commits a page the mirror passed without rewriting its file. Retrying the request's effects reruns the mirror for this page; once the mirror commits, the withheld work is re-armed automatically. | Read the parked effects with gbrain doctor --only parked_effects, fix the cause the mirror recorded, then preview gbrain sources writer retry-effects <source> --request-id <id> --dry-run and run it without --dry-run. | agent | `gbrain doctor --json` | 1 | no |
 
 ### withdrawal_mirror_pending
 

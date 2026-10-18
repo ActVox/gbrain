@@ -47,6 +47,13 @@ const breakFile = (root: string, slug = W2) => { rmSync(join(root, `${slug}.md`)
 const fixFile = (root: string, slug = W2) => { rmSync(join(root, `${slug}.md`), { recursive: true }); git(root, 'checkout', '--', `${slug}.md`); };
 const actions = (result: Record<string, unknown>) => Object.fromEntries((result.effects as Array<{ kind: string; action: string }>).map(e => [e.kind, e.action]));
 
+/** One claim per pass: only the mirror runs (Git and embedding wait on it) until it ends `state`. */
+async function mirrorOnly(engine: BrainEngine, requestId: string, state: 'failed' | 'committed'): Promise<void> {
+  for (let pass = 0; pass < 20 && (await effectsOf(engine, requestId))['withdrawal-mirror'].state !== state; pass++) {
+    await expectUnitNotAborted(() => drain(engine, 1, { limit: 1 }));
+  }
+}
+
 async function settleLifecycle(engine: BrainEngine): Promise<number> {
   const binding = (await getWorktreeBinding(engine, SOURCE, localHostId()))!;
   const principal = await topologyPrincipal(engine);
@@ -144,10 +151,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const raw = readFileSync(join(root, `${W1}.md`));
         writeFileSync(join(root, `${W1}.md`), `${raw}\nAn uncoordinated local edit.\n`);
         breakFile(root, W3);
-        // One claim per pass: only the mirror runs (Git and embedding wait on it) until it ends failed.
-        for (let pass = 0; pass < 20 && (await effectsOf(engine, request.id))['withdrawal-mirror'].state !== 'failed'; pass++) {
-          await expectUnitNotAborted(() => drain(engine, 1, { limit: 1 }));
-        }
+        await mirrorOnly(engine, request.id, 'failed');
         const mirror = (await effectsOf(engine, request.id))['withdrawal-mirror'];
         expect({ state: mirror.state, skipped: mirror.data.skipped, parked: mirror.data.parked?.map((p: { slug: string }) => p.slug) })
           .toEqual({ state: 'failed', skipped: [{ slug: W1, reason: 'file_database_drift' }], parked: [W3] });
@@ -169,6 +173,71 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const after = await effectsOf(engine, request.id);
         for (const kind of ['withdrawal-mirror', 'git', 'embedding']) expect({ kind, state: after[kind].state }).toEqual({ kind, state: 'committed' });
         expect(await embeddedPages(engine)).toEqual(TARGETS);
+      }, { untracked: [W1] });
+    }, 180_000);
+
+    test('A-12 item: a Git page parked behind the mirror is re-armed when the mirror commits, with no second retry-effects', async () => {
+      await withdrawalBrain(databaseUrl, async ({ engine, root, request, ctx }) => {
+        const raw = readFileSync(join(root, `${W2}.md`));
+        breakFile(root);
+        // The other order of the race: the Git attempt reads the failed mirror first, then retry-effects requeues
+        // the mirror, so the attempt parks W2 behind it; the mirror then publishes W2 and commits.
+        const original = engine.executeRaw;
+        const retries: Record<string, string>[] = [];
+        engine.executeRaw = (async function (this: BrainEngine, sql: string, params?: unknown[]) {
+          const result = await original.call(this, sql, params);
+          if (!retries.length && /FROM persistence_effects WHERE kind='withdrawal-mirror'/.test(sql)) {
+            const states = Object.fromEntries((await original.call(engine, `SELECT kind,state,data->>'after_slug' AS after FROM persistence_effects WHERE request_id=$1::uuid`,
+              [request.id]) as Array<{ kind: string; state: string; after: string | null }>).map(row => [row.kind, `${row.state}:${row.after}`]));
+            if (states.git === `running:${W1}` && !states.embedding?.startsWith('running')) {
+              rmSync(join(root, `${W2}.md`), { recursive: true }); writeFileSync(join(root, `${W2}.md`), raw);
+              retries.push(actions(await retryRequestEffects(engine, SOURCE, request.request_id, false, ctx.config)));
+            }
+          }
+          return result;
+        }) as BrainEngine['executeRaw'];
+        try { await expectUnitNotAborted(() => drain(engine, 16)); } finally { engine.executeRaw = original; }
+        expect(retries.map(retry => retry['withdrawal-mirror'])).toEqual(['retry_queued']);
+        expect(committedActiveClaim(root)).toEqual([]);
+        const after = await effectsOf(engine, request.id);
+        for (const kind of ['withdrawal-mirror', 'git', 'embedding']) expect({ kind, state: after[kind].state, parked: after[kind].data.parked ?? null }).toEqual({ kind, state: 'committed', parked: null });
+        expect(committedSinceSeed(root).sort()).toEqual(TARGETS.map(slug => `${slug}.md`));
+        expect(await embeddedPages(engine)).toEqual(TARGETS);
+      }, { untracked: [W2] });
+    }, 180_000);
+
+    test('A-12 item: behind a mirror without a published list, Git commits a passed page whose file holds the mirror rendering and skips one that holds pre-withdrawal bytes', async () => {
+      await withdrawalBrain(databaseUrl, async ({ engine, root, request }) => {
+        const raw = readFileSync(join(root, `${W3}.md`));
+        breakFile(root);
+        await mirrorOnly(engine, request.id, 'failed');
+        expect((await effectsOf(engine, request.id))['withdrawal-mirror'].data.published).toEqual([W1, W3]);
+        // A mirror that failed before it recorded its publications.
+        await engine.transaction(async tx => {
+          await declarePersistenceProtocol(tx);
+          await tx.executeRaw(`UPDATE persistence_effects SET data=data-'published' WHERE request_id=$1::uuid AND kind='withdrawal-mirror'`, [request.id]);
+        });
+        writeFileSync(join(root, `${W3}.md`), raw);
+        await expectUnitNotAborted(() => drain(engine, 12));
+        expect(committedActiveClaim(root)).toEqual([]);
+        expect(committedSinceSeed(root)).toEqual([`${W1}.md`]);
+        const git = (await effectsOf(engine, request.id)).git;
+        expect({ state: git.state, skipped: git.data.skipped, parked: git.data.parked })
+          .toEqual({ state: 'failed', skipped: [{ slug: W3, reason: 'withdrawal_not_mirrored' }], parked: [{ slug: W2, error_code: WITHHELD }] });
+      }, { untracked: [W3] });
+    }, 180_000);
+
+    test('A-12 item: Git skips a page the mirror published whose file was reverted to its pre-withdrawal bytes', async () => {
+      await withdrawalBrain(databaseUrl, async ({ engine, root, request }) => {
+        const raw = readFileSync(join(root, `${W1}.md`));
+        await mirrorOnly(engine, request.id, 'committed');
+        expect((await effectsOf(engine, request.id))['withdrawal-mirror'].data.published).toEqual(TARGETS);
+        writeFileSync(join(root, `${W1}.md`), raw);
+        await expectUnitNotAborted(() => drain(engine, 12));
+        expect(committedActiveClaim(root)).toEqual([]);
+        expect(committedSinceSeed(root).sort()).toEqual([`${W2}.md`, `${W3}.md`]);
+        const git = (await effectsOf(engine, request.id)).git;
+        expect({ state: git.state, skipped: git.data.skipped }).toEqual({ state: 'committed', skipped: [{ slug: W1, reason: 'withdrawal_not_mirrored' }] });
       }, { untracked: [W1] });
     }, 180_000);
 
