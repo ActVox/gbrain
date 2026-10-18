@@ -24,11 +24,13 @@ import { readFix } from '../core/ops/op-fix.ts';
 import { shellQuote } from '../core/agent-output.ts';
 import { OLDER_THAN_RE } from '../cli/strict-args.ts';
 import { parseSince } from '../core/since.ts';
-import { REPAIR_KINDS, resolveRepairScope, type RepairKind, type RepairResult } from '../core/repair/core.ts';
+import { REPAIR_KINDS, resolveRepairScope, type RepairKind, type RepairResult, type RepairScope } from '../core/repair/core.ts';
 import { consentGate, engineConsentEnv } from '../core/consent-cli.ts';
 import { AUTO_REPAIR_REGISTRY, EXPLICIT_REPAIR_REGISTRY, LLM_REPAIR_REGISTRY, PREVIEW_BOUND_REPAIR_REGISTRY, REPAIR_REGISTRY, explicitRepairNotices, repairMayEmbed, repairMaySpend,
-  repairPreviewCommand, repairRunner, repairSpec } from '../core/repair/registry.ts';
+  repairPreviewCommand, repairRunner, repairSpec, type RepairKindSpec } from '../core/repair/registry.ts';
 import { CONTENT_REPAIR_KINDS } from '../core/repair/content-lane.ts';
+import { kindErrorResult } from '../core/remediation/repairs.ts';
+import { ItemRun } from '../core/item-failure.ts';
 
 /** The content-repair lane's command word (#6377): parsed like a kind, dispatched to repair-content.ts, never a RepairKind. */
 export const CONTENT_LANE = 'content';
@@ -374,18 +376,13 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
     if (!auth) return;
   }
   const runner = await repairRunner(engine, { apply, noEmbed });
-  const results: Array<RepairResult & { paid: boolean }> = [];
-  for (const k of kinds) {
-    const result = await runner.run(k, scope, { limit, sourceFlag: source, explicit: k === kind, expect, includeAmbiguous,
-      ...(k === kind && KIND_FLAGS['--only']!.includes(k) ? { only, skip } : {}), ...(k === kind && slugs.length ? { slugs } : {}),
-      ...(k === kind && noLlm ? { noLlm } : {}), ...(k === kind && maxUsd !== undefined ? { maxLlmUsd: maxUsd } : {}),
-      ...(k === kind && k === 'file-drift' ? { prefer, requests, allDrifted, driftClass, since } : {}),
-      ...(k === kind && keep ? { keep } : {}), ...(k === kind && requestId ? { requestId } : {}),
-      ...(k === kind && k === 'receipt-compaction' ? { olderThan, includeFailures, force } : {}),
-      ...(k === kind && k === 'rename-identity' ? { from, close } : {}) });
-    results.push({ ...result, paid: repairMaySpend(repairSpec(k), noEmbed) });
-    if (result.stopped) break;
-  }
+  const results = await runRepairKinds(kinds, scope, { apply, source, noEmbed, named: kind !== undefined }, k => runner.run(k, scope, { limit, sourceFlag: source, explicit: k === kind, expect, includeAmbiguous,
+    ...(k === kind && KIND_FLAGS['--only']!.includes(k) ? { only, skip } : {}), ...(k === kind && slugs.length ? { slugs } : {}),
+    ...(k === kind && noLlm ? { noLlm } : {}), ...(k === kind && maxUsd !== undefined ? { maxLlmUsd: maxUsd } : {}),
+    ...(k === kind && k === 'file-drift' ? { prefer, requests, allDrifted, driftClass, since } : {}),
+    ...(k === kind && keep ? { keep } : {}), ...(k === kind && requestId ? { requestId } : {}),
+    ...(k === kind && k === 'receipt-compaction' ? { olderThan, includeFailures, force } : {}),
+    ...(k === kind && k === 'rename-identity' ? { from, close } : {}) }));
   if (apply) clearHealthMemo(engine);
   const paidKinds = results.filter(r => r.paid).map(r => r.kind);
   if (json) {
@@ -407,6 +404,33 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
     if (explicitKindsNotRun.length) console.log(`Explicit-only kinds (not run without their name; preview each): ${explicitKindsNotRun.map(n => n.preview_command).join('; ')}`);
   }
   if (repairExitVerdict(results) !== 0) setCliExitVerdict(1);
+}
+
+/**
+ * Runs each kind in order; a kind that stops (capacity, a held writer, a pending write) ends the loop. A kind whose plan
+ * or apply throws item-scoped (GBRA-130 A-45) is reported as a result stopped with reason `error` and the loop goes on;
+ * a run-scoped error, or most kinds failing (`item_failures_systemic`), stops the command. `named`: the operator named
+ * one kind, whose error is the command's error. `registry`: the kinds' specs (tests pass stubs).
+ */
+export async function runRepairKinds(kinds: readonly RepairKind[], scope: RepairScope, opts: { apply: boolean; source?: string; noEmbed: boolean; named: boolean; registry?: readonly RepairKindSpec[] },
+  run: (kind: RepairKind) => Promise<RepairResult>): Promise<Array<RepairResult & { paid: boolean }>> {
+  const results: Array<RepairResult & { paid: boolean }> = [];
+  const kindRun = new ItemRun('repair.all_kinds');
+  for (const k of kinds) {
+    let result: RepairResult;
+    try {
+      result = await run(k);
+      kindRun.succeed();
+    } catch (error) {
+      if (opts.named) throw error;
+      kindRun.fail(k, error);
+      results.push({ ...kindErrorResult(k, scope, { apply: opts.apply, error, source: opts.source }), paid: false });
+      continue;
+    }
+    results.push({ ...result, paid: repairMaySpend(repairSpec(k, opts.registry), opts.noEmbed) });
+    if (result.stopped) break;
+  }
+  return results;
 }
 
 /** Exit 1 when any kind stopped early or refused an item; 0 only when every pending item was attempted and applied or skipped. */

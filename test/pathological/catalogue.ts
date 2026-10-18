@@ -19,4 +19,6 @@ export interface SiteCases {
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'repair.apply_items': { file: 'test/pathological/a9-repair-core.test.ts', item: 'item case: an item whose apply throws', run: 'run case: a run-scoped' },
+  'repair.all_kinds': { file: 'test/pathological/a45-repair-all-kinds.test.ts', item: 'item case: a kind whose plan throws', run: 'run case: a run-scoped' },
+  'repair.content_lane_kinds': { file: 'test/pathological/a46-content-lane-kinds.test.ts', item: 'item case: fences throwing is recorded', run: 'run case: a run-scoped' },
 };
