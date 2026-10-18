@@ -106,7 +106,7 @@ export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmb
   /** #6712 PR 2 `file-drift`: only pages whose newest drift conflict is at or after this concrete instant (ISO; `--since`, parsed by `since.ts`). */
   since?: string;
   /** `stuck-recovery`: the version an apply keeps, and the one request a run selects. */
-  keep?: 'prior' | 'disk'; requestId?: string;
+  keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string;
   /** `receipt-compaction` (#6696 A9): the age (`72h`, `30d`), failures too, and compaction inside the retention window. */
   olderThan?: string; includeFailures?: boolean; force?: boolean;
   /** `rename-identity` (#6729): the old slug that disambiguates a pair (`--from`), and the close disposition (`--close`). */
@@ -304,7 +304,7 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
   opts: { apply: boolean; limit?: number; embeddingModel?: string; sourceFlag?: string; embed?: boolean; applyArgs?: string[];
     explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[]; slugs?: string[]; noLlm?: boolean;
     prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string;
-    keep?: 'prior' | 'disk'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean;
+    keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean;
     spec?: Pick<RepairKindSpec, 'explicit_only' | 'consent' | 'spends'>; maxLlmUsd?: number; deadline?: number; now?: () => number;
     /** Test seam: who publishes this run's admissions (default: this process's consumer, else a live full one on this host). */
     publicationOwner?: () => Promise<{ alive: boolean; owner: string }> }): Promise<RepairResult> {
