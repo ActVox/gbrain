@@ -6,6 +6,9 @@ import { readFix } from '../ops/op-fix.ts';
 import type { Action } from '../agent-output.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { materializePageSnapshot } from '../page-state/materialize.ts';
+import type { PageSnapshot } from '../page-state/types.ts';
+import { serializePageToMarkdown } from '../markdown.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import type { JournalLimits } from './model.ts';
 import { readJournalLimits } from './limits.ts';
 import { lockCounters } from './journal.ts';
@@ -15,7 +18,7 @@ import { withFilesystemPublication } from './filesystem-guard.ts';
 import { persistenceFileHash, publishPersistenceFile } from './coordinator.ts';
 import type { EffectRecovery, PersistenceEffect } from './effect-model.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
-import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, upgradeRecoveryStaging } from './staging.ts';
+import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFile, upgradeRecoveryStaging } from './staging.ts';
 import { declarePersistenceProtocol } from './protocol.ts';
 import { advanceEffectCursor } from './effect-journal.ts';
 import { faultPoint } from './fault-points.ts';
@@ -95,6 +98,53 @@ async function clearRecovery(tx: BrainEngine, effect: PersistenceEffect): Promis
   }
   await faultPoint('effect_recovery:before_clear', { effectId: effect.id, requestId: effect.request_id, sourceId: effect.source_id });
   await tx.executeRaw('UPDATE persistence_effects SET recovery=NULL,recovery_bytes=0 WHERE id=$1', [effect.id]);
+}
+
+/** The bytes a withdrawal mirror writes for a page: its current markdown rendering (callers skip or refuse a segmented page first). */
+export function mirrorContent(snapshot: PageSnapshot): string {
+  return serializePageToMarkdown(snapshot.page, snapshot.tags);
+}
+
+/**
+ * Under the native lock, before anything publishes a stuck withdrawal-mirror record's `after` bytes (`gbrain repair
+ * stuck-recovery --keep withdrawn`): when the page moved past the record (a later withdrawal committed), the recorded bytes
+ * would put that withdrawal's fact back on disk, so the record is rebased on the latest snapshot under its page lock: `after`
+ * becomes the bytes `mirrorPage` renders for it, `pageId`/`revision` follow the snapshot, and the publication stage and
+ * reserved recovery bytes grow to fit the new bytes (`queue_capacity` when they do not). `persist` runs in the same
+ * transaction. Returns the current record (unchanged when it was not stale), null when it holds none, or 'unrenderable'
+ * when the page was deleted, replaced or segmented, so there are no current bytes to write.
+ */
+export async function rebaseStaleEffectRecovery(engine: BrainEngine, effectId: string | number, hostId: string,
+  persist: (tx: BrainEngine, record: EffectRecovery) => Promise<void>): Promise<EffectRecovery | null | 'unrenderable'> {
+  const [effect] = await engine.executeRaw<PersistenceEffect>('SELECT * FROM persistence_effects WHERE id=$1', [effectId]);
+  if (!effect?.recovery) return null;
+  const limits = await readJournalLimits(engine);
+  return engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
+    await guardEffectSource(tx, effect, hostId);
+    const counters = await lockCounters(tx, ['brain', `worktree:${effect.worktree_id}`]);
+    const [current] = await tx.executeRaw<PersistenceEffect>('SELECT * FROM persistence_effects WHERE id=$1 FOR UPDATE', [effectId]);
+    const record = current?.recovery;
+    if (!record) return null;
+    await tx.lockPageKeys([{ sourceId: current.source_id, slug: record.slug }]);
+    const snapshot = await tx.readPageSnapshot(record.slug, { sourceId: current.source_id, includeDeleted: true });
+    if (snapshot?.page.id === record.pageId && snapshot.revision === record.revision) return record;
+    if (!snapshot || snapshot.page.id !== record.pageId || snapshot.page.deleted_at || isSegmentedPage(snapshot.page)) return 'unrenderable';
+    const after = Buffer.from(mirrorContent(snapshot));
+    const rebased: EffectRecovery = { ...record, after: after.toString('base64'), afterHash: sha256(after), revision: snapshot.revision,
+      staging: { publication: recoveryStagingFile(record.path, after) } };
+    const extra = Math.max(0, Buffer.byteLength(JSON.stringify(rebased)) * 2 + 4096 - Number(current.recovery_bytes));
+    for (const counter of counters) if (Number(counter.recovery_bytes) + extra > (counter.key === 'brain' ? limits.brainRecoveryBytes : limits.worktreeRecoveryBytes)) {
+      throw opError('queue_capacity', 'Other publications hold the recovery capacity the current mirror bytes need.',
+        `Page ${record.slug} in source ${current.source_id} changed after its withdrawal mirror stopped, and writing its current version needs ${extra} more bytes of recovery space than other publications leave free, so nothing was written. Run the same apply again once they finish.`,
+        { fix: effectStatusFix(current) });
+    }
+    await withFilesystemPublication([record.root], async () => cleanupRecoveryStaging(record));
+    await tx.executeRaw('UPDATE persistence_effects SET recovery=$2::text::jsonb,recovery_bytes=recovery_bytes+$3,updated_at=now() WHERE id=$1', [current.id, JSON.stringify(rebased), extra]);
+    for (const counter of counters) await tx.executeRaw('UPDATE persistence_counters SET recovery_bytes=recovery_bytes+$2 WHERE key=$1', [counter.key, extra]);
+    await persist(tx, rebased);
+    return rebased;
+  });
 }
 
 /** Under the native lock: finish forward, never restore withdrawn bytes. */

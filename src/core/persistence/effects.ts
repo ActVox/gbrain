@@ -35,7 +35,7 @@ import { sha256 } from './digest.ts';
 import { prepareFileTarget } from './page-prepare.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
 import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, failedMirrorAllowlists, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect } from './effect-journal.ts';
-import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
+import { guardEffectSource, mirrorContent, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
 import { commitGitTargets, DURABILITY_NOT_ENABLED, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
 import { retryIndexLockParks } from './effect-retry.ts';
 import { gitDurabilityPolicy } from './git-durability-policy.ts';
@@ -196,7 +196,7 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
   if (isMetafilePage(snapshot)) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId, 'metafile'); return; }
   // Wave B PR 1: a segmented body has no whole-body mirror yet (per-segment mirror in PR 2).
   if (isSegmentedPage(snapshot.page)) { await skipTarget(engine, effect, snapshot, 'page_body_segmented'); return; }
-  const content = serializePageToMarkdown(snapshot.page, snapshot.tags);
+  const content = mirrorContent(snapshot);
   let file: Awaited<ReturnType<typeof prepareFileTarget>>;
   try {
     file = binding?.local_path ? await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot, content, opts.hostId, { allowMissing: true }) : undefined;
