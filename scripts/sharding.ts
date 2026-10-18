@@ -55,6 +55,8 @@ const DEFAULT_WEIGHTS_PATH = resolve(REPO_ROOT, "scripts/test-weights.json");
  * test/scripts/unit-shard-budget.test.ts pins both workflows to it.
  */
 export const UNIT_SHARDS = 18;
+/** Unit shards each test.yml `test` job runs at once (scripts/test-shard-pack.sh); test/scripts/ci-gates.test.ts pins the matrix to it. */
+export const UNIT_SHARDS_PER_JOB = 2;
 /** test.yml's `test` job `timeout-minutes: 22`: the only bound on a unit shard, its setup steps included. */
 export const UNIT_JOB_TIMEOUT_MS = 22 * 60 * 1000;
 /** The job's steps before the shard (checkout, Bun, cache restores, install): 10-20 s measured on a warm cache. */

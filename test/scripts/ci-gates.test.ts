@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { load } from 'js-yaml';
-import { UNIT_SHARDS } from '../../scripts/sharding.ts';
+import { UNIT_SHARDS, UNIT_SHARDS_PER_JOB } from '../../scripts/sharding.ts';
 
 const root = join(import.meta.dir, '..', '..');
 type Job = { needs?: string | string[]; if?: string; steps: Array<{ name?: string; run?: string; uses?: string; env?: Record<string, string>; if?: string; with?: Record<string, string>; 'timeout-minutes'?: number }> };
@@ -127,15 +127,29 @@ describe('CI execution evidence', () => {
   });
 
   test('unit shard count agrees across the matrix, the shard step and the coverage manifest', () => {
-    const job = unit.jobs.test as Job & { strategy: { matrix: { shard: number[] } } };
-    const shards = job.strategy.matrix.shard;
+    const job = unit.jobs.test as Job & { strategy: { matrix: { shards: number[][] } } };
+    const packs = job.strategy.matrix.shards;
+    expect(packs.map(pack => pack.length)).toEqual(packs.map(() => UNIT_SHARDS_PER_JOB));
+    const shards = packs.flat();
     expect(shards).toEqual(Array.from({ length: UNIT_SHARDS }, (_, i) => i + 1));
-    const run = job.steps.find(step => step.run?.includes('scripts/test-shard.sh'))!;
-    expect(run.name).toBe(`Run test shard \${{ matrix.shard }}/${shards.length}`);
-    expect(run.run).toContain(`scripts/test-shard.sh \${{ matrix.shard }} ${shards.length}`);
+    const run = job.steps.find(step => step.run?.includes('scripts/test-shard-pack.sh'))!;
+    expect(run.name).toBe(`Run test shards \${{ join(matrix.shards, ' and ') }} of ${shards.length}`);
+    expect(run.run).toBe(`bash scripts/test-shard-pack.sh ${shards.length} \${{ join(matrix.shards, ' ') }}`);
     const merge = unit.jobs['coverage-report'].steps.find(step => step.name === 'Merge lanes')!.run!;
     const expected = /--manifest-expect (\S+)/.exec(merge)![1].split(',').filter(lane => lane.startsWith('shard-'));
     expect(expected).toEqual(shards.map(shard => `shard-${shard}`));
+  });
+
+  test('each packed unit shard uploads its own receipts, coverage lane and timing log', () => {
+    const job = unit.jobs.test as Job;
+    const pack = job.steps.find(step => step.run?.includes('scripts/test-shard-pack.sh'))!;
+    expect(pack.env).toEqual({ GBRAIN_SHARD_PACK_DIR: '${{ runner.temp }}/shards' });
+    const uploads = job.steps.filter(step => step.uses?.startsWith('actions/upload-artifact@')).map(step => [step.with!.name, step.with!.path]);
+    expect(uploads).toEqual(Array.from({ length: UNIT_SHARDS_PER_JOB }, (_, i) => `\${{ matrix.shards[${i}] }}`).flatMap(shard => [
+      [`receipts-unit-${shard}`, `\${{ runner.temp }}/shards/${shard}/receipts`],
+      [`coverage-shard-${shard}`, `\${{ runner.temp }}/shards/${shard}/coverage`],
+      [`timings-unit-${shard}`, `\${{ runner.temp }}/shards/${shard}/unit.log`],
+    ]));
   });
 
   test('the nightly coverage-full-unit lane runs the same unit partition', () => {
