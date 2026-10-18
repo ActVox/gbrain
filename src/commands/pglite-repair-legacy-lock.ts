@@ -6,17 +6,21 @@
  *   --dry-run   read-only: the verdict, the advisory evidence and the plan_hash.
  *   apply       takes the stable sibling kernel lock (no kernel-v1 process can be
  *               live while it is held), re-inspects under it, refuses a live
- *               holder or a network filesystem (`legacy_lock_removal_refused`),
- *               asks for consent bound to the plan hash (`--yes --expect`; a
- *               changed lock refuses `preview_changed`), then moves the legacy
- *               dir aside and writes the kernel-v1 marker (core/pglite-legacy-lock.ts).
+ *               holder, a network filesystem or one whose locality it cannot
+ *               read (`legacy_lock_removal_refused`), asks for consent bound
+ *               to the plan hash (`--yes --expect`), inspects again after
+ *               consent (a holder or change that appeared while the prompt
+ *               waited refuses; a changed plan refuses `preview_changed`), then
+ *               moves the legacy dir aside and writes the kernel-v1 marker
+ *               (core/pglite-legacy-lock.ts).
  */
 import { shellQuote, type Action } from '../core/agent-output.ts';
 import { currentExitCode, writeJsonDocument } from '../core/cli-force-exit.ts';
 import { consentGate } from '../core/consent-cli.ts';
+import type { ConsentEnv } from '../core/consent.ts';
 import { opError, OperationError } from '../core/ops/contract.ts';
 import { acquireKernelLockOnly, PgliteBusyError, releaseLock, type LockHandle } from '../core/pglite-lock.ts';
-import { applyLegacyLockRemoval, inspectLegacyLock, type LegacyLockInspection } from '../core/pglite-legacy-lock.ts';
+import { applyLegacyLockRemoval, inspectLegacyLock, type LegacyLockInspection, type LegacyLockProbe } from '../core/pglite-legacy-lock.ts';
 import { writeCliError } from '../cli/cli-error.ts';
 
 const RISK = 'The legacy lock folder is moved into a sibling <data-dir>.legacy-lock-removed-<timestamp> folder with a receipt and the exact restore command; nothing is deleted. '
@@ -63,14 +67,19 @@ function printPreview(i: LegacyLockInspection, json: boolean): number {
 
 function refuse(i: LegacyLockInspection, json: boolean): number {
   const refusal = i.refusal!;
-  const e = opError('legacy_lock_removal_refused', `${refusal.message} The legacy lock at ${i.legacy_lock.dir} was left in place.`,
-    'Stop the process named in the message (on a shared filesystem: every gbrain on every host that mounts it), then run the preview again.',
+  const hint = refusal.reason === 'filesystem_unverified'
+    ? 'If the folder is on a network or shared mount, stop every gbrain on every host that mounts it. Otherwise run the preview and the repair on a Linux or macOS host where this folder is on a local disk. Where gbrain cannot check locality (another system, an unrecognised filesystem), only the user can confirm that no gbrain on any computer reaches this folder and move the lock folder aside themselves.'
+    : 'Stop the process named in the message (on a shared filesystem: every gbrain on every host that mounts it), then run the preview again.';
+  const e = opError('legacy_lock_removal_refused', `${refusal.message} The legacy lock at ${i.legacy_lock.dir} was left in place.`, hint,
     { reason: refusal.reason, fix: previewFix(i.data_dir) });
   return writeCliError(e, 'pglite-repair', { json, emit: emitText });
 }
 
-async function applyUnderKernelLock(dataDir: string, json: boolean, args: readonly string[]): Promise<number> {
-  const inspection = inspectLegacyLock(dataDir);
+interface LegacyLockRepairOpts { dryRun: boolean; json: boolean; args: readonly string[]; consentEnv?: ConsentEnv; probe?: LegacyLockProbe }
+
+async function applyUnderKernelLock(dataDir: string, opts: LegacyLockRepairOpts): Promise<number> {
+  const { json, args } = opts;
+  const inspection = inspectLegacyLock(dataDir, opts.probe);
   if (!inspection.legacy_lock.legacy) {
     emit({ status: 'ok', action: 'none', data_dir: inspection.data_dir, verdict: inspection.legacy_lock.verdict });
     return 0;
@@ -83,16 +92,22 @@ async function applyUnderKernelLock(dataDir: string, json: boolean, args: readon
     risk: RISK, user_message: userMessage(inspection),
     argv: applyArgv(inspection.data_dir), preview_argv: previewArgv(inspection.data_dir),
     plan_hash: inspection.plan_hash!, selection: inspection.selection, args,
-  }, { json });
+  }, { json, env: opts.consentEnv });
   if (!auth) return currentExitCode();
-  const receipt = applyLegacyLockRemoval(inspection);
+  const fresh = inspectLegacyLock(dataDir, opts.probe);
+  if (fresh.refusal) return refuse(fresh, json);
+  if (fresh.plan_hash !== inspection.plan_hash) {
+    throw opError('preview_changed', `The legacy lock of ${inspection.data_dir} changed while consent was pending (approved plan ${inspection.plan_hash}, current plan ${fresh.plan_hash ?? 'none'}); nothing was changed.`,
+      'Preview again, show the user the new plan, and re-run with the new --expect value only if they approve it.', { fix: previewFix(inspection.data_dir) });
+  }
+  const receipt = applyLegacyLockRemoval(fresh);
   if (json) emit({ status: 'ok', ...receipt, next_command: 'gbrain doctor --json' });
   else console.log(`Moved the legacy lock of ${receipt.data_dir} to ${receipt.moved_to} and wrote the kernel-v1 marker.\n  Undo (once no process has the brain open): ${receipt.restore_command}\n  Next: gbrain doctor --json`);
   return 0;
 }
 
-export async function runLegacyLockRepair(dataDir: string, opts: { dryRun: boolean; json: boolean; args: readonly string[] }): Promise<number> {
-  const inspection = inspectLegacyLock(dataDir);
+export async function runLegacyLockRepair(dataDir: string, opts: LegacyLockRepairOpts): Promise<number> {
+  const inspection = inspectLegacyLock(dataDir, opts.probe);
   if (opts.dryRun) return printPreview(inspection, opts.json);
   if (!inspection.legacy_lock.legacy) {
     if (opts.json) emit({ status: 'ok', action: 'none', data_dir: inspection.data_dir, verdict: inspection.legacy_lock.verdict });
@@ -109,7 +124,7 @@ export async function runLegacyLockRepair(dataDir: string, opts: { dryRun: boole
     return writeCliError(e, 'pglite-repair', { json: opts.json, emit: emitText });
   }
   try {
-    return await applyUnderKernelLock(inspection.data_dir, opts.json, opts.args);
+    return await applyUnderKernelLock(inspection.data_dir, opts);
   } catch (error) {
     if (!(error instanceof OperationError)) throw error;
     return writeCliError(error, 'pglite-repair', { json: opts.json, emit: emitText });
