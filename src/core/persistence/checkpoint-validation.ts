@@ -96,9 +96,12 @@ export const OPEN_PASS_WORK_SQL = `(SELECT r.request_id::text AS request_id FROM
  * `persistence_requests_recovery`. Returns the blocking request id, or null. A statement timeout is the typed
  * `checkpoint_validation_timeout`, as clause 1 of the cursor validation.
  */
-export async function findOpenPassWork(tx: Pick<BrainEngine, 'executeRaw'>, worktreeId: string, selfRequestId: string): Promise<string | null> {
+export async function findOpenPassWork(tx: Pick<BrainEngine, 'executeRaw'>, worktreeId: string, selfRequestId: string,
+  /** A writeback's folded stamp: its own recovery record is the file publication's journal, which its commit resolves. */
+  ownRecovery = false): Promise<string | null> {
   try {
-    const [row] = await tx.executeRaw<{ request_id: string }>(OPEN_PASS_WORK_SQL, [worktreeId, selfRequestId]);
+    const [row] = await tx.executeRaw<{ request_id: string }>(ownRecovery ? OPEN_PASS_WORK_SQL.replace('r.recovery IS NOT NULL LIMIT 1', 'r.recovery IS NOT NULL AND r.request_id<>$2::uuid LIMIT 1') : OPEN_PASS_WORK_SQL,
+      [worktreeId, selfRequestId]);
     return row?.request_id ?? null;
   } catch (error) {
     const failure = error as { code?: string; message?: string };

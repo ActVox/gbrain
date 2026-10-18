@@ -77,8 +77,9 @@ export function passRequestId(passId: string, path: string, level: string | null
  * The converged watermark a pass records (design v3.2 §2.2): the worktree's highest request `sequence`, and the requests
  * (`r:<id>`) and Git effects (`e:<id>`) still open, at most `cap` (null above it: no idle until a full round re-reads).
  */
-export async function readConvergedWatermark(tx: Pick<BrainEngine, 'executeRaw'>, scope: { worktreeId: string; sourceId: string; incarnation: string }, selfRequestId: string | null, cap: number):
-  Promise<{ request_hwm: string; open_at_stamp: string[] | null }> {
+export async function readConvergedWatermark(tx: Pick<BrainEngine, 'executeRaw'>, scope: { worktreeId: string; sourceId: string; incarnation: string }, selfRequestId: string | null, cap: number,
+  /** `converged.writeback` (sync-pass-row.ts): a folded writeback stamp's own write, and the prior stamp's list, of which the uncommitted stay. */
+  writeback?: { own?: string; prior?: readonly string[] }): Promise<{ request_hwm: string; open_at_stamp: string[] | null; writeback?: string[] }> {
   // The worktree's requests and the incarnation's worktree-less ones (writes admitted with sync.write_through=false).
   const [hwm] = await tx.executeRaw<{ hwm: string | null }>(`SELECT GREATEST((SELECT max(sequence) FROM persistence_requests WHERE worktree_id=$1::uuid),
     (SELECT max(sequence) FROM persistence_requests WHERE worktree_id IS NULL AND source_id=$2 AND source_incarnation=$3::uuid))::text AS hwm`, [scope.worktreeId, scope.sourceId, scope.incarnation]);
@@ -87,7 +88,11 @@ export async function readConvergedWatermark(tx: Pick<BrainEngine, 'executeRaw'>
         AND request_id IS DISTINCT FROM $2::uuid LIMIT $3)
     UNION ALL (SELECT 'e:'||e.id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
       WHERE r.worktree_id=$1::uuid AND e.kind='git' AND e.state IN ('queued','running') LIMIT $3)`, [scope.worktreeId, selfRequestId, cap + 1, scope.sourceId, scope.incarnation]);
-  return { request_hwm: hwm?.hwm ?? '0', open_at_stamp: open.length > cap ? null : open.map(row => row.id) };
+  // The prior list's writebacks whose Git effect has not committed (queued, running, failed or parked) stay listed.
+  const carried = writeback?.prior?.length ? (await tx.executeRaw<{ id: string }>(`SELECT DISTINCT e.request_id::text AS id FROM persistence_effects e
+      WHERE e.request_id = ANY($1::uuid[]) AND e.kind='git' AND e.state<>'committed'`, [writeback.prior])).map(row => row.id) : [];
+  const listed = [...new Set([...(writeback?.own ? [writeback.own] : []), ...carried])];
+  return { request_hwm: hwm?.hwm ?? '0', open_at_stamp: open.length > cap ? null : open.map(row => row.id), ...(listed.length ? { writeback: listed } : {}) };
 }
 
 /** A round batch's entry: the discovery shape plus the level `L` it was classified at (the request identity's third part). */

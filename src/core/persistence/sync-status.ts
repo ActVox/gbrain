@@ -156,7 +156,7 @@ export type SyncStatusState = 'synced' | 'resumable' | 'blocked';
 export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'request_pending',
   'status_unknown', 'needs_human', 'head_blocked', 'recovery_blocked',
   // #6712 PR 4b (design v3.2 §9): the live pass's reasons.
-  'pass_unfinished', 'not_converged', 'settle_mismatch', 'deletes_withheld', 'selection_scoped', 'admission_paused'] as const;
+  'pass_unfinished', 'not_converged', 'settle_mismatch', 'deletes_withheld', 'selection_scoped', 'admission_paused', 'writeback_failed'] as const;
 export type SyncStatusReason = typeof SYNC_STATUS_REASONS[number];
 export type SyncStatusRead = { status: 'read' } | { status: 'not_read'; fix: Action };
 /** The bound of each default probe (the oldest blocker, the recovery records). */
@@ -251,8 +251,11 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   // #6712 PR 4b (design §9): the pass row and the withheld-delete record ride the source read (primary-key probes), so the plain status keeps its statement budget.
   const admissionSql = syncAdmissionSettingSql(4);
   const [source] = await engine.executeRaw<{ incarnation: string; pass_value: PassRow['value'] | null; pass_updated_at: Date | string | null; withheld: DeletesWithheld | null;
-    admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null }>(
-    `SELECT s.incarnation::text AS incarnation, p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns} FROM sources s
+    admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null; writeback_failed: string | null }>(
+    `SELECT s.incarnation::text AS incarnation, p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns},
+      (SELECT r.request_id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE e.kind='git' AND e.state='failed'
+        AND e.request_id IN (SELECT id::uuid FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(p.completed_keys->0->'obligations'->'converged'->'writeback')='array'
+          THEN p.completed_keys->0->'obligations'->'converged'->'writeback' ELSE '[]'::jsonb END) AS w(id)) ORDER BY e.id LIMIT 1) AS writeback_failed FROM sources s
       LEFT JOIN op_checkpoints p ON p.op=$2 AND p.fingerprint=s.id||':'||s.incarnation::text
       LEFT JOIN op_checkpoints w ON w.op=$3 AND w.fingerprint=s.id||':'||s.incarnation::text
       ${admissionSql.joins}
@@ -296,7 +299,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   // #6712 PR 4b (design §9): the pass row (one primary-key read) and the withheld-delete record make the live `convergence` block.
   const passRow: PassRow | null = source.pass_value && source.pass_updated_at ? { value: source.pass_value, updated_at: new Date(source.pass_updated_at).toISOString() } : null;
   const withheld = passRow ? source.withheld : null;
-  const passState = passRow ? passStatusState(passRow, withheld) : null;
+  const passState = passRow ? passStatusState(passRow, withheld, source.writeback_failed) : null;
   const resume = !header && passRow ? passResumeArgs(sourceId, passRow) : managedSyncResumeArgs({ sourceId, processingOptions: header?.processingOptions, syncOptions: header?.syncOptions });
   const human = holds.find(hold => hold.needs_human) ?? (lastError?.needs_human ? lastError : undefined);
   // #6643: a knock-on or a superseded run is not a failure of its page: the resume re-freezes the entry.
@@ -334,7 +337,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const [state, stateReason] = statusState({ human: !!human, oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!lastError, actionable: actionable.length > 0, holds: holds.length > 0, pass: passState });
   const admission = await syncAdmissionStatus(engine, sourceId, source.incarnation,
     { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at });
-  const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume) : null;
+  const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume, source.writeback_failed) : null;
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, identity_downgrades: await withIdentityRemedies(engine, await listIdentityDowngrades(engine, [sourceId])), last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),

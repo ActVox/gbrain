@@ -6,9 +6,10 @@
  * - fold engages: a one-file commit whose file is already canonical (no writeback) publishes exactly one request carrying
  *   the stamp, its import, which folds it (`pass_stamp: folded`); no separate checkpoint request. A fold that quietly
  *   stops engaging costs this shape a second level and a checkpoint publication per commit (#6858 at 57 ms: 17.7 s -> 21.8 s).
- * - fold declines a writeback: a one-file commit whose file is not canonical is rewritten by its import (`file_written`), so
- *   `foldPassCheckpoint` keeps the stamp path (sync-pass-fold.ts `prepared.file`): the import carries the fold offer and
- *   publishes alone, and its own checkpoint request follows.
+ * - fold engages for a writeback (GBRA-108, option A): a one-file commit whose file is not canonical is rewritten by its
+ *   import (`file_written`), which folds the stamp exactly once through its post-effects hook (sync-pass-fold.ts,
+ *   coordinator.ts `afterEffects`), with no separate checkpoint request; the stamp records the import in
+ *   `converged.writeback` (test/sync-pass-writeback-fold-6712.test.ts covers what that keeps busy).
  * - fold probe 1: the last import's publication fails after its folded stamp ran (`publication:before_commit`): the stamp
  *   rolls back with it, so the checkpoint and the pass row stay where they were, and later runs converge.
  * - fold probe 2: a hold at the target when the last import publishes: the import publishes alone (`pass_stamp_skipped`),
@@ -96,7 +97,7 @@ for (const backend of testBackends()) {
       expect(await bodyOf(engine, 'notes/a')).toContain('A committed change of notes/a.');
     }), 120_000);
 
-    test('fold declines a writeback: a one-file commit whose import rewrites its file keeps the checkpoint request', () => brain(async ({ engine, root }) => {
+    test('fold engages for a writeback: a one-file commit whose import rewrites its file folds exactly once, no separate stamp request', () => brain(async ({ engine, root }) => {
       expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
       const after = await lastSequence(engine);
       writeFileSync(join(root, 'notes/a.md'), '---\ntitle: notes/a\n---\nA committed change of notes/a.\n'); commit(root, 'change a, not canonical');
@@ -105,8 +106,12 @@ for (const backend of testBackends()) {
         "SELECT intent->>'kind' AS kind, slug, state, intent->'stamp' ? 'fold' AS offered, outcome->>'pass_stamp' AS stamp, outcome->>'pass_stamp_skipped' AS skipped, outcome FROM persistence_requests WHERE sequence > $1 AND intent ? 'stamp' ORDER BY sequence", [after]);
       expect((stamped[0]?.outcome as { persistence?: { file_written?: boolean } } | undefined)?.persistence?.file_written).toBe(true);
       expect(stamped.map(({ outcome, ...row }) => row)).toEqual([
-        { kind: 'managed_sync_import', slug: 'notes/a', state: 'committed', offered: true, stamp: null, skipped: null },
-        { kind: 'managed_sync_checkpoint', slug: '__managed_sync_checkpoint__', state: 'committed', offered: false, stamp: null, skipped: null }]);
+        { kind: 'managed_sync_import', slug: 'notes/a', state: 'committed', offered: true, stamp: 'folded', skipped: null }]);
+      const head = git(root, 'rev-parse', 'HEAD');
+      expect(await checkpoint(engine)).toEqual({ last_commit: head, converged: head });
+      const [row] = await engine.executeRaw<{ request_id: string }>("SELECT id::text AS request_id FROM persistence_requests WHERE sequence > $1 AND intent->>'kind'='managed_sync_import'", [after]);
+      const [pass] = await engine.executeRaw<{ writeback: string[] | null }>("SELECT completed_keys->0->'obligations'->'converged'->'writeback' AS writeback FROM op_checkpoints WHERE op='managed-sync-pass'");
+      expect(pass!.writeback).toEqual([row!.request_id]);
     }), 120_000);
 
     test('fold probe 1: a failed publication of the last import rolls its folded stamp back; later runs converge', () => brain(async ({ engine, root }) => {

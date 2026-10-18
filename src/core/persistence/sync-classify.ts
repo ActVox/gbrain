@@ -183,7 +183,7 @@ export function classifySyncPath(s: SyncPathState): SyncClassified {
 
 /** Why a pass is not idle (v3.2 §2.2); empty = idle. A hold-only round runs when `rescreen_due_hold` is the only reason. */
 export type SyncIdleBlocker = 'no_converged_state' | 'target_moved' | 'open_episode' | 'owed_tail' | 'retry_row' | 'not_converged_streak' | 'mismatch_streak'
-  | 'fingerprint_changed' | 'request_newer' | 'open_at_stamp_finished' | 'working_change' | 'full_round_due' | 'rescreen_due_hold';
+  | 'fingerprint_changed' | 'request_newer' | 'open_at_stamp_finished' | 'writeback_open' | 'working_change' | 'full_round_due' | 'rescreen_due_hold';
 
 export interface SyncPassKindInput {
   converged: { target: string; parserFp: string; pack: string | null; selectionFp: string; passesSinceFull: number; lastFullAt: number } | null;
@@ -193,6 +193,8 @@ export interface SyncPassKindInput {
   requestNewer: boolean;
   /** Some request or effect recorded in `converged.open_at_stamp` is no longer open (or the set overflowed its cap). */
   openAtStampFinished: boolean;
+  /** A writeback recorded in `converged.writeback` has a Git effect that has not committed (queued, running, failed or parked). */
+  writebackOpen?: boolean;
   /** Working mode: the stat cache saw a change. */
   workingChange: boolean;
   rescreenDueHold: boolean;
@@ -221,6 +223,7 @@ export function syncPassKind(input: SyncPassKindInput): { kind: 'idle' | 'hold_o
   if (input.mismatchStreak > 0) blockers.push('mismatch_streak');
   if (input.requestNewer) blockers.push('request_newer');
   if (input.openAtStampFinished) blockers.push('open_at_stamp_finished');
+  if (input.writebackOpen) blockers.push('writeback_open');
   if (input.workingChange) blockers.push('working_change');
   if (input.rescreenDueHold) blockers.push('rescreen_due_hold');
   const kind = !blockers.length ? 'idle' : blockers.every(b => b === 'rescreen_due_hold') ? 'hold_only' : 'full';

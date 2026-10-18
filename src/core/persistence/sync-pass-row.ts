@@ -49,6 +49,11 @@ export interface PassConverged {
   request_hwm: string;
   /** Requests and Git effects open on settled paths at the stamp (design §2.2), at most `OPEN_AT_STAMP_CAP`; null when the cap overflowed (no idle). */
   open_at_stamp: string[] | null;
+  /**
+   * #6712 PR 4b: the write ids of the writeback imports whose Git effect a stamp recorded open (the folded stamp's own, and
+   * any an earlier stamp carried that has not committed). Until each effect commits the source is not idle; absent: none.
+   */
+  writeback?: string[];
   parser_fp: string;
   pack: string | null;
   selection_fp: string;
