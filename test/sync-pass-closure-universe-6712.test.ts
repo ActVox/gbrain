@@ -10,6 +10,10 @@
  *   both values of `configured`;
  * - the walk is skipped exactly for the pairs whose universes are equal (equal spellings included) and taken for every
  *   other pair, so a selection field the shortcut ignored would close an episode the walk keeps open.
+ *
+ * The fixture's tree is walked once (`walkTreeLevel`) and replayed into every closure that walks (`walk`), instead of a
+ * `git ls-tree` process per pair; one episode variant's row also walks for real at every root, slug mode and `configured`,
+ * and must equal the replay.
  */
 import { expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -17,6 +21,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
+import { walkTreeLevel } from '../src/core/persistence/sync-git-stream.ts';
 import { episodeClosure, passEpisodeClosure } from '../src/core/persistence/sync-pass-episode.ts';
 import type { PassEpisode, SyncSelection } from '../src/core/persistence/sync-pass-row.ts';
 
@@ -43,7 +48,11 @@ test('an episode closes without the walk exactly when the universes are equal, a
     git(gitRoot, 'add', '-A'); git(gitRoot, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'tree');
     const head = git(gitRoot, 'rev-parse', 'HEAD'), treePaths = git(gitRoot, 'ls-tree', '-r', '--name-only', head).split('\n');
     expect(treePaths.length).toBe(FILES.length);
-    let walks = 0;
+    const listing: string[] = [];
+    await walkTreeLevel(gitRoot, head, '', path => { listing.push(path); });
+    expect([...listing].sort()).toEqual([...treePaths].sort());
+    const walk = async (visit: (path: string) => void) => { for (const path of listing) visit(path); };
+    let walks = 0, real = 0;
     installFaultHook(point => { if (point === 'sync:closure_walk') walks++; });
     const misses: unknown[] = [], tally = { skipped: 0, walked: 0, closes: 0, open: 0 };
     for (const [root, scope] of [[gitRoot, ''], [join(gitRoot, 'docs'), 'docs']] as const)
@@ -53,13 +62,20 @@ test('an episode closes without the walk exactly when the universes are equal, a
             for (const [oName, oGroup, other] of VARIANTS) {
               const pass = configured ? all : other, configuredSelection = configured ? other : all;
               const before = walks;
-              const got = await passEpisodeClosure({ gitRoot, root, head, slugMode, episode: episode(e), pass, configuredSelection, configured });
+              const input = { gitRoot, root, head, slugMode, episode: episode(e), pass, configuredSelection, configured };
+              const got = await passEpisodeClosure({ ...input, walk });
               const want = episodeClosure({ episode: e, pass, configuredSelection, configured, scope, slugMode, treePaths });
               const walked = walks - before, wantWalk = (scope ? groupIn(eGroup) !== groupIn(oGroup) : eGroup !== oGroup) ? 1 : 0;
               tally[walked ? 'walked' : 'skipped']++; tally[want.closes ? 'closes' : 'open']++;
               if (JSON.stringify(got) !== JSON.stringify(want) || walked !== wantWalk) misses.push({ scope, slugMode, configured, e: eName, other: oName, got, want, walked, wantWalk });
+              if (eName === 'noDocsDrafts') {
+                const fresh = await passEpisodeClosure(input);
+                real += walks - before - walked;
+                if (JSON.stringify(fresh) !== JSON.stringify(got)) misses.push({ scope, slugMode, configured, e: eName, other: oName, replayed: got, fresh });
+              }
             }
     expect(misses).toEqual([]);
+    expect(real).toBeGreaterThan(0);
     expect(tally.skipped).toBeGreaterThan(0); expect(tally.walked).toBeGreaterThan(0); expect(tally.closes).toBeGreaterThan(0); expect(tally.open).toBeGreaterThan(0);
   } finally { installFaultHook(undefined); rmSync(gitRoot, { recursive: true, force: true }); }
 });
