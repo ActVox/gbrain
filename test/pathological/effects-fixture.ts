@@ -45,8 +45,11 @@ export interface WithdrawalBrain {
 
 const body = (slug: string) => `# ${slug}\n\n${renderFactsTable([{ rowNum: 1, claim: CLAIM, kind: 'fact', confidence: 1, visibility: 'world', notability: 'medium', active: true }])}`;
 
-/** Seeds the pages, their files and chunks, commits them, then commits one forget request whose withdrawal queues mirror, Git and embedding effects. */
-export async function withdrawalBrain(databaseUrl: string | undefined, run: (brain: WithdrawalBrain) => Promise<void>): Promise<void> {
+/**
+ * Seeds the pages, their files and chunks, commits them, then commits one forget request whose withdrawal queues mirror, Git and embedding effects.
+ * `untracked` pages keep their files on disk but out of the seed commit, so a later commit of their bytes shows in the history.
+ */
+export async function withdrawalBrain(databaseUrl: string | undefined, run: (brain: WithdrawalBrain) => Promise<void>, opts: { untracked?: string[] } = {}): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-pathological-effects-'));
   try {
     await withEnv({ GBRAIN_HOME: join(home, 'home'), GBRAIN_AUDIT_DIR: join(home, 'audit'), DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
@@ -63,7 +66,7 @@ export async function withdrawalBrain(databaseUrl: string | undefined, run: (bra
           await engine.upsertChunks(slug, [{ chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: text }], { sourceId: SOURCE });
           const snapshot = (await engine.readPageSnapshot(slug, { sourceId: SOURCE }))!;
           writeFileSync(join(root, `${slug}.md`), serializePageToMarkdown(snapshot.page, snapshot.tags));
-          files.push(`${slug}.md`);
+          if (!opts.untracked?.includes(slug)) files.push(`${slug}.md`);
         }
         durableGitRepo(root, files);
         const ctx: OperationContext = { engine, remote: false, sourceId: SOURCE, config: { engine: engine.kind, embedding_disabled: false }, dryRun: false,
@@ -101,15 +104,15 @@ export async function due(engine: BrainEngine): Promise<void> {
 }
 
 /**
- * Runs `passes` effect passes (limit 20 each), every effect due before each, with the given embedding stub; the
+ * Runs `passes` effect passes (limit 20 each unless `limit` is given), every effect due before each, with the given embedding stub; the
  * projections a withdrawal invalidated are rebuilt first unless `projections` is false (an archived source refuses them).
  */
-export async function drain(engine: BrainEngine, passes: number, opts: { embed?: Embed; config?: GBrainConfig; projections?: boolean } = {}): Promise<void> {
+export async function drain(engine: BrainEngine, passes: number, opts: { embed?: Embed; config?: GBrainConfig; projections?: boolean; limit?: number } = {}): Promise<void> {
   for (let i = 0; i < passes; i++) {
     await due(engine);
     if (opts.projections !== false) await rebuildProjections(engine);
     await runPersistenceEffects(engine, opts.config ?? { engine: engine.kind, embedding_disabled: false },
-      { hostId: localHostId(), limit: 20, embedding: { signature: SIGNATURE, model: MODEL, embed: opts.embed ?? embedAll } });
+      { hostId: localHostId(), limit: opts.limit ?? 20, embedding: { signature: SIGNATURE, model: MODEL, embed: opts.embed ?? embedAll } });
   }
 }
 
@@ -149,6 +152,13 @@ export async function effectsOf(engine: BrainEngine, requestId: string): Promise
 export function committedSinceSeed(root: string): string[] {
   return git(root, 'log', '--name-only', '--pretty=format:', 'HEAD', '--not', git(root, 'rev-list', '--max-parents=0', 'HEAD').trim())
     .split('\n').filter(Boolean);
+}
+
+/** Paths whose committed bytes since the seed commit hold the active (unwithdrawn) facts row of CLAIM. */
+export function committedActiveClaim(root: string): string[] {
+  const seed = git(root, 'rev-list', '--max-parents=0', 'HEAD').trim();
+  return [...new Set(committedSinceSeed(root))].filter(path => git(root, 'log', '-p', '--format=', 'HEAD', '--not', seed, '--', path)
+    .split('\n').some(line => line.startsWith('+') && line.includes(`| ${CLAIM} |`))).sort();
 }
 
 export async function embeddedPages(engine: BrainEngine): Promise<string[]> {

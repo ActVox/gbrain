@@ -6,7 +6,7 @@ import { opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import { fileContentHash } from './large-file.ts';
-import { PARK_AFTER_FAILURES, REMOTE_AUTO_LINKS_KEY, REMOTE_MENTION_OPERATIONS, type EffectKind, type PersistenceEffect, type EffectRequest } from './effect-model.ts';
+import { PARK_AFTER_FAILURES, REMOTE_AUTO_LINKS_KEY, REMOTE_MENTION_OPERATIONS, WITHHELD_BY_MIRROR, type EffectKind, type PersistenceEffect, type EffectRequest } from './effect-model.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
 import { recordChronicleDecision } from '../chronicle/ledger.ts';
 import { isFactsExtractionEnabled } from '../facts/extract.ts';
@@ -150,28 +150,63 @@ export function singleFileGitEffect(effect: PersistenceEffect): boolean {
 }
 
 /**
- * GBRA-130 A-12: the pages a failed withdrawal mirror finished (its cursor
- * passed them and none is parked or awaiting a retry). A mirror that failed
- * before upgrading to an exact target list finished nothing.
+ * GBRA-130 A-12: what a request's withdrawal mirror proves about its pages, read
+ * when a Git or embedding attempt executes. `pending`: the mirror is queued or
+ * running (a retry-effects requeue lands between the claim and the attempt), so
+ * the attempt waits. `published`: pages whose file the mirror rewrote (its
+ * recovery records each one, `data.published`); a cursor position is no proof,
+ * since the mirror also passes pages it skipped or found without a file.
+ * `passed`: pages the mirror moved past without parking or awaiting a retry; it
+ * never revisits them.
  */
-export function mirrorCommittedTargets(data: PersistenceEffect['data']): Set<string> {
-  const after = data.after_slug;
-  const unfinished = new Set([...(data.parked ?? []).flatMap(entry => entry.slug ? [entry.slug] : []), ...(data.retry_slugs ?? [])]);
-  return new Set((data.targets ?? []).filter(target => after !== undefined && target.slug <= after && !unfinished.has(target.slug)).map(target => target.slug));
+export interface MirrorGate { state: 'pending' | 'failed' | 'committed'; published: Set<string>; passed: Set<string> }
+
+/**
+ * Per request id, the gate of its withdrawal mirror: every mirror that has not
+ * committed, and a committed one that recorded its publications. A request
+ * without such a mirror is absent and its work is unrestricted.
+ */
+export async function mirrorGates(engine: SqlEngine, requestIds: readonly string[]): Promise<Map<string, MirrorGate>> {
+  if (!requestIds.length) return new Map();
+  const rows = await engine.executeRaw<{ request_id: string; state: PersistenceEffect['state']; data: PersistenceEffect['data'] }>(
+    `SELECT request_id::text AS request_id,state,data FROM persistence_effects WHERE kind='withdrawal-mirror' AND (state<>'committed' OR data ? 'published')
+      AND request_id=ANY($1::uuid[])`, [[...new Set(requestIds)]]);
+  return new Map(rows.map(({ request_id, state, data }) => {
+    const after = data.after_slug;
+    const unfinished = new Set([...(data.parked ?? []).flatMap(entry => entry.slug ? [entry.slug] : []), ...(data.retry_slugs ?? [])]);
+    const passed = (data.targets ?? []).filter(target => after !== undefined && target.slug <= after && !unfinished.has(target.slug)).map(target => target.slug);
+    return [request_id, { state: state === 'queued' || state === 'running' ? 'pending' : state, published: new Set(data.published ?? []), passed: new Set(passed) }];
+  }));
 }
 
 /**
- * GBRA-130 A-12: Git and embedding work of a request whose withdrawal mirror
- * ended failed may touch only the pages that mirror committed; the claim gate
- * releases them once the mirror is no longer queued or running. Returns, per
- * request id, the pages allowed; a request without a failed mirror is absent.
+ * GBRA-130 A-12: once a request's withdrawal mirror has committed, the Git and
+ * embedding targets parked behind it (`withdrawal_mirror_failed`) get another
+ * attempt with no operator retry: a scan revisits them first
+ * (`data.retry_slugs`), a single-target effect runs again. Other parked targets
+ * stay parked, and a claimed effect is left to its claim. The mirror's commit
+ * calls this in its own transaction; each effect pass calls it again for the
+ * requests it touched, for a park that settled after a concurrent mirror commit.
  */
-export async function failedMirrorAllowlists(engine: SqlEngine, requestIds: readonly string[]): Promise<Map<string, Set<string>>> {
-  if (!requestIds.length) return new Map();
-  const rows = await engine.executeRaw<{ request_id: string; data: PersistenceEffect['data'] }>(
-    `SELECT request_id::text AS request_id,data FROM persistence_effects WHERE kind='withdrawal-mirror' AND state='failed' AND request_id=ANY($1::uuid[])`,
-    [[...new Set(requestIds)]]);
-  return new Map(rows.map(row => [row.request_id, mirrorCommittedTargets(row.data)]));
+export async function rearmWithheldTargets(engine: SqlEngine, requestIds: readonly string[]): Promise<number> {
+  if (!requestIds.length) return 0;
+  const rows = await engine.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e WHERE e.request_id=ANY($1::uuid[])
+    AND e.kind IN ('git','embedding') AND e.state IN ('queued','failed') AND e.execution_token IS NULL AND e.recovery IS NULL
+    AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(e.data->'parked','[]'::jsonb)) AS p(target) WHERE p.target->>'error_code'=$2)
+    AND EXISTS (SELECT 1 FROM persistence_effects m WHERE m.request_id=e.request_id AND m.kind='withdrawal-mirror' AND m.state='committed')
+    ORDER BY e.id FOR UPDATE OF e SKIP LOCKED`, [[...new Set(requestIds)], WITHHELD_BY_MIRROR]);
+  for (const effect of rows) {
+    const { parked = [], ...data } = effect.data;
+    const kept = parked.filter(entry => entry.error_code !== WITHHELD_BY_MIRROR);
+    const scanning = data.targets !== undefined || data.source_scan === true;
+    const slugs = scanning ? parked.flatMap(entry => entry.error_code === WITHHELD_BY_MIRROR && entry.slug ? [entry.slug] : []) : [];
+    const retrying = [...new Set([...(data.retry_slugs ?? []), ...slugs])];
+    await engine.executeRaw(`UPDATE persistence_effects SET state='queued',data=$2::text::jsonb,error_code=NULL,claim_expires_at=NULL,
+      next_attempt_at=now(),updated_at=now() WHERE id=$1 AND execution_token IS NULL AND recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE}`,
+    [effect.id, JSON.stringify({ ...data, ...(kept.length ? { parked: kept } : {}), ...(retrying.length ? { retry_slugs: retrying } : {}),
+      ...(effect.kind === 'embedding' ? { embedding_attempt_base: effect.attempts } : {}) })]);
+  }
+  return rows.length;
 }
 
 /**
