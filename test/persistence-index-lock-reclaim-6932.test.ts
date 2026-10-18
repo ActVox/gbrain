@@ -17,7 +17,7 @@ import { existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, utim
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { commitGitTargets, gitStepTimeoutMs, INDEX_LOCK_GRACE_FOR_TESTS } from '../src/core/persistence/effect-git.ts';
-import { processTableBlind, readIndexLockReclaims, RECLAIM_MIN_AGE_MS } from '../src/core/persistence/index-lock-reclaim.ts';
+import { processTableBlind, proveIndexLockAbandoned, readIndexLockReclaims, reclaimIndexLock, RECLAIM_MIN_AGE_MS } from '../src/core/persistence/index-lock-reclaim.ts';
 import { tryAcquireNativeLock } from '../src/core/persistence/native-lock.ts';
 import { checkParkedEffects } from '../src/commands/doctor/checks/parked-effects.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -184,6 +184,66 @@ test('probe: a live git running in the checkout, or pointed at it through GIT_DI
       expect(existsSync(lock)).toBe(false);
     }
     await writer.release();
+  });
+}, 60_000);
+
+test('probe: a git SIGKILLed mid-commit (holding index.lock in its pre-commit hook) leaves the lock, and the writer recovers and commits', async () => {
+  const { root, home, lock } = repo();
+  const pids = join(root, '.git', 'hook-pids');
+  writeFileSync(join(root, '.git', 'hooks', 'pre-commit'), `#!/bin/sh\necho "$PPID $$" > '${pids}'\nexec sleep 120\n`, { mode: 0o755 });
+  const child = spawn('git', ['-C', root, 'commit', '-q', '--only', '-m', 'interrupted', '--', 'a.md'], { stdio: 'ignore' });
+  children.push(child);
+  await until(() => existsSync(pids) && readFileSync(pids, 'utf8').trim().split(' ').length === 2);
+  const [gitPid, hookPid] = readFileSync(pids, 'utf8').trim().split(' ').map(Number);
+  expect(existsSync(lock)).toBe(true);
+  process.kill(gitPid!, 'SIGKILL');
+  process.kill(hookPid!, 'SIGKILL');
+  await until(() => !alive(gitPid!) && !alive(hookPid!));
+  rmSync(join(root, '.git', 'hooks', 'pre-commit'));
+  expect(existsSync(lock)).toBe(true);
+  // A commit killed after it wrote its new index leaves a lock with content: a git may still be writing
+  // one like it, so it is kept as contention until it is older than the stale threshold.
+  expect(statSync(lock).size).toBeGreaterThan(0);
+  age(lock, RECLAIM_MIN_AGE_MS + 60_000);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    const writer = await writerLock(home);
+    await expect(commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: writer })).rejects.toMatchObject({ code: 'git_index_locked' });
+    expect(existsSync(lock)).toBe(true);
+    age(lock, INDEX_LOCK_GRACE_FOR_TESTS + 60_000);
+    if (blind) {
+      await expect(commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: writer })).rejects.toMatchObject({ code: 'git_index_stale' });
+      expect(existsSync(lock)).toBe(true);
+    } else {
+      expect((await commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: writer })).get('a.md')).toEqual({ git: 'committed' });
+      expect(existsSync(lock)).toBe(false);
+      expect(git(root, 'show', 'HEAD:a.md')).toBe('second\n');
+      expect(git(root, 'log', '--format=%s')).not.toContain('interrupted');
+      expect(readIndexLockReclaims()).toEqual([expect.objectContaining({ lock, size: expect.any(Number) })]);
+    }
+    await writer.release();
+  });
+}, 60_000);
+
+test('a lock replaced between the proof and the reclaim (a new git took it) is put back and never removed', async () => {
+  const { root, home, lock } = repo();
+  writeFileSync(lock, '');
+  age(lock, RECLAIM_MIN_AGE_MS + 1_000);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    const proof = proveIndexLockAbandoned(lock, root, INDEX_LOCK_GRACE_FOR_TESTS);
+    if (blind) { expect(proof).toMatchObject({ abandoned: false, reason: blind }); return; }
+    expect(proof).toMatchObject({ abandoned: true, size: 0 });
+    // A new git removes nothing of ours: the old lock goes and a new one takes its name (a new inode).
+    rmSync(lock);
+    writeFileSync(lock, 'new git writing');
+    const before = statSync(lock).ino;
+    expect(reclaimIndexLock(lock, root, proof as Extract<typeof proof, { abandoned: true }>)).toBeNull();
+    expect(existsSync(lock)).toBe(true);
+    expect(statSync(lock).ino).toBe(before);
+    expect(readFileSync(lock, 'utf8')).toBe('new git writing');
+    expect(readIndexLockReclaims()).toEqual([]);
+    // A lock that changes while it is being checked fails the proof itself.
+    age(lock, -60_000);
+    expect(proveIndexLockAbandoned(lock, root, INDEX_LOCK_GRACE_FOR_TESTS)).toMatchObject({ abandoned: false });
   });
 }, 60_000);
 

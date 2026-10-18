@@ -51,7 +51,7 @@ const SHARED_FILESYSTEMS = new Set([
   0x6b414653, // kafs
 ]);
 
-export interface IndexLockProof { abandoned: true; size: number; ageMs: number; dev: number; ino: number }
+export interface IndexLockProof { abandoned: true; size: number; ageMs: number; dev: number; ino: number; mtimeMs: number; birthtimeMs: number }
 export interface IndexLockDoubt { abandoned: false; reason: string }
 export type IndexLockVerdict = IndexLockProof | IndexLockDoubt;
 
@@ -148,18 +148,20 @@ export function proveIndexLockAbandoned(lock: string, checkout: string, staleMs:
   let after;
   try { after = lstatSync(lock); } catch { return doubt('the lock disappeared while it was checked'); }
   if (after.ino !== before.ino || after.dev !== before.dev || after.size !== before.size || after.mtimeMs !== before.mtimeMs) return doubt('the lock changed while it was checked');
-  return { abandoned: true, size: before.size, ageMs, dev: before.dev, ino: before.ino };
+  return { abandoned: true, size: before.size, ageMs, dev: before.dev, ino: before.ino, mtimeMs: before.mtimeMs, birthtimeMs: before.birthtimeMs };
 }
 
 /**
  * Remove a proven lock. It is renamed aside first, so a lock that a new git created after the proof is
  * never the one removed: a renamed file that is not the proven one is put back and nothing is reclaimed.
+ * A freed inode number is reused at once, so the proven file is matched by inode, size, modification
+ * and birth time together, not by inode alone.
  */
 export function reclaimIndexLock(lock: string, checkout: string, proof: IndexLockProof): IndexLockReclaim | null {
   const aside = `${lock}.gbrain-reclaim-${process.pid}-${Date.now()}`;
   try { renameSync(lock, aside); } catch { return null; }
   const moved = lstatSync(aside);
-  if (moved.dev !== proof.dev || moved.ino !== proof.ino) {
+  if (moved.dev !== proof.dev || moved.ino !== proof.ino || moved.size !== proof.size || moved.mtimeMs !== proof.mtimeMs || moved.birthtimeMs !== proof.birthtimeMs) {
     try { renameSync(aside, lock); } catch { /* a newer lock now holds the name; the moved file stays aside for the operator */ }
     return null;
   }
