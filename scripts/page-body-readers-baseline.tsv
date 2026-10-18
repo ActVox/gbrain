@@ -220,6 +220,7 @@ src/core/facts/file-body-guard.ts	readStoredBody	sql	SEGW	reads the inline colum
 src/core/facts/file-body-guard.ts	replaceStoredBody	call:contentHash	META	hash of the inline file body being mirrored
 src/core/facts/file-body-guard.ts	replaceStoredBody	call:refreshPageBody	SEGW	runs only after fileBodyMatchesStored matched the inline row under the lock, so never on a segmented page
 src/core/facts/file-body-guard.ts	replaceStoredBody	field	SEGW	runs only after fileBodyMatchesStored matched the inline row under the lock, so never on a segmented page
+src/core/facts/file-body-guard.ts	storedBodyUnchanged	field	SEGW	compares the inline preimage only after the fence and forget callers have refused a segmented page
 src/core/facts/file-body-guard.ts	replaceableFile	sql	SEGW	a segmented page reads NULL inline columns, so its file is never replaceable and the caller holds it
 src/core/facts/forget.ts	forgetFactInFence	call:contentHash	META	inline pages only
 src/core/facts/forget.ts	forgetFactInFence	call:refreshPageBody	SEGW	assertInlineBody first
