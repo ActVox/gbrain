@@ -97,6 +97,26 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       expectOthersUnchanged(before, await snapshotItems(engine, SOURCE), { expectProgress: [POISON], progressFields: ['chunks'] });
     });
 
+    test('breaker case: when every page is unbuildable the held outcomes trip item_failures_systemic and the run is not complete', async () => {
+      for (let i = 5; i <= 8; i++) {
+        await importFromContent(engine, 'notes/a' + i, '---\ntitle: notes/a' + i + '\ntype: note\n---\n\nBody of notes/a' + i + ' for the safe-chunk fixture, long enough to chunk.\n', { noEmbed: true, sourceId: SOURCE });
+      }
+      await engine.executeRaw('UPDATE pages SET chunker_version=1 WHERE source_id=$1', [SOURCE]);
+      await engine.executeRaw('DELETE FROM content_chunks WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [SOURCE]);
+      await engine.executeRaw(`CREATE OR REPLACE FUNCTION pathological_refuse_chunk() RETURNS trigger LANGUAGE plpgsql AS $fn$
+        BEGIN RAISE EXCEPTION 'pathological: chunk refused for every page' USING ERRCODE = 'check_violation'; END $fn$`);
+      await engine.executeRaw('DROP TRIGGER IF EXISTS pathological_refuse_chunk ON content_chunks');
+      await engine.executeRaw('CREATE TRIGGER pathological_refuse_chunk BEFORE INSERT OR UPDATE ON content_chunks FOR EACH ROW EXECUTE FUNCTION pathological_refuse_chunk()');
+      const before = await snapshotItems(engine, SOURCE);
+      const result = await run();
+      expect(result.stopped?.reason).toBe('item_failures_systemic');
+      expect(result.complete).toBe(false);
+      expect(result.applied).toBe(0);
+      expectOthersUnchanged(before, await snapshotItems(engine, SOURCE));
+      const again = await run();
+      expect(again.stopped?.reason).toBe('item_failures_systemic');
+    });
+
     test('a managed reindex counts the held page as failed instead of failing the command', async () => {
       await refuseChunksOf(engine, POISON);
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');

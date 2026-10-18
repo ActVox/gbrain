@@ -72,6 +72,8 @@ export const RUN_SCOPED_CODES: ReadonlySet<string> = new Set([
   'writer_registration_required', 'writer_identity_invalid', 'writer_not_initialized', 'writer_upgrade_required',
   'writer_not_quiesced', 'writer_admin_locked', 'unsupported_mutation_protocol', 'write_claim_lost', 'connection_lost',
   'permission_denied', 'schema_owner_required', 'scope_denied', 'config', 'auth', 'connector_holds_exhausted', 'transfer_in_progress', 'disk_full',
+  'invalid_token', 'insufficient_scope', 'trusted_local_only', 'requires_local_engine', 'not_owner_host', 'host_identity_mismatch',
+  'recovery_required', 'cancelled', 'persistence_restart_required', 'writer_regrant_required', 'writer_manifest_rescope_required',
 ]);
 
 /** Item codes that fail the same way until the item changes. Every other item code is transient. */
@@ -86,6 +88,8 @@ function sqlstateFailure(state: string): { code: string; scope: 'run' | 'item'; 
   if (state === '25P02' || state === '40001' || state === '40P01' || state.startsWith('08') || state.startsWith('53') || state.startsWith('57P')
     || state.startsWith('58') || state.startsWith('XX')) return { code: 'database_contention', scope: 'run', class: 'transient' };
   if (state === '42P01' || state === '42703' || state === '42883') return { code: 'schema_behind', scope: 'run', class: 'transient' };
+  if (state === '42501') return { code: 'permission_denied', scope: 'run', class: 'transient' };
+  if (state.startsWith('28')) return { code: 'auth', scope: 'run', class: 'transient' };
   if (state === '57014') return { code: 'statement_timeout', scope: 'item', class: 'transient' };
   if (state === '55P03') return { code: 'lock_timeout', scope: 'item', class: 'transient' };
   if (state.startsWith('22') || state.startsWith('23') || state === '54000') return { code: 'invalid_data', scope: 'item', class: 'content' };
@@ -129,16 +133,21 @@ function classifyOne(error: unknown): ClassifiedItemFailure | null {
 
 /**
  * Classifies one failure raised while processing a single item. The `cause`
- * chain is walked (at most 5 deep) when the error itself is not recognized.
+ * chain is walked (at most 5 deep): a run-scoped stop anywhere in it wins, so a
+ * wrapped abort or authorization failure is never one item's; otherwise the
+ * outermost recognized error decides.
  */
 export function classifyItemFailure(error: unknown): ClassifiedItemFailure {
+  const message = error instanceof Error ? error.message : String(error);
+  let first: ClassifiedItemFailure | null = null;
   let current: unknown = error;
   for (let depth = 0; depth < 5 && current != null; depth++) {
     const classified = classifyOne(current);
-    if (classified) return depth === 0 ? classified : { ...classified, message: error instanceof Error ? error.message : String(error) };
+    if (classified?.scope === 'run') return depth === 0 ? classified : { ...classified, message };
+    if (classified && !first) first = depth === 0 ? classified : { ...classified, message };
     current = (current as { cause?: unknown }).cause;
   }
-  return { code: 'internal', scope: 'item', class: 'transient', message: error instanceof Error ? error.message : String(error), requestId: null };
+  return first ?? { code: 'internal', scope: 'item', class: 'transient', message, requestId: null };
 }
 
 export interface ItemFailure extends ClassifiedItemFailure { key: string }
