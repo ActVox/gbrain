@@ -59,6 +59,7 @@ import { withFilesystemPublication } from './filesystem-guard.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { isStreamedContent } from './large-file.ts';
+import { sharedReadFailure } from './bounded-reads.ts';
 import { decoratePublicationOutcome, finishPreparationStalled, finishUnpublishedFailure, pageRecoveryRecord, persistenceFileHash, preparationAbortReason, publicationPostimage, publishMutation,
   publishPersistenceFile, recoverPublication, type PreparedMutation } from './coordinator.ts';
 import { pipelined } from '../page-state/transactions.ts';
@@ -170,7 +171,8 @@ export function preparationReads(engine: BrainEngine, imports?: ImportGroupReads
   const reads = new Map<string, Promise<unknown>>();
   const once = <T>(id: string, read: () => Promise<T>): Promise<T> => {
     let value = reads.get(id) as Promise<T> | undefined;
-    if (!value) { value = read(); reads.set(id, value); value.catch(() => reads.delete(id)); }
+    // Flip lane C: a failed shared read is no member's own statement (`sharedReadFailure`): nobody is charged for it.
+    if (!value) { value = read().catch(error => { throw sharedReadFailure(error); }); reads.set(id, value); value.catch(() => reads.delete(id)); }
     return value;
   };
   return new Proxy(engine, { get(target, key) {
