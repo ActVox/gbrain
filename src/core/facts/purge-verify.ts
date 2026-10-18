@@ -445,7 +445,7 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
   if (Number(legacy?.n ?? 0)) stores.push({ store: 'derived_legacy', status: 'unverified', reason: 'legacy_no_derivation_edges', remaining: Number(legacy.n),
     detail: `${legacy.n} model-derived page(s) in this source predate derivation edges, so purge cannot tell whether they restate the claim in other words.` });
   if (!dryRun) {
-    stores.push(await segmentTextReport(engine, src, [claim], removed.page_segment_texts ?? 0, deadline));
+    stores.push(await segmentTextReport(engine, src, [...new Set([claim, escapeFenceCell(claim)])], removed.page_segment_texts ?? 0, deadline));
     stores.push(...await ledgerReports(engine, src, [claim], input.ledger, deadline));
     stores.push(await effectPayloadReport(engine, src, [claim], deadline, removed.persistence_effects ?? 0));
   }

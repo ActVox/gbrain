@@ -9,7 +9,10 @@
  *    takes every text the page's own stagings recorded (page_body_staging_texts) and deletes those no manifest row
  *    references, in the same transaction. A text a live staging of another write recorded stays (that unpublished
  *    write's copy, the rule for referenced texts); purge_fact aborts a live staging holding the claim, so its texts go.
- * 2. Fails when: right after the purge, before any GC, a row of page_segment_texts still holds the planted claim.
+ *    purge_fact's text delete also matches the claim as a fence cell stores it (escapeFenceCell: `|` as `\|`), the
+ *    forms stagingsHoldingClaim matches, so an orphan holding a claim with `|` goes too.
+ * 2. Fails when: right after the purge, before any GC, a row of page_segment_texts still holds the planted claim, plain
+ *    or escaped.
  * 3. A 2 MB conversation page with a facts fence: put_page, forget_fact, delete_page, restore_page, then delete_page
  *    purge:true (the N14 lifecycle) or purge_fact of the claim. Runs on PGLite, and on Postgres when DATABASE_URL is
  *    set. N14 reproduced it at 2 MB, 20 MB and 24 MiB; the orphan is one fence segment at any size, so the 2 MB page
@@ -27,6 +30,7 @@ import { operations } from '../../src/core/operations.ts';
 import { registerLocalWriter } from '../../src/core/persistence/identity.ts';
 import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
+import { escapeFenceCell } from '../../src/core/fence-shared.ts';
 import { conversationBody } from '../helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { reconstructedPage, segmentedPageRow } from '../helpers/segmented-page-checks.ts';
@@ -37,13 +41,16 @@ import { pathologicalArms } from './harness.ts';
 const TOKEN = 'quillfeather7731';
 const CLAIM = `The lifecycle marker is ${TOKEN}`;
 const NEEDLES = ['lphneedleone', 'lphneedletwo', 'lphneedlethree'];
-const FENCE = ['', '', '## Facts', '', '<!--- gbrain:facts:begin -->',
+const PIPE_TOKEN = 'pipe8842';
+/** A claim holding `|`: the fence cell stores it escaped (`\|`), so the stored text never holds the claim's exact bytes. */
+const PIPE_CLAIM = `The gate marker is quill|${PIPE_TOKEN}`;
+const fence = (cell: string) => ['', '', '## Facts', '', '<!--- gbrain:facts:begin -->',
   '| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |',
   '|---|-------|------|------------|------------|------------|------------|-------------|--------|---------|',
-  `| 1 | ${CLAIM} | fact | 1.0 | world | low | 2026-10-01 |  | chat |  |`,
+  `| 1 | ${cell} | fact | 1.0 | world | low | 2026-10-01 |  | chat |  |`,
   '<!--- gbrain:facts:end -->', ''].join('\n');
-const page = (seed: number) => `---\ntitle: Lifecycle chat\ntype: note\n---\n\n${conversationBody(2_000_000, { seed,
-  needles: NEEDLES.map((word, i) => ({ at: 0.2 + i * 0.3, word })) })}${FENCE}`;
+const page = (seed: number, cell = CLAIM) => `---\ntitle: Lifecycle chat\ntype: note\n---\n\n${conversationBody(2_000_000, { seed,
+  needles: NEEDLES.map((word, i) => ({ at: 0.2 + i * 0.3, word })) })}${fence(cell)}`;
 
 const homes: string[] = [];
 afterAll(() => { for (const home of homes) rmSync(home, { recursive: true, force: true }); });
@@ -78,17 +85,17 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`a purge aft
     ORDER BY 1`, [slug])).map(row => row.sha);
 
   /** put_page, forget_fact, delete_page, restore_page: leaves the pre-forget fence text unreferenced (N14-5). */
-  async function lifecycle(slug: string, seed: number): Promise<{ factId: number; orphans: string[] }> {
-    await op('put_page', { slug, content: page(seed), request_id: randomUUID(), wait_ms: 30000 });
+  async function lifecycle(slug: string, seed: number, claim = { cell: CLAIM, token: TOKEN }): Promise<{ factId: number; orphans: string[] }> {
+    await op('put_page', { slug, content: page(seed, claim.cell), request_id: randomUUID(), wait_ms: 30000 });
     expect((await segmentedPageRow(engine, slug)).body_storage).toBe('segmented');
-    const [fact] = await engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND strpos(fact,$2)>0', ['default', TOKEN]);
+    const [fact] = await engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND strpos(fact,$2)>0', ['default', claim.token]);
     const factId = Number(fact!.id);
     expect((await op('forget_fact', { id: factId, reason: 'lp-h lifecycle' })).expired).toBe(true);
     expect((await op('delete_page', { slug, request_id: randomUUID(), expected_revision: await revision(slug) })).status).toBe('soft_deleted');
     expect((await op('restore_page', { slug, request_id: randomUUID(), expected_revision: await revision(slug, true) })).status).toBe('restored');
     const orphans = await orphansOf(slug);
     expect(orphans.length).toBeGreaterThan(0);
-    expect(await textsHolding(TOKEN)).toBeGreaterThan(0);
+    expect(await textsHolding(claim.token)).toBeGreaterThan(0);
     return { factId, orphans };
   }
   /** An unpublished create of another page that deduped onto `sha` (its staging recorded the text). */
@@ -158,5 +165,26 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`a purge aft
     const read = await op('get_page', { slug, body: 'auto' });
     expect(read.revision).toBe(row.knowledge_revision);
     await engine.executeRaw('DELETE FROM page_body_stagings WHERE id=$1::uuid', [staging]);
+  }), 600_000);
+
+  test('purge_fact of a claim holding | deletes the unreferenced text that stores it escaped in the fence cell', async () => withEnv(env(), async () => {
+    const slug = 'notes/lp-h-pipe-purge', cell = escapeFenceCell(PIPE_CLAIM);
+    expect(cell).not.toBe(PIPE_CLAIM);
+    const { factId, orphans } = await lifecycle(slug, 19, { cell, token: PIPE_TOKEN });
+    const [fact] = await engine.executeRaw<{ fact: string }>('SELECT fact FROM facts WHERE id=$1', [factId]);
+    expect(fact!.fact).toBe(PIPE_CLAIM);
+    const escaped = (await Promise.all(orphans.map(async sha => (await engine.executeRaw(`SELECT 1 FROM page_segment_texts WHERE source_id='default'
+      AND sha256=decode($1,'hex') AND position(convert_to($2::text,'UTF8') in body)>0`, [sha, cell])).length))).filter(Boolean).length;
+    expect(escaped).toBeGreaterThan(0);
+    const dry = await op('purge_fact', { id: factId, dry_run: true });
+    const done = await op('purge_fact', { id: factId, confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: randomUUID() });
+    expect(done.state).toBe('committed');
+    const left = { escaped: await textsHolding(cell), plain: await textsHolding(PIPE_CLAIM), orphans: (await Promise.all(orphans.map(textExists))).filter(Boolean).length };
+    console.log(`[lp-h] ${backend} pipe purge_fact: ${escaped} orphan(s) holding the escaped cell before; after: ${JSON.stringify(left)}`);
+    expect(left).toEqual({ escaped: 0, plain: 0, orphans: 0 });
+    const { page: row, body, hash } = await reconstructedPage(engine, slug);
+    expect(hash).toBe(row.content_hash);
+    expect(body.compiled_truth).not.toContain(PIPE_TOKEN);
+    for (const needle of NEEDLES) expect(body.compiled_truth).toContain(needle);
   }), 600_000);
 });
