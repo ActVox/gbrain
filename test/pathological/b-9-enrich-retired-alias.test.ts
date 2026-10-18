@@ -14,13 +14,11 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { enrichEntity } from '../../src/core/enrichment-service.ts';
 import { operationsByName } from '../../src/core/operations.ts';
 import type { OperationContext } from '../../src/core/operations.ts';
-import { testBackends } from '../helpers/test-backends.ts';
-import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
+import { openArm, pathologicalArms } from './_gbra60-shim.ts';
 
 const page = (fm: Record<string, unknown>, title: string) =>
   `---\n${Object.entries({ title, ...fm }).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join('\n')}\n---\n\n# ${title}\n`;
@@ -43,23 +41,17 @@ const timeline = async (engine: BrainEngine, slug: string) =>
 const backlinks = async (engine: BrainEngine, slug: string) =>
   (await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM links l JOIN pages p ON p.id = l.from_page_id WHERE p.slug = $1`, [slug]))[0]!.n;
 
-const backends = testBackends();
+const arms = pathologicalArms();
 const engines: Array<{ name: string; engine: BrainEngine; close: () => Promise<void> }> = [];
 beforeAll(async () => {
-  if (backends.includes('pglite')) {
-    const engine = new PGLiteEngine();
-    await engine.connect({}); await engine.initSchema(); await seed(engine);
-    engines.push({ name: 'pglite', engine, close: () => engine.disconnect() });
-  }
-  if (backends.includes('postgres')) {
-    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
-    await seed(pg.engine);
-    engines.push({ name: 'postgres', engine: pg.engine, close: async () => { await pg.engine.disconnect(); await pg.close(); } });
+  for (const arm of arms) {
+    const { engine, close } = await openArm(arm); await seed(engine);
+    engines.push({ name: arm.backend, engine, close });
   }
 }, 120_000);
 afterAll(async () => { for (const e of engines) await e.close(); });
 
-for (const backend of backends) {
+for (const { backend } of arms) {
   const engine = () => engines.find(e => e.name === backend)!.engine;
   describe(`B-9 enrichment follows a retired page to its canonical page (${backend})`, () => {
     test('enriching Alice Example updates the canonical page and leaves the retired one untouched', async () => {

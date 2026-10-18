@@ -18,12 +18,10 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { readFacts } from '../../src/core/persistence/prepared-maintenance.ts';
 import { relinkFactHash, submitRelinkGroup } from '../../src/core/facts/relink-publish.ts';
-import { testBackends } from '../helpers/test-backends.ts';
-import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
+import { openArm, pathologicalArms } from './_gbra60-shim.ts';
 
 const VALID_FROM = '2026-03-01T00:00:00Z';
 const observe = (engine: BrainEngine, entitySlug: string, source: string) =>
@@ -32,22 +30,17 @@ const rows = (engine: BrainEngine) => engine.executeRaw<{ id: number; entity_slu
   `SELECT id, entity_slug, source_markdown_slug, expired_at FROM facts WHERE source_id = 'default' AND dimension = 'role' ORDER BY id`);
 const md = (title: string, type: string) => `---\ntitle: ${title}\ntype: ${type}\n---\n\n# ${title}\n`;
 
-const backends = testBackends();
+const arms = pathologicalArms();
 const engines: Array<{ name: string; engine: BrainEngine; close: () => Promise<void> }> = [];
 beforeAll(async () => {
-  if (backends.includes('pglite')) {
-    const engine = new PGLiteEngine();
-    await engine.connect({}); await engine.initSchema();
-    engines.push({ name: 'pglite', engine, close: () => engine.disconnect() });
-  }
-  if (backends.includes('postgres')) {
-    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
-    engines.push({ name: 'postgres', engine: pg.engine, close: async () => { await pg.engine.disconnect(); await pg.close(); } });
+  for (const arm of arms) {
+    const { engine, close } = await openArm(arm);
+    engines.push({ name: arm.backend, engine, close });
   }
 }, 120_000);
 afterAll(async () => { for (const e of engines) await e.close(); });
 
-for (const backend of backends) {
+for (const { backend } of arms) {
   const engine = () => engines.find(e => e.name === backend)!.engine;
   describe(`B-10 re-keying a fact never collides on the ontology stint index (${backend})`, () => {
     beforeEach(async () => {
