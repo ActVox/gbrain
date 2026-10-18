@@ -10,6 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.296.0] - 2026-10-18
+
+**Several live pages recording one file no longer stop a source's whole managed sync, verified duplicates heal on their own, and no writer can create such a pair any more.** Hotfix for #6948.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed sync of a source where two or more live pages record the same file as their origin (duplicate-origin twins) | the run refused `page_identity_changed` and nothing in the source synced | only that file is held `origin_conflict`; every other file syncs, and the hold re-screens on each run |
+| Twins that are verified duplicates: one of them is the page the path names, one body, a readable file, no conflicting frontmatter `id`, one visibility and trust tier, no slug-keyed withdrawals, no file at a twin's own slug path, and nothing the merge would lose | they stayed until a person merged them by hand | right after the managed sync, on the source's owner host, each other page is merged into the canonical one: links in every role, relationship dates, timeline, raw data, user tags, aliases and facts move, its slug becomes an alias, and it is soft-deleted without touching the file (restorable for 72 h). The receipt lists every frontmatter key the twin carried that the file lacks. A run handles at most 200 files in 60 s and 1000 twin pages per source per day, and the mass-delete valve applies. Kill switch: `gbrain config set sync.origin_twins.auto_resolve false` |
+| Any other group of twins | the source stayed stopped | the file stays held with a reason (`no_canonical_claimant`, `content_differs`, `file_unreadable`, `explicit_id_conflict`, `visibility_differs`, `trust_tier_differs`, `twin_has_withdrawals`, `twin_slug_path_occupied`, `twin_evidence_conflicts`). `gbrain repair origin-twins --source <id>` previews every group; `--slug <kept-slug>` keeps one page and detaches the others without deleting them. A merge never raises or lowers a trust tier |
+| A write that would give a second live page an origin another live page records (`put_page`, write-through, an import's origin refresh, sync renames and rename collisions, file and frontmatter repairs, managed sync no-ops, segmented flips, restoring a tombstone) | it wrote a new twin | it refuses `page_identity_changed` (detail `origin_already_claimed`) inside the write's transaction, under a per-origin advisory lock that also covers a scoped source's legacy `<scope>/<origin>` spelling |
+| Readers and repairs that resolve a file to a page (classic sync deletes, fence, frontmatter and file-drift repairs) | took an arbitrary twin | take the page the path names, and refuse when no single page is canonical |
+
+New index `pages_live_origin_key` (one live page per recorded origin). Migration v257 builds it online only on a brain with no twins; on a brain with twins it writes nothing, and doctor `origin_twins` reports "Index pending" until the repair resolves them, after which `gbrain repair origin-twins --source <id> --apply` builds it.
+
+### What you need to do
+
+Nothing on most brains. If doctor `origin_twins` reports "Index pending", run the preview it names (`gbrain repair origin-twins --source <id>`), let the next sync heal the verified groups or apply the preview, and decide the held ones.
+
+### For contributors
+
+- Every origin assignment goes through `src/core/persistence/origin-guard.ts` (`bindOrigin` or `assertOriginUnclaimed` in the same transaction). `bun run check:origin-assignment` (in verify) fails on a new `UPDATE pages SET source_path = <value>`, `INSERT INTO pages (... source_path ...)` or slug rename outside it unless the statement carries `origin-guard-ok: <reason>`.
+- A test that seeds legacy twins drops the index first with `dropOriginIndex` (`test/helpers/origin-index.ts`) and sets the origin with raw SQL; E2E `setupDB` restores the index for the next file.
+
 ## [0.60.295.0] - 2026-10-18
 
 **A Git index lock left by a killed git no longer stops a managed brain's Git backups until someone removes it, and large checkouts stop killing git in the first place.** Hotfix for #6932, plus #6936.
