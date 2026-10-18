@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.303.0] - 2026-10-18
+
+**CI only: master is green again. tsc runs in its own `typecheck` job beside `verify`, and the crash robot reaches every fault its count role plans.** Nothing changes for gbrain users.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A PR changes a widely imported type (any new error code) | master's next typecheck was effectively cold (121 s) inside verify's 120 s per-check cap, and it timed out; a timed-out tsc saves no state, so a rerun restored the same stale cache | tsc runs in test.yml's `typecheck` job, in parallel with verify, under a 6-minute step timeout (3x the worst cold CI time); the job saves its tsbuildinfo on every outcome; `test-status`, and with it the release gate, requires the job |
+| A crash-robot count role sees the git effect of `finish`'s probe write | the run role could exit before that effect ran, so a fault planned there went unreached (`authority_change_pending_effects` seed 5105, `effect:git:mid#4`) | `finish` drains the probe's effects, so every seam the count role sees comes again in the run; a probe whose effects do not drain is a `wedge` violation |
+
+### What you need to do
+
+Nothing.
+
+### For contributors
+
+- `bun run verify` still runs typecheck locally. CI's verify sets `GBRAIN_VERIFY_SKIP_TYPECHECK=1` because the `typecheck` job owns tsc, and `test/scripts/ci-gates.test.ts` pins the job, its timeout, its cache save and its place in `test-status`.
+- Moving verify's typecheck to tsgo (TypeScript 7 native preview, about 13 s cold) is a follow-up for when its diagnostics match tsc's.
+
 ## [0.60.302.0] - 2026-10-18
 
 **No gbrain writer replaces a newer file or database copy of a page without checking it first.** Before this release the unfenced-facts step in `extract_facts` could copy a stale checkout file over a newer database body with no history (#6982). An audit found the same unchecked overwrite in 21 more writers. Each one now compares both copies, keeps both on a mismatch, holds the page with `file_database_drift` and the next step, and keeps going with the rest of the batch. A `storage.db_only` cache that only lags the database no longer blocks writes to that page (#6986), and `response_too_large` now returns the write's `request_id` (#6989).
