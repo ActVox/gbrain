@@ -14,6 +14,7 @@
 |---|---|---|---|---|
 | The dream cycle's purge phase fails every night with `managed_purge_failed` (`42P01`, relation `query_cache` does not exist), or doctor `schema_missing_tables` warns | upgrade (#6911: the purge skips a missing rebuildable cache), then preview recreating it: `gbrain repair missing-tables` ([missing tables](repair.md#missing-tables)); apply the printed `--apply --expect <hash>` command. Pages parked by the earlier failures: `gbrain pages purge-deleted --retry-parked --dry-run`, then without `--dry-run` | agent, after the user agrees | `destructive` (the parked-page retry purges them) | `gbrain doctor --only schema_missing_tables --json` reports ok |
 | A managed source's autopilot freshness `sync` jobs each land about one page, or `sources status` says `parked` while a sync job runs | upgrade (#6706: sync jobs drain to their deadline and count as the source's live drain), then restart `gbrain jobs work` / the supervisor so the worker loads the handler; a job result with `incomplete: true` names its follow-up (`continuation_job_id`) or the next step in `next` | agent | none | `gbrain sync status --source <id> --json` shows `live_job_id` or a cursor at `done`; `gbrain jobs get <id> --json` shows `outcome` |
+| A classic `gbrain sync` with pull returns `partial` / `pull_failed` on every run after the upstream was force-pushed, and doctor `sync_failures` names `upstream_rewritten`, `upstream_unknown` or `upstream_diverged` | follow the check's `fix` ([upstream rewritten](#upstream-rewritten)): `upstream_diverged` runs `gbrain git commit-push --pull --path <checkout>`; `upstream_rewritten` and `upstream_unknown` preview `gbrain sources reset-upstream <id> --expect-local <sha> --expect-upstream <sha> --dry-run`, then run it without `--dry-run`; then `gbrain sync --source <id>` | agent; the reset after the user agrees | `destructive` (the reset; the old history is kept under a backup ref) | `gbrain doctor --only sync_failures --json` no longer names the source |
 | Doctor `sync_freshness` says a source has "no successful sync recorded" or "first sync running" | follow the check's `fix`: `first sync running` (code `sync_first_run_in_progress`, warn) means wait; `no successful sync recorded` (code `sync_no_successful_sync`, fail) names the last attempt and its `reason`: wait for a queued job, inspect holds (`gbrain sync status --source <id> --json`), or retry (`gbrain sync --source <id>`) ([details](#sync-freshness-no-successful-sync)) | agent | none | `gbrain doctor --only sync_freshness --json` |
 | Recall returns conversation facts like "Date said …", "Attendees said …" or "Summary said …" | `gbrain repair conversation-labels` previews them ([conversation labels](repair.md#conversation-labels)); apply the printed command with `--yes` | agent, after the user agrees | `destructive` | `gbrain doctor --only conversation_label_facts --json` is ok |
 | Conversation facts are dated 1970-01-01 | same preview: `gbrain repair conversation-labels` (an undated page's pre-fix facts carry a `segment 1970-01-01` context); add a `date:` to the page frontmatter before re-extracting it | agent, after the user agrees | `destructive` | `gbrain doctor --only conversation_label_facts --json` is ok |
@@ -618,6 +619,46 @@ Automatic event extraction is on by default. See the
 three-step check, and the skip codes. `gbrain doctor` reports it as the
 `auto_chronicle` check. To turn it off, run
 `gbrain config set auto_chronicle false`.
+
+## Upstream rewritten
+
+<a id="upstream-rewritten"></a>
+
+**Say to your agent:** *"My brain repo's remote was force-pushed and sync keeps saying the pull failed. Fix it without losing anything."*
+
+A classic source that syncs with pull fast-forwards its checkout to the
+upstream. When that is impossible, the sync still imports local HEAD (nothing
+is blocked) and records what it found; the sync result (`upstream` in
+`gbrain sync --json`), `gbrain sources status <id> --json` and doctor
+`sync_failures` report it with the next step. It is never a sync-failure ledger
+row, and the next pull that fast-forwards (or finds nothing to do) clears it.
+Before every fetch the sync records the upstream commit the checkout contains,
+so the cases are told apart:
+
+- `upstream_rewritten`: the upstream commit the checkout last contained is not in
+  the new upstream history, so someone force-pushed. A merge would bring back
+  the commits that push removed, so the fix is a reset after the user agrees:
+  preview `gbrain sources reset-upstream <id> --expect-local <sha> --expect-upstream <sha> --dry-run`
+  (doctor prints the exact command), then run it without `--dry-run` and
+  `gbrain sync --source <id>`.
+- `upstream_unknown`: the checkout and upstream diverged and nothing usable was
+  recorded (the first pull after an upgrade, after an earlier fetch already
+  brought the rewrite in). Same fix; the preview names any local commit that
+  was never on the upstream.
+- `upstream_diverged`: the checkout has its own commits and the upstream moved
+  forward normally. Run `gbrain git commit-push --pull --path <checkout>`, then
+  `gbrain sync --source <id>`.
+
+Nothing is classified while a rebase, merge, cherry-pick or revert is in
+progress in the checkout. `reset-upstream` takes the checkout's commit lock
+and changes nothing (`reset_upstream_refused`) when HEAD or the upstream moved
+since the command was printed (`expect_mismatch`: sync again for a fresh
+command), when tracked files have uncommitted edits (`dirty_tree`), or when a
+local commit was never on the upstream (`local_commits`: it names them and the
+backup ref a reset would create; push or re-apply them first). Otherwise it
+keeps the old HEAD under `refs/gbrain/backup/<UTC stamp>-<sha>`, runs
+`git reset --keep` to the upstream and verifies HEAD before it reports
+`reset`. To get the old history back: `git log <backup ref>`.
 
 ## Sync freshness: no successful sync recorded
 

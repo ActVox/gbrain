@@ -3182,6 +3182,22 @@ Reasons: `rename_source_changed`.
 |---|---|---|---|---|---|---|
 | This command needs the brain's local database, and this install is a thin client of a remote brain. | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### reset_upstream_refused
+
+<a id="reset_upstream_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain sources reset-upstream changed nothing: the checkout moved since the reset was proposed, has no upstream, has uncommitted tracked edits, or has local commits that were never on the upstream (named, with the backup ref a reset would create). | The reset is bound to the HEAD and upstream the user agreed to and drops only commits the upstream once had; anything else needs the user's decision first. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `expect_mismatch`, `no_upstream`, `dirty_tree`, `local_commits`.
+
+Override: reason `dirty_tree`: consent, exit 1, not retryable.
+
+Override: reason `local_commits`: consent, exit 1, not retryable.
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
+
 ### response_too_large
 
 <a id="response_too_large"></a>
@@ -3943,6 +3959,36 @@ More: [docs/guides/write-refusals.md#unsupported_path](../../docs/guides/write-r
 | Google connect credential error: upstream. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
+
+### upstream_diverged
+
+<a id="upstream_diverged"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic source's pull cannot fast-forward: the checkout has commits that are not on the upstream and the upstream moved forward; local HEAD keeps syncing. | The upstream still contains the commit this checkout last pulled, so nothing was force-pushed: bringing the upstream in beside the local commits loses nothing. | Run gbrain git commit-push --pull --path <checkout>, then gbrain sync --source <id>. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
+
+### upstream_rewritten
+
+<a id="upstream_rewritten"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic source's upstream was force-pushed: the upstream commit the checkout last contained is not in the new upstream history, so the pull cannot fast-forward; local HEAD keeps syncing. | Merging would bring back the commits the force-push removed, so the fix resets the checkout to the new upstream after the user agrees, keeping the old history under a backup ref. | Ask the user, then run the gbrain sources reset-upstream <id> --expect-local <sha> --expect-upstream <sha> command doctor sync_failures prints (preview with --dry-run), then gbrain sync --source <id>. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
+
+### upstream_unknown
+
+<a id="upstream_unknown"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic source's checkout and upstream diverged and gbrain has no record of the upstream before the fetch (first pull after an upgrade, or the recorded commit is gone), so it cannot tell a force-push from local commits; local HEAD keeps syncing. | Merging could bring back commits a force-push removed; the reset preview names any local commit that was never on the upstream before anything moves. | Ask the user, then preview the gbrain sources reset-upstream command doctor sync_failures prints with --dry-run. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
 
 ### verification_failed
 
