@@ -76,6 +76,25 @@ describe('CI execution evidence', () => {
     expect(aggregate(unit, 'test-status', 'push', { typecheck: 'failure' })).toBe(1);
   });
 
+  test('macOS 26 validation typechecks in its own job, under a measured step timeout, saves its state on every outcome, and its verify skips tsc (#6056)', () => {
+    const mac = loadWorkflow('macos-validation.yml') as Workflow & { jobs: Record<string, Job & { 'runs-on'?: string }> };
+    const job = mac.jobs.typecheck;
+    expect(job['runs-on']).toBe('macos-26');
+    expect(job.if).toBe(mac.jobs['macos-26'].if);
+    const tsc = job.steps.find(step => step.run === 'bun run typecheck')!;
+    expect(tsc['timeout-minutes']).toBe(7);
+    const restore = job.steps.find(step => step.uses?.startsWith('actions/cache/restore@') && step.with?.path === 'node_modules/.cache/gbrain-typecheck.tsbuildinfo')!;
+    expect(restore.with!.key).toBe(unit.jobs.typecheck.steps.find(step => step.uses?.startsWith('actions/cache/restore@') && step.with?.path === restore.with!.path)!.with!.key);
+    const save = job.steps.find(step => step.uses?.startsWith('actions/cache/save@'))!;
+    expect(save.if).toBe('always()');
+    expect(save.with).toEqual({ path: restore.with!.path, key: restore.with!.key });
+    expect(job.steps.indexOf(restore)).toBeLessThan(job.steps.indexOf(tsc));
+    expect(job.steps.indexOf(save)).toBeGreaterThan(job.steps.indexOf(tsc));
+    const verify = mac.jobs['macos-26'].steps.find(step => step.run?.includes('bun run verify'))!;
+    expect(verify.env?.GBRAIN_VERIFY_SKIP_TYPECHECK).toBe('1');
+    expect(JSON.stringify(mac.jobs['macos-26'].steps)).not.toContain('gbrain-typecheck.tsbuildinfo');
+  });
+
   test('unit aggregate rejects failed, cancelled or skipped required jobs', () => {
     expect(unit.jobs['test-status'].if).toBe("${{ needs.changes.outputs.reuse != 'true' && always() && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || (inputs.native_only != true && inputs.race_hunt != true && !inputs.stress_files && !inputs.stress_base)) }}");
     expect(unit.jobs['test-status'].needs).toEqual([
