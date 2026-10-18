@@ -11,13 +11,17 @@
  * - durability on: the writeback folds (no checkpoint request), the Git effect commits exactly the bytes the import wrote,
  *   the next tick converges at that commit and the one after is idle;
  * - a writeback whose Git effect fails for good shows in doctor (`parked_effects`) and in `sync status` (blocked,
- *   `writeback_failed`), never as an idle, healthy source.
+ *   `writeback_failed`), never as an idle, healthy source;
+ * - against a bare tracking remote: a foreign commit pushed first keeps every tick non-idle until the effect resolves; once it
+ *   commits (the push integrates the remote, #7010), the ownWritebackCommit shortcut refuses the merge, a full level read
+ *   imports the foreign file and the source idles. A remote that refuses every push parks the effect: doctor and
+ *   `sync status` show it, and no tick is idle.
  *
  * PGLite here; Postgres through test/e2e/sync-pass-writeback-fold-6712-postgres.test.ts.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { checkParkedEffects } from '../src/commands/doctor/checks/parked-effects.ts';
@@ -44,9 +48,9 @@ const setup = ({ root }: { root: string }) => {
 const writebackCommit = (root: string) => { writeFileSync(join(root, 'notes/a.md'), '---\ntitle: notes/a\n---\nA committed change of notes/a.\n'); commit(root, 'change a, not canonical'); };
 const lastSequence = async (engine: BrainEngine) => Number((await engine.executeRaw<{ s: number }>('SELECT COALESCE(max(sequence),0) AS s FROM persistence_requests'))[0]!.s);
 /** The newest import of notes/a and its Git effect. */
-async function writebackEffect(engine: BrainEngine): Promise<{ request_id: string; write_id: string; effect_id: string; state: string; data: Record<string, unknown> } | undefined> {
-  return (await engine.executeRaw<{ request_id: string; write_id: string; effect_id: string; state: string; data: Record<string, unknown> }>(
-    `SELECT r.request_id::text AS request_id, r.id::text AS write_id, e.id::text AS effect_id, e.state, e.data FROM persistence_requests r JOIN persistence_effects e ON e.request_id=r.id AND e.kind='git'
+async function writebackEffect(engine: BrainEngine): Promise<{ request_id: string; write_id: string; effect_id: string; state: string; data: Record<string, unknown>; updated: string } | undefined> {
+  return (await engine.executeRaw<{ request_id: string; write_id: string; effect_id: string; state: string; data: Record<string, unknown>; updated: string }>(
+    `SELECT r.request_id::text AS request_id, r.id::text AS write_id, e.id::text AS effect_id, e.state, e.data, e.updated_at::text AS updated FROM persistence_requests r JOIN persistence_effects e ON e.request_id=r.id AND e.kind='git'
       WHERE r.slug='notes/a' AND r.intent->>'kind'='managed_sync_import' ORDER BY r.sequence DESC LIMIT 1`))[0];
 }
 const effectSettled = (engine: BrainEngine) => waitFor(async () => ['committed', 'failed'].includes((await writebackEffect(engine))?.state ?? ''),
@@ -70,6 +74,42 @@ const lastCommit = async (engine: BrainEngine) => (await engine.executeRaw<{ c: 
 const stamped = (engine: BrainEngine, after: number) => engine.executeRaw<{ kind: string; stamp: string | null }>(
   "SELECT intent->>'kind' AS kind, outcome->>'pass_stamp' AS stamp FROM persistence_requests WHERE sequence > $1 AND intent ? 'stamp' ORDER BY sequence", [after]);
 const enableDurability = (engine: BrainEngine) => engine.executeRaw("UPDATE persistence_host_bindings SET git_durability='enabled'");
+/** The worktree tracks a bare remote (`<home>/remote.git`) its branch was pushed to, so a Git effect pushes. */
+const trackedSetup = ({ root }: { root: string }) => {
+  setup({ root });
+  const remote = join(root, '..', 'remote.git');
+  execFileSync('git', ['init', '-q', '--bare', remote]);
+  git(root, 'remote', 'add', 'origin', remote);
+  git(root, 'push', '-q', '-u', 'origin', `HEAD:refs/heads/${git(root, 'symbolic-ref', '--short', 'HEAD')}`);
+};
+/** A commit another clone pushed to the remote: notes/c, a file the worktree has never seen. */
+const foreignPush = (root: string) => {
+  const clone = join(root, '..', 'foreign');
+  execFileSync('git', ['clone', '-q', join(root, '..', 'remote.git'), clone]);
+  git(clone, 'config', 'user.name', 'Other'); git(clone, 'config', 'user.email', 'other@example.invalid');
+  writeFileSync(join(clone, 'notes/c.md'), note('notes/c', 'A foreign note pushed by another clone.'));
+  commit(clone, 'foreign c'); git(clone, 'push', '-q');
+};
+/** Runs the writeback's Git effect once more now (its retry backoff skipped) and waits until that attempt ends. */
+async function attemptNow(engine: BrainEngine): Promise<string> {
+  const before = (await writebackEffect(engine))!;
+  if (before.state === 'committed' || before.state === 'failed') return before.state;
+  await asWriter(engine, "UPDATE persistence_effects SET next_attempt_at=now() WHERE id=$1 AND state='queued'", [before.effect_id]);
+  startPersistenceConsumer(engine, { engine: engine.kind }).wake(true);
+  await waitFor(async () => { const now = (await writebackEffect(engine))!; return now.state !== 'running' && now.updated !== before.updated; },
+    { timeoutMs: 60_000, label: 'one Git effect attempt ends' });
+  return (await writebackEffect(engine))!.state;
+}
+/** Ticks until the writeback's Git effect resolves, one attempt per tick: every tick before then is non-idle. */
+async function ticksUntilResolved(engine: BrainEngine): Promise<{ state: string; ticks: string[] }> {
+  const ticks: string[] = [];
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const state = await attemptNow(engine);
+    if (state === 'committed' || state === 'failed') return { state, ticks };
+    ticks.push((await tick(engine)).kind);
+  }
+  return { state: (await writebackEffect(engine))!.state, ticks };
+}
 
 afterEach(() => installFaultHook(undefined));
 
@@ -207,5 +247,58 @@ for (const backend of testBackends()) {
       const again = await readSyncStatus(engine, 'default', { detail: false });
       expect({ state: again.state, reason: again.reason }).toEqual({ state: 'blocked', reason: 'writeback_failed' });
     }), 180_000);
+  });
+
+  describe(`#6712 PR 4b writeback fold against a tracking remote, durability on (${backend})`, () => {
+    const tracked = (run: Parameters<typeof managedBrain>[0]) => managedBrain(run, { ...(databaseUrl ? { databaseUrl } : {}), setup: trackedSetup });
+
+    // Written for the push path that integrates a moved remote (#7010, through #6530's commitAndPush). The path before it
+    // never integrates: the push is refused non-fast-forward until the effect parks (failed, `writeback_failed`).
+    test('the remote moved first: non-idle until the effect resolves; it commits, the shortcut refuses the merge, a full read imports the foreign file, then idle', () => tracked(async ({ engine, root }) => {
+      expect((await tick(engine)).status).toBe('first_sync');
+      await enableDurability(engine);
+      foreignPush(root);
+      writebackCommit(root);
+      // The effect's push runs before the confirm round, where the ownWritebackCommit shortcut would end the pass on its stamp.
+      const reads: number[] = [];
+      installFaultHook(async (point, detail) => {
+        if (point === 'sync:level_read') reads.push(detail.round as number);
+        if (point === 'sync:round_start' && detail.round === 2) await attemptNow(engine);
+      });
+      expect((await tick(engine)).status).toBe('synced');
+      installFaultHook(undefined);
+      const resolved = await ticksUntilResolved(engine);
+      expect(resolved.ticks.filter(kind => kind === 'idle')).toEqual([]);
+      expect(resolved.state).toBe('committed');
+      const head = git(root, 'rev-parse', 'HEAD');
+      expect(git(root, 'show', `${head}:notes/c.md`)).toContain('A foreign note pushed by another clone.');
+      expect(git(root, 'rev-parse', `origin/${git(root, 'symbolic-ref', '--short', 'HEAD')}`)).toBe(head);
+      expect(reads).toContain(2);
+      expect((await engine.getPage('notes/c', { sourceId: 'default' }))?.compiled_truth).toContain('A foreign note pushed by another clone.');
+      expect(await lastCommit(engine)).toBe(head);
+      expect(await tick(engine)).toEqual({ status: 'up_to_date', kind: 'idle' });
+    }), 240_000);
+
+    test('the remote refuses every push: non-idle while it retries; parked, doctor and sync status show it, never idle and healthy', () => tracked(async ({ engine, root }) => {
+      expect((await tick(engine)).status).toBe('first_sync');
+      await enableDurability(engine);
+      const hook = join(root, '..', 'remote.git', 'hooks', 'pre-receive');
+      writeFileSync(hook, '#!/bin/sh\necho "refused by policy" >&2\nexit 1\n'); chmodSync(hook, 0o755);
+      writebackCommit(root);
+      expect((await tick(engine)).status).toBe('synced');
+      const resolved = await ticksUntilResolved(engine);
+      expect(resolved.ticks.filter(kind => kind === 'idle')).toEqual([]);
+      expect(resolved.state).toBe('failed');
+      const effect = (await writebackEffect(engine))!;
+      expect(JSON.stringify(effect.data.parked)).toContain('git_push_unavailable');
+      const doctor = await checkParkedEffects(engine, ['default']);
+      expect(doctor.status).toBe('warn');
+      expect(JSON.stringify(doctor.details)).toContain(effect.request_id);
+      const status = await readSyncStatus(engine, 'default', { detail: false });
+      expect({ state: status.state, reason: status.reason }).toEqual({ state: 'blocked', reason: 'writeback_failed' });
+      expect((await tick(engine)).kind).not.toBe('idle');
+      const again = await readSyncStatus(engine, 'default', { detail: false });
+      expect({ state: again.state, reason: again.reason }).toEqual({ state: 'blocked', reason: 'writeback_failed' });
+    }), 240_000);
   });
 }
