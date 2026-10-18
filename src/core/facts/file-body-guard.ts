@@ -24,8 +24,8 @@ export interface StoredBody {
 
 /** The diagnostic and repair choices for a held unmanaged file/body mirror. */
 export function fileDatabaseDriftToken(slug: string, sourceId: string, when: 'before' | 'during',
-  disposition = 'its rows stay unfenced, active and searchable until they agree'): string {
-  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : 'changed while the fence step ran'}, `
+  disposition = 'its rows stay unfenced, active and searchable until they agree', step = 'the fence step'): string {
+  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : `changed while ${step} ran`}, `
     + `so neither was replaced and ${disposition}. If the file holds the newer edit, `
     + `gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
     + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
@@ -52,19 +52,27 @@ export async function readStoredBody(engine: BrainEngine, sourceId: string, slug
 }
 
 /**
- * Inside `tx`: lock the page, and when its stored body is still `expected` (the body the caller compared with the file
- * before planning), keep it in page_versions and mirror `fileBytes` over it. The row keeps its content_hash, so the
- * next sync re-imports and re-chunks the page. Returns false, writing nothing, when the page is gone or moved.
+ * Inside `tx`: lock the page, and when its stored body is still `expected` (the body the caller compared before
+ * planning), keep it in page_versions and store `next`. The row keeps its content_hash unless `hash` is given.
+ * Returns false, writing nothing, when the page is gone or moved.
  */
-export async function mirrorFileBody(tx: BrainEngine, sourceId: string, slug: string, fileBytes: string, expected: StoredBody): Promise<boolean> {
+export async function replaceStoredBody(tx: BrainEngine, sourceId: string, slug: string, next: { compiled_truth: string; timeline: string },
+  expected: StoredBody, hash?: string): Promise<boolean> {
   const current = await readStoredBody(tx, sourceId, slug, true);
   if (!current || current.compiled_truth !== expected.compiled_truth || current.timeline !== expected.timeline) return false;
   const page = await tx.getPage(slug, { sourceId });
   if (!page) return false;
   await tx.createVersion(slug, { sourceId });
-  const body = mirroredBody(fileBytes, slug);
-  await tx.refreshPageBody(slug, sourceId, body.compiled_truth, body.timeline, page.content_hash || contentHash(page));
+  await tx.refreshPageBody(slug, sourceId, next.compiled_truth, next.timeline, hash ?? (page.content_hash || contentHash(page)));
   return true;
+}
+
+/**
+ * Inside `tx`: `replaceStoredBody` with the body `fileBytes` mirrors. Without `hash` the row keeps its content_hash,
+ * so the next sync re-imports and re-chunks the page.
+ */
+export async function mirrorFileBody(tx: BrainEngine, sourceId: string, slug: string, fileBytes: string, expected: StoredBody, hash?: string): Promise<boolean> {
+  return replaceStoredBody(tx, sourceId, slug, mirroredBody(fileBytes, slug), expected, hash);
 }
 
 /** Page states a checkout file is compared with: the live row, then its newest page_versions rows. */
@@ -77,7 +85,7 @@ function fileHeldBy(fileBytes: string, slug: string, state: StoredState): boolea
   if (!fileBodyMatchesStored(fileBytes, slug, state)) return false;
   const file = contentHashFrontmatterAndTags({ frontmatter: parseMarkdown(fileBytes, `${slug}.md`).frontmatter });
   const stored = contentHashFrontmatterAndTags({ frontmatter: state.frontmatter ?? {} });
-  return Object.entries(file.frontmatter).every(([key, value]) => stableJson(value) === stableJson(stored.frontmatter[key]));
+  return Object.entries(file.frontmatter).every(([key, value]) => stored.frontmatter[key] !== undefined && stableJson(value) === stableJson(stored.frontmatter[key]));
 }
 
 /**
