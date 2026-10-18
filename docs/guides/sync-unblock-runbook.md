@@ -135,6 +135,7 @@ Every hold and error has three fields, from one table
 | `file_unreadable` | page | none | yes | always: only a change to the checkout makes the file readable |
 | `origin_conflict` | page | repair | no | the hold carries a reason (the pages differ, ids conflict or none is the page the path names), or the heal is off |
 | `origin_conflict_decision` | page | none | yes | always: the pages differ, their ids conflict or none is the page the path names |
+| `page_identity_decision` | page | none | yes | always: only a person decides which page the file is |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |
 | `page_identity_changed` | page | retry | no | the same path fails again after a rerun |
 | `pinned_git_worktree_conflict` | page | retry | no | the same path fails again after a rerun |

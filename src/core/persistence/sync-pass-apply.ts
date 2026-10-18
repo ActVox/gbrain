@@ -72,7 +72,7 @@ const LEVEL_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 /** What a pass applied across its rounds (kept in memory; its counts go into the pass row's telemetry). */
 export interface PassApplyState {
   markersRetired: number;
-  holds: { file_gone: number; tombstone_edited: number; purged_differs: number; settle_mismatch: number; origin_conflict: number };
+  holds: { file_gone: number; tombstone_edited: number; purged_differs: number; settle_mismatch: number; origin_conflict: number; page_identity_changed: number };
   settleMismatch: string[];
   adopted: number;
   swept: { screened: number; recorded: number };
@@ -84,7 +84,7 @@ export interface PassApplyState {
   keepDb: { admitted: number; pending: number; paused: number; refused: Record<string, number> };
   /** keep_db paths admitted in this pass: never admitted twice. */
   keepDbTaken: string[];
-  /** #6948: paths this pass held `origin_conflict` (re-screen due, so a later round reads them again): held once per pass. */
+  /** #6948: paths this pass held `origin_conflict` (GBRA-130: or `page_identity_changed`; re-screen due, so a later round reads them again): held once per pass. */
   originHeld: Set<string>;
   matchedSlugs: Set<string>;
   /** The newest round's classes and summary (design §9), after this module settled what it finished. */
@@ -98,7 +98,7 @@ export interface PassApplyState {
 }
 
 export function newPassApplyState(): PassApplyState {
-  return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0, origin_conflict: 0 }, settleMismatch: [], adopted: 0,
+  return { markersRetired: 0, holds: { file_gone: 0, tombstone_edited: 0, purged_differs: 0, settle_mismatch: 0, origin_conflict: 0, page_identity_changed: 0 }, settleMismatch: [], adopted: 0,
     swept: { screened: 0, recorded: 0 }, sweptAll: false, withheld: null, withheldCount: 0, keepDb: { admitted: 0, pending: 0, paused: 0, refused: {} }, keepDbTaken: [], originHeld: new Set(), matchedSlugs: new Set(), classes: {}, summary: null, recorded: new Set() };
 }
 
@@ -148,7 +148,8 @@ export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, in
   await applyDeleteValve(engine, level, input, state);
   if (input.remote) {
     // #6948: a remote pass writes no hold, so a path several live pages claim is left as it is for the owner's pass to hold.
-    for (const entry of level.paths) if (entry.ambiguousOrigin?.kind === 'several_live' && !entry.result.settled && !entry.result.inFlight) settleAs(entry, { settled: true, action: 'none', classAction: 'repair' });
+    // GBRA-130: so is a path several tombstones record, and a spelling twin (A-17, B-3).
+    for (const entry of level.paths) if ((entry.ambiguousOrigin || entry.result.cls === 'spelling') && !entry.result.settled && !entry.result.inFlight) settleAs(entry, { settled: true, action: 'none', classAction: 'repair' });
     summarizeRound(level, state);
     return;
   }
@@ -242,8 +243,8 @@ async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: 
 
 /** Rows 6 and 9 and the settle-mismatch streak (§3.1): holds at level `L`, written under the drain lease. */
 async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
-  type Pending = { entry: ShadowPath; code: GitHoldCode; message: string; slug: string | null; meta: Partial<GitHoldMeta>; kind: keyof PassApplyState['holds']; pageId?: null };
-  const pending: Pending[] = [];
+  const pending: PendingHold[] = [];
+  let spellings: Map<string, string[]> | undefined;
   // A held rename's origin waits for its destination's hold (#5988), whatever its page did meanwhile.
   const heldRenameOrigins = new Set(level.heldRenames.map(held => syncOriginPath(held.rename.sourcePath)));
   const step = loopYield();
@@ -261,6 +262,19 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
       continue;
     }
     if (r.settled) continue;
+    // GBRA-130 A-17 / B-3: a path whose page identity sync cannot decide is held alone; discovery (a dry run, a company plan) still refuses.
+    const identity = r.cls === 'spelling' ? 'spelling' as const : entry.ambiguousOrigin?.kind === 'several_tombstones' ? 'several_tombstones' as const : null;
+    if (identity) {
+      if (state.originHeld.has(entry.path)) { settleAs(entry, { cls: 'held', settled: true, action: 'none', classAction: 'repair' }); continue; }
+      const others = identity === 'spelling' ? ((spellings ??= spellingGroups(level)).get(spellingKey(sourcePath)) ?? []).filter(other => other !== sourcePath) : [];
+      pending.push(identity === 'spelling'
+        ? { entry, code: 'page_identity_changed', kind: 'page_identity_changed', slug: entry.slug ?? resolveSlugForPath(sourcePath) ?? null, meta: { reason: 'spelling', identity_paths: others },
+          message: `${path} and ${others.join(', ') || 'another file'} differ only by letter case or separator, which another platform treats as one file, so sync held them instead of guessing which is the page's; the rest of the source synced.` }
+        : { entry, code: 'page_identity_changed', kind: 'page_identity_changed', slug: entry.slug ?? entry.ambiguousOrigin!.slugs[0] ?? null, pageId: null,
+          meta: { reason: 'several_tombstones', identity_slugs: entry.ambiguousOrigin!.slugs },
+          message: `Deleted pages ${entry.ambiguousOrigin!.slugs.join(', ')} all record ${path} as their origin, so sync held this file instead of guessing which page it is; the rest of the source synced.` });
+      continue;
+    }
     const streak = input.obligations.mismatch?.[entry.path];
     if (streak && streak.streak >= SETTLE_MISMATCH_STREAK && streak.level === entry.state.level) {
       pending.push({ entry, code: 'settle_mismatch', slug: entry.slug, kind: 'settle_mismatch', meta: { mismatch_streak: streak.streak },
@@ -279,6 +293,34 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
           : `${path}: page ${slug} was deleted in the database, and the file changed since, so sync held the file instead of reviving the page; the rest of the source synced.` });
     }
   }
+  await writeHolds(engine, level, input, state, pending);
+}
+
+/**
+ * GBRA-130 B-4: holds the imports `batchEntries` found would take over a page at their slug whose frontmatter id differs
+ * from the file's (another document), in the same shape as `writePassHolds`; discovery (a dry run, a company plan) still refuses.
+ */
+export async function holdPassIdentities(engine: BrainEngine, level: ShadowLevel, input: Pick<PassApplyInput, 'passId' | 'observedAt'>, state: PassApplyState,
+  items: ReadonlyArray<{ entry: ShadowPath; slug: string; ids: { page: string; file: string } }>): Promise<void> {
+  await writeHolds(engine, level, input, state, items.map(({ entry, slug, ids }) => ({ entry, code: 'page_identity_changed' as const, kind: 'page_identity_changed' as const, slug, pageId: null,
+    meta: { reason: 'identity_differs' as const, identity_slugs: [slug], identity_ids: ids },
+    message: `${passEntryPaths(level, entry.path).path} maps to page ${slug}, whose file is gone, but its frontmatter id '${ids.file}' differs from the page's id '${ids.page}', so it is a different document; sync held it and kept the page instead of giving the file that page's facts, links and history; the rest of the source synced.` })));
+}
+
+type PendingHold = { entry: ShadowPath; code: GitHoldCode; message: string; slug: string | null; meta: Partial<GitHoldMeta>; kind: keyof PassApplyState['holds']; pageId?: null };
+const spellingKey = (sourcePath: string) => sourcePath.replaceAll('\\', '/').toLowerCase();
+/** The level's spelling twins by their folded spelling (only built when a round has one). */
+function spellingGroups(level: ShadowLevel): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const entry of level.paths) if (entry.result.cls === 'spelling') {
+    const { sourcePath } = passEntryPaths(level, entry.path);
+    groups.set(spellingKey(sourcePath), [...groups.get(spellingKey(sourcePath)) ?? [], sourcePath]);
+  }
+  return groups;
+}
+
+/** Writes the round's holds at level `L` under the drain lease, counts them and settles their paths `held`. */
+async function writeHolds(engine: BrainEngine, level: ShadowLevel, input: Pick<PassApplyInput, 'passId' | 'observedAt'>, state: PassApplyState, pending: PendingHold[]): Promise<void> {
   if (!pending.length) return;
   await engine.transaction(async tx => {
     await assertDrainLease(tx, level.sourceId);
@@ -293,7 +335,7 @@ async function writePassHolds(engine: BrainEngine, level: ShadowLevel, input: Pa
   for (const hold of pending) {
     state.holds[hold.kind]++;
     if (hold.code === 'settle_mismatch') state.settleMismatch.push(passEntryPaths(level, hold.entry.path).path);
-    if (hold.code === 'origin_conflict') state.originHeld.add(hold.entry.path);
+    if (hold.code === 'origin_conflict' || hold.code === 'page_identity_changed') state.originHeld.add(hold.entry.path);
     settleAs(hold.entry, { cls: 'held', settled: true, action: 'none', classAction: 'repair' });
   }
 }
@@ -458,7 +500,7 @@ export async function finishPassApply(engine: BrainEngine, sourceId: string, sta
 export function passApplyCounts(state: PassApplyState): Record<string, number> {
   const refused = Object.values(state.keepDb.refused).reduce((a, b) => a + b, 0);
   return { markers_retired: state.markersRetired, holds_file_gone: state.holds.file_gone, holds_tombstone_edited: state.holds.tombstone_edited,
-    holds_purged_differs: state.holds.purged_differs, holds_settle_mismatch: state.holds.settle_mismatch, holds_origin_conflict: state.holds.origin_conflict, adopted: state.adopted, legacy_swept: state.swept.screened,
+    holds_purged_differs: state.holds.purged_differs, holds_settle_mismatch: state.holds.settle_mismatch, holds_origin_conflict: state.holds.origin_conflict, holds_page_identity_changed: state.holds.page_identity_changed, adopted: state.adopted, legacy_swept: state.swept.screened,
     legacy_recorded: state.swept.recorded, deletes_withheld: state.withheldCount, keep_db_admitted: state.keepDb.admitted, keep_db_pending: state.keepDb.pending,
     paused_keep_db: state.keepDb.paused, keep_db_refused: refused };
 }

@@ -76,7 +76,9 @@ export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regre
   /** GBRA-130 A-6: the path's write failed the same unclassifiable way (an owner exception, an unplaced refusal) on repeated attempts. */
   | 'page_write_failed'
   /** GBRA-130 A-7: a file sync cannot read as a regular file inside its root (a symlink, a non-regular file, a permission error). */
-  | 'file_unreadable';
+  | 'file_unreadable'
+  /** GBRA-130 A-17/B-3/B-4: a path whose page identity sync cannot decide (several tombstones, a spelling twin, a takeover whose ids differ). */
+  | 'page_identity_changed';
 /** GBRA-130 A-6: the fault a `page_write_failed` hold stands for (identifiers and classes only, never content). */
 export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null; request_id: string; attempts: number; gbrain_version: string }
 /** #6278: what the owner recorded about a preparation it gave up on (step names and vocabulary only, never content). */
@@ -91,7 +93,9 @@ export interface PreparationStallMeta {
   /** The `gbrain sync` arguments that resume the cursor with its stored options (after `sources retry-held`). */
   sync_argv: string[];
 }
-export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason | OriginConflictReason;
+export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason | OriginConflictReason | PageIdentityHoldReason;
+/** GBRA-130: why a `page_identity_changed` hold's path has no page sync may write (A-17, B-3, B-4). */
+export type PageIdentityHoldReason = 'several_tombstones' | 'spelling' | 'identity_differs';
 /** #6712 PR 4b: the sides a `file_drift` Decision can be about, and the states of a deleted side (design v3.2 §4). */
 export const FILE_DRIFT_SIDES = ['both', 'unknown', 'deleted'] as const;
 export type FileDriftSide = typeof FILE_DRIFT_SIDES[number];
@@ -165,6 +169,12 @@ export interface GitHoldMeta {
   origin_claimants?: Array<{ id: number; slug: string; revision: string }>;
   /** #6948 `origin_conflict`: the slug the file's path gives (the page that keeps the origin). */
   canonical_slug?: string;
+  /** GBRA-130 `page_identity_changed`: the pages involved (the tombstones recording the origin, or the page whose slug a file would take over). */
+  identity_slugs?: string[];
+  /** GBRA-130 `page_identity_changed` (`spelling`): the other spellings of the origin, in the source's path form. */
+  identity_paths?: string[];
+  /** GBRA-130 `page_identity_changed` (`identity_differs`): the frontmatter ids of the page and of the file. */
+  identity_ids?: { page: string; file: string };
 }
 
 /** #6188: why the last fence repair left a hold in place, and when the maintenance run tries it again (null: it does not). */
@@ -529,10 +539,11 @@ export async function holdBasisMoved(engine: Pick<BrainEngine, 'executeRaw'>, so
  * imports the image instead of holding it. #6712 PR 2: a `content_rejected`, `write_gate_rejected` or
  * `purged_content` hold rests on a setting, an allow rule or a tombstone its fix lets the user change, so it
  * re-screens on every sync too. #6727: so does a `legacy_slug_conflict` hold, which rests on the legacy pages a person removes. #6948: and an
- * `origin_conflict` hold, which rests on the twin pages the heal, the repair or a person removes.
+ * `origin_conflict` hold, which rests on the twin pages the heal, the repair or a person removes. GBRA-130: and a `page_identity_changed`
+ * hold, which rests on pages (tombstones, a page at the slug) or spellings a person changes.
  */
 export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, retried: boolean): boolean {
-  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict', 'origin_conflict'].includes(record.code)
+  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict', 'origin_conflict', 'page_identity_changed'].includes(record.code)
     // #6712: a transient hold (the write owner stalled, not the file) is retried by every sync until it has been held HOLD_ATTEMPTS_NEEDS_HUMAN times.
     || (record.code === 'preparation_stalled' && (record.meta.attempts ?? 1) < HOLD_ATTEMPTS_NEEDS_HUMAN)
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
@@ -778,6 +789,23 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
       return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'user', requires_exclusive: false,
         user_message: `gbrain refuses ${record.path}, whose exact bytes imported under an earlier version. This is a gbrain bug: report it with the gbrain version, the file and the code, then upgrade or pin the last good version.`,
         why: 'The same bytes imported before, so only gbrain changed; sync holds the file under GBRAIN_SYNC_PARSER_REGRESSION=hold.' };
+    case 'page_identity_changed': {
+      const slugs = record.meta.identity_slugs ?? [], paths = record.meta.identity_paths ?? [], ids = record.meta.identity_ids;
+      const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+      const then: Action = { argv: ['gbrain', 'sync', '--source', source, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+        why: `Re-screens ${record.path} once its page identity is decided (this hold is re-screened on every sync); the file then imports.` };
+      const user_message = record.meta.reason === 'several_tombstones'
+        ? `Deleted pages ${slugs.map(slug => JSON.stringify(slug)).join(', ')} all record ${record.path} as their origin, so sync cannot tell which one the file is and held only this file; the rest of the source keeps syncing. `
+          + `Restore the page that is this file's (gbrain restore '<slug>' --source-id ${source}; a live page wins over the deleted ones) or purge the others, then run gbrain sync --source ${source} --no-pull.`
+        : record.meta.reason === 'spelling'
+        ? `${record.path} and ${paths.length ? paths.join(', ') : 'another file'} differ only by letter case or separator, which another platform treats as one file, so sync held them rather than guess which is the page's; the rest of the source keeps syncing. `
+          + `Keep one spelling, rename or remove the others and commit, then run gbrain sync --source ${source} --no-pull.`
+        : `${record.path} maps to page ${JSON.stringify(slugs[0] ?? record.slug ?? '')}, whose file is gone, but its frontmatter id ${JSON.stringify(ids?.file ?? '')} differs from the page's id ${JSON.stringify(ids?.page ?? '')}, so it is a different document and sync held it rather than give it that page's facts, links and history; the rest of the source keeps syncing. `
+          + `Give the file the page's id if it is the same document, or rename it so its slug differs, commit, then run gbrain sync --source ${source} --no-pull.`;
+      return { argv: verify.argv, consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code, record.meta.reason), user_message,
+        why: 'Which page a file is cannot be decided when several deleted pages record it, when spellings another platform folds together collide, or when the ids say it is another document; sync never guesses a page identity.',
+        then, verify };
+    }
     case 'legacy_slug_conflict': {
       const slugs = record.meta.legacy_slugs ?? [];
       const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };

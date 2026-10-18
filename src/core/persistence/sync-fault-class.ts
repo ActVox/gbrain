@@ -90,6 +90,9 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // #6948: an `origin_conflict` hold whose verdict carries a reason (sync-status.ts holdVerdict): nothing resolves it without a person.
   { code: 'origin_conflict_decision', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: the pages differ, their ids conflict or none is the page the path names',
     human_reason: 'Several live pages record this file as their origin and sync cannot prove they are one document; a person keeps the page that is the file\'s and soft-deletes the others (gbrain repair origin-twins --source <source> lists them with the commands), then syncs.' },
+  // GBRA-130 A-17/B-3/B-4: a held `page_identity_changed` path (sync-status.ts holdVerdict): several tombstones, a spelling twin or a takeover whose ids differ.
+  { code: 'page_identity_decision', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a person decides which page the file is',
+    human_reason: 'Sync cannot decide which page this file is (several deleted pages record it, another spelling of it collides, or its frontmatter id differs from the page at its slug) and never guesses; a person restores or purges the deleted pages, keeps one spelling, or fixes the id or the file name, commits, then runs gbrain sync --source <source> --no-pull.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
   { code: 'revision_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'page_identity_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },

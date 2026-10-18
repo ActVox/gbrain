@@ -14,7 +14,6 @@
  *   converging stop `resumable` (`not_converged`).
  */
 import { randomUUID } from 'node:crypto';
-import { opError } from '../ops/contract.ts';
 import { confirmedSyncDelta, confirmRenameIdentities, explicitIdVeto } from '../sync-rename-identity.ts';
 import { buildDetachedWorkingTreeManifest } from '../sync-delta.ts';
 import type { DowngradedRename, SyncManifest } from '../sync.ts';
@@ -25,7 +24,7 @@ import { getWriteRequestById } from './journal.ts';
 import type { WriteRequest } from './model.ts';
 import { managedSyncWriteDiagnostic } from './sync-write-diagnostic.ts';
 import { recordedStop, replaysUnchangedRefusal } from './sync-stop-class.ts';
-import { adoptLegacyPage, ambiguousOriginRefusal, assertTakeoverIdentity, incomingId, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
+import { adoptLegacyPage, incomingId, syncExcludePatterns, syncGit, type LegacyIdentity, type ManagedSyncContext, type SyncDiscovery, type SyncEntry, type SyncFileRefusal, type SyncSlugCollision } from './sync-discovery.ts';
 import { assertSyncDispatchActive, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import { recordPassFenceTrend, type PassStamp, type SyncCursorOptions, type SyncIntent } from './sync-prepare.ts';
 import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP, writePassRow, type ManagedSyncPassValue, type PassEpisode,
@@ -56,7 +55,7 @@ import { databaseOnlyPageSql } from './unbound-pages.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
 import { SYNC_SLICE_OP } from './sync-slices.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
-import { applyPassRound, finishPassApply, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
+import { applyPassRound, finishPassApply, holdPassIdentities, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
 import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
 import { currentEmbeddingPricePerMTok } from '../embedding.ts';
 import { SIZE_STATE_SAMPLE, type SyncSizeStates } from '../page-embedding-budget.ts';
@@ -144,7 +143,8 @@ function entryPaths(level: ShadowLevel, gitPath: string): { path: string; source
  * page moves to the new slug). Deletes first, then imports.
  */
 async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: ShadowPath[], imports: ShadowPath[]):
-  Promise<{ entries: PassEntry[]; collisions: SyncSlugCollision[]; skipped: ShadowPath[]; downgrades: DowngradedRename[] }> {
+  Promise<{ entries: PassEntry[]; collisions: SyncSlugCollision[]; skipped: ShadowPath[]; downgrades: DowngradedRename[];
+    identity: Array<{ entry: ShadowPath; origin: ShadowPath | null; slug: string; ids: { page: string; file: string } }> }> {
   const working = (entry: ShadowPath) => level.mode === 'working' && entry.state.level !== entry.state.tree;
   const deleteEntries = new Map<string, PassEntry>(deletes.map(entry => [entry.path, { ...entryPaths(level, entry.path), action: 'delete' as const, working: level.mode === 'working',
     slug: entry.slug!, pageId: entry.pageId, revision: entry.revision, level: null }]));
@@ -176,7 +176,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   const bothDrift = imports.filter(entry => entry.result.cls === 'drift' && entry.result.side === 'both' && entry.pageId !== null);
   const baselineRecords = await readSyncImportProvenances(engine, level.sourceId, level.incarnation, bothDrift.map(entry => entry.pageId!));
   const driftBaseline = (entry: ShadowPath) => entry.result.side === 'both' && entry.pageId !== null ? baselineRecords.get(entry.pageId)?.disk_blob_oid ?? undefined : undefined;
-  const entries: PassEntry[] = [], collisions: SyncSlugCollision[] = [], skipped: ShadowPath[] = [];
+  const entries: PassEntry[] = [], collisions: SyncSlugCollision[] = [], skipped: ShadowPath[] = [], identity: Array<{ entry: ShadowPath; origin: ShadowPath | null; slug: string; ids: { page: string; file: string } }> = [];
   const claims = new Map<string, ShadowPath[]>();
   for (const entry of imports) {
     const paths = entryPaths(level, entry.path);
@@ -217,8 +217,14 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     const paths = entryPaths(level, winner.path);
     const base = { ...paths, action: 'import' as const, working: working(winner), level: winner.state.level, slug, ...legacySlugs.get(winner.path) };
     if (holder) {
-      // #6729: a file whose frontmatter id differs from the page's is another document; it inherits nothing (refused before any write).
-      assertTakeoverIdentity(discovery, named(winner), holder);
+      // #6729: a file whose frontmatter id differs from the page's is another document; it inherits nothing. GBRA-130 B-4: it is
+      // held alone and the page keeps its slug (its origin's deletion waits with it); discovery still refuses the source.
+      const incoming = holder.fm_id ? incomingId(discovery, named(winner)) : null;
+      if (explicitIdVeto(incoming, holder.fm_id)) {
+        identity.push({ entry: winner, origin: deletes.find(entry => entry.path === holderPath) ?? null, slug, ids: { page: holder.fm_id!, file: incoming! } });
+        if (holderPath !== null) deleteEntries.delete(holderPath);
+        continue;
+      }
       // A live page at the slug with no recorded origin (written straight to the database, or by an older gbrain) attests
       // neither side: the import is guarded as drift of unknown side, so the freeze imports it only as a proven no-op and
       // otherwise holds file_drift (as discovery's tree walk guards it, sync-prescreen.ts). A page written while the source was
@@ -255,7 +261,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     }
     entries.push({ ...base, pageId: null, revision: null });
   }
-  return { entries: [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))], collisions, skipped, downgrades };
+  return { entries: [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))], collisions, skipped, downgrades, identity };
 }
 
 /**
@@ -454,9 +460,9 @@ async function triageRound(level: ShadowLevel, input: { S: Map<string, string>; 
     if (r.settled) continue;
     if (r.inFlight) { inFlight.push(entry); continue; }
     if (S.has(settledKey(entry.path, entry.state.level))) {
-      // A hold this pass wrote or re-screened at L, or a slug collision it skipped, is that path's fate here, even when
-      // its code re-screens every pass or the skipped twin still classifies as an import.
-      if (entry.state.hold?.atLevel || S.get(settledKey(entry.path, entry.state.level)) === 'collision'
+      // A hold this pass wrote or re-screened at L, a slug collision it skipped, or the origin deletion an identity hold keeps
+      // (GBRA-130 B-4) is that path's fate here, even when its code re-screens every pass or the skipped twin still classifies as an import.
+      if (entry.state.hold?.atLevel || ['collision', 'identity_origin'].includes(S.get(settledKey(entry.path, entry.state.level))!)
         || legacyWaived.has(settledKey(entryPaths(level, entry.path).path, entry.state.level))) continue;
       // Design §3.1: admitted at most once more per (path, level) in this pass, then counted as a settle mismatch.
       const again = settledKey(entry.path, entry.state.level);
@@ -764,13 +770,6 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         await writeLegacyMarkers(engine, level);
         value.obligations.legacy_markers_at = new Date().toISOString();
       }
-      // #6517, as discovery refuses a claim: several tombstones record the origin of a path this pass would act on (before any
-      // hold). Several live pages hold that path alone (#6948 `origin_conflict`, sync-pass-apply.ts) and the rest syncs.
-      const ambiguous = level.paths.find(entry => entry.ambiguousOrigin?.kind === 'several_tombstones' && !entry.result.settled && !entry.result.inFlight && entry.result.cls !== 'spelling');
-      if (ambiguous) {
-        await save('blocked', 'page_identity_changed');
-        throw ambiguousOriginRefusal(sourceId, entryPaths(level, ambiguous.path).sourcePath, ambiguous.ambiguousOrigin!.slugs.map(slug => ({ slug })), ambiguous.ambiguousOrigin!.kind);
-      }
       await applyPassRound(engine, level, { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions,
         grantPrefixes: remote ? authority.writer.slugPrefixes : null }, applied);
       assertActive();
@@ -778,13 +777,6 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (!remote) value.obligations.deletes_withheld = applied.withheld?.set_hash ?? null;
       const { deletes, imports, inFlight, mismatch, owed } = await triageRound(level, { S, legacyWaived, readmitted, admission, remote, counts });
       lastMismatch = mismatch;
-      // Origins that differ only by case or separator spelling may be one file on another platform: refuse rather than guess, as discovery does.
-      const spelled = owed.filter(entry => entry.result.cls === 'spelling').map(entry => entryPaths(level, entry.path).sourcePath);
-      if (spelled.length) {
-        await save('blocked', 'page_identity_changed');
-        throw opError('page_identity_changed', 'Sync origins for one slug differ only by case or separator spelling.',
-          `Files in ${sourceId} differ only by case or separator spelling (${spelled.slice(0, 3).join(', ')}); nothing was written. Keep one spelling, rename or remove the others and commit, then run gbrain sync --no-pull --source ${sourceId}.`);
-      }
       const candidates = deletes.length + imports.length;
       if (round === 1) candidatesFirst = candidates + inFlight.length + owed.length;
       value.telemetry.candidates = candidatesFirst;
@@ -835,6 +827,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         throw error;
       });
       collisions.push(...built.collisions);
+      if (!remote && built.identity.length) await holdPassIdentities(engine, level, { passId, observedAt: startedAt }, applied, built.identity);
+      for (const { entry, origin } of built.identity) {
+        S.set(settledKey(entry.path, entry.state.level), 'held');
+        if (origin) S.set(settledKey(origin.path, origin.state.level), 'identity_origin');
+      }
       identityDowngrades.push(...built.downgrades.filter(pair => !identityDowngrades.some(seen => seen.from === pair.from && seen.to === pair.to)));
       for (const entry of [...built.skipped, ...built.collisions.flatMap(c => c.skipped.map(sourcePath => imports.find(i => entryPaths(level, i.path).sourcePath === sourcePath)!))].filter(Boolean)) {
         S.set(settledKey(entry.path, entry.state.level), 'collision'); counts.collisions++;

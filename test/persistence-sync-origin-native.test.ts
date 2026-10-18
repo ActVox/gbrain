@@ -236,8 +236,15 @@ check('native historical separator identity preserves the original page or refus
     expect((await engine.executeRaw<{ last_commit: string }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
   } else {
     await expect(performManagedSync(engine, { ...f.opts, dryRun: true })).rejects.toMatchObject({ code: 'page_identity_changed' });
-    await expect(performManagedSync(engine, f.opts)).rejects.toMatchObject({ code: 'page_identity_changed' });
-    expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
+    // GBRA-130 B-3 (was: the pass refused page_identity_changed): both spellings are held, neither is imported or deleted,
+    // and an unrelated file in the same sync imports.
+    writeFileSync(join(f.root, 'notes/other.md'), 'An unrelated synthetic note.\n');
+    execFileSync('git', ['-C', f.root, 'add', 'notes/other.md']);
+    execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Add an unrelated note']);
+    const result = await performManagedSync(engine, f.opts);
+    expect(result.held?.map(hold => [hold.path, hold.code, hold.reason]).sort()).toEqual([['notes/example.md', 'page_identity_changed', 'spelling'], ['notes\\example.md', 'page_identity_changed', 'spelling']]);
+    expect(await engine.executeRaw("SELECT intent->>'path' AS path FROM persistence_requests WHERE source_id=$1 AND intent->>'kind' <> 'managed_sync_checkpoint' ORDER BY path", [f.id])).toEqual([{ path: 'notes/other.md' }]);
+    expect(await engine.getPage('notes/other', { sourceId: f.id })).not.toBeNull();
     expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))?.revision).toBe(f.snapshot.revision);
   }
   expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))?.revision).toBe(f.snapshot.revision);
@@ -248,13 +255,16 @@ check('native historical separator identity preserves the original page or refus
 check('native Windows historical alias cannot become a delete plus replacement identity', async engine => {
   if (process.platform !== 'win32') {
     const literal = 'notes\\example.md', literalSlug = resolveSlugForPath(literal);
-    const f = await fixture(engine, literal, literalSlug, { [literal]: content, 'notes/example.md': content.replace('stable', 'separate') });
+    const f = await fixture(engine, literal, literalSlug, { [literal]: content, 'notes/example.md': content.replace('stable', 'separate'), 'notes/other.md': 'An unrelated synthetic note.\n' });
     const history = await engine.getVersions(f.slug, { sourceId: f.id });
     await expect(performManagedSync(engine, { ...f.opts, dryRun: true })).rejects.toMatchObject({ code: 'page_identity_changed' });
-    await expect(performManagedSync(engine, f.opts)).rejects.toMatchObject({ code: 'page_identity_changed' });
+    // GBRA-130 B-3 (was: the pass refused page_identity_changed): both spellings are held, the page is neither deleted nor
+    // replaced, and an unrelated file in the same sync imports.
+    const result = await performManagedSync(engine, f.opts);
+    expect(result.held?.map(hold => [hold.path, hold.code, hold.reason]).sort()).toEqual([['notes/example.md', 'page_identity_changed', 'spelling'], ['notes\\example.md', 'page_identity_changed', 'spelling']]);
     expect((await engine.getPage(literalSlug, { sourceId: f.id }))?.id).toBe(f.snapshot.page.id);
-    expect(await engine.executeRaw('SELECT id FROM pages WHERE source_id=$1', [f.id])).toHaveLength(1);
-    expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
+    expect((await engine.executeRaw<{ slug: string }>('SELECT slug FROM pages WHERE source_id=$1', [f.id])).map(row => row.slug).sort()).toEqual([literalSlug, 'notes/other'].sort());
+    expect(await engine.executeRaw("SELECT intent->>'path' AS path FROM persistence_requests WHERE source_id=$1 AND intent->>'kind' <> 'managed_sync_checkpoint' ORDER BY path", [f.id])).toEqual([{ path: 'notes/other.md' }]);
     expect(readFileSync(join(f.root, literal), 'utf8')).toBe(content);
     expect(readFileSync(join(f.root, 'notes/example.md'), 'utf8')).toContain('separate');
     expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))?.revision).toBe(f.snapshot.revision);
@@ -302,9 +312,15 @@ for (const alias of [false, true]) check(`native historical ${alias ? 'alias' : 
   expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
   expect(await engine.getVersions(f.slug, { sourceId: f.id })).toEqual(history);
   if (process.platform !== 'win32' && !alias) {
-    await expect(performManagedSync(engine, opts)).rejects.toMatchObject({ code: 'page_identity_changed' });
-    expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
-    expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
+    // GBRA-130 B-3 (was: the pass refused page_identity_changed): both spellings are held, neither is imported or deleted,
+    // and the unrelated notes/untouched.md imports.
+    const result = await performManagedSync(engine, opts);
+    expect(result).toMatchObject({ status: 'synced', fromCommit: f.head, toCommit: target, deleted: 0, filesImported: 1 });
+    expect(result.held?.map(hold => [hold.path, hold.code, hold.reason]).sort()).toEqual([['notes/example.md', 'page_identity_changed', 'spelling'], ['notes\\example.md', 'page_identity_changed', 'spelling']]);
+    expect(await engine.executeRaw("SELECT intent->>'path' AS path FROM persistence_requests WHERE source_id=$1 AND intent->>'kind' <> 'managed_sync_checkpoint' ORDER BY path", [f.id])).toEqual([{ path: 'notes/untouched.md' }]);
+    expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
+    expect(await engine.getVersions(f.slug, { sourceId: f.id })).toEqual(history);
+    expect((await engine.executeRaw('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(target);
   } else {
     // #6712 PR 4b: the first pass reads the whole level, so the unchanged notes/untouched.md, which has no page yet, is
     // imported beside the changed file (the cursor's incremental delta saw only the change). The historical origin's page
@@ -439,7 +455,7 @@ check('an explicit working-tree deletion of a page no sync import recorded is he
 });
 
 check('native case aliases refuse rather than merge distinct origins', async engine => {
-  const f = await fixture(engine, 'Notes/example.md', 'notes/example', { 'Notes/example.md': content });
+  const f = await fixture(engine, 'Notes/example.md', 'notes/example', { 'Notes/example.md': content, 'other.md': 'An unrelated synthetic note.\n' });
   const object = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD:Notes/example.md'], { encoding: 'utf8' }).trim();
   execFileSync('git', ['-C', f.root, '-c', 'core.ignorecase=false', 'update-index', '--add', '--cacheinfo', `100644,${object},notes/example.md`]);
   execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Add case-distinct tree entry']);
@@ -447,9 +463,15 @@ check('native case aliases refuse rather than merge distinct origins', async eng
     mkdirSync(join(f.root, 'notes'), { recursive: true });
     writeFileSync(join(f.root, 'notes/example.md'), content);
   }
-  await expect(performManagedSync(engine, f.opts)).rejects.toMatchObject({ code: 'page_identity_changed' });
+  // GBRA-130 B-3 (was: the pass refused page_identity_changed): the case spellings are held, neither is imported or
+  // deleted, and an unrelated file in the same sync imports.
+  const result = await performManagedSync(engine, f.opts);
+  const held = result.held?.map(hold => [hold.path, hold.code, hold.reason]).sort();
+  if (process.platform === 'linux') expect(held).toEqual([['Notes/example.md', 'page_identity_changed', 'spelling'], ['notes/example.md', 'page_identity_changed', 'spelling']]);
+  else for (const hold of held ?? []) expect(hold).toEqual([expect.stringMatching(/^[Nn]otes\/example\.md$/), 'page_identity_changed', 'spelling']);
+  expect(held?.length).toBeGreaterThan(0);
   expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))?.revision).toBe(f.snapshot.revision);
-  expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toEqual([]);
+  expect(await engine.executeRaw("SELECT intent->>'path' AS path FROM persistence_requests WHERE source_id=$1 AND intent->>'kind' <> 'managed_sync_checkpoint' ORDER BY path", [f.id])).toEqual([{ path: 'other.md' }]);
   expect(readFileSync(join(f.root, 'Notes/example.md'), 'utf8')).toBe(content);
   expect(readFileSync(join(f.root, 'notes/example.md'), 'utf8')).toBe(content);
 });
