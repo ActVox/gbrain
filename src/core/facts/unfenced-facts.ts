@@ -75,7 +75,7 @@ import type { WriteAuthority } from '../persistence/model.ts';
 import { UNBOUND_WRITE_KEY } from '../persistence/unbound-source.ts';
 import { contentHash } from '../utils.ts';
 import { bodyUnread } from '../page-body/page-shape.ts';
-import { fileBodyMatchesStored, mirrorFileBody, readStoredBody } from './file-body-guard.ts';
+import { fileBodyMatchesStored, fileDatabaseDriftToken, mirrorFileBody, readStoredBody } from './file-body-guard.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
 import { commitFactFenceFile, gitPathState } from './fence-write.ts';
 import { isOwnedClone } from '../url-clone.ts';
@@ -548,18 +548,6 @@ async function fenceDatabaseOnlyPage(engine: BrainEngine, sourceId: string, enti
   } catch (err) {
     outcome.failed_pages.push(`${entitySlug} (${err instanceof Error ? err.message : String(err)})`);
   }
-}
-
-/**
- * #6982: the `failed_pages` entry for an unmanaged page whose canonical file and database body differ, so its rows stay
- * unfenced and neither copy is replaced. Which side is newer is not knowable here: an unimported file edit and a newer
- * database-only edit look the same, and replacing either would lose the other.
- */
-export function fileDatabaseDriftToken(slug: string, sourceId: string, when: 'before' | 'during'): string {
-  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : 'changed while the fence step ran'}, `
-    + `so neither was replaced and its rows stay unfenced, active and searchable until they agree. If the file holds the newer edit, `
-    + `gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
-    + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
 }
 
 /**
