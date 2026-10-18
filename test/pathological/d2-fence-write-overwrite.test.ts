@@ -4,13 +4,20 @@
  * fallback, and writeSingleFact records the unfenced fact. Agreeing copies still append with history.
  * Fails when: the pre-fix whole-file mirror overwrites the DB after publishing the file.
  * Existing coverage checks missing files, not divergent live copies or publication races.
+ * Inferred subjects keep their authorized attribution and provenance while drift holds their page out of
+ * destructive reconciliation; existing inference coverage does not assert preservation of either body.
  * Seams: engine proxy injects a real edit before the prepared fence transaction; no production-only hook.
  */
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { __setChatTransportForTests, resetGateway } from '../../src/core/ai/gateway.ts';
+import { runExtractFacts } from '../../src/core/cycle/extract-facts.ts';
+import { runFactsPipeline } from '../../src/core/facts/backstop.ts';
 import { writeSingleFact } from '../../src/core/facts/write-single.ts';
 import { parseFactsFence } from '../../src/core/facts-fence.ts';
 import { pathologicalArms } from './harness.ts';
 import { CLAIM, EDIT, SLUG, editWhenPrepared, withFactsBrain } from './facts-overwrite-fixture.ts';
+
+afterEach(() => { __setChatTransportForTests(null); resetGateway(); });
 
 for (const { backend, databaseUrl } of pathologicalArms()) describe(`D-2 fence writes (${backend})`, () => {
   for (const mode of ['database', 'file', 'late-database', 'late-file'] as const) test(`${mode} edit preserves both copies and falls back`, async () => {
@@ -38,6 +45,32 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`D-2 fence w
       expect(parseFactsFence(b.bytes()).facts.map(f => f.claim)).toEqual([CLAIM]);
       expect(parseFactsFence(await b.body()).facts.map(f => f.claim)).toEqual([CLAIM]);
       expect(await b.engine.executeRaw('SELECT compiled_truth FROM page_versions WHERE compiled_truth = $1', [before])).toHaveLength(1);
+    });
+  }, 180_000);
+
+  for (const mode of ['database', 'file'] as const) test(`${mode} drift keeps an authorized inferred subject and both bodies`, async () => {
+    await withFactsBrain(databaseUrl, async b => {
+      if (mode === 'database') await b.dbEdit();
+      else b.fileEdit();
+      const before = { file: b.bytes(), body: await b.body() };
+      __setChatTransportForTests(async () => ({
+        text: JSON.stringify({ facts: [{ fact: CLAIM, entity: null, kind: 'fact', confidence: 1, notability: 'high' }] }),
+        blocks: [], stopReason: 'end', model: 'test:stub', providerId: 'test',
+        usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      }));
+      const result = await runFactsPipeline('turn', { engine: b.engine, sourceId: 'default', sessionId: null,
+        source: 'mcp:extract_facts', sourceSlug: SLUG, mode: 'inline', visibility: 'world', remote: false });
+      expect(result.inserted).toBe(1);
+      expect(await b.engine.executeRaw('SELECT entity_slug, row_num, context FROM facts WHERE id = $1', [result.fact_ids[0]]))
+        .toEqual([{ entity_slug: SLUG, row_num: null, context: `${SLUG} — entity inferred from page` }]);
+      const reconcile = await runExtractFacts(b.engine, { sourceId: 'default' });
+      expect(reconcile.legacyRowsPending).toBe(1);
+      expect(reconcile.guardTriggered).toBe(true);
+      expect(reconcile.legacyPages).toEqual([SLUG]);
+      expect(reconcile.warnings.some(w => w.includes(`${SLUG} (file_database_drift`))).toBe(true);
+      expect({ file: b.bytes(), body: await b.body() }).toEqual(before);
+      expect(await b.engine.executeRaw('SELECT entity_slug, row_num FROM facts WHERE expired_at IS NULL'))
+        .toEqual([{ entity_slug: SLUG, row_num: null }]);
     });
   }, 180_000);
 });
