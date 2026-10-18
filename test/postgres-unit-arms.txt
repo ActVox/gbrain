@@ -220,6 +220,7 @@ test/page-purge-journal-timeout-6511.test.ts
 test/page-state-engine.test.ts
 test/pathological/a-36-facts-batch-partial-refusal.test.ts
 test/pathological/a-42-atom-dot-led-slug.test.ts
+test/pathological/a-65-captured-facts-unreadable-corpus.test.ts
 test/pathological/c-9-facts-absorb-dead.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
