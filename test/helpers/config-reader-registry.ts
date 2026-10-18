@@ -83,6 +83,7 @@ export const UNRESOLVED_CONFIG_READS: readonly UnresolvedConfigRead[] = [
   { file: 'src/commands/doctor/skill-checks.ts', expr: 'key', why: P },
   { file: 'src/commands/init-mode-picker.ts', expr: 'k', why: P },
   { file: 'src/commands/models.ts', expr: 'overrideKey', why: 'per-task model override key from the model-tier table (models.* prefix)' },
+  { file: 'src/commands/search.ts', expr: 'parts[3]', why: 'search tune --apply re-reads the key its recommendation just wrote, to reconcile a thrown write (search.* knobs from tune-recommendations.ts apply_command)' },
   { file: 'src/commands/skillpack/harness.ts', expr: 'key', why: P },
   { file: 'src/core/advisor/collect-setup-smells.ts', expr: 'key', why: P },
   { file: 'src/core/config-db-merge.ts', expr: 'key', why: 'listConfigKeys walk filtered to the cycle. and provider_chat_options. prefixes' },
