@@ -16,8 +16,10 @@
  * ordinary short lines or dated bullets with no structural candidate are cut
  * only by force. A joined run longer than BLOCK_MAX_BYTES (a line or fence many
  * segments long) refuses with `page_body_segmented`; a facts fence crossing a
- * forced cut while the source has withdrawals is read joined across it, up to
- * the same bound (read-range.ts `trustedSegments`).
+ * forced cut while the source has withdrawals is read joined across it by
+ * read-range.ts `trustedSegments` (up to FENCE_MAX_BYTES, the bound withdrawal
+ * discovery and the purge rewrite share), and a block it yields longer than
+ * BLOCK_MAX_BYTES still refuses here.
  */
 import type { BrainEngine } from '../engine.ts';
 import { BLOCK_MAX_BYTES, blockTooLargeError, bodyRowWork, confirmBodyPin, openSegmentedBody, readBodyRange, trustedSegments, type BodyPin } from './read-range.ts';

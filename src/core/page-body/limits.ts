@@ -36,6 +36,13 @@ export const SEGMENT_TARGET_BYTES = 256 * 1024;
 export const SEGMENT_RANK4_BYTES = 384 * 1024;
 /** Hard bound, matched by the `page_segment_texts.byte_len` CHECK. */
 export const SEGMENT_MAX_BYTES = 1024 * 1024;
+/**
+ * The longest facts fence a withdrawal holds as one string, counted from its begin marker through its end marker
+ * (UTF-8 bytes): withdrawal discovery, the purge and forget rewrite of the segments (segment-rewrite.ts), the trusted
+ * read's join (read-range.ts `trustedSegments`) and the canonical file's overlaid digest (body-digests.ts) all count a
+ * fence this way and refuse a longer one with `page_body_segmented` (`fenceTooLargeError`).
+ */
+export const FENCE_MAX_BYTES = PAGE_MAX_BYTES;
 
 /** Raw prefix of each region kept on the page row (`truth_lead`, `timeline_lead`), equal to Wave A's bounded prefix. */
 export const BODY_LEAD_BYTES = 64 * 1024;

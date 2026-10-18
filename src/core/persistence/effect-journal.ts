@@ -206,8 +206,8 @@ export async function releaseAbandonedClaims(engine: BrainEngine, processStarted
   return effects.length + requests.length;
 }
 
-/** @internal Claim renewals made between the pieces of a segmented page's file (effectClaimKeeper), for the bounded-work test. Counts, not time. */
-export const effectClaimWork = { renewals: 0 };
+/** @internal Claim renewals made between the pieces of a segmented page's file (effectClaimKeeper), by effect kind, for the bounded-work test. Counts, not time. */
+export const effectClaimWork: Record<string, number> = {};
 
 /**
  * Called between the pieces of a long read or write under a withdrawal-mirror or Git claim (a segmented page's file
@@ -219,7 +219,7 @@ export function effectClaimKeeper(engine: BrainEngine, effect: PersistenceEffect
   return async () => {
     if (performance.now() - last < intervalMs) return;
     last = performance.now();
-    effectClaimWork.renewals++;
+    effectClaimWork[effect.kind] = (effectClaimWork[effect.kind] ?? 0) + 1;
     const rows = await engine.executeRawDirect(`UPDATE persistence_effects SET claim_expires_at=now()+interval '2 minutes',updated_at=now()
       WHERE id=$1 AND execution_token=$2::uuid AND state='running' AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING id`, [effect.id, effect.execution_token]);
     if (rows.length !== 1) throw opError('write_claim_lost', 'The effect claim changed.',
