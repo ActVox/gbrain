@@ -222,6 +222,10 @@ test/page-purge-journal-timeout-6511.test.ts
 test/page-state-engine.test.ts
 test/pathological/a1-links-extract.test.ts
 test/pathological/a10-global-maintenance-stamp.test.ts
+test/pathological/a11-effect-retry-budget.test.ts
+test/pathological/a12-withdrawal-mirror-gate.test.ts
+test/pathological/a13-embedding-target-park.test.ts
+test/pathological/a15-deactivate-exits.test.ts
 test/pathological/a2-transcripts-ingest.test.ts
 test/pathological/a21-facts-expire-deleted.test.ts
 test/pathological/a22-consolidate-buckets.test.ts

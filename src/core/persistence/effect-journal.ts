@@ -134,7 +134,7 @@ export async function claimPersistenceEffect(engine: BrainEngine, hostId: string
       AND NOT EXISTS (SELECT 1 FROM persistence_requests blocked
         WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
       AND (e.kind='withdrawal-mirror' OR NOT EXISTS (SELECT 1 FROM persistence_effects mirror
-        WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state<>'committed'))
+        WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state IN ('queued','running')))
       ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId]);
     if (!candidate) return null;
     const [claimed] = await tx.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
@@ -147,6 +147,31 @@ export async function claimPersistenceEffect(engine: BrainEngine, hostId: string
 export function singleFileGitEffect(effect: PersistenceEffect): boolean {
   return effect.kind === 'git' && typeof effect.data.relative_path === 'string' && effect.data.version === undefined
     && !effect.data.source_scan && effect.data.targets === undefined;
+}
+
+/**
+ * GBRA-130 A-12: the pages a failed withdrawal mirror finished (its cursor
+ * passed them and none is parked or awaiting a retry). A mirror that failed
+ * before upgrading to an exact target list finished nothing.
+ */
+export function mirrorCommittedTargets(data: PersistenceEffect['data']): Set<string> {
+  const after = data.after_slug;
+  const unfinished = new Set([...(data.parked ?? []).flatMap(entry => entry.slug ? [entry.slug] : []), ...(data.retry_slugs ?? [])]);
+  return new Set((data.targets ?? []).filter(target => after !== undefined && target.slug <= after && !unfinished.has(target.slug)).map(target => target.slug));
+}
+
+/**
+ * GBRA-130 A-12: Git and embedding work of a request whose withdrawal mirror
+ * ended failed may touch only the pages that mirror committed; the claim gate
+ * releases them once the mirror is no longer queued or running. Returns, per
+ * request id, the pages allowed; a request without a failed mirror is absent.
+ */
+export async function failedMirrorAllowlists(engine: SqlEngine, requestIds: readonly string[]): Promise<Map<string, Set<string>>> {
+  if (!requestIds.length) return new Map();
+  const rows = await engine.executeRaw<{ request_id: string; data: PersistenceEffect['data'] }>(
+    `SELECT request_id::text AS request_id,data FROM persistence_effects WHERE kind='withdrawal-mirror' AND state='failed' AND request_id=ANY($1::uuid[])`,
+    [[...new Set(requestIds)]]);
+  return new Map(rows.map(row => [row.request_id, mirrorCommittedTargets(row.data)]));
 }
 
 /**
@@ -171,7 +196,7 @@ export async function claimCoalescedGitEffects(engine: BrainEngine, hostId: stri
       AND (e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
       AND e.recovery IS NULL
       AND NOT EXISTS (SELECT 1 FROM persistence_effects mirror
-        WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state<>'committed')
+        WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state IN ('queued','running'))
       ORDER BY e.next_attempt_at,e.id LIMIT $3 FOR UPDATE OF e SKIP LOCKED)
       UPDATE persistence_effects p SET state='running',execution_token=gen_random_uuid(),
       claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now()

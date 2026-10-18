@@ -714,10 +714,18 @@ runbook above.
    with its exit and what would change, and changes nothing. Blocker exits:
    `gbrain cancel-write-request <request_id>` for a queued write,
    `gbrain sync --source <id> --no-pull` for one that needs
-   recovery, `gbrain repair embedding-effects --source <id>` for a stuck
-   embedding effect, `gbrain sources writer retry-effects <source> --request-id <id> --dry-run`
-   for a failed Git or withdrawal effect, and `gbrain sources writer unlock` for
-   the writer admin lock. Held Google or GitHub items do not block: deactivate
+   recovery, waiting for the owner to drain a queued or running effect (a
+   links or facts-backstop effect that keeps failing settles after five
+   attempts; an embedding effect still queued after an hour is re-queued by
+   `gbrain repair embedding-effects --source <id>`), and
+   `gbrain sources writer unlock` for the writer admin lock. A terminally
+   failed effect does not block: the dry run lists it in `failed_effects` with
+   its code and the exit that retries it
+   (`gbrain sources writer retry-effects <source> --request-id <id> --dry-run`
+   for parked targets and failed Git, withdrawal, links and facts-backstop
+   effects, `gbrain repair embedding-effects --source <id>` for a failed
+   embedding effect, none for a zero-norm refusal or an effect whose source is
+   gone). Held Google or GitHub items do not block: deactivate
    copies each source's managed holds into its classic state file
    (`.google-source.json` or `.github-source.json`), so they stay held, retried
    and reported in classic mode; the dry run lists them as `carried_holds`. Only

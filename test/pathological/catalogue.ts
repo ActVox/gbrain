@@ -74,4 +74,6 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
     run: 'run: a run-scoped failure inside an event stops the sweep and records no hold' },
   'migrate_engine.loop_rows': { file: 'test/pathological/a31-migrate-loop-rows.serial.test.ts',
     item: 'A-31 item: a refused open_loops row is printed with its id and code and blocks the switch', run: 'A-31 run: a run-scoped error' },
+  'effects.derived_retry_budget': { file: 'test/pathological/a11-effect-retry-budget.test.ts',
+    item: 'A-11 item: a links and a facts-backstop effect failing every attempt', run: 'A-11 run: a run-scoped failure (' },
 };

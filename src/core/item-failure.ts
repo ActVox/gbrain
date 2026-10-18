@@ -47,6 +47,7 @@ export const ISOLATE_SITES = {
   'google.contact': 'A-3',
   'google.calendar_event': 'A-3',
   'migrate_engine.loop_rows': 'A-31',
+  'effects.derived_retry_budget': 'A-11',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
