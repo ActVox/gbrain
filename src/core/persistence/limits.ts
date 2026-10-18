@@ -26,14 +26,14 @@ export function parseJournalConfigValue(key:string,value:string):number {
 /**
  * Database configuration applies to every server sharing this brain. An unset `worktree_recovery_bytes` defaults to
  * room for the largest page `pages.max_bytes` admits and the largest page stored in segments (page-body/limits.ts
- * `pageRecoveryBytes`, never below 256 MiB; the stored maximum is one probe of pages_segmented_body_bytes_idx, v259, or
+ * `pageRecoveryBytes`, never below 256 MiB; the stored maximum is one probe of pages_segmented_body_bytes_idx, v260, or
  * the engine ceiling while that index is not valid: JOURNAL_LIMITS_SQL); an
  * engine that is not PGLite (or a stub without a `kind`) counts as Postgres, the larger ceiling.
  */
 /**
  * The journal's one config statement. Its last row (key NULL) is the largest page stored in segments, read only while
  * pages_segmented_body_bytes_idx is valid (the CASE leaves the subquery unexecuted otherwise, so an index the online
- * v259 build left INVALID never turns each limit read into a scan of pages); 'unindexed' then stands for a page at the
+ * v260 build left INVALID never turns each limit read into a scan of pages); 'unindexed' then stands for a page at the
  * engine ceiling, the most any stored page can hold.
  */
 export const JOURNAL_LIMITS_SQL=`SELECT key,value FROM config WHERE key LIKE 'persistence.limits.%' OR key IN ('${PAGE_BODY_CONFIG_KEYS.segmentedStorage}','${PAGE_BODY_CONFIG_KEYS.maxBytes}')

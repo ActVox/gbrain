@@ -23,13 +23,13 @@ export const INGEST_LOG_MARKED_INDEX = {
   sql: 'CREATE INDEX IF NOT EXISTS ingest_log_marked_idx ON ingest_log (created_at) WHERE writer_segment_reader IS TRUE',
 };
 
-export const v258: Migration = {
-  version: 258,
+export const v259: Migration = {
+  version: 259,
   name: 'ingest_log_marked_index',
   idempotent: true,
   transaction: false,
   sql: '',
   handler: async engine => {
-    await buildIndexOnline(engine, 258, INGEST_LOG_MARKED_INDEX, { notice: migrationNotice });
+    await buildIndexOnline(engine, 259, INGEST_LOG_MARKED_INDEX, { notice: migrationNotice });
   },
 };

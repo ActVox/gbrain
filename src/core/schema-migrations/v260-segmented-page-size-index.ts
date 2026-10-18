@@ -21,13 +21,13 @@ export const PAGES_SEGMENTED_BODY_BYTES_INDEX = {
   sql: "CREATE INDEX IF NOT EXISTS pages_segmented_body_bytes_idx ON pages (body_bytes) WHERE body_storage = 'segmented'",
 };
 
-export const v259: Migration = {
-  version: 259,
+export const v260: Migration = {
+  version: 260,
   name: 'segmented_page_size_index',
   idempotent: true,
   transaction: false,
   sql: '',
   handler: async engine => {
-    await buildIndexOnline(engine, 259, PAGES_SEGMENTED_BODY_BYTES_INDEX, { notice: migrationNotice });
+    await buildIndexOnline(engine, 260, PAGES_SEGMENTED_BODY_BYTES_INDEX, { notice: migrationNotice });
   },
 };

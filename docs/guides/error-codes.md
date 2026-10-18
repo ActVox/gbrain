@@ -1998,6 +1998,14 @@ More: [docs/guides/company-brain-ingestion.md#resume-and-verify](../../docs/guid
 
 More: [docs/guides/troubleshooting.md#ipc-path-too-long](../../docs/guides/troubleshooting.md#ipc-path-too-long)
 
+### item_failures_systemic
+
+<a id="item_failures_systemic"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Most items of one per-item loop failed (or many failed with one code, or none succeeded), so the failure is systemic and no item was held; the unit stopped instead of skipping every item. | A per-item loop holds a bad item and continues (GBRA-130), but a run where most items fail points at a shared cause, and holding every item would hide it. | Fix the shared cause the first failures name, then rerun the same command; run gbrain doctor --json if the cause is unclear. Run: gbrain doctor --json | agent | `gbrain doctor --json` | 1 | no |
+
 ### keyword_candidates_incomplete
 
 <a id="keyword_candidates_incomplete"></a>

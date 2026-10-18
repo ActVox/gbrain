@@ -1899,6 +1899,26 @@
         },
         {
           "category": "ops",
+          "details": {
+            "age_minutes": null,
+            "code": "global_maintenance_stalled",
+            "docs": "docs/guides/troubleshooting.md#global-maintenance-stalled",
+            "fail_after_minutes": 10080,
+            "failed_jobs_since": 0,
+            "last_failed_job": null,
+            "last_global_at": null,
+            "phases": [],
+            "reason": "fresh",
+            "resume_phase": null,
+            "warn_after_minutes": 180
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Brain-wide maintenance has not run yet.",
+          "name": "global_maintenance_stalled",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
           "elapsed_ms": "<volatile>",
           "message": "No automatic embed-backfill is repeating the same failure.",
           "name": "embed_backfill_stalled",

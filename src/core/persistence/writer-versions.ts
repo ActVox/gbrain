@@ -110,7 +110,7 @@ export interface SegmentedGateWriter {
  * build of the same version without them, so an unmarked writer blocks whatever its version, and a release below the
  * floor may write the mark (v0.60.290.0 does). Admitters count in any state, so a failed or still-queued request of an
  * older binary is seen as well. The ingest log is read in two arms, unmarked and marked rows, each over its
- * window on its partial index (ingest_log_unmarked_idx, v254; ingest_log_marked_idx, v258), so the read never
+ * window on its partial index (ingest_log_unmarked_idx, v254; ingest_log_marked_idx, v259), so the read never
  * scans the whole log. Not seen: an older binary that writes neither a request nor an
  * ingest-log row (a single-page put on a brain without managed persistence, a run that dies before logging), and
  * one-shot readers and exporters, which write nothing.

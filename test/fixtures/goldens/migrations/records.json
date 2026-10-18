@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 254,
+    "count": 255,
     "gaps": [
       17,
       18,
@@ -69,7 +69,7 @@
       "tableRows": "906d2413b13d76a06d5910885e47ed5c544be4ff3a2266e83146715721b24270",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 259,
+    "latest": 260,
     "records": [
       {
         "handler": {
@@ -4032,6 +4032,19 @@
         "version": 257
       },
       {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "pages_links_extract_failure",
+        "sql": {
+          "length": 79,
+          "sha256": "076f0d516a37d225deec04c581a0176a4551351e08cc052acd5d79c89ca8dd4d"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 258
+      },
+      {
         "handler": {
           "form": "arrow",
           "helpers": [
@@ -4044,7 +4057,7 @@
             "quietMigrationNotices",
             "tableRows"
           ],
-          "sha256": "2eb9891cdbd55e5ed7204198230395dde52a272d222cc9611beea6a841e84dd6"
+          "sha256": "0d85538d5d8481866342b45c8872e889d1f0c8dcffe114ab833c9209effc42dc"
         },
         "idempotent": true,
         "name": "ingest_log_marked_index",
@@ -4055,7 +4068,7 @@
         "sqlFor": "absent",
         "transaction": false,
         "verify": "absent",
-        "version": 258
+        "version": 259
       },
       {
         "handler": {
@@ -4070,7 +4083,7 @@
             "quietMigrationNotices",
             "tableRows"
           ],
-          "sha256": "9f7701edb302ed2008367521ba841f94cd5c4fc0adfaef5bed77e93459eb1a1d"
+          "sha256": "35f2cceeba8abac07df01b2da479d76e6594ccc62b62a760a3cc7f3c846a73e9"
         },
         "idempotent": true,
         "name": "segmented_page_size_index",
@@ -4081,7 +4094,7 @@
         "sqlFor": "absent",
         "transaction": false,
         "verify": "absent",
-        "version": 259
+        "version": 260
       }
     ],
     "versions": [
@@ -4338,7 +4351,8 @@
       256,
       257,
       258,
-      259
+      259,
+      260
     ]
   },
   "normalizer": "migrations-record-v1"
