@@ -1,14 +1,14 @@
 /**
  * #7013 `atom_retirements_restorable`: atoms a managed re-extraction retired (`retired_by: managed-reextract`) that
  * `gbrain repair atoms-restore` can bring back, by the one rule the repair and the purge hold share
- * (`restorableAtomRetirementSql`). A `WAVE_CHECKS` entry: `ok` when none; `warn` with the count, the origins, the
+ * (`atomRetirementsSql`). A `WAVE_CHECKS` entry: `ok` when none; `warn` with the count, the origins, the
  * oldest and newest retirement, the date the purge hold of the earliest one ends, and the read-only preview as fix.
  * The apply needs the user's agreement on the previewed set. Read-only.
  */
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
 import { agentFix } from '../check-fix.ts';
-import { ATOM_RESTORE_HOLD_DAYS, restorableAtomRetirementSql } from '../../../core/persistence/atom-retirement-hold.ts';
+import { ATOM_RESTORE_HOLD_DAYS, atomRetirementsSql } from '../../../core/persistence/atom-retirement-hold.ts';
 
 const DOCS = 'docs/guides/repair.md#atoms-restore';
 
@@ -17,11 +17,10 @@ export async function atomRetirementsRestorableCheck(engine: BrainEngine, source
     const sources = sourceIds ?? (await engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE archived IS NOT TRUE ORDER BY id')).map(row => row.id);
     const rows = await engine.executeRaw<{ source_id: string; count: number; origins: number; oldest: string | null; newest: string | null; hold_until: string }>(`
       SELECT p.source_id, count(*)::int AS count,
-             count(DISTINCT COALESCE(NULLIF(p.frontmatter->>'source_slug',''), 'path:'||(p.frontmatter->>'source_path')))::int AS origins,
-             min(p.frontmatter->>'retired_at') AS oldest, max(p.frontmatter->>'retired_at') AS newest,
+             count(DISTINCT c.origin_kind||':'||c.origin)::int AS origins, min(c.retired_at) AS oldest, max(c.retired_at) AS newest,
              to_char((min(p.deleted_at) + interval '${ATOM_RESTORE_HOLD_DAYS} days') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS hold_until
-        FROM pages p WHERE p.source_id=ANY($1::text[]) AND ${restorableAtomRetirementSql('p')}
-       GROUP BY p.source_id ORDER BY p.source_id`, [sources]);
+        FROM (${atomRetirementsSql('p.source_id=ANY($1::text[])')}) c JOIN pages p ON p.id=c.id
+       WHERE c.restorable GROUP BY p.source_id ORDER BY p.source_id`, [sources]);
     const bySource = rows.map(row => ({ ...row, count: Number(row.count), origins: Number(row.origins) }));
     const count = bySource.reduce((sum, row) => sum + row.count, 0);
     const details = { count, origins: bySource.reduce((sum, row) => sum + row.origins, 0),

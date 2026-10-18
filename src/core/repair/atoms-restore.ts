@@ -3,7 +3,7 @@
  * returned no atoms for their origin. An empty extraction retired every earlier atom of the origin by soft delete
  * stamped `retired_by: managed-reextract`, and the purge then removed them for good.
  *
- * The candidate rule is one SQL predicate (`restorableAtomRetirementSql`, persistence/atom-retirement-hold.ts):
+ * The candidate rule is one SQL query (`atomRetirementsSql`, persistence/atom-retirement-hold.ts, column `restorable`):
  * the latest retired generation of a live origin (a page in the same source, or a transcript) that no later
  * generation replaced. Imported atoms, `stale-atoms` retirements and older generations are never listed; the
  * preview counts what it keeps (`origin_gone`, `replaced`, `older_generation`).
@@ -29,8 +29,7 @@ import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { preparePageMutation } from '../persistence/page-prepare.ts';
 import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
-import { atomLatestGenerationSql, atomOriginLiveSql, atomReplacedSql, reextractRetiredAtomSql, restorableAtomRetirementSql,
-  ATOM_REEXTRACT_RETIRED_BY } from '../persistence/atom-retirement-hold.ts';
+import { atomOriginScopeSql, atomRetirementsSql, ATOM_REEXTRACT_RETIRED_BY } from '../persistence/atom-retirement-hold.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { declareDerivation, deriveTrust, lowerToDerivedTier, recordTaintEdges } from '../trust/taint.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
@@ -62,22 +61,18 @@ interface RestoreItem extends RepairItem { atom: RestorableAtom; hash: string; l
 /** An approved atom carries the preview's source selection, so an apply under another `--source` refuses. */
 interface ApprovedAtom extends RestorableAtom { selection: string[] }
 
-/** Restorable atoms of these sources in id order; `atomId` narrows to one atom for the apply recheck. */
+/** Restorable atoms of these sources in id order; `atomId` narrows to one atom (and its origin) for the apply recheck. */
 async function restorableAtoms(db: BrainEngine, sourceIds: string[], atomId?: number): Promise<RestorableAtom[]> {
+  const scope = atomId === undefined ? 'p.source_id=ANY($1::text[])' : `p.source_id=ANY($1::text[]) AND ${atomOriginScopeSql('$2::bigint')}`;
   const rows = await db.executeRaw<RestorableAtom>(`
-    SELECT a.id, a.source_id, (SELECT s.incarnation::text FROM sources s WHERE s.id=a.source_id) AS incarnation,
-           a.slug, a.knowledge_revision::text AS revision,
-           CASE WHEN NULLIF(a.frontmatter->>'source_slug','') IS NOT NULL THEN 'page' ELSE 'transcript' END AS origin_kind,
-           COALESCE(NULLIF(a.frontmatter->>'source_slug',''), a.frontmatter->>'source_path') AS origin,
-           (SELECT o.id FROM pages o WHERE o.source_id=a.source_id AND o.slug=a.frontmatter->>'source_slug' AND o.deleted_at IS NULL) AS origin_page_id,
-           regexp_replace(COALESCE(a.frontmatter->>'source_hash',''),'^pending:','') AS hash,
-           a.frontmatter->>'retired_at' AS retired_at,
+    SELECT c.id, c.source_id, (SELECT s.incarnation::text FROM sources s WHERE s.id=c.source_id) AS incarnation,
+           a.slug, a.knowledge_revision::text AS revision, c.origin_kind, c.origin, c.origin_page_id, c.hash, c.retired_at,
            (SELECT v.id FROM page_versions v WHERE v.page_id=a.id AND v.is_deleted=false AND v.frontmatter->>'retired_by' IS NULL
-               AND regexp_replace(COALESCE(v.frontmatter->>'source_hash',''),'^pending:','')=regexp_replace(COALESCE(a.frontmatter->>'source_hash',''),'^pending:','')
+               AND regexp_replace(COALESCE(v.frontmatter->>'source_hash',''),'^pending:','')=c.hash
              ORDER BY v.id DESC LIMIT 1) AS version_id
-      FROM pages a
-     WHERE a.source_id=ANY($1::text[]) AND ($2::int IS NULL OR a.id=$2::int) AND ${restorableAtomRetirementSql('a')}
-     ORDER BY a.id`, [sourceIds, atomId ?? null]);
+      FROM (${atomRetirementsSql(scope)}) c JOIN pages a ON a.id=c.id
+     WHERE c.restorable${atomId === undefined ? '' : ' AND c.id=$2::bigint'}
+     ORDER BY c.id`, atomId === undefined ? [sourceIds] : [sourceIds, atomId]);
   return rows.map(row => ({ ...row, id: Number(row.id), origin_page_id: row.origin_page_id === null ? null : Number(row.origin_page_id),
     version_id: row.version_id === null ? null : Number(row.version_id) }));
 }
@@ -85,12 +80,10 @@ async function restorableAtoms(db: BrainEngine, sourceIds: string[], atomId?: nu
 /** The re-extraction retirements of these sources the rule keeps, by reason. */
 async function keptCounts(db: BrainEngine, sourceIds: string[]): Promise<{ origin_gone: number; replaced: number; older_generation: number }> {
   const [row] = await db.executeRaw<{ origin_gone: number; replaced: number; older_generation: number }>(`
-    SELECT count(*) FILTER (WHERE NOT live)::int AS origin_gone,
-           count(*) FILTER (WHERE live AND replaced)::int AS replaced,
-           count(*) FILTER (WHERE live AND NOT replaced AND NOT latest)::int AS older_generation
-      FROM (SELECT ${atomOriginLiveSql('a')} AS live, ${atomReplacedSql('a')} AS replaced,
-                   COALESCE(${atomLatestGenerationSql('a')}, false) AS latest
-              FROM pages a WHERE a.source_id=ANY($1::text[]) AND ${reextractRetiredAtomSql('a')}) kept`, [sourceIds]);
+    SELECT count(*) FILTER (WHERE NOT origin_live)::int AS origin_gone,
+           count(*) FILTER (WHERE origin_live AND replaced)::int AS replaced,
+           count(*) FILTER (WHERE origin_live AND NOT replaced AND NOT latest)::int AS older_generation
+      FROM (${atomRetirementsSql('p.source_id=ANY($1::text[])')}) kept`, [sourceIds]);
   return { origin_gone: Number(row?.origin_gone ?? 0), replaced: Number(row?.replaced ?? 0), older_generation: Number(row?.older_generation ?? 0) };
 }
 
