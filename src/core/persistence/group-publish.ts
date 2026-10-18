@@ -165,9 +165,11 @@ const STABLE_IN_PREPARATION = new Set([
  * above and config values (`getConfig`, `getAllConfig`) are answered once for
  * the whole preparation, as if every member were prepared at the same moment;
  * publication re-checks what it relies on under its locks. It lives only for
- * one group's preparation; a failed read is not kept.
+ * one group's preparation; a failed read is not kept. `also` adds plain reads a
+ * caller's preparations repeat (GBRA-108: the legacy sweep's read-only screen).
  */
-export function preparationReads(engine: BrainEngine, imports?: ImportGroupReads): BrainEngine {
+export function preparationReads(engine: BrainEngine, imports?: ImportGroupReads, also: readonly string[] = []): BrainEngine {
+  const stable = also.length ? new Set([...STABLE_IN_PREPARATION, ...also.map(flat)]) : STABLE_IN_PREPARATION;
   const reads = new Map<string, Promise<unknown>>();
   const once = <T>(id: string, read: () => Promise<T>): Promise<T> => {
     let value = reads.get(id) as Promise<T> | undefined;
@@ -180,7 +182,7 @@ export function preparationReads(engine: BrainEngine, imports?: ImportGroupReads
     // A shared read takes no member's signal: a caller's own signal bypasses the memo, and (#6278) a bounded preparation read
     // (`timeoutMs`, whose signal only covers its connection wait) is answered once with the member's bound and signal dropped.
     if (key === 'executeRaw') return (sql: string, params?: unknown[], opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
-      STABLE_IN_PREPARATION.has(flat(sql)) && (!opts?.signal || opts.timeoutMs !== undefined)
+      stable.has(flat(sql)) && (!opts?.signal || opts.timeoutMs !== undefined)
         ? once(JSON.stringify([flat(sql), params ?? null]), () => target.executeRaw(sql, params)) : target.executeRaw(sql, params, opts);
     // GBRA-75 wave 10: every config key a member reads comes from one config read for the group (the same value per key).
     if (key === 'getConfig') return (name: string) => once('config:*', () => target.getAllConfig()).then(all => Object.hasOwn(all, name) ? all[name]! : null);

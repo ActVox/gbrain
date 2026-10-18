@@ -28,6 +28,11 @@ import { managedSyncAuthority, type SyncProcessingOptions } from './sync-authori
 import { screeningRequest } from './noop-kernel.ts';
 import { prepareManagedSyncMutation, type SyncIntent } from './sync-prepare.ts';
 import { sha256 } from './digest.ts';
+import { preparationReads } from './group-publish.ts';
+import { importGroupReads } from './import-reads.ts';
+import { PAGE_PURGE_TOMBSTONES_SQL } from './page-purge.ts';
+import { WORKTREE_BINDING_SQL } from './ownership.ts';
+import { SOURCE_TRUST_CONFIG_SQL } from '../trust/channel.ts';
 
 /** keep_db DB-wins writes one pass admits (design v3.2 §4, [estimated]); the rest are `keep_db_pending`. */
 export const KEEP_DB_PASS_CAP = 200;
@@ -177,10 +182,16 @@ export async function buildConvergenceReceipt(engine: BrainEngine, level: Shadow
   };
 }
 
+/** Plain reads every screened preparation repeats beside group-publish.ts's `preparationReads` set: the binding, the owner trust config and the purge tombstones. */
+const SCREEN_STABLE_READS = [WORKTREE_BINDING_SQL, SOURCE_TRUST_CONFIG_SQL, PAGE_PURGE_TOMBSTONES_SQL];
+
 /**
  * The dry run's read-only `sameContentAtOrigin` (sync-run.ts): prepares each drift path's import as a screening request
  * (`prepareManagedSyncMutation(..., { unsaved: true })`, never admitted or persisted) and reports `same` when the
- * preparer's own no-op verdict holds at the page's current revision.
+ * preparer's own no-op verdict holds at the revision the level read for the page. GBRA-108: one call's preparations
+ * share what each would read again (`preparationReads`: the writer, binding, root, managed mode, shared packs, config,
+ * trust config, purge tombstones) and read their pages in one batch (`importGroupReads`), so a call costs its pages'
+ * own reads plus a constant, not every shared read once per page.
  */
 export function readOnlySameContentScreen(engine: BrainEngine, context: ManagedSyncContext, processingOptions: SyncProcessingOptions): ConvergenceScreen {
   return async (level, paths) => {
@@ -188,22 +199,23 @@ export function readOnlySameContentScreen(engine: BrainEngine, context: ManagedS
     const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, context.root);
     const committed = level.mode === 'committed' ? await readBlobs(level.gitRoot, [...new Set(paths.map(entry => entry.state.level!).filter(Boolean))], 8 * 1024 * 1024) : new Map<string, Buffer>();
     const runId = randomUUID();
+    const pages = importGroupReads(engine, paths.flatMap(entry => entry.slug ? [{ slug: entry.slug, source_id: level.sourceId }] : []));
+    const reads = preparationReads(engine, { snapshot: pages.snapshot, findDuplicate: (sourceId, input) => engine.findDuplicatePage?.(sourceId, input) ?? Promise.resolve(null) }, SCREEN_STABLE_READS);
     for (const entry of paths) {
       try {
         const sourceRelative = level.scope ? entry.path.slice(level.scope.length + 1) : entry.path;
         const disk = readSyncFile(level.root, sourceRelative);
         const bytes = level.mode === 'committed' ? committed.get(entry.state.level!) ?? null : disk;
-        const snapshot = entry.slug ? await engine.readPageSnapshot(entry.slug, { sourceId: level.sourceId, includeDeleted: true }) : null;
-        if (!bytes || !snapshot || snapshot.page.deleted_at != null) { verdicts.set(entry.path, 'unknown'); continue; }
+        if (!bytes || !entry.slug || entry.pageId === null || entry.revision === null || entry.state.page?.live !== true) { verdicts.set(entry.path, 'unknown'); continue; }
         const content = bytes.toString('utf8');
         const lineEndingOnly = disk !== null && disk.equals(Buffer.from(disk.toString('utf8'))) && disk.toString('utf8').replace(/\r\n/g, '\n') === content.replace(/\r\n/g, '\n');
         const sourcePath = level.slugMode === 'source-root' ? sourceRelative : entry.path;
-        const intent: SyncIntent = { kind: 'managed_sync_import', expected_revision: snapshot.revision, sourcePath, path: sourceRelative, rawHash: disk ? sha256(disk) : null, content, lineEndingOnly,
+        const intent: SyncIntent = { kind: 'managed_sync_import', expected_revision: entry.revision, sourcePath, path: sourceRelative, rawHash: disk ? sha256(disk) : null, content, lineEndingOnly,
           processingOptions, ownerEpoch: String(context.binding.owner_epoch), syncAuthority: authority, cursorKey: `convergence-shadow:${level.sourceId}`, runId,
           slugMode: level.slugMode, index: 0, total: 1, from: level.baselineCommit, target: level.head, working: level.mode === 'working' };
-        const prepared = await prepareManagedSyncMutation(engine, screeningRequest({ source_id: level.sourceId, source_incarnation: level.incarnation, slug: snapshot.page.slug,
-          page_id: snapshot.page.id, worktree_id: context.binding.worktree_id, authority: authority.writer, intent }), { engine: engine.kind } as never, undefined, { unsaved: true });
-        verdicts.set(entry.path, (prepared.contentUnchanged === true || prepared.noop === true) && !prepared.file && prepared.observedRevision === snapshot.revision ? 'same' : 'differs');
+        const prepared = await prepareManagedSyncMutation(reads, screeningRequest({ source_id: level.sourceId, source_incarnation: level.incarnation, slug: entry.slug,
+          page_id: entry.pageId, worktree_id: context.binding.worktree_id, authority: authority.writer, intent }), { engine: engine.kind } as never, undefined, { unsaved: true });
+        verdicts.set(entry.path, (prepared.contentUnchanged === true || prepared.noop === true) && !prepared.file && prepared.observedRevision === entry.revision ? 'same' : 'differs');
       } catch {
         verdicts.set(entry.path, 'unknown');
       }
