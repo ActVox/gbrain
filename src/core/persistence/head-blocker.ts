@@ -20,15 +20,16 @@ import { claimStateOf } from './claim-phase.ts';
 import { isTerminal, type RequestState } from './model.ts';
 import { sha256 } from './digest.ts';
 import { claimableWriteSql, EARLIER_HEAD, foregroundPrioritySql, SYNC_KIND } from './journal.ts';
+import { BACKOFF_ELAPSED } from './transient-retry.ts';
 import { recoveryUpgradeFix, recoveryVersionKnown, type RecoveryTable } from './recovery-version.ts';
 
 export type HeadBlockerPredicate = 'worktree_owner' | 'refresh_fence' | 'effect_recovery' | 'withdrawal_mirror' | 'request_recovery'
-  | 'zombie_publication' | 'lease' | 'root_hold';
+  | 'zombie_publication' | 'lease' | 'root_hold' | 'transient_backoff';
 export interface HeadBlocker {
   predicate: HeadBlockerPredicate;
-  /** The refresh id for a fence, the request ids of blocking requests, the effect ids of blocking effects, or the worktree id. */
+  /** The refresh id for a fence, the request ids of blocking requests (the head itself for `transient_backoff`), the effect ids of blocking effects, or the worktree id. */
   ids: string[];
-  /** The fence state, the blocking request's state, the worktree state (`other_host` when another host owns it), or why an effect recovery cannot finish. */
+  /** The fence state, the blocking request's state, the worktree state (`other_host` when another host owns it), why an effect recovery cannot finish, or when a backoff ends (ISO time). */
   state: string | null;
   /** The process behind the blocker when one is known: a refresh process (`live` from its lock) or a claim's stamped owner. */
   owner: { kind: string | null; pid: number | null; live: boolean | null; restart_required: boolean } | null;
@@ -45,7 +46,7 @@ interface RowRef { request_id: string; state: string; claim_phase: unknown; exec
   publication_started: boolean; recovery: boolean; principal_kind: string; principal_id: string }
 interface ProbeRow { id: string; worktree_id: string | null; owner_host_id: string | null; worktree_state: string | null; claimable: boolean;
   fence: { id: string; state: string } | null; effect_recovery: EffectRecoveryRef[] | null; mirrors: string[] | null; request_recovery: RequestRecoveryRef[] | null;
-  earlier: RowRef[] | null; ahead: RowRef[] | null }
+  request_id: string; backoff_until: string | Date | null; earlier: RowRef[] | null; ahead: RowRef[] | null }
 interface EffectRecoveryRef { id: string; request_id: string | null; error_code: string | null; slug: string | null; path: string | null; before: string | null; after: string | null; version: unknown }
 interface RequestRecoveryRef { request_id: string; state: RequestState; blocked_reason: string | null; slug: string; version: string | null; path: string | null;
   before: string | null; after: string | null; files: Array<{ path: string | null; before: string | null; after: string | null }> | null }
@@ -97,7 +98,8 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
   const out = new Map<string, HeadBlockerRead>();
   if (!ids.length) return out;
   const priority = foregroundPrioritySql();
-  const rows = await engine.executeRaw<ProbeRow>(`SELECT r.id::text AS id, r.worktree_id::text AS worktree_id, w.owner_host_id::text AS owner_host_id, w.state AS worktree_state,
+  const rows = await engine.executeRaw<ProbeRow>(`SELECT r.id::text AS id, r.request_id::text AS request_id, r.worktree_id::text AS worktree_id, w.owner_host_id::text AS owner_host_id, w.state AS worktree_state,
+      CASE WHEN NOT ${BACKOFF_ELAPSED('r')} THEN r.next_attempt_at END AS backoff_until,
       (${claimableWriteSql(priority)}) AS claimable,
       (SELECT jsonb_build_object('id',f.id::text,'state',f.state) FROM persistence_worktree_refreshes f
         WHERE f.worktree_id=r.worktree_id AND f.state IN ('fenced','merged','recovery_required') LIMIT 1) AS fence,
@@ -139,6 +141,8 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
     }
     if (row.mirrors?.length) { blocked({ predicate: 'withdrawal_mirror', ids: row.mirrors, state: null, owner: null, intervention: false }); continue; }
     if (row.request_recovery?.length) { blocked(requestRecoveryBlocker(row.request_recovery)); continue; }
+    // v261: the head itself waits out a transient interruption's backoff (transient-retry.ts); it is claimed again when it ends.
+    if (row.backoff_until) { blocked({ predicate: 'transient_backoff', ids: [row.request_id], state: new Date(row.backoff_until).toISOString(), owner: null, intervention: false }); continue; }
     const ref = row.earlier?.[0] ?? row.ahead?.[0];
     if (!ref) { out.set(row.id, { status: 'unknown' }); continue; }
     const claim = claimStateOf({ state: ref.state, claim_phase: ref.claim_phase, execution_token: ref.execution_token, claim_lapsed: ref.claim_lapsed, publication_started: ref.publication_started });

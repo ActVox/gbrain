@@ -273,6 +273,8 @@ test/pathological/c4-bundle-stuck-recovery.test.ts
 test/pathological/c5-writer-transfer-cancel.test.ts
 test/pathological/c7-content-receipt-root.test.ts
 test/pathological/lp-a-segmented-mirror.test.ts
+test/pathological/lp-b-transient-retry-budget.test.ts
+test/pathological/lp-c-publication-ceiling-retry.test.ts
 test/pathological/lp-d-recovery-version.test.ts
 test/pathological/lp-d-segmented-mirror-gate.test.ts
 test/pathological/lp-f-split-fence-withdrawal-capacity.test.ts
