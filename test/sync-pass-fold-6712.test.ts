@@ -3,6 +3,9 @@
  * and the confirm round's reuse of round 1's classification (sync-pass.ts `matchedUnchanged`).
  *
  * Protects:
+ * - fold engages: a one-file commit whose file is already canonical (no writeback) publishes exactly one request carrying
+ *   the stamp, its import, which folds it (`pass_stamp: folded`); no separate checkpoint request. A fold that quietly
+ *   stops engaging costs this shape a second level and a checkpoint publication per commit (#6858 at 57 ms: 17.7 s -> 21.8 s).
  * - fold probe 1: the last import's publication fails after its folded stamp ran (`publication:before_commit`): the stamp
  *   rolls back with it, so the checkpoint and the pass row stay where they were, and later runs converge.
  * - fold probe 2: a hold at the target when the last import publishes: the import publishes alone (`pass_stamp_skipped`),
@@ -77,6 +80,19 @@ for (const backend of testBackends()) {
   const brain = (run: Parameters<typeof managedBrain>[0]) => managedBrain(run, { ...(databaseUrl ? { databaseUrl } : {}), setup });
 
   describe(`#6712 PR 4b folded pass checkpoint (${backend})`, () => {
+    test('fold engages: a one-file commit of a canonical file folds the stamp into its import, with no checkpoint request', () => brain(async ({ engine, root }) => {
+      expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+      const after = await lastSequence(engine);
+      edit(root, 'notes/a', 'A committed change of notes/a.'); commit(root, 'change a');
+      expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+      const stamped = await engine.executeRaw<{ kind: string; slug: string | null; state: string; stamp: string | null; skipped: string | null }>(
+        "SELECT intent->>'kind' AS kind, slug, state, outcome->>'pass_stamp' AS stamp, outcome->>'pass_stamp_skipped' AS skipped FROM persistence_requests WHERE sequence > $1 AND intent ? 'stamp' ORDER BY sequence", [after]);
+      expect(stamped).toEqual([{ kind: 'managed_sync_import', slug: 'notes/a', state: 'committed', stamp: 'folded', skipped: null }]);
+      const head = git(root, 'rev-parse', 'HEAD');
+      expect(await checkpoint(engine)).toEqual({ last_commit: head, converged: head });
+      expect(await bodyOf(engine, 'notes/a')).toContain('A committed change of notes/a.');
+    }), 120_000);
+
     test('fold probe 1: a failed publication of the last import rolls its folded stamp back; later runs converge', () => brain(async ({ engine, root }) => {
       expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
       const before = await checkpoint(engine), after = await lastSequence(engine);
