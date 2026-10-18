@@ -36,7 +36,8 @@ import { prepareFileTarget } from './page-prepare.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
 import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect } from './effect-journal.ts';
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
-import { commitGitTargets, DURABILITY_NOT_ENABLED, publishGitEffect, pushGitRoot } from './effect-git.ts';
+import { commitGitTargets, DURABILITY_NOT_ENABLED, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
+import { retryIndexLockParks } from './effect-retry.ts';
 import { gitDurabilityPolicy } from './git-durability-policy.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
 import { dispatchFactsBackstopEffect } from './effect-facts.ts';
@@ -47,7 +48,7 @@ import { recoveryStagingFile } from './staging.ts';
 import { selectEffectRecoveries } from './effect-recovery-scan.ts';
 import { nativeFileTarget } from './native-file-target.ts';
 import { sourceMirrorReadOnly } from './mirror-read-only.ts';
-import { isLockOpenFailure } from './native-lock.ts';
+import { isLockOpenFailure, type NativeLockHandle } from './native-lock.ts';
 import { planPageEmbedding } from '../page-embedding-budget.ts';
 import { chunkGenerationFilter, chunkManifestReads } from '../search/safe-chunks.ts';
 
@@ -238,14 +239,23 @@ function gitCommitNote(effect: PersistenceEffect): GitCommitNote | undefined {
 }
 
 async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: WorktreeBinding | null, opts: EffectWorkerOptions,
-  attempt: EffectAttempt, hardened: boolean | undefined): Promise<void> {
+  attempt: EffectAttempt, hardened: boolean | undefined, writerLock: NativeLockHandle | null): Promise<void> {
   if (!binding?.local_path) { await completeEffect(engine, effect, { git: 'skipped', reason: 'no_repo_configured' }); return; }
   // #5409: a read-only mirror's checkout is never committed to; its publications wrote no file.
   if (await sourceMirrorReadOnly(engine, effect.source_id)) { await completeEffect(engine, effect, { git: 'skipped', reason: 'mirror_read_only' }); return; }
   const root = binding.local_path;
+  let reclaimed = false;
+  const owner = writerLock ? { writerLock, onReclaim: () => { reclaimed = true; } } : undefined;
+  try { await publishGitPage(engine, effect, { ...binding, local_path: root }, opts, attempt, hardened, owner); }
+  finally { if (reclaimed && effect.worktree_id) await retryIndexLockParks(engine, effect.worktree_id); }
+}
+
+async function publishGitPage(engine: BrainEngine, effect: PersistenceEffect, binding: WorktreeBinding & { local_path: string }, opts: EffectWorkerOptions,
+  attempt: EffectAttempt, hardened: boolean | undefined, owner: GitEffectOwner | undefined): Promise<void> {
+  const root = binding.local_path;
   if (!targetedWithdrawalEffect(effect) && !effect.data.source_scan) {
     const target = await singleFileGitTarget(engine, effect, { ...binding, local_path: root }, attempt);
-    if (target !== null) await completeEffect(engine, effect, await publishGitEffect(root, target, opts.signal, hardened, gitCommitNote(effect)));
+    if (target !== null) await completeEffect(engine, effect, await publishGitEffect(root, target, opts.signal, hardened, gitCommitNote(effect), undefined, owner));
     return;
   }
   // Only a page walk reads snapshots; a single-file effect completes by its recorded hash.
@@ -274,7 +284,7 @@ async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: 
     await finishPage(engine, effect, snapshot, { git: 'skipped', reason: 'db_only' });
     return;
   }
-  const result = await publishGitEffect(root, relative(root, path).split(sep).join('/'), opts.signal, hardened, gitCommitNote(effect));
+  const result = await publishGitEffect(root, relative(root, path).split(sep).join('/'), opts.signal, hardened, gitCommitNote(effect), undefined, owner);
   if (result.reason === 'durability_not_enabled') await completeEffect(engine, effect, result);
   else await finishPage(engine, effect, snapshot, result);
 }
@@ -609,7 +619,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
       });
       effect = await upgradeWithdrawalEffect(engine, effect, opts.hostId);
       if (effect.kind === 'withdrawal-mirror') await mirrorPage(engine, effect, binding, opts, attempt);
-      else if (effect.kind === 'git') await gitPage(engine, effect, binding, opts, attempt, hardened);
+      else if (effect.kind === 'git') await gitPage(engine, effect, binding, opts, attempt, hardened, lock);
       else await withAIAttribution({ request_id: effect.request_id, effect: effect.kind }, () => effect.kind === 'facts-backstop'
         ? dispatchFactsBackstopEffect(engine, effect, opts.hostId)
         : effect.kind === 'links' ? runLinksEffect(engine, effect, opts.hostId)
@@ -662,6 +672,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
       return;
     }
     const targets: { effect: PersistenceEffect; path: string; attempt: EffectAttempt }[] = [];
+    let reclaimed = false;
     try {
       for (const effect of effects) {
         const attempt: EffectAttempt = {};
@@ -681,7 +692,8 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
         } catch (error) { await recordFailure(engine, effect, error, opts.signal, attempt.target); }
       }
       const notes = new Map(targets.flatMap(({ effect, path }) => { const note = gitCommitNote(effect); return note ? [[path, note] as const] : []; }));
-      const outcomes = targets.length ? await commitGitTargets(binding.local_path, targets.map(t => t.path), opts.signal, notes) : new Map();
+      const outcomes = targets.length ? await commitGitTargets(binding.local_path, targets.map(t => t.path), opts.signal, notes,
+        { writerLock: lock, onReclaim: () => { reclaimed = true; } }) : new Map();
       const pending = unpushed.get(binding.local_path) ?? { binding, items: [] };
       for (const { effect, path, attempt } of targets) {
         const outcome = outcomes.get(path)!;
@@ -692,7 +704,11 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
       if (pending.items.length) unpushed.set(binding.local_path, pending);
     } catch (error) {
       for (const { effect, attempt } of targets) await recordFailure(engine, effect, error, opts.signal, attempt.target);
-    } finally { await lock.release(); }
+    } finally {
+      // #6932: the reclaimed lock may have parked earlier effects of this worktree; they get one more attempt.
+      if (reclaimed) await retryIndexLockParks(engine, effects[0]!.worktree_id!);
+      await lock.release();
+    }
   };
   // A group of single-file Git effects in a root without the durability hook
   // runs no git command: each effect only records its outcome. The group takes
