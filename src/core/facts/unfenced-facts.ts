@@ -52,7 +52,7 @@
  *   durability-hardened checkout commits the file.
  * A page that fails is reported in `failed_pages`; the others still fence.
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 
 import type { BrainEngine } from '../engine.ts';
 import { sanitizeText } from '../batch-rows.ts';
@@ -74,7 +74,9 @@ import { assertPersistenceAccepting } from '../persistence/service.ts';
 import type { WriteAuthority } from '../persistence/model.ts';
 import { UNBOUND_WRITE_KEY } from '../persistence/unbound-source.ts';
 import { contentHash } from '../utils.ts';
-import { resolvePageWriteTarget } from '../write-through.ts';
+import { bodyUnread } from '../page-body/page-shape.ts';
+import { fileBodyMatchesStored, mirrorFileBody, readStoredBody } from './file-body-guard.ts';
+import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
 import { commitFactFenceFile, gitPathState } from './fence-write.ts';
 import { isOwnedClone } from '../url-clone.ts';
 
@@ -303,10 +305,15 @@ export async function planUnfencedFacts(engine: BrainEngine, opts: { sourceId?: 
   }
   const filePaths = new Map<string, string>();
   const databaseOnly = new Map<string, NonNullable<WriteAuthority['databaseOnlyReason']>>();
+  const writeThroughOff = !managed && await isWriteThroughDisabled(engine);
   for (const [key, group] of managed ? [] : [...groups]) {
     const [sourceId, entitySlug] = key.split('\0');
     const target = await resolvePageWriteTarget(engine, entitySlug, sourceId);
-    if (target.ok && existsSync(target.filePath)) { filePaths.set(key, target.filePath); continue; }
+    if (target.ok && existsSync(target.filePath)) {
+      if (writeThroughOff) databaseOnly.set(key, 'disabled_by_config');
+      else filePaths.set(key, target.filePath);
+      continue;
+    }
     const placement = await databaseOnlyPlacement(engine, sourceId, entitySlug);
     if (placement.kind === 'fence') { databaseOnly.set(key, placement.reason); continue; }
     groups.delete(key);
@@ -539,14 +546,44 @@ async function fenceDatabaseOnlyPage(engine: BrainEngine, sourceId: string, enti
   }
 }
 
-/** One unmanaged page: file first (atomic), then the page mirror and row stamps in one maintenance transaction. */
+/**
+ * #6982: the `failed_pages` entry for an unmanaged page whose canonical file and database body differ, so its rows stay
+ * unfenced and neither copy is replaced. Which side is newer is not knowable here: an unimported file edit and a newer
+ * database-only edit look the same, and replacing either would lose the other.
+ */
+export function fileDatabaseDriftToken(slug: string, sourceId: string, when: 'before' | 'during'): string {
+  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : 'changed while the fence step ran'}, `
+    + `so neither was replaced and its rows stay unfenced, active and searchable until they agree. If the file holds the newer edit, `
+    + `gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
+    + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
+}
+
+/**
+ * One unmanaged page (#6982): the fence is planned on the file only when the file and the database body agree
+ * (`fileMatchesSnapshot`, the coordinator's drift comparison), so mirroring the fenced file back can only add the fence.
+ * The page row is then locked and re-read in a maintenance transaction: when the database or the file moved since the
+ * comparison, nothing is written. Otherwise the prior body is kept in page_versions, the body is mirrored, the rows are
+ * stamped, and the `.tmp` is renamed into place last, so a rolled-back transaction leaves the file as it was.
+ */
 async function fenceFilePage(engine: BrainEngine, sourceId: string, entitySlug: string, filePath: string,
   group: UnfencedFactRow[], outcome: UnfencedFactsOutcome, lockRoot?: string): Promise<void> {
   const target = await resolvePageWriteTarget(engine, entitySlug, sourceId);
   if (!target.ok) { outcome.skipped_no_page += group.length; return; }
   const { writeRoot } = target;
   const write = () => withPageLock(entitySlug, async () => {
-    const fence = await planFence(engine, sourceId, entitySlug, readFileSync(filePath, 'utf-8'), group);
+    const bytes = readFileSync(filePath, 'utf-8');
+    const page = await engine.getPage(entitySlug, { sourceId });
+    const stored = page && await readStoredBody(engine, sourceId, entitySlug);
+    if (!page || !stored) { outcome.skipped_no_page += group.length; return; }
+    if (bodyUnread(page)) {
+      outcome.failed_pages.push(`${entitySlug} (page_body_segmented: the page is stored in segments, so its file is not compared or rewritten here; its rows stay unfenced, active and searchable)`);
+      return;
+    }
+    if (!fileBodyMatchesStored(bytes, entitySlug, stored)) {
+      outcome.failed_pages.push(fileDatabaseDriftToken(entitySlug, sourceId, 'before'));
+      return;
+    }
+    const fence = await planFence(engine, sourceId, entitySlug, bytes, group);
     if ('warnings' in fence) {
       outcome.failed_pages.push(`${entitySlug} (${fence.warnings.join('; ')})`);
       return;
@@ -565,17 +602,10 @@ async function fenceFilePage(engine: BrainEngine, sourceId: string, entitySlug: 
       outcome.failed_pages.push(`${entitySlug} (${parsed.warnings.join('; ')})`);
       return;
     }
-    renameSync(tmpPath, filePath);
     // Mirror the file into pages so this run's reconcile and get_page read the
-    // new fence (same body-only mirror as fence-write.ts: the row keeps its
-    // content_hash, so the next sync re-imports and re-chunks the page).
-    const reparsed = parseMarkdown(tmpBody, `${entitySlug}.md`);
-    await maintenanceTransaction(engine, async tx => {
-      const existing = await tx.getPage(entitySlug, { sourceId });
-      if (existing) {
-        await tx.refreshPageBody(entitySlug, sourceId, sanitizeText(reparsed.compiled_truth), sanitizeText(reparsed.timeline),
-          existing.content_hash || contentHash(existing));
-      }
+    // new fence (same body-only mirror as fence-write.ts).
+    const written = await maintenanceTransaction(engine, async tx => {
+      if (readFileSync(filePath, 'utf-8') !== bytes || !await mirrorFileBody(tx, sourceId, entitySlug, tmpBody, stored)) return false;
       // The parsed claim is what the fence projects; the row keeps its id,
       // vectors and provenance (the reconcile would retire a row whose text
       // differs from its fence row).
@@ -586,7 +616,15 @@ async function fenceFilePage(engine: BrainEngine, sourceId: string, entitySlug: 
           [a.row_num, entitySlug, a.id, sourceId, a.fact],
         );
       }
+      assertSourceFilesystemActive();
+      renameSync(tmpPath, filePath);
+      return true;
     });
+    if (!written) {
+      rmSync(tmpPath, { force: true });
+      outcome.failed_pages.push(fileDatabaseDriftToken(entitySlug, sourceId, 'during'));
+      return;
+    }
     if (durable) await commitFactFenceFile(writeRoot, filePath, entitySlug, sourceId, prewrite);
     outcome.fenced += fence.assignments.length;
     outcome.pages_touched += 1;
