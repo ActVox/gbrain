@@ -290,6 +290,58 @@ export function applyHoldsToManifest(holds: LegacyHolds | null, filtered: { adde
   }
 }
 
+/** GBRA-133 S-51: the hold code of a rename pair whose identity the database refused to read. */
+const UNREADABLE_RENAME = 'rename_identity_unreadable';
+
+/**
+ * GBRA-133 S-51: holds each pair the identity confirmation could not read (SQLSTATE 22021/22P05). `to` is not
+ * imported and the page at `from` keeps its id, links, facts and timeline; the hold records that page, so the pair
+ * moves with its id if a later decision confirms it.
+ */
+export async function holdUnreadableRenames(engine: BrainEngine, holds: LegacyHolds, root: string, pairs: Array<{ from: string; to: string; cause: unknown }>): Promise<void> {
+  for (const pair of pairs) {
+    const [page] = await engine.executeRaw<{ id: number | string; slug: string; revision: string }>(
+      `SELECT id, slug, knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND (source_path=$2 OR slug=$3)
+        ORDER BY (source_path=$2) DESC LIMIT 1`, [holds.sourceId, pair.from, resolveSlugForPath(pair.from) || '']);
+    const filePath = fileUnderRoot(root, pair.to);
+    const state = (pair.cause as { code?: unknown } | null)?.code;
+    await recordLegacyHold(engine, holds, {
+      path: pair.to, upstreamVersion: filePath ? currentVersion(filePath) ?? null : null,
+      renameFrom: page ? { sourcePath: pair.from, slug: page.slug, pageId: Number(page.id), revision: page.revision } : undefined,
+      refusal: { code: UNREADABLE_RENAME, message: `${pair.to} replaces ${pair.from} in this sync, but the database refused to compare its title or id`
+        + `${typeof state === 'string' ? ` (SQLSTATE ${state})` : ''}, so sync could not tell whether it is the same page; it held ${pair.to} and kept the old page.` },
+    });
+  }
+}
+
+/**
+ * GBRA-133 S-51: a held pair whose file this run imports or re-screens is decided again before the hold replay turns
+ * it into a rename. Confirmed: the replay moves the page with its id. Downgraded: the old page is deleted and the file
+ * imports as a new page, as for any unconfirmed pair. Still unreadable: it stays held and is not imported.
+ */
+export async function redecideUnreadableRenames(engine: BrainEngine, holds: LegacyHolds, root: string, filtered: { added: string[]; modified: string[]; deleted: string[] },
+  decide: (pair: { from: string; to: string; pageId: number }) => Promise<'confirmed' | 'downgraded' | 'held'>): Promise<void> {
+  if (!holds.active) return;
+  const existing = holds.existing as Map<string, GitHoldRecord>;
+  for (const [path, record] of existing) {
+    const origin = record.meta.rename_from;
+    const lists = [filtered.added, filtered.modified, holds.rescreen];
+    if (record.code !== UNREADABLE_RENAME || !origin || !lists.some(list => list.includes(path))) continue;
+    const verdict = await decide({ from: origin.sourcePath, to: path, pageId: origin.pageId });
+    if (verdict === 'confirmed') continue;
+    if (verdict === 'downgraded') {
+      const { rename_from: _settled, ...meta } = record.meta;
+      existing.set(path, { ...record, meta });
+      if (!filtered.deleted.includes(origin.sourcePath)) filtered.deleted.push(origin.sourcePath);
+      continue;
+    }
+    for (const list of lists) { const at = list.indexOf(path); if (at >= 0) list.splice(at, 1); }
+    const filePath = fileUnderRoot(root, path);
+    await recordLegacyHold(engine, holds, { path, upstreamVersion: filePath ? currentVersion(filePath) ?? null : null, renameFrom: origin,
+      refusal: { code: UNREADABLE_RENAME, message: record.message } });
+  }
+}
+
 /** The rename a hold on `to` (or on an earlier destination of the same origin) still owes. */
 function pendingRename(holds: LegacyHolds, from: string, to: string): SyncRename | undefined {
   return holds.existing.get(to)?.meta.rename_from

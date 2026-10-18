@@ -42,6 +42,7 @@ import type { FenceReason, FenceTier, GateLetter } from '../fence-repair/types.t
 import { FENCE_VERSION } from '../fence-repair/refusal.ts';
 import { fenceHoldFix, fenceHoldLocation, fencePreviewArgv, readFenceAutoRepair, type FenceAutoRepair, type FenceHoldLocation } from '../fence-repair/hold-fix.ts';
 import { contentHoldDocs, contentHoldFix } from '../content-repair/hold-fix.ts';
+import { classicRenameHoldFix } from '../classic-rename-holds.ts';
 import { STRUCTURED_WRITE_ADVICE, type FencesNormalized } from '../fence-repair/report.ts';
 import type { SyncDiscovery, SyncRename } from './sync-discovery.ts';
 import { isCodeFilePath, isImageFilePath, isMultimodalEnabled } from '../sync.ts';
@@ -70,7 +71,9 @@ export const GIT_HOLD_ESCALATE_MIN_SCREENED = 40;
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 
 export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regression' | 'managed_image_sync_unsupported' | 'concurrent_write' | 'preparation_stalled' | 'worktree_dirty' | 'file_drift'
-  | 'legacy_slug_conflict' | 'write_interrupted' | 'origin_conflict';
+  | 'legacy_slug_conflict' | 'write_interrupted' | 'origin_conflict'
+  /** GBRA-133 PR 1 (classic sync): src/core/classic-rename-holds.ts. */
+  | 'rename_identity_unreadable' | 'rename_reconcile_failed';
 /**
  * Flip lane C: the holds of a write that ran out of attempts, its preparation never settling (`preparation_stalled`)
  * or its statements ended by the database every time (`write_interrupted`). The file is not the problem: they route to
@@ -738,6 +741,8 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
           + (soft.length ? `, for example: ${soft.join('; ')}` : '') + `; then run gbrain sync --source ${source} --no-pull. gbrain repair origin-twins --source ${source} lists the group and its commands.`,
         why: 'Which page owns a file cannot be decided when the pages differ, carry different frontmatter ids, or none is the page the path names; sync never deletes a page it cannot prove is a duplicate.', then, verify };
     }
+    case 'rename_identity_unreadable': case 'rename_reconcile_failed':
+      return classicRenameHoldFix(record);
     case 'rename_held':
       return repair(true, `The page that ${record.path} renames changed after the rename was recorded, so it was not moved; the preview proposes re-binding the rename to the current page for approval.`);
     case 'frontmatter_slug_conflict':

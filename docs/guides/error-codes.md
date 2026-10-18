@@ -3100,6 +3100,22 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 Reasons: `rename_source_changed`.
 
+### rename_identity_unreadable
+
+<a id="rename_identity_unreadable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A renamed file is held because the database refused to compare its title or frontmatter id (SQLSTATE 22021/22P05), so sync could not tell whether it is the page it replaces. | Which page a file is cannot be decided without comparing its identity; the old page keeps its id, links, facts and timeline and the rest of the source keeps syncing. | Remove the NUL byte or broken Unicode character from the file title and id, commit, and sync again; the pair is decided again when the file changes. | agent | `repeat the read that failed` | 1 | no |
+
+### rename_reconcile_failed
+
+<a id="rename_reconcile_failed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A renamed file imported, but removing the page of its old name failed unexpectedly, so that page was kept and may be a duplicate. | An unexpected error is deterministic, so a blocking marker would stop the source on every run; the rename is held instead and the rest of the source keeps syncing. | Ask the user before a full sync of the source (gbrain sync --source <source> --full --no-pull), which removes pages whose file is gone, or remove the old page with gbrain delete. | agent | `repeat the read that failed` | 1 | no |
+
 ### request_already_submitted
 
 <a id="request_already_submitted"></a>

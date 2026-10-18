@@ -84,6 +84,11 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   { code: 'origin_conflict', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the hold carries a reason (the pages differ, ids conflict or none is the page the path names), or the heal is off',
     human_reason: 'Several live pages record this file as their origin and sync cannot prove they are one document; a person keeps the page that is the file\'s and soft-deletes the others (gbrain repair origin-twins --source <source> lists them with the commands), then syncs.' },
   // #6948: an `origin_conflict` hold whose verdict carries a reason (sync-status.ts holdVerdict): nothing resolves it without a person.
+  // GBRA-133 PR 1: classic rename holds (src/core/classic-rename-holds.ts); only a person changes the file or removes the page.
+  { code: 'rename_identity_unreadable', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: the file title or id holds characters the database cannot compare',
+    human_reason: 'The database refused to compare this renamed file title or frontmatter id; a person removes the NUL byte or broken Unicode character from the file and commits, then syncs.' },
+  { code: 'rename_reconcile_failed', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: the old page may be a duplicate',
+    human_reason: 'A rename imported but the old page could not be removed; a person runs a full sync of the source (it removes pages whose file is gone) or removes the old page with gbrain delete.' },
   { code: 'origin_conflict_decision', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: the pages differ, their ids conflict or none is the page the path names',
     human_reason: 'Several live pages record this file as their origin and sync cannot prove they are one document; a person keeps the page that is the file\'s and soft-deletes the others (gbrain repair origin-twins --source <source> lists them with the commands), then syncs.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
