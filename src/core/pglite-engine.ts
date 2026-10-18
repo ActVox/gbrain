@@ -160,6 +160,7 @@ import { searchKeywordCJK } from './engine-sql/cjk-search.ts';
 import * as titlesImpl from './engine-sql/titles.ts';
 import * as keywordPagesImpl from './engine-sql/keyword-pages.ts';
 import { applyForwardReferenceBootstrap, pgliteBootstrapTarget } from './engine-sql/bootstrap.ts';
+import { wellFormedJson } from './text-safe.ts';
 
 /**
  * #4284 — opt-in out-of-band watchdog for a PGLite disconnect with a live
@@ -2375,6 +2376,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async putDreamVerdict(filePath: string, contentHash: string, verdict: DreamVerdictInput): Promise<void> {
+    verdict = wellFormedJson(verdict);
     // $N::jsonb + JSON.stringify is legal ONLY on PGLite (its db.query parses
     // text→jsonb natively); the postgres.js twin must use sql.json().
     // Expiry is computed server-side (now() + TTL) so it lives on the same
