@@ -105,6 +105,25 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       });
     }, 180_000);
 
+    test('a real title-only edit is held without replacing either copy', async () => {
+      await withSource(databaseUrl, async b => {
+        const file = b.file();
+        const edited = file.replace('title: "Alice Example"', 'title: "Alice Updated Example"');
+        expect(edited).not.toBe(file);
+        writeFileSync(b.path, edited);
+        const before = { body: await b.body(), title: (await b.engine.getPage(BAD, { sourceId: SOURCE }))!.title };
+        for (let i = 0; i < 3; i++) {
+          const result = await expectUnitNotAborted(() => b.sync());
+          expect(result.failedFiles).toBe(1);
+          expect({ file: b.file(), body: await b.body(), title: (await b.engine.getPage(BAD, { sourceId: SOURCE }))!.title })
+            .toEqual({ file: edited, ...before });
+        }
+        const hold = readGoogleState(b.root).item_holds as { items: Record<string, { code: string; state: string }> };
+        expect(hold.items['contact:people/c1']).toMatchObject({ code: 'file_database_drift', state: 'held' });
+        expect(await b.body(GOOD)).toContain('Upstream 1');
+      });
+    }, 180_000);
+
     test('late file edit: comparison preimage is checked again immediately before rename', async () => {
       await withSource(databaseUrl, async b => {
         const old = await b.body();

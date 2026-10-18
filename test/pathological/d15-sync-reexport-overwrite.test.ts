@@ -41,6 +41,7 @@ async function withBrain(databaseUrl: string | undefined, run: (b: {
         const root = join(home, 'brain');
         mkdirSync(join(root, 'memories'), { recursive: true });
         gitExec('git init', root);
+        gitExec('git config user.email test@example.invalid && git config user.name "Test Fixture"', root);
         writeFileSync(join(root, '.gitignore'), 'memories/\n');
         gitExec('git add .gitignore && git commit -m fixture', root);
         await engine.executeRaw("UPDATE sources SET local_path = $1 WHERE id = 'default'", [root]);
