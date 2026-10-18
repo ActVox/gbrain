@@ -475,15 +475,15 @@ export async function writePageThrough(
     // EEXIST when the directory already exists (POSIX no-ops it). That aborts
     // the put_page / enrich / capture write-through whenever the prefix dir
     // already exists, silently leaving the DB and the .md file plane out of sync.
-    if (opts.expectedFileBytes !== undefined
-      && (existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null) !== opts.expectedFileBytes) {
-      return { written: false, skipped: 'file_changed' };
-    }
+    const fileChanged = () => opts.expectedFileBytes !== undefined
+      && (existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null) !== opts.expectedFileBytes;
+    if (fileChanged()) return { written: false, skipped: 'file_changed' };
 
     await engine.transaction(tx => bindOrigin(tx, { sourceId, slug, sourcePath: sourcePathToBind, onlyIfUnset: true, liveOnly: true }));
     assertSourceFilesystemActive();
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     assertSourceFilesystemActive();
+    if (fileChanged()) return { written: false, skipped: 'file_changed' };
     atomicWriteFileSync(filePath, md, { verify: () => assertSourceFilesystemActive() });
 
     // #2426: on a durability-hardened repo (user ran `gbrain sources harden`),
