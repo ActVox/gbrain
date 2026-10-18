@@ -22,7 +22,8 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { enrichEntity, slugifyEntity } from '../../src/core/enrichment-service.ts';
-import { openArm, pathologicalArms } from './_gbra60-shim.ts';
+import { pathologicalArms } from './harness.ts';
+import { isolatedSharedSkillsEngine } from '../helpers/shared-skills-engine.ts';
 
 const page = (type: string, title: string) => `---\ntitle: ${JSON.stringify(title)}\ntype: ${type}\n---\n\n# ${title}\n`;
 const PREFIX = 'acme-example-holdings-'.repeat(11);
@@ -57,7 +58,7 @@ const arms = pathologicalArms();
 const engines: Array<{ name: string; engine: BrainEngine; close: () => Promise<void> }> = [];
 beforeAll(async () => {
   for (const arm of arms) {
-    const { engine, close } = await openArm(arm); await seed(engine);
+    const { engine, close } = await isolatedSharedSkillsEngine(arm.databaseUrl); await seed(engine);
     engines.push({ name: arm.backend, engine, close });
   }
 }, 120_000);
