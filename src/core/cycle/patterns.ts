@@ -58,7 +58,7 @@ import { derivedMaintenanceTransaction, isExternalTier, type DerivationDeclarati
 import { storedTrustTier, type TaintInput } from '../trust/tier.ts';
 import { patternsDerivation, type Derivation } from './dream-taint.ts';
 import { ItemRun } from '../item-failure.ts';
-import { beginGroundingRun, finishGroundingRun, groundingHeld, withGroundingStatus, type GroundingRun } from './pattern-grounding.ts';
+import { beginGroundingRun, finishGroundingRun, groundingHeld, withGroundingStatus, type GroundingReport, type GroundingRun } from './pattern-grounding.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
@@ -158,6 +158,7 @@ export async function runPhasePatterns(
   opts: PatternsPhaseOpts,
 ): Promise<PhaseResult> {
   let config: PatternsConfig, evidenceKey: string, cadenceKey: string, reflections: ReflectionRef[];
+  let retried: AppendRetry | null = null;
   try {
     throwIfAborted(opts.signal, '[dream] patterns');
     config = await loadPatternsConfig(engine);
@@ -179,6 +180,8 @@ export async function runPhasePatterns(
 
     // Gather reflections within lookback window.
     reflections = await gatherReflections(engine, config.lookbackDays, config.sourceSlugPrefix, opts.sourceId ?? 'default');
+    // GBRA-130 A-23: before any gate can skip the pass, so a failed append never waits on new evidence or a paid child.
+    if (!opts.dryRun) retried = await retryPendingAppends(engine, opts, opts.sourceId ?? 'default');
   } catch (e) {
     return failed(makeError('InternalError', 'PATTERNS_PHASE_FAIL',
       e instanceof Error ? (e.message || 'patterns phase threw') : String(e)));
@@ -188,10 +191,10 @@ export async function runPhasePatterns(
   // enough evidence of their own), and that pass's pattern pages are external.
   const external = reflections.filter(r => isExternalTier(r.taint?.tier ?? 'unknown'));
   const owner = await runPatternsPass(engine, opts, config, reflections.filter(r => !external.includes(r)), { evidence: evidenceKey, cadence: cadenceKey });
-  if (!external.length) return owner;
+  if (!external.length) return withAppendRetry(owner, retried);
   const externalPass = external.length >= config.minEvidence
     ? await runPatternsPass(engine, opts, config, external, { evidence: `${evidenceKey}.external`, cadence: `${cadenceKey}.external` }) : null;
-  return mergeExternalPass(owner, externalPass, external.length);
+  return withAppendRetry(mergeExternalPass(owner, externalPass, external.length), retried);
 }
 
 /** One patterns child over one partition of the reflections; `keys` are that partition's evidence watermark and cadence stamp. */
@@ -715,6 +718,63 @@ async function stampPatternOutputs(engine: BrainEngine, maintenance: Maintenance
   return { quoteVerify: pages ? { ...pages, ...(appended ? { timeline_appends: appended } : {}) } : null, finalized, held: heldSlugs.size, grounding };
 }
 
+type AppendRetry = { report: GroundingReport; stats: { pages: number; entries: number; quarantined: number; repaired: number } };
+
+/**
+ * GBRA-130 A-23: ground the timeline appends earlier runs failed to ground (pattern-grounding.ts), each page against
+ * the reflections its entries were appended under and written back at their derivation, then reverse-write (or verify
+ * the managed publication of) the pages that grounded. A page held at its current content is not attempted. Null when
+ * nothing is pending.
+ */
+async function retryPendingAppends(engine: BrainEngine, opts: PatternsPhaseOpts, sourceId: string): Promise<AppendRetry | null> {
+  const run = await beginGroundingRun(engine, sourceId);
+  const slugs = Object.keys(run.pending);
+  if (slugs.length === 0) return null;
+  const hashes = new Map((await engine.executeRaw<{ slug: string; content_hash: string | null }>(
+    'SELECT slug, content_hash FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL', [sourceId, slugs]))
+    .map(r => [r.slug, r.content_hash ?? null]));
+  const due = slugs.filter(slug => !groundingHeld(run, slug, hashes.get(slug) ?? null, run.pending));
+  const maintenance = due.length ? await maintenancePreflight(engine, sourceId, opts.brainDir) : null;
+  const cycleDate = opts.cycleDate ?? await resolveCycleDate(engine);
+  const heldSlugs = new Set<string>();
+  const stats = { pages: 0, entries: 0, quarantined: 0, repaired: 0 };
+  for (const slug of due) {
+    const { appends, reflections } = run.pending[slug]!;
+    const grounded = await groundTimelineAppends(engine, maintenance, appends, reflections, sourceId, cycleDate, opts.signal, heldSlugs, patternsDerivation(reflections), run);
+    if (!grounded) break;
+    stats.pages++;
+    stats.entries += grounded.entries;
+    stats.quarantined += grounded.quarantined;
+    stats.repaired += grounded.repaired;
+  }
+  const report = await finishGroundingRun(engine, run);
+  const rewritten = [...run.appendsResolved.keys()].filter(slug => !heldSlugs.has(slug)).map(slug => ({ slug, source_id: sourceId }));
+  if (rewritten.length) {
+    if (maintenance) await verifyMaintenanceOutputs(engine, maintenance, rewritten);
+    else await reverseWriteRefs(engine, opts.brainDir, rewritten, sourceId, opts.signal);
+  }
+  return { report, stats };
+}
+
+/**
+ * The pending-append retry rides on the phase result: its failures lead `grounding_failed`; a pass that grounded
+ * already lists every hold, else the retry's held appends are listed. A failed or held retry warns, even when the
+ * pass skipped.
+ */
+function withAppendRetry(result: PhaseResult, retried: AppendRetry | null): PhaseResult {
+  if (!retried) return result;
+  const { report, stats } = retried;
+  const passGrounded = Array.isArray(result.details.grounding_held);
+  const failed = [...report.details.grounding_failed, ...((result.details.grounding_failed ?? []) as GroundingReport['details']['grounding_failed'])];
+  const held = passGrounded ? result.details.grounding_held as GroundingReport['details']['grounding_held']
+    : report.details.grounding_held.filter(h => h.timeline_appends);
+  const details = { ...result.details, timeline_append_retry: stats, grounding_failed: failed, grounding_held: held };
+  const retryHeld = passGrounded ? 0 : held.length;
+  if (!report.details.grounding_failed.length && !retryHeld) return { ...result, details };
+  return { ...result, details, status: result.status === 'ok' || result.status === 'skipped' ? 'warn' : result.status,
+    summary: `${result.summary}; timeline-append retry: ${report.details.grounding_failed.length} page(s) failed, ${retryHeld} held (details.grounding_failed, details.grounding_held)` };
+}
+
 async function stampProvenance(engine: BrainEngine, maintenance: MaintenanceAuthority | null,
   refs: Array<{ slug: string; source_id: string }>, cycleDate: string, sourceSlugPrefix: string, seat: string | undefined, signal: AbortSignal | undefined,
   heldSlugs: Set<string>, derivation: Derivation & { declaration: DerivationDeclaration }): Promise<void> {
@@ -796,7 +856,7 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
  * through the segment reader (its body columns are NULL); one over the single-string ceiling is not a grounding
  * source, so a quote only it holds goes to unverified_claims, and the skip is logged.
  */
-async function loadGroundingSources<T>(engine: BrainEngine, sourceId: string, reflections: ReflectionRef[],
+async function loadGroundingSources<T>(engine: BrainEngine, sourceId: string, reflections: Array<{ slug: string }>,
   groundSource: (path: string, content: string, opts: { tolerant: boolean }) => T): Promise<T[]> {
   const sourcePages = await engine.executeRaw<{ id: number; slug: string; body_storage: string | null; body_bytes: number | string | null; compiled_truth: string | null; timeline: string | null }>(
     'SELECT id, slug, body_storage, body_bytes, compiled_truth, timeline FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL',
@@ -848,11 +908,13 @@ async function writeGroundedPage(engine: BrainEngine, maintenance: MaintenanceAu
  * put_page) against this run's reflections. A failing entry leaves the timeline for frontmatter `unverified_claims`
  * (a materialized marker line in front of it goes with it); a near or normalized quote is repaired in place. Every
  * other byte of the page, earlier verified content and its stored claim sources included, is kept, and an entry no
- * longer on the page is skipped. Returns null when dream.quote_verify is off. Holds, derivation and `grounding`
- * (per-page isolation, never a durable hold here) as groundPatternPages.
+ * longer on the page is skipped. Returns null when dream.quote_verify is off. Holds, derivation and `grounding` as
+ * groundPatternPages, except that every call of one run shares the run's breaker, a failed page carries its entries and
+ * reflections (pattern-grounding.ts stores them for a later run) and a page whose entries are settled (written back,
+ * unchanged or gone, and not held) has them resolved.
  */
 export async function groundTimelineAppends(engine: BrainEngine, maintenance: MaintenanceAuthority | null, appends: TimelineAppend[],
-  reflections: ReflectionRef[], sourceId: string, cycleDate: string, signal?: AbortSignal, heldSlugs?: Set<string>,
+  reflections: Array<{ slug: string; taint?: TaintInput }>, sourceId: string, cycleDate: string, signal?: AbortSignal, heldSlugs?: Set<string>,
   derivation?: Derivation & { declaration: DerivationDeclaration }, grounding?: GroundingRun): Promise<{ entries: number; quarantined: number; repaired: number; segmented_skipped: number } | null> {
   const { dreamQuoteVerifyEnabled, groundSource, verifyBody } = await import('./synthesize-verify.ts');
   if (!await dreamQuoteVerifyEnabled(engine)) return null;
@@ -861,24 +923,32 @@ export async function groundTimelineAppends(engine: BrainEngine, maintenance: Ma
   const sources = await loadGroundingSources(engine, sourceId, reflections, groundSource);
   const { serializePageToMarkdown } = await import('../markdown.ts');
   const [{ materializedSnapshot }, { bodyUnread }] = await Promise.all([import('../persistence/segmented-apply.ts'), import('../page-body/page-shape.ts')]);
-  const run = grounding ? new ItemRun('patterns.ground_timeline_appends') : null;
+  const run = grounding ? (grounding.appendRun ??= new ItemRun('patterns.ground_timeline_appends')) : null;
   for (const slug of [...new Set(appends.map(a => a.slug))]) {
     throwIfAborted(signal, '[dream] patterns timeline quote verify');
     let contentHash: string | null = null;
+    const slugAppends = appends.filter(a => a.slug === slug);
+    const resolve = () => {
+      if (!grounding || heldSlugs?.has(slug)) return;
+      const resolved = grounding.appendsResolved.get(slug) ?? new Set<string>();
+      for (const a of slugAppends) resolved.add(a.requestId);
+      grounding.appendsResolved.set(slug, resolved);
+    };
     try {
       // A segmented page within the single-string ceiling is read back as strings; over it, its appends stay as written (counted, logged).
       const snapshot = await materializedSnapshot(engine, await engine.readPageSnapshot(slug, { sourceId }));
-      if (!snapshot) continue;
+      if (!snapshot) { resolve(); continue; }
       contentHash = snapshot.page.content_hash ?? null;
       if (bodyUnread(snapshot.page)) {
         stats.segmented_skipped++;
         process.stderr.write(`[dream] patterns quote verify: ${slug} is a segmented page over the single-string ceiling; its timeline appends were not verified.\n`);
+        resolve();
         continue;
       }
       let timeline = snapshot.page.timeline ?? '';
       const quarantined: Array<Record<string, unknown>> = [];
       const removed: TimelineAppend['entry'][] = [];
-      for (const append of appends.filter(a => a.slug === slug)) {
+      for (const append of slugAppends) {
         const at = timeline.indexOf(append.block);
         if (at < 0) continue;
         stats.entries++;
@@ -893,16 +963,18 @@ export async function groundTimelineAppends(engine: BrainEngine, maintenance: Ma
           timeline = timeline.slice(0, at) + verified.body + timeline.slice(at + append.block.length);
         }
       }
-      if (timeline === (snapshot.page.timeline ?? '')) continue;
+      if (timeline === (snapshot.page.timeline ?? '')) { resolve(); continue; }
       const frontmatter = quarantined.length
         ? withClaimSources(snapshot.page.frontmatter as Record<string, unknown>, quarantined, sources.map(x => x.path)).frontmatter
         : snapshot.page.frontmatter;
       await writeGroundedPage(engine, maintenance, snapshot, serializePageToMarkdown({ ...snapshot.page, timeline, frontmatter }, snapshot.tags),
         sourceId, heldSlugs, derivation, removed);
       run?.succeed();
+      resolve();
     } catch (error) {
       if (!run || !grounding) throw error;
-      grounding.failed.push({ ...run.fail(slug, error), content_hash: contentHash, timelineAppend: true });
+      grounding.failed.push({ ...run.fail(slug, error), content_hash: contentHash, timelineAppend: true,
+        inputs: { appends: slugAppends, reflections: reflections.map(r => ({ slug: r.slug, ...(r.taint ? { taint: r.taint } : {}) })) } });
     }
   }
   return stats;
