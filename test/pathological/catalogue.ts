@@ -63,4 +63,13 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'repair.all_kinds': { file: 'test/pathological/a45-repair-all-kinds.test.ts', item: 'item case: a kind whose plan throws', run: 'run case: a run-scoped' },
   'repair.content_lane_kinds': { file: 'test/pathological/a46-content-lane-kinds.test.ts', item: 'item case: fences throwing is recorded', run: 'run case: a run-scoped' },
   'migration.credential_reseal': { file: 'test/pathological/a27-credential-reseal.test.ts', item: 'item case: the unbuildable page is held', run: 'run case: a run-scoped' },
+  'transcripts.ingest_session': { file: 'test/pathological/a2-transcripts-ingest.test.ts',
+    item: 'item: a session the coordinator refuses is reported with its code and the other sessions land',
+    run: 'run: a run-scoped failure inside a session stops the ingest' },
+  'google.contact': { file: 'test/pathological/a3-google-items.test.ts',
+    item: 'a failing contact and a failing event are counted, then held',
+    run: 'run: a run-scoped failure inside a contact stops the sweep and records no hold' },
+  'google.calendar_event': { file: 'test/pathological/a3-google-items.test.ts',
+    item: 'a failing contact and a failing event are counted, then held',
+    run: 'run: a run-scoped failure inside an event stops the sweep and records no hold' },
 };

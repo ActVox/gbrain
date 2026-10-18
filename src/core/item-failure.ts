@@ -43,6 +43,9 @@ export const ISOLATE_SITES = {
   'repair.all_kinds': 'A-45',
   'repair.content_lane_kinds': 'A-46',
   'migration.credential_reseal': 'A-27',
+  'transcripts.ingest_session': 'A-2',
+  'google.contact': 'A-3',
+  'google.calendar_event': 'A-3',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
