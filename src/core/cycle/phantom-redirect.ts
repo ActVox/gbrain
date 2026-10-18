@@ -33,6 +33,7 @@
  * safe).
  */
 
+import type { Action } from '../agent-output.ts';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -99,7 +100,7 @@ export interface PhantomPassResult {
   /** True iff live root pages remain after this pass's window; the next pass resumes after the last slug examined. */
   more_pending: boolean;
   /** Root pages whose redirect threw an item-scoped error this pass; each is retried when the cursor next reaches it. */
-  failures: Array<{ key: string; code: string; message: string; fix: string }>;
+  failures: Array<{ key: string; code: string; message: string; fix: Action }>;
   /** Set when most examined pages failed (item_failures_systemic): the pass stopped and its cursor did not move. */
   stopped?: { code: string; message: string };
   /**
@@ -749,7 +750,8 @@ export async function runPhantomRedirectPass(
           reason: `exception: ${failure.message.slice(0, 200)}`,
         });
         result.failures.push({ key: slug, code: failure.code, message: failure.message,
-          fix: `gbrain dream --phase extract_facts --source ${sourceId}` });
+          fix: { argv: ['gbrain', 'dream', '--phase', 'extract_facts', '--source', sourceId], consent: [], actor: 'agent', requires_exclusive: false,
+            why: `Reruns the facts phase for ${sourceId}; the phantom pass retries ${slug} after its cursor wraps.` } });
         if (systemic) {
           result.stopped = { code: 'item_failures_systemic', message: systemic.message };
           break;
