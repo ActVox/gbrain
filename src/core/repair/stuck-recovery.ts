@@ -11,7 +11,7 @@
 import { OperationError } from '../ops/contract.ts';
 import { catalogueError } from '../error-catalogue.ts';
 import { loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
-import { KEEP_CHOICES, readResolutions, resolveStuckRecovery, scanStuckRecoveries, stuckRecoveryPreviewCommand, type KeepChoice, type RecoveryFileView, type RefusedRecovery,
+import { KEEP_CHOICES, priorStageUnavailable, readResolutions, resolveStuckRecovery, scanStuckRecoveries, stuckRecoveryPreviewCommand, type KeepChoice, type RecoveryFileView, type RefusedRecovery,
   type StuckRecovery } from '../persistence/recovery-resolve.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
@@ -38,17 +38,26 @@ const selectionOf = (scope: RepairScope, requestId?: string): Selection => ({ so
 const hashOf = (scope: RepairScope, selection: Selection, items: StuckRecovery[]) =>
   previewHash({ kind: 'stuck-recovery-v1', brain_id: scope.brain_id, selection, items: items.map(found => found.digest) });
 
+/** A prior file over the single-string ceiling is the staged copy beside it (recovery-resolve.ts PriorStageView). */
+const STAGE_TEXT = {
+  verified: 'verified',
+  missing: 'missing (--keep prior is unavailable)',
+  mismatched: 'does not match its recorded SHA-256 (--keep prior is unavailable)',
+} as const;
+
 function fileLines(file: RecoveryFileView): string[] {
   const priorLabel = file.withdrawn ? 'before withdrawal' : 'prior';
   const prior = file.prior.absent ? 'absent: prior was a create'
-    : `sha256 ${file.prior.sha256.slice(0, 16)}… size ${file.prior.size ?? '?'} mode ${file.prior.mode === null ? '?' : file.prior.mode.toString(8)}${file.prior.stored || file.withdrawn ? '' : ' (bytes not stored in the record)'}`;
+    : `sha256 ${file.prior.sha256.slice(0, 16)}… size ${file.prior.size ?? '?'} mode ${file.prior.mode === null ? '?' : file.prior.mode.toString(8)}`
+      + (file.prior.stage ? `, staged copy ${STAGE_TEXT[file.prior.stage.state]}` : file.prior.stored || file.withdrawn ? '' : ' (bytes not stored in the record)');
   const disk = file.disk.deleted ? 'deleted on disk' : file.disk.kind !== 'file' ? `${file.disk.kind} (not a regular file; resolve it by hand)`
     : `sha256 ${file.disk.sha256!.slice(0, 16)}… size ${file.disk.size} mode ${file.disk.mode.toString(8)}`;
   const seen = file.matches === 'neither' ? `neither the ${file.withdrawn ? 'pre-withdrawal nor the withdrawn' : 'prior nor the published'} bytes (blocked)` : `the ${file.matches} bytes`;
   return [`    file ${file.relative}`, `      ${priorLabel}: ${prior}`,
     ...(file.withdrawn ? [`      withdrawn: sha256 ${file.withdrawn.sha256.slice(0, 16)}… size ${file.withdrawn.size}`] : []),
     `      disk:  ${disk}`, `      recovery sees: ${seen}`,
-    ...(file.diff_path ? [`      diff: ${file.diff_path}`, `      reproduce: ${file.diff_command}`] : [])];
+    ...(file.diff_path ? [`      diff: ${file.diff_path}${file.diff_summary ? ' (summary: a version is over the 24 MiB single-string ceiling, so no full diff)' : ''}`,
+      `      reproduce: ${file.diff_command}`] : [])];
 }
 
 function headerLines(found: StuckRecovery): string[] {
@@ -98,7 +107,7 @@ export const stuckRecoveryRepair: RepairHandler = {
     }
     if (approved.some(entry => JSON.stringify(entry.selection) !== JSON.stringify(selection))) throw previewChangedError(expect, command);
     const unavailable = approved.filter(entry => entry.choices && !entry.choices[keep]);
-    if (unavailable.length) throw catalogueError('recovery_choice_refused', `--keep ${keep} is not available for ${unavailable.map(entry => `${entry.source_id}:${entry.slug} (${entry.target === 'withdrawal_mirror' ? `withdrawal-mirror effect ${entry.effect_id}` : `request ${entry.request_id}`})`).join(', ')}.`,
+    if (unavailable.length) throw unavailable.map(entry => priorStageUnavailable(entry, keep, expect)).find(Boolean) ?? catalogueError('recovery_choice_refused', `--keep ${keep} is not available for ${unavailable.map(entry => `${entry.source_id}:${entry.slug} (${entry.target === 'withdrawal_mirror' ? `withdrawal-mirror effect ${entry.effect_id}` : `request ${entry.request_id}`})`).join(', ')}.`,
       `Nothing was changed. The preview lists the choices every record offers; run it again (${command}) and apply one of those, or narrow it to one record with --request-id.`);
     const started = new Set((await readResolutions(engine, expect)).map(entry => entry.id));
     const fresh = approved.filter(entry => !started.has(entry.id));

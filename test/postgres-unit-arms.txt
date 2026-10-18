@@ -103,8 +103,10 @@ test/large-pages/managed-sync-streamed.test.ts
 test/large-pages/oversized-backfill-segmented.test.ts
 test/large-pages/page-purge-segments.test.ts
 test/large-pages/pinned-segmented-reads.test.ts
+test/large-pages/projection-claim-ownership.test.ts
 test/large-pages/projection-demotion-race.test.ts
 test/large-pages/projection-parity.test.ts
+test/large-pages/publication-seal-bounded.test.ts
 test/large-pages/purge-fact-inflight-staging.test.ts
 test/large-pages/purge-fact-segmented-preimage.test.ts
 test/large-pages/purge-inflight-create.test.ts
@@ -171,8 +173,11 @@ test/large-pages/segmented-think-compile-leads.serial.test.ts
 test/large-pages/segmented-timeline-heap.test.ts
 test/large-pages/segmented-timeline-retract-versions.test.ts
 test/large-pages/segmented-versions.test.ts
+test/large-pages/segmented-withdrawal-mirror.test.ts
 test/large-pages/segmented-withdrawn-fence-delete.test.ts
 test/large-pages/streamed-import-drift.test.ts
+test/large-pages/streamed-sync-origin-b14.test.ts
+test/large-pages/stuck-recovery-large.slow.test.ts
 test/large-pages/v252-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
@@ -300,6 +305,7 @@ test/persistence-sync-cursor-strategy-6696.test.ts
 test/persistence-sync-fence-holds.test.ts
 test/persistence-sync-holds.test.ts
 test/persistence-sync-lease.test.ts
+test/persistence-write-interrupted.test.ts
 test/persistence-write-stall.test.ts
 test/persistence-writer-fences.test.ts
 test/physical-root-birth-tolerance-6501.test.ts

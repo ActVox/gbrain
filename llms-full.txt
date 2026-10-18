@@ -5710,7 +5710,7 @@ and the fix is the read-only `gbrain migrate --to postgres --plan --json`.
 | Cost | Free | Supabase Pro ($25/mo) |
 | Concurrency | Single process | Connection pooling |
 | Backups | Manual (file copy) | Managed by Supabase |
-| Largest page | 24 MiB; 128 MiB stored in segments with `pages.segmented_storage on` (`pages.max_bytes`) | 24 MiB; 256 MiB stored in segments with `pages.segmented_storage on` (`pages.max_bytes`) |
+| Largest page | 128 MiB, stored in segments (`pages.max_bytes`) | 256 MiB, stored in segments (`pages.max_bytes`) |
 
 **The belief ledger lives only in the database.** `belief_events` and its side tables record what the brain had recorded, and when (`gbrain beliefs status`). Markdown carries only current state, so a rebuild from Markdown, `gbrain reinit-pglite` or a dropped database starts an empty history; back up the database itself. After restoring a Postgres (or PGLite) backup, replay the purges made after the backup was taken: until then content purged later is readable again, and `gbrain doctor --only belief_ledger_coverage` reports a restore whose purge replay was partial, unavailable or unverified. Graduation copies the ledger verbatim (equal event keys and digests); the legacy copier refuses a brain that has one.
 
@@ -7567,6 +7567,7 @@ Every hold and error has three fields, from one table
 | `concurrent_write` | page | reconcile | yes | always: the file and the database page diverge |
 | `file_drift` | page | reconcile | yes | always: the page changed in the database since its file was last imported |
 | `preparation_stalled` | page | retry, upgrade | no | 3 failed attempts over 24 h, or writer status names a step that never finishes |
+| `write_interrupted` | page | retry | no | 3 failed attempts over 24 h: gbrain sources writer status --source <source> --json (read-only) names the load on the write owner |
 | `invalid_fence` | page | repair | no | the fence repair preview offers no plan (a manual reason) |
 | `invalid_frontmatter` | page | repair | no | the repair preview needs an interpretation (--include-ambiguous) |
 | `frontmatter_slug_conflict` | page | repair | no | the lane recorded why it could not decide |
@@ -7674,6 +7675,11 @@ it and kept going; the receipt lists the hold (`held`, `held_count`) and
 - `preparation_stalled`: the write owner, not the file, stalled;
   `gbrain sources writer status --source <id> --json` names the step.
   `unblock --apply` schedules the re-screen.
+- `write_interrupted`: the database ended the file's statements (SQLSTATE
+  57014, a statement timeout or cancel) at every attempt, so the file is held
+  and the rest of the source syncs. Writer status names the load on the write
+  owner; reduce it, then `gbrain sources retry-held <id>` (or
+  `unblock --apply`) and the same sync.
 - `invalid_fence` and `frontmatter_slug_conflict`: the content-repair lane
   clears them. Managed sync drops a `slug:` line naming no page or file
   (#6865). `unblock --apply` runs it on the held paths now; the maintenance

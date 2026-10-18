@@ -342,7 +342,8 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'published bytes, which stops every write on its worktree. The preview starts from the head blocker, lists each file of each blocked record '
       + '(prior and disk hash, size and mode) and writes a private diff to ~/.gbrain/backups/stuck-recovery/. --request-id <uuid> selects one request. '
       + 'Apply on the owner host with --apply --expect <hash> --keep prior|disk --yes (no default): both versions are backed up first; prior writes the recorded '
-      + 'bytes back and the accepted write publishes again, disk keeps the edit and abandons the write (reconcile the page afterwards). A terminal request is '
+      + 'bytes back and the accepted write publishes again, disk keeps the edit and abandons the write (reconcile the page afterwards). A file over 24 MiB is '
+      + 'hashed, copied and compared in pieces, and its diff is a bounded summary. A terminal request is '
       + 'refused (recovery_choice_refused). Runs only when named.',
   },
   'ghost-pages': {

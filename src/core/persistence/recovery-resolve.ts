@@ -21,10 +21,17 @@
  * staging and clears the record (`clearResolvedRecovery`), releasing its reserved bytes. The record is never rewritten,
  * so no recovery bytes move outside the accounting.
  * A terminal request whose recovery record is still set is refused (`recovery_choice_refused`): its outcome is immutable,
- * recovery never restores its canonical file, and `--keep prior` would roll back a committed write. So is a page
- * recovery whose prior file is over the single-string ceiling (`recovery_large_file_unsupported`: its diff would read
- * both files whole), when it is blocked on unexpected bytes or its file (hashed in pieces) matches neither recorded
- * version, and a bundle record this binary cannot read (`recovery_bundle_unsupported`).
+ * recovery never restores its canonical file, and `--keep prior` would roll back a committed write. So is a bundle
+ * record this binary cannot read (`recovery_bundle_unsupported`).
+ *
+ * A page recovery whose prior file is over the single-string ceiling (large-file.ts) embeds no prior bytes: its prior is
+ * the staged copy beside the file (`staging.before`, by path and SHA-256). It resolves the same way in bounded memory: the
+ * disk file and the staged copy are hashed in pieces, both are backed up by kernel copy checked by streamed hash, the
+ * preview's diff is a summary (both fingerprints, the first differing byte and a window of at most a kilobyte), and
+ * `--keep prior` renames the verified staged copy back as recovery's own restoration does (`restoreBeforeStage`: verified,
+ * mode set, atomic rename, directory flushed). A staged copy that is missing or does not match refuses `--keep prior`
+ * (`recovery_prior_stage_unavailable`, whose fix is the `--keep disk` apply); `--keep disk` backs a mismatched copy up and
+ * removes it, because recovery's cleanup never deletes a copy it cannot verify. The hash also binds the staged copy's state.
  *
  * A withdrawal-mirror effect only finishes forward: its withdrawal is committed, and keeping the edited file (or the
  * pre-withdrawal bytes) would leave the forgotten fact on disk for the next sync to import again. Its only choice is
@@ -34,8 +41,8 @@
  * `rebaseStaleEffectRecovery` rebases the record under its page lock on the latest snapshot's rendering (the bytes the
  * mirror itself writes) and the journal records the rebased identity, so a rerun after any interruption resumes it; a
  * page deleted, replaced or segmented meanwhile has no current bytes and is refused (`recovery_effect_unsupported`). A record without
- * usable post-withdrawal bytes (or bound to another owner, root or incarnation) stays refused
- * (`recovery_effect_unsupported`) with an ask_user fix naming the exact preview.
+ * usable post-withdrawal bytes (a streamed version 2 record of a segmented page embeds none) or bound to another owner,
+ * root or incarnation stays refused (`recovery_effect_unsupported`) with an ask_user fix naming the exact preview.
  *
  * The apply runs on the owner host under the worktree lock, so the resident recovery pass cannot interleave. Each
  * record moves through a journal (`op_checkpoints`, op `stuck-recovery-resolution`, keyed by record and preview
@@ -46,7 +53,7 @@
  * can finish a resolution this command started. The finished journal row is the resolution's audit entry; a terminal
  * receipt is never rewritten.
  */
-import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
@@ -72,8 +79,9 @@ import { rebaseStaleEffectRecovery } from './effect-recovery.ts';
 import { trueUpRequests } from './receipt-true-up.ts';
 import { bundleFileHash } from './bundle-files.ts';
 import { mayReprepare } from './semantic.ts';
-import { cleanupRecoveryStaging, upgradeRecoveryStaging } from './staging.ts';
-import { hashFile } from './large-file.ts';
+import { cleanupRecoveryStaging, restoreBeforeStage, upgradeRecoveryStaging } from './staging.ts';
+import { FileBytes, hashDescriptor, hashFile, LARGE_FILE_MIN_BYTES, largeFileWork, validateBeforeStagePath } from './large-file.ts';
+import { SEGMENT_MAX_BYTES } from '../page-body/limits.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { readHeadBlockers } from './head-blocker.ts';
 import { previewChangedError } from './preview-approval.ts';
@@ -86,7 +94,13 @@ export const KEEP_CHOICES: readonly KeepChoice[] = ['prior', 'disk', 'withdrawn'
 /** What the record publishes: one page file, every file of a shared-skill bundle, or a withdrawal mirror of a page file. */
 export type RecoveryTarget = 'page' | 'skill_bundle' | 'withdrawal_mirror';
 
-export type PriorView = { absent: true } | { absent: false; sha256: string; size: number | null; mode: number | null; stored: boolean };
+/**
+ * A prior file over the single-string ceiling is not in the record: it is the staged copy beside the canonical file
+ * (`staging.before`). `verified`: that copy is a regular file of the recorded length and SHA-256; `missing`: no file there;
+ * `mismatched`: anything else (`sha256` is what it holds now, null when it is not a single-link regular file).
+ */
+export interface PriorStageView { state: 'verified' | 'missing' | 'mismatched'; path: string; sha256: string | null; size: number | null }
+export type PriorView = { absent: true } | { absent: false; sha256: string; size: number | null; mode: number | null; stored: boolean; stage?: PriorStageView };
 export type DiskView = { deleted: true } | { deleted: false; kind: 'file' | 'symlink' | 'directory' | 'other'; sha256: string | null; size: number; mode: number };
 export interface RecoveryFileView {
   path: string; root: string; relative: string; prior: PriorView; disk: DiskView;
@@ -96,6 +110,8 @@ export interface RecoveryFileView {
   withdrawn?: { sha256: string; size: number };
   /** Preview only: the private diff and the command that reproduces it (absent for a remote caller). */
   diff_path?: string; diff_command?: string;
+  /** The diff is a bounded summary (a version is over the single-string ceiling), not a full diff. */
+  diff_summary?: true;
 }
 /** The identity the hash binds: the publication attempt, its owner epoch and each file's path and published hash. */
 export interface RecoveryIdentity { attempt: string; owner_epoch: string; files: Array<{ path: string; after_hash: string | null }> }
@@ -111,11 +127,8 @@ export interface StuckRecovery {
   /** Digest of the identity, each file's disk bytes and the page revision: what an apply re-verifies. */
   digest: string;
 }
-/**
- * A blocked terminal request, an unusable withdrawal-mirror effect or bundle record, or a page recovery whose prior file
- * is over the single-string ceiling: listed, never resolved (see the module comment).
- */
-export interface RefusedRecovery { code: 'recovery_choice_refused' | 'recovery_effect_unsupported' | 'recovery_large_file_unsupported' | 'recovery_bundle_unsupported';
+/** A blocked terminal request, or an unusable withdrawal-mirror effect or bundle record: listed, never resolved (see the module comment). */
+export interface RefusedRecovery { code: 'recovery_choice_refused' | 'recovery_effect_unsupported' | 'recovery_bundle_unsupported';
   request_id: string; source_id: string; slug: string; state: string; blocked_reason: string | null; reason: string; effect_id?: string;
   /** The next step when it is not the read-only writer status: an ask_user action naming the exact preview. */
   fix?: Action }
@@ -135,8 +148,6 @@ export interface ResolutionResult {
 }
 interface EffectRow { id: string; request_ref: string; request_id: string | null; kind: string; state: string; error_code: string | null; worktree_id: string;
   recovery: EffectRecovery | null }
-/** What `writeArtifacts` compares each disk file against: the recorded prior bytes, or a mirror's withdrawn bytes. */
-type Reference = { label: 'prior' | 'withdrawn'; bytes: Buffer | null };
 
 const statusFix = (sourceId: string) => readFix(`Shows source ${sourceId}'s canonical owner with its recovering write requests, read-only.`,
   { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] });
@@ -157,20 +168,55 @@ function filesOf(record: RecoveryRecord): FileRecoveryRecord[] | null {
   try { return recoveryFiles(record); } catch { return null; }
 }
 
-function diskView(path: string): { view: DiskView; bytes: Buffer | null } {
+/** Where one version's bytes are read from: held in memory (at most the single-string ceiling), a file read in pieces, or nowhere. */
+type Bytes = { bytes: Buffer } | { path: string } | null;
+
+/** The disk version: a file over the single-string ceiling is hashed in pieces and never read whole. */
+function diskView(path: string): { view: DiskView; source: Bytes } {
   let stat;
-  try { stat = lstatSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { view: { deleted: true }, bytes: null }; throw error; }
-  if (!stat.isFile()) return { view: { deleted: false, kind: stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : 'other', sha256: null, size: stat.size, mode: fileMode(stat.mode) }, bytes: null };
+  try { stat = lstatSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { view: { deleted: true }, source: null }; throw error; }
+  if (!stat.isFile()) return { view: { deleted: false, kind: stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : 'other', sha256: null, size: stat.size, mode: fileMode(stat.mode) }, source: null };
+  if (stat.size > LARGE_FILE_MIN_BYTES) {
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      const { hash, bytes } = hashDescriptor(fd);
+      return { view: { deleted: false, kind: 'file', sha256: hash, size: bytes, mode: fileMode(stat.mode) }, source: { path } };
+    } finally { closeSync(fd); }
+  }
   const bytes = readFileSync(path);
-  return { view: { deleted: false, kind: 'file', sha256: sha256(bytes), size: bytes.length, mode: fileMode(stat.mode) }, bytes };
+  return { view: { deleted: false, kind: 'file', sha256: sha256(bytes), size: bytes.length, mode: fileMode(stat.mode) }, source: { bytes } };
 }
 const diskHash = (view: DiskView) => view.deleted ? null : view.sha256;
 
 function priorBytes(record: FileRecoveryRecord): Buffer | null { return record.before === null ? null : Buffer.from(record.before, 'base64'); }
+/** The staged copy of a prior file over the single-string ceiling, checked by its streamed SHA-256 (see PriorStageView). */
+function priorStageView(record: FileRecoveryRecord): PriorStageView {
+  const stage = record.staging!.before!;
+  let named = isWriteTargetContained(stage.path, record.root);
+  try { validateBeforeStagePath(record.path, stage.path); } catch { named = false; }
+  if (!named) return { state: 'mismatched', path: stage.path, sha256: null, size: null };
+  let leaf;
+  try { leaf = lstatSync(stage.path); }
+  catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return { state: 'missing', path: stage.path, sha256: null, size: null }; throw error; }
+  if (!leaf.isFile() || leaf.nlink !== 1) return { state: 'mismatched', path: stage.path, sha256: null, size: leaf.size };
+  const hash = hashFile(stage.path);
+  const verified = hash === stage.hash && leaf.size === stage.bytes && stage.hash === record.beforeHash;
+  return { state: verified ? 'verified' : 'mismatched', path: stage.path, sha256: hash, size: leaf.size };
+}
 function priorView(record: FileRecoveryRecord): PriorView {
   if (record.beforeHash === null) return { absent: true };
+  if (record.staging?.before) {
+    const stage = priorStageView(record);
+    return { absent: false, sha256: record.beforeHash, size: record.staging.before.bytes, mode: record.mode, stored: stage.state === 'verified', stage };
+  }
   const bytes = priorBytes(record);
   return { absent: false, sha256: record.beforeHash, size: bytes?.length ?? null, mode: record.mode, stored: bytes !== null && sha256(bytes) === record.beforeHash };
+}
+function priorSource(record: FileRecoveryRecord, view: PriorView): Bytes {
+  if (view.absent) return null;
+  if (view.stage) return view.stage.state === 'verified' ? { path: view.stage.path } : null;
+  const bytes = priorBytes(record);
+  return bytes === null ? null : { bytes };
 }
 
 /** The private backup directory, refused when it is not a private directory of this user or sits inside a canonical checkout. */
@@ -204,21 +250,113 @@ function writePrivateFile(path: string, bytes: Buffer): void {
     `Nothing was changed on disk or in the journal. Check free space and the filesystem under ${dirname(path)}, then run the same command again.`);
 }
 
-/** Each file's recorded and disk bytes (and their diff) under `dir`; returns the diff paths by file index. */
-function writeArtifacts(dir: string, files: RecoveryFileView[], references: Reference[], disks: Array<Buffer | null>) {
-  return files.map((file, index) => {
-    const { label, bytes } = references[index]!;
-    const referencePath = bytes === null ? null : join(dir, `${index}.${label}`);
-    const diskPath = disks[index] === null ? null : join(dir, `${index}.disk`);
-    if (referencePath) writePrivateFile(referencePath, bytes!);
-    if (diskPath) writePrivateFile(diskPath, disks[index]!);
+/**
+ * Copies the file at `from` to `path` 0600 and durable: the kernel copies it to a temporary name, the copy is hashed in
+ * pieces and must hold `expected`, then it is fsynced and renamed. An existing copy holding `expected` is kept. A copy
+ * that does not hold `expected` (the file changed since it was fingerprinted) is removed and `changed()` is thrown.
+ */
+function copyPrivateFile(path: string, from: string, expected: string, changed: () => OperationError): void {
+  if (existsSync(path) && hashFile(path) === expected) return;
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  let copied = false;
+  try {
+    copyFileSync(from, temporary, constants.COPYFILE_EXCL);
+    const fd = openSync(temporary, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
+    try {
+      fchmodSync(fd, 0o600);
+      const copy = hashDescriptor(fd);
+      largeFileWork.bytesCopied += copy.bytes;
+      if (copy.hash !== expected) throw changed();
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    renameSync(temporary, path);
+    copied = true;
+  } finally {
+    if (!copied) try { unlinkSync(temporary); } catch { /* never created */ }
+  }
+  flushDirectory(dirname(path));
+}
+
+const SUMMARY_CONTEXT_BYTES = 256, SUMMARY_WINDOW_BYTES = 768;
+const MIB = 1024 * 1024;
+const view = (bytes: Uint8Array) => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+function newlines(bytes: Buffer): number {
+  let count = 0;
+  for (let at = bytes.indexOf(10); at >= 0; at = bytes.indexOf(10, at + 1)) count++;
+  return count;
+}
+const prefixed = (prefix: string, bytes: Uint8Array) => {
+  const text = view(bytes).toString('utf8');
+  return text ? (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n').map(line => `${prefix}${line}`) : [];
+};
+/**
+ * The bounded stand-in for a diff when a version is over the single-string ceiling: both fingerprints, the first byte
+ * where the two differ (found by comparing them a segment at a time) and a window of at most a kilobyte around it.
+ */
+function diffSummary(file: RecoveryFileView, priorPath: string | null, diskPath: string | null): string {
+  const prior = priorPath ? FileBytes.open(priorPath) : null;
+  const disk = diskPath ? FileBytes.open(diskPath) : null;
+  try {
+    const label = file.withdrawn ? 'withdrawn' : 'prior';
+    const reference = file.withdrawn ?? (file.prior.absent ? null : { sha256: file.prior.sha256, size: file.prior.size });
+    const shared = Math.min(prior?.length ?? 0, disk?.length ?? 0);
+    let offset = shared, line = 1;
+    for (let at = 0; at < shared; at += SEGMENT_MAX_BYTES) {
+      const end = Math.min(at + SEGMENT_MAX_BYTES, shared);
+      const a = view(prior!.subarray(at, end)), b = view(disk!.subarray(at, end));
+      if (a.equals(b)) { line += newlines(a); continue; }
+      let index = 0;
+      while (a[index] === b[index]) index++;
+      offset = at + index;
+      line += newlines(a.subarray(0, index));
+      break;
+    }
+    const start = Math.max(0, offset - SUMMARY_CONTEXT_BYTES);
+    const side = (bytes: FileBytes | null, from: number, to: number) => bytes ? bytes.subarray(from, to) : new Uint8Array();
+    const context = side(prior ?? disk, start, offset);
+    const removed = side(prior, offset, offset + SUMMARY_WINDOW_BYTES), added = side(disk, offset, offset + SUMMARY_WINDOW_BYTES);
+    const describe = (label: string, version: { sha256: string | null; size: number | null } | null) => version
+      ? `${label}  sha256 ${version.sha256}  ${version.size} bytes` : `${label}  absent`;
+    return [
+      `# summary only, no full diff: a version is over the ${LARGE_FILE_MIN_BYTES / MIB} MiB single-string ceiling, so neither is read whole`,
+      describe(`--- ${label}/${file.relative}`, reference ? { sha256: reference.sha256, size: prior?.length ?? reference.size } : null),
+      describe(`+++ disk/${file.relative}`, file.disk.deleted ? null : { sha256: file.disk.sha256, size: file.disk.size }),
+      offset === shared && (prior?.length ?? 0) === (disk?.length ?? 0) ? '# the two versions hold the same bytes'
+        : `# first difference at byte ${offset} (line ${line}); the window below is cut at byte offsets, not lines`,
+      `@@ bytes ${start}..${offset + removed.length} of ${label}, ${start}..${offset + added.length} of disk @@`,
+      ...prefixed(' ', context), ...prefixed('-', removed), ...prefixed('+', added),
+      `# reproduce: cmp ${priorPath ?? '/dev/null'} ${diskPath ?? '/dev/null'}`, '',
+    ].join('\n');
+  } finally { prior?.close(); disk?.close(); }
+}
+
+/**
+ * Both versions of every file (and their diff) under `dir`; returns the paths by file index. The recorded side is the
+ * prior (`<index>.prior`), or a withdrawal mirror's withdrawn bytes (`<index>.withdrawn`). A version over the
+ * single-string ceiling is copied by the kernel and checked by its streamed hash, and its diff is a bounded summary.
+ * A staged prior copy that matches nothing recorded is kept too (`<index>.prior-stage`): `--keep disk` removes it.
+ */
+function writeArtifacts(dir: string, item: { files: RecoveryFileView[] }, sources: Array<{ prior: Bytes; disk: Bytes }>, changed: () => OperationError) {
+  return item.files.map((file, index) => {
+    const { prior, disk } = sources[index];
+    const keep = (path: string, source: NonNullable<Bytes>, expected: string | null) => 'bytes' in source ? writePrivateFile(path, source.bytes) : copyPrivateFile(path, source.path, expected!, changed);
+    const label = file.withdrawn ? 'withdrawn' : 'prior';
+    const priorPath = prior === null ? null : join(dir, `${index}.${label}`);
+    const diskPath = disk === null ? null : join(dir, `${index}.disk`);
+    if (priorPath) keep(priorPath, prior!, file.withdrawn?.sha256 ?? (file.prior.absent ? null : file.prior.sha256));
+    if (diskPath) keep(diskPath, disk!, file.disk.deleted ? null : file.disk.sha256);
+    const stage = file.prior.absent ? undefined : file.prior.stage;
+    if (stage?.state === 'mismatched' && stage.sha256) copyPrivateFile(join(dir, `${index}.prior-stage`), stage.path, stage.sha256, changed);
     const diffPath = join(dir, `${index}.diff`);
-    writePrivateFile(diffPath, Buffer.from(unifiedDiff(bytes?.toString('utf8') ?? '', disks[index]?.toString('utf8') ?? '',
-      { oldPath: `${label}/${file.relative}`, newPath: `disk/${file.relative}` })));
-    return { diff_path: diffPath, diff_command: `diff -u ${referencePath ?? '/dev/null'} ${diskPath ?? '/dev/null'}` };
+    if ((prior === null || 'bytes' in prior) && (disk === null || 'bytes' in disk)) {
+      writePrivateFile(diffPath, Buffer.from(unifiedDiff(prior?.bytes.toString('utf8') ?? '', disk?.bytes.toString('utf8') ?? '',
+        { oldPath: `${label}/${file.relative}`, newPath: `disk/${file.relative}` })));
+      return { diff_path: diffPath, diff_command: `diff -u ${priorPath ?? '/dev/null'} ${diskPath ?? '/dev/null'}` };
+    }
+    writePrivateFile(diffPath, Buffer.from(diffSummary(file, priorPath, diskPath)));
+    return { diff_path: diffPath, diff_command: `cmp ${priorPath ?? '/dev/null'} ${diskPath ?? '/dev/null'}`, diff_summary: true as const };
   });
 }
-const priorReferences = (records: FileRecoveryRecord[]): Reference[] => records.map(record => ({ label: 'prior', bytes: priorBytes(record) }));
 
 /** What recovery makes of a file's disk bytes; a bundle file also needs its recorded mode and a regular, unaliased file. */
 function recoveryMatch(record: FileRecoveryRecord, view: DiskView, bundle: boolean): RecoveryFileView['matches'] {
@@ -233,31 +371,34 @@ function recoveryMatch(record: FileRecoveryRecord, view: DiskView, bundle: boole
 }
 
 /** One page or bundle record's current view: its files with disk fingerprints, the page revision and the state digest. */
-async function readItem(engine: BrainEngine, row: WriteRequest, binding: WorktreeBinding): Promise<{ item: StuckRecovery; records: FileRecoveryRecord[]; disks: Array<Buffer | null> }> {
-  if (row.recovery?.version === 1 && row.recovery.staging?.before) throw catalogueError('recovery_large_file_unsupported', largeFileReason(row),
-    `Nothing was changed. Inspect it read-only with gbrain sources writer status --source ${row.source_id} --json and ask the user which version of the file to keep; its prior bytes are the staged copy the record names. Put the chosen bytes in place by hand, then let the resident writer finish its recovery.`);
+async function readItem(engine: BrainEngine, row: WriteRequest, binding: WorktreeBinding): Promise<{ item: StuckRecovery; records: FileRecoveryRecord[]; sources: Array<{ prior: Bytes; disk: Bytes }> }> {
   const records = filesOf(row.recovery!);
   if (!records) throw refusalError(bundleRefusal(row));
   const bundle = row.recovery!.version === 2;
   const [page] = await engine.executeRaw<{ revision: string | null }>('SELECT knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND slug=$2', [row.source_id, row.slug]);
-  const disks: Array<Buffer | null> = [];
+  const sources: Array<{ prior: Bytes; disk: Bytes }> = [];
   const files = records.map(record => {
     const contained = isWriteTargetContained(record.path, record.root) && !!binding.local_path && isWriteTargetContained(record.path, binding.local_path);
-    const { view, bytes } = contained ? diskView(record.path) : { view: { deleted: false, kind: 'other', sha256: null, size: 0, mode: 0 } as DiskView, bytes: null };
-    disks.push(bytes);
-    return { path: record.path, root: record.root, relative: relative(binding.local_path ?? record.root, record.path), prior: priorView(record), disk: view,
+    const { view, source } = contained ? diskView(record.path) : { view: { deleted: false, kind: 'other', sha256: null, size: 0, mode: 0 } as DiskView, source: null };
+    const prior = priorView(record);
+    sources.push({ prior: priorSource(record, prior), disk: source });
+    return { path: record.path, root: record.root, relative: relative(binding.local_path ?? record.root, record.path), prior, disk: view,
       matches: recoveryMatch(record, view, bundle) } as RecoveryFileView;
   });
   const writable = (file: RecoveryFileView) => file.disk.deleted || file.disk.kind === 'file';
+  // --keep disk leaves the staged prior to recovery's cleanup, which refuses a copy it cannot verify: a mismatched copy is
+  // backed up and removed first, so it must be a regular file this command can hash.
+  const stageRemovable = (file: RecoveryFileView) => file.prior.absent || file.prior.stage?.state !== 'mismatched' || file.prior.stage.sha256 !== null;
   const unexpected = files.filter(file => file.matches === 'neither');
-  const choices = { prior: unexpected.every(file => writable(file) && (file.prior.absent || file.prior.stored)), disk: unexpected.every(writable), withdrawn: false };
+  const choices = { prior: unexpected.every(file => writable(file) && (file.prior.absent || file.prior.stored)), disk: unexpected.every(file => writable(file) && stageRemovable(file)), withdrawn: false };
   const identity = identityOf(records, row.recovery!);
   const page_revision = page?.revision ?? null;
-  return { records, disks, item: { id: row.id, target: bundle ? 'skill_bundle' : 'page', request_id: row.request_id, source_id: row.source_id, slug: row.slug, operation: row.operation, state: row.state,
+  const priorStages = files.map(file => file.prior.absent ? null : file.prior.stage ?? null);
+  return { records, sources, item: { id: row.id, target: bundle ? 'skill_bundle' : 'page', request_id: row.request_id, source_id: row.source_id, slug: row.slug, operation: row.operation, state: row.state,
     blocked_reason: row.blocked_reason ?? null, worktree_id: row.worktree_id!, sequence: String(row.sequence),
     page_revision, identity, recorded_error: row.error_code ?? null, prior_hashes: records.map(record => record.beforeHash), files, choices,
     digest: digest({ v: 'stuck-recovery-item-v1', id: row.id, request_id: row.request_id, identity, prior_hashes: records.map(record => record.beforeHash),
-      disk: files.map(file => file.disk), page_revision }) } };
+      disk: files.map(file => file.disk), page_revision, ...(priorStages.some(Boolean) ? { prior_stages: priorStages } : {}) }) } };
 }
 
 const EFFECT_SQL = `SELECT e.id::text AS id, e.request_id::text AS request_ref, r.request_id::text AS request_id, e.kind, e.state, e.error_code,
@@ -268,18 +409,18 @@ const EFFECT_SQL = `SELECT e.id::text AS id, e.request_id::text AS request_ref, 
  * a refusal when the record cannot be written forward on this binding, else the item with its withdrawn and disk bytes.
  */
 async function readEffectItem(engine: BrainEngine, effect: EffectRow, binding: WorktreeBinding, sourceId: string):
-Promise<{ item: StuckRecovery; reference: Buffer; disk: Buffer | null } | RefusedRecovery | null> {
+Promise<{ item: StuckRecovery; sources: Array<{ prior: Bytes; disk: Bytes }> } | RefusedRecovery | null> {
   const record = effect.recovery;
   const slug = typeof record?.slug === 'string' ? record.slug : '';
   const refused: RefusedRecovery = { code: 'recovery_effect_unsupported', request_id: effect.request_id ?? '', effect_id: effect.id, source_id: sourceId, slug,
     state: effect.state, blocked_reason: effect.error_code, reason: effectReason(effect.kind), fix: effectFix(sourceId, effect.request_id) };
-  if (!record || effect.kind !== 'withdrawal-mirror' || record.kind !== 'withdrawal-mirror' || typeof record.after !== 'string' || typeof record.afterHash !== 'string'
+  if (!record || effect.kind !== 'withdrawal-mirror' || record.kind !== 'withdrawal-mirror' || record.version !== 1 || typeof record.after !== 'string' || typeof record.afterHash !== 'string'
     || typeof record.path !== 'string' || typeof record.root !== 'string' || !binding.local_path) return refused;
   const after = Buffer.from(record.after, 'base64');
   if (sha256(after) !== record.afterHash || record.ownerEpoch !== String(binding.owner_epoch) || record.sourceIncarnation !== binding.source_incarnation
     || !isWriteTargetContained(record.path, record.root) || !isWriteTargetContained(record.path, binding.local_path)
     || resolve(record.root) !== resolve(join(binding.local_path, binding.relative_path))) return refused;
-  const { view, bytes } = diskView(record.path);
+  const { view, source } = diskView(record.path);
   const regular = !view.deleted && view.kind === 'file';
   if (regular && (diskHash(view) === record.beforeHash || diskHash(view) === record.afterHash)) return null;
   const [page] = await engine.executeRaw<{ revision: string | null }>('SELECT knowledge_revision::text AS revision FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]);
@@ -288,7 +429,7 @@ Promise<{ item: StuckRecovery; reference: Buffer; disk: Buffer | null } | Refuse
   const file: RecoveryFileView = { path: record.path, root: record.root, relative: relative(binding.local_path, record.path),
     prior: record.beforeHash === null ? { absent: true } : { absent: false, sha256: record.beforeHash, size: null, mode: record.mode, stored: false },
     disk: view, matches: 'neither', withdrawn: { sha256: record.afterHash, size: after.length } };
-  return { reference: after, disk: bytes, item: { id: `effect:${effect.id}`, target: 'withdrawal_mirror', effect_id: effect.id, request_id: effect.request_id ?? '',
+  return { sources: [{ prior: { bytes: after }, disk: source }], item: { id: `effect:${effect.id}`, target: 'withdrawal_mirror', effect_id: effect.id, request_id: effect.request_id ?? '',
     source_id: sourceId, slug, operation: 'withdrawal-mirror', state: effect.state, blocked_reason: effect.error_code, worktree_id: effect.worktree_id,
     sequence: effect.id, page_revision, identity, recorded_error: null, prior_hashes: [record.beforeHash], files: [file],
     choices: { prior: false, disk: false, withdrawn: regular },
@@ -331,8 +472,8 @@ export async function scanStuckRecoveries(engine: BrainEngine, sourceIds: string
         continue;
       }
       if (opts.artifacts) {
-        const paths = writeArtifacts(await privateBackupDir(engine, read.item.request_id || read.item.id, read.item.digest.slice(0, 16)), read.item.files,
-          [{ label: 'withdrawn', bytes: read.reference }], [read.disk]);
+        const paths = writeArtifacts(await privateBackupDir(engine, read.item.request_id || read.item.id, read.item.digest.slice(0, 16)), read.item, read.sources,
+          () => opError('source_changed', `A file of withdrawal-mirror effect ${read.item.effect_id} changed while the preview copied it.`, `Nothing was changed. Run the preview again: ${stuckRecoveryPreviewCommand(sourceIds)}`));
         read.item.files = read.item.files.map((file, index) => ({ ...file, ...paths[index] }));
       }
       scan.items.push(read.item);
@@ -363,21 +504,11 @@ export async function scanStuckRecoveries(engine: BrainEngine, sourceIds: string
         residual('bundle_refused');
         continue;
       }
-      if (!opts.requestId && row.recovery?.version === 1 && row.recovery.staging?.before) {
-        const record = row.recovery;
-        const contained = isWriteTargetContained(record.path, record.root) && isWriteTargetContained(record.path, binding.local_path!);
-        const leaf = contained ? lstatSync(record.path, { throwIfNoEntry: false }) : undefined;
-        const disk = !contained ? undefined : !leaf ? null : leaf.isFile() ? hashFile(record.path) : undefined;
-        if (row.blocked_reason !== 'unexpected_file_bytes' && (disk === record.beforeHash || disk === record.afterHash)) { residual('recovers_on_its_own'); continue; }
-        scan.refused.push({ code: 'recovery_large_file_unsupported', request_id: row.request_id, source_id: row.source_id, slug: row.slug, state: row.state,
-          blocked_reason: row.blocked_reason ?? null, reason: largeFileReason(row) });
-        residual('large_file_refused');
-        continue;
-      }
-      const { item, records, disks } = await readItem(engine, row, binding);
+      const { item, sources } = await readItem(engine, row, binding);
       if (row.blocked_reason !== 'unexpected_file_bytes' && item.files.every(file => file.matches !== 'neither')) { residual('recovers_on_its_own'); continue; }
       if (opts.artifacts) {
-        const paths = writeArtifacts(await privateBackupDir(engine, row.request_id, item.digest.slice(0, 16)), item.files, priorReferences(records), disks);
+        const paths = writeArtifacts(await privateBackupDir(engine, row.request_id, item.digest.slice(0, 16)), item, sources,
+          () => opError('source_changed', `A file of request ${row.request_id} changed while the preview copied it.`, `Nothing was changed. Run the preview again: ${stuckRecoveryPreviewCommand(sourceIds)}`));
         item.files = item.files.map((file, index) => ({ ...file, ...paths[index] }));
       }
       scan.items.push(item);
@@ -392,9 +523,6 @@ function terminalReason(row: WriteRequest): string {
   return `Request ${row.request_id} already ended ${row.state}; a terminal outcome is immutable and its recovery never restores the canonical file, so `
     + `--keep prior would roll back ${row.state === 'committed' ? 'a committed write' : 'the outcome it recorded'} and --keep disk has nothing to abandon. Its recovery only waits `
     + `for staging cleanup (${row.blocked_reason}), which this command does not perform.`;
-}
-function largeFileReason(row: WriteRequest): string {
-  return `Request ${row.request_id} in source ${row.source_id} holds a page recovery whose prior file is over the single-string ceiling, which gbrain repair stuck-recovery does not resolve.`;
 }
 function effectReason(kind: string): string {
   return `A ${kind} effect recovery blocks the worktree, and its record does not hold usable withdrawn bytes for this canonical binding (missing, corrupt, `
@@ -437,6 +565,50 @@ export async function readResolutions(engine: BrainEngine, previewHash: string):
   const rows = await engine.executeRaw<{ completed_keys: Journal[] }>("SELECT completed_keys FROM op_checkpoints WHERE op=$1 AND completed_keys->0->>'preview_hash'=$2 ORDER BY fingerprint",
     [RESOLUTION_OP, previewHash]);
   return rows.map(row => row.completed_keys[0]);
+}
+
+/**
+ * The refusal of a choice the staged prior copy cannot support (null when the copy is not why): `--keep prior` needs a
+ * verified copy, and `--keep disk` a copy it can back up and remove. Its fix is the remaining exit, the `--keep disk`
+ * apply under the same preview hash (destructive, so the user agrees first), or the read-only owner status when none is left.
+ */
+export function priorStageUnavailable(item: StuckRecovery, keep: KeepChoice, previewHash: string): OperationError | null {
+  if (keep === 'withdrawn') return null;
+  const stage = item.files.filter(file => file.matches === 'neither').map(file => file.prior.absent ? undefined : file.prior.stage)
+    .find(found => found && (keep === 'prior' ? found.state !== 'verified' : found.state === 'mismatched' && found.sha256 === null));
+  if (!stage) return null;
+  const docs = 'docs/guides/repair.md#recovery-prior-stage-unavailable';
+  const status = ['gbrain', 'sources', 'writer', 'status', '--source', item.source_id, '--json'];
+  const what = stage.state === 'missing' ? 'is missing' : stage.sha256 === null ? 'is not a regular file' : 'does not match its recorded SHA-256';
+  const message = `The staged copy of the prior file of request ${item.request_id} in source ${item.source_id} ${what} (${stage.path}), so --keep ${keep} `
+    + `cannot ${keep === 'prior' ? 'restore the prior bytes' : 'back it up and remove it'}.`;
+  if (keep === 'prior' && item.choices.disk) {
+    const argv = ['gbrain', 'repair', 'stuck-recovery', '--source', item.source_id, '--keep', 'disk', '--apply', '--expect', previewHash, '--yes'];
+    return opError('recovery_prior_stage_unavailable', message,
+      `Nothing was changed. The prior bytes cannot be put back, so the remaining exit keeps the edited file and abandons the write. Ask the user, then run: ${argv.join(' ')}`,
+      { docs, fix: { argv, consent: ['destructive'], actor: 'agent', requires_exclusive: false, verify: { argv: status },
+        why: 'Keeps the bytes on disk and abandons the write after backing up both versions; the recovery is then cleared and the worktree claims writes again.',
+        user_message: `gbrain's saved copy of the previous version of ${item.slug} ${what}, so that version cannot be put back. `
+          + 'Keep the file as it is on disk now and drop the write that was interrupted?' } });
+  }
+  return opError('recovery_prior_stage_unavailable', message,
+    `Nothing was changed. Something other than gbrain replaced the staged copy at ${stage.path}. Show the user the owner status (gbrain sources writer status --source ${item.source_id} --json) and that path; once it is a regular file again, preview again (${stuckRecoveryPreviewCommand([item.source_id], item.request_id)}).`,
+    { docs, fix: { ...statusFix(item.source_id), verify: { argv: status } } });
+}
+
+/**
+ * `--keep disk` with a staged prior copy that matches nothing recorded: recovery's cleanup never deletes such a copy, so
+ * once it is in the backup directory (`<index>.prior-stage`) it is removed here, only while it still holds the bytes the
+ * preview hashed. Idempotent: an absent copy was already removed.
+ */
+function removeMismatchedStage(stage: PriorStageView, item: StuckRecovery, command: string): void {
+  let leaf;
+  try { leaf = lstatSync(stage.path); }
+  catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) return; throw error; }
+  if (!leaf.isFile() || hashFile(stage.path) !== stage.sha256) throw opError('unexpected_staging_bytes', `The staged prior copy of request ${item.request_id} changed after the preview, so the resolution stopped before removing it.`,
+    `Nothing more was changed; the copy from the preview is backed up. Preview again (${command}), show the user the new state and apply the new hash.`, { fix: statusFix(item.source_id) });
+  unlinkSync(stage.path);
+  flushDirectory(dirname(stage.path));
 }
 
 /**
@@ -519,12 +691,12 @@ Promise<ResolutionResult & { replayed: boolean }> {
       if (isTerminal(row!)) throw choiceRefused(terminalReason(row!), item.source_id);
       const current = await readItem(engine, row!, binding);
       if (current.item.digest !== item.digest) throw previewChangedError(opts.previewHash, command);
-      if (!current.item.choices[opts.keep]) throw catalogueError('recovery_choice_refused', `--keep ${opts.keep} is not available for request ${item.request_id}: `
+      if (!current.item.choices[opts.keep]) throw priorStageUnavailable(current.item, opts.keep, opts.previewHash) ?? catalogueError('recovery_choice_refused', `--keep ${opts.keep} is not available for request ${item.request_id}: `
         + (opts.keep === 'prior' ? 'the recovery record does not hold the prior bytes, or a blocked file is not a regular file.'
           : opts.keep === 'withdrawn' ? 'only a withdrawal-mirror effect recovery has withdrawn bytes to write.' : 'a blocked file is not a regular file.'),
         `Nothing was changed. The preview lists the available choices; run it again (${command}) and apply one of those.`);
       const dir = await privateBackupDir(engine, item.request_id, item.digest.slice(0, 16));
-      writeArtifacts(dir, current.item.files, priorReferences(current.records), current.disks);
+      writeArtifacts(dir, current.item, current.sources, () => previewChangedError(opts.previewHash, command));
       await faultPoint('stuck_recovery:backed_up', { requestId: item.request_id, sourceId: item.source_id });
       journal = { id: item.id, request_id: item.request_id, source_id: item.source_id, slug: item.slug, preview_hash: opts.previewHash, keep: opts.keep, phase: 'backed_up',
         backup_dir: dir, original: { state: row!.state, blocked_reason: row!.blocked_reason ?? null, prior_hashes: item.prior_hashes,
@@ -544,7 +716,13 @@ Promise<ResolutionResult & { replayed: boolean }> {
         const staged = recoveryFiles((await getWriteRequestById(engine, item.id))!.recovery!);
         await withFilesystemPublication([...new Set(staged.map(record => record.root))], async () => {
           for (const { index } of unexpected) {
-            const record = staged[index]!;
+            const record = staged[index];
+            if (record.staging?.before) {
+              // A prior over the single-string ceiling: recovery's own restoration renames the verified staged copy back.
+              cleanupRecoveryStaging(record, { keepBefore: true });
+              if (hashFile(record.path) !== record.beforeHash) restoreBeforeStage(record);
+              continue;
+            }
             cleanupRecoveryStaging(record);
             publishPersistenceFile({ path: record.path, root: record.root, content: priorBytes(record) }, record.staging?.restoration?.path, undefined, record.mode);
           }
@@ -553,6 +731,11 @@ Promise<ResolutionResult & { replayed: boolean }> {
         journal = { ...journal, phase: 'written' };
         await writeJournal(engine, key, journal);
       } else {
+        const mismatched = unexpected.map(({ record, index }) => ({ record, stage: item.files[index].prior.absent ? undefined : item.files[index].prior.stage }))
+          .filter(({ stage }) => stage?.state === 'mismatched' && stage.sha256 !== null);
+        if (mismatched.length) await withFilesystemPublication([...new Set(mismatched.map(({ record }) => record.root))], async () => {
+          for (const { stage } of mismatched) removeMismatchedStage(stage!, item, command);
+        });
         if (!isTerminal(row!)) await abandonWrite(engine, row!, opts.previewHash);
         journal = { ...journal, phase: 'abandoned' };
         await writeJournal(engine, key, journal);
@@ -600,7 +783,7 @@ Promise<ResolutionResult & { replayed: boolean }> {
       if (!current.item.choices.withdrawn) throw catalogueError('recovery_choice_refused', `--keep withdrawn is not available for request ${item.request_id}: its file is not a regular file.`,
         `Nothing was changed. Put a regular file back at ${current.item.files[0]!.path} (the backup and the preview diff name the bytes), then preview again (${command}).`);
       const dir = await privateBackupDir(engine, item.request_id || item.id, item.digest.slice(0, 16));
-      writeArtifacts(dir, current.item.files, [{ label: 'withdrawn', bytes: current.reference }], [current.disk]);
+      writeArtifacts(dir, current.item, current.sources, () => previewChangedError(opts.previewHash, command));
       await faultPoint('stuck_recovery:backed_up', { requestId: item.request_id, sourceId: item.source_id });
       journal = { id: item.id, request_id: item.request_id, source_id: item.source_id, slug: item.slug, preview_hash: opts.previewHash, keep: opts.keep, phase: 'backed_up',
         backup_dir: dir, original: { state: effect!.state, blocked_reason: effect!.error_code, prior_hashes: item.prior_hashes, disk_hashes: [diskHash(current.item.files[0]!.disk)] } };
@@ -618,9 +801,12 @@ Promise<ResolutionResult & { replayed: boolean }> {
         `Nothing was written; the edited bytes are backed up under ${started.backup_dir}. ${effectFix(item.source_id, item.request_id || null).user_message}`);
       await upgradeRecoveryStaging(engine, 'persistence_effects', item.effect_id!, item.worktree_id, 'forward');
       const record = (await read())!.recovery!;
+      const after = record.version === 1 ? record.after : null;
+      if (after === null) throw catalogueError('recovery_effect_unsupported', effectReason('withdrawal-mirror'),
+        `Nothing was written; the edited bytes are backed up under ${started.backup_dir}. ${effectFix(item.source_id, item.request_id || null).user_message}`);
       await withFilesystemPublication([record.root], async () => {
         cleanupRecoveryStaging(record);
-        publishPersistenceFile({ path: record.path, root: record.root, content: Buffer.from(record.after, 'base64') }, record.staging?.publication?.path);
+        publishPersistenceFile({ path: record.path, root: record.root, content: Buffer.from(after, 'base64') }, record.staging?.publication?.path);
         if (record.mode !== null && existsSync(record.path)) chmodSync(record.path, record.mode);
       });
       await faultPoint('stuck_recovery:written', { requestId: item.request_id, sourceId: item.source_id });

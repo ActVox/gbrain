@@ -29,19 +29,25 @@ export function contentRepairCommit(path: string, receipt: Pick<ContentRepairRec
   return { subject: contentRepairCommitSubject(path), line: `${safe(path)} (frontmatter_slug_conflict)`, trailer: contentRepairTrailer(receipt) };
 }
 export interface ParkedTarget { slug?: string; error_code: string }
+/** `page_body_segmented`: a segmented page an older binary's mirror or Git scan passed by; this one mirrors and commits it. */
 export interface SkippedTarget { slug: string; reason: 'metafile' | 'file_database_drift' | 'page_body_segmented' | 'withdrawal_not_mirrored' }
 /** The code a page behind a failed withdrawal mirror is parked with: its file may still hold the withdrawn text. */
 export const WITHHELD_BY_MIRROR = 'withdrawal_mirror_failed';
 /** A Git or withdrawal target parks after this many consecutive execution failures. */
 export const PARK_AFTER_FAILURES = 5;
+/**
+ * A withdrawal mirror's recovery record. Version 1 embeds the mirrored file (`after`, base64). Version 2 is a segmented
+ * page's file, never held whole: `after` is null and `staging.publication` names the file streamed from the page's
+ * segments by path, SHA-256 (`afterHash`) and length, written once the record is durable (effect-recovery.ts).
+ */
 export interface EffectRecovery {
-  version: 1;
+  version: 1 | 2;
   kind: 'withdrawal-mirror';
   path: string;
   root: string;
   beforeHash: string | null;
   afterHash: string;
-  after: string;
+  after: string | null;
   mode: number | null;
   ownerEpoch: string;
   pageId: number;

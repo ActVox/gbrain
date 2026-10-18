@@ -136,7 +136,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `orphan-bindings` | `orphan_persistence_bindings` | Deletes persistence source bindings whose source was removed, or that belong to an earlier incarnation of a source re-added under the same id. `gbrain sources remove` and `gbrain sources purge` delete the binding; one an older gbrain left behind makes the re-added source read as claimed, so every `gbrain sync --source <id>` fails with `writer_coordinator_required`. Bookkeeping only: no journal admission, no page or file changes, and it runs brain-wide (`--source` does not narrow it). See [orphan bindings](#orphan-bindings). | A binding that a queued, running or recovering write request of the same source incarnation still references. |
 | `managed-sync-orphans` | `sync_failures` | Explicit-only, preview-bound. Retires managed sync bookkeeping nothing current can resume or clear: a `managed-sync-failure` row whose cursor key has no cursor, and an unfinished `managed-sync` cursor recorded by a principal that is no longer an active local writer (or a pre-options cursor a later run superseded) whose pending request is terminal, or (#6834) a cursor whose checkpoint can never publish because the source's `last_commit` moved elsewhere (`checkpoint_moved`). `op_checkpoints` rows only; no journal admission, no page or file changes. The preview prints a hash; `--apply --expect <hash>` retires exactly that set. See [managed sync orphans](#managed-sync-orphans). | An unfinished cursor whose pending request is still queued, running or recovering, or one the live writer can resume with its recorded options (doctor prints that sync command). |
 | `content-receipt-root` | `sync_freshness` (`content_receipt_stale`) | Explicit-only, preview-bound, owner host. Rebinds a gbrain-owned content source's shared-skills content receipt that still names an old root after a writer transfer or relocation, when the owner's tree still hashes to the recorded worktree manifest. The receipt row only; the previous value is kept under `<key>.backup`. See [content receipt root](#content-receipt-root). | A receipt whose source path, owner host or tree does not match: listed with its class and the step to run first. |
-| `stuck-recovery` | none (`gbrain sources writer status` shows the request `recovering`, or the withdrawal-mirror effect, with `unexpected_file_bytes`) | Explicit-only, preview-bound, destructive consent. Resolves a live page or shared-skill bundle publication recovery whose file matches neither its recorded prior nor its published bytes, and a withdrawal-mirror effect recovery whose file was edited while it was mirroring; each stops every write on its worktree. The preview lists each blocked file with both fingerprints and writes a private diff; `--apply --expect <hash> --keep prior\|disk --yes` backs up both versions, then restores the prior (the write publishes again) or keeps the edit and abandons the write (every file of a bundle one way); an effect's only choice, `--keep withdrawn`, backs up the edit and writes the withdrawn version. See [stuck recovery](#stuck-recovery). | A terminal request with its recovery still set (listed as refused, `recovery_choice_refused`), an effect or bundle record that cannot be resolved (listed as refused, `recovery_effect_unsupported` or `recovery_bundle_unsupported`, with an ask_user fix), a recovery blocked on staging bytes, and a recovery whose file already matches a recorded version (the resident writer finishes those). |
+| `stuck-recovery` | none (`gbrain sources writer status` shows the request `recovering`, or the withdrawal-mirror effect, with `unexpected_file_bytes`) | Explicit-only, preview-bound, destructive consent. Resolves a live page or shared-skill bundle publication recovery whose file matches neither its recorded prior nor its published bytes, and a withdrawal-mirror effect recovery whose file was edited while it was mirroring; each stops every write on its worktree. The preview lists each blocked file with both fingerprints and writes a private diff; `--apply --expect <hash> --keep prior\|disk --yes` backs up both versions, then restores the prior (the write publishes again) or keeps the edit and abandons the write (every file of a bundle one way); an effect's only choice, `--keep withdrawn`, backs up the edit and writes the withdrawn version. A file over 24 MiB resolves the same way, read in pieces, with a bounded diff summary. See [stuck recovery](#stuck-recovery). | A terminal request with its recovery still set (listed as refused, `recovery_choice_refused`), an effect or bundle record that cannot be resolved (listed as refused, `recovery_effect_unsupported` or `recovery_bundle_unsupported`, with an ask_user fix), `--keep prior` on a large-file recovery whose staged prior copy is missing or damaged (`recovery_prior_stage_unavailable`; `--keep disk` still resolves it), a recovery blocked on staging bytes, and a recovery whose file already matches a recorded version (the resident writer finishes those). |
 | `frontmatter-keys` | `stale_frontmatter_keys` | Explicit-only, preview-bound. Strips the parser's reserved top-level keys (`type`, `title`, `tags`, `slug`) that an older import stored inside `pages.frontmatter`. Since v0.60.176.0 those keys are not file/database drift and never render (#6454), so this is hygiene: database rows only, in source-scoped coordinated batches of up to 1,000 pages, no file, body or embedding change. Each swept page advances its `knowledge_revision` once, so a client holding an older revision of a swept page gets one `revision_conflict` and re-reads. See [frontmatter keys](#frontmatter-keys). | A page whose keys were cleared by a write between preview and apply (`already_clean`). |
 | `embedding-effects` | `stale_embedding_effects` | Settles stale queued and failed embedding effects of committed writes, which block receipt compaction and activation: `reconciled` when current vectors pass the effect verifier, `superseded` when the page was deleted or a newer revision owns its own effect, `retry_queued` for the owner (paid; a used-up retry allowance gets one new bounded cycle per explicit apply). See [stale queued embedding effects](#stale-queued-embedding-effects). | `blocked` effects, counted by reason (`owner_unavailable`, `embedding_disabled`, `embedding_unconfigured`, `projection_pending`, `no_replacement_obligation`). |
 | `attribution-backfill` | none | Fills write attribution (who wrote it) on pages, page versions and facts written before attribution was recorded, only where exactly one committed request in the write journal proves the writer: the page write whose recorded result is the row's revision, or the `remember` that inserted the fact. Fills NULLs only, in committed batches of 1,000 that resume after an interruption; no content, revision, page file or request ID changes. See [write attribution](../mcp/ADMIN.md#write-attribution). | `unrecorded_pages`, `unrecorded_page_versions`, `unrecorded_facts`: rows the journal cannot prove. They stay `unrecorded`; nothing is inferred. |
@@ -797,6 +797,25 @@ command that reproduces it. It prints only the choices available for every
 listed record. The hash binds each record's identity, each file's disk bytes
 and the page's database revision, so an edit or a page write after the
 preview refuses the apply with `preview_changed`.
+
+A file over the 24 MiB single-string ceiling (normal with segmented page
+storage, up to `pages.max_bytes`) resolves the same way, in bounded memory.
+Its write kept the prior file as a hidden staged copy beside it
+(`.<sha256>.tmp.before-<uuid>`) instead of inside the recovery record. The
+preview hashes the file and that copy in pieces and prints the copy's state
+after the prior fingerprint: `staged copy verified`, `missing` or `does not
+match its recorded SHA-256`. Both versions are backed up by copy, each
+checked against its fingerprint, and the diff file is a summary instead of a
+full diff (both hashes and sizes, the first byte where they differ, and a
+window of at most 1 KiB around it), marked `(summary: ...)` in the preview;
+its `reproduce` line is a `cmp` of the two backups. `--keep prior` renames
+the verified staged copy back over the file, as the writer's own recovery
+does, and the write publishes again. A missing or damaged staged copy can't
+restore the prior, so the preview offers only `--keep disk`, and `--keep
+prior` refuses with
+[`recovery_prior_stage_unavailable`](#recovery-prior-stage-unavailable).
+`--keep disk` keeps a damaged copy in the backup directory (`0.prior-stage`)
+and removes it from the checkout.
 
 The choice is the user's: there is no default `--keep`, the kind never runs
 from `--all`, `gbrain doctor --remediate` or a remediation step, and a
@@ -2903,20 +2922,26 @@ brain host and preview again, or ask the user which version of each skill file
 to keep, put those bytes in place by hand, and let the resident writer finish
 the recovery.
 
-### Recovery large file unsupported
+### Recovery prior stage unavailable
 
-`recovery_large_file_unsupported`: `gbrain repair stuck-recovery` found a page
-recovery whose prior file is over the 24 MiB single-string ceiling. Its prior
-bytes are kept as a staged copy beside the file (named in the record, with its
-SHA-256) instead of inside the record, and the preview's diff would read both
-files whole, so nothing was changed. The preview lists such a recovery under
-`refused` with this code and still lists the source's other recoveries; with
-`--request-id` naming it, the command refuses with this code. Inspect the request read-only with
-`gbrain sources writer status --source <id> --json`, ask the user which version
-to keep, put those bytes at the canonical path by hand (the staged copy holds
-the prior bytes; never delete it), and let the resident writer finish the
-recovery: it renames the copy back when the file holds the published bytes, and
-removes it when the file holds the prior ones.
+<a id="recovery-large-file-unsupported"></a>
+
+`recovery_prior_stage_unavailable`: `gbrain repair stuck-recovery` can't apply
+that `--keep` choice to a page recovery whose prior file is over the 24 MiB
+single-string ceiling, and nothing was changed. Such a recovery keeps its prior
+bytes as a staged copy beside the file, named in the record by path and
+SHA-256, and that copy is missing, doesn't match its recorded SHA-256, or isn't
+a regular file. Without it `--keep prior` has nothing safe to put back. The
+refusal's `fix` is the remaining exit, the `--keep disk` apply under the same
+preview hash (`next: ask_user`, because it keeps the edit and abandons the
+write), with `gbrain sources writer status --source <id> --json` as its
+`verify`. When the staged copy isn't a regular file, `--keep disk` can't back
+it up either; the `fix` is then that read-only status, and the preview offers
+the choices again once the path holds a regular file.
+
+Builds before this one listed every large-file recovery as refused with
+`recovery_large_file_unsupported` and had no exit for it; this build resolves
+them with `gbrain repair stuck-recovery`.
 
 ### Recovery choice refused
 
