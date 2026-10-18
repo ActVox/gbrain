@@ -862,13 +862,16 @@ export async function runPhaseExtractAtoms(
 
   // Phase-level no-op: nothing to extract today.
   if (work.length === 0 && transcripts.length === 0 && pages.length === 0) {
+    const held = atomFiles?.held ?? [];
     return {
       phase: 'extract_atoms',
-      status: 'skipped',
+      status: held.length > 0 ? 'warn' : 'skipped',
       duration_ms: 0,
-      summary: 'extract_atoms: no transcripts or pages to process',
+      summary: 'extract_atoms: no transcripts or pages to process'
+        + (held.length > 0 ? ` (${held.length} atom file(s) left as they are: file_database_drift)` : ''),
       details: {
         reason: 'no_work',
+        ...(held.length > 0 ? { file_holds: held } : {}),
         source_id: sourceId,
         atoms_extracted: 0,
         transcripts_processed: 0,
@@ -1302,7 +1305,7 @@ export async function runPhaseExtractAtoms(
         // #6503: a cut item keeps its atoms provisional (`pending:<hash>`, the upsert path when it runs
         // again), retires nothing and records its partial disposition instead of a completion stamp.
         const retired = truncated ? [] : await completeUnmanagedItem(engine, sourceId, item, hash16, importedSlugs);
-        await atomFiles?.(importedSlugs, retired);
+        await atomFiles?.write(importedSlugs, retired);
         if (truncated) await recordPartialDisposition(engine, sourceId, item, maxInputChars);
         else if (item.kind === 'page') await stampAtomsScanHash(item);
         await commitAtomsWatermark(item, input, []);
@@ -1414,7 +1417,7 @@ export async function runPhaseExtractAtoms(
     // succeed, even though skips are not failures and leave failures[] empty.
     // Reporting 'ok' there hides a total no-op behind a green status.
     status:
-      failures.length > 0 ||
+      failures.length > 0 || (atomFiles?.held.length ?? 0) > 0 ||
       (work.length > 0 &&
         totalAtomsExtracted === 0 &&
         transcriptsSkipped + pagesSkipped === work.length)
@@ -1429,9 +1432,11 @@ export async function runPhaseExtractAtoms(
       (transcriptsSkipped + pagesSkipped > 0
         ? ` (${transcriptsSkipped + pagesSkipped} budget-skipped)`
         : '') +
-      (inputTruncated > 0 ? ` (${inputTruncated} input-truncated: the model did not read the tail)` : ''),
+      (inputTruncated > 0 ? ` (${inputTruncated} input-truncated: the model did not read the tail)` : '') +
+      ((atomFiles?.held.length ?? 0) > 0 ? ` (${atomFiles!.held.length} atom file(s) left as they are: file_database_drift)` : ''),
     details: {
       atoms_extracted: totalAtomsExtracted,
+      ...((atomFiles?.held.length ?? 0) > 0 ? { file_holds: atomFiles!.held } : {}),
       transcripts_processed: transcriptsProcessed,
       transcripts_total: transcripts.length,
       transcripts_skipped_budget: transcriptsSkipped,

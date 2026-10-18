@@ -13,7 +13,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import type { BrainEngine } from '../engine.ts';
 import { sanitizeText } from '../batch-rows.ts';
-import { parseMarkdown } from '../markdown.ts';
+import { parseMarkdown, parseMarkdownHead } from '../markdown.ts';
 import { contentHash, contentHashFrontmatterAndTags } from '../utils.ts';
 
 export interface StoredBody {
@@ -60,12 +60,26 @@ export async function mirrorFileBody(tx: BrainEngine, sourceId: string, slug: st
 /** Page states a checkout file is compared with: the live row, then its newest page_versions rows. */
 const HISTORY_ROWS = 20;
 
-interface StoredState extends StoredBody { frontmatter: Record<string, unknown> | null }
+interface StoredState extends StoredBody {
+  frontmatter: Record<string, unknown> | null;
+  title: string | null;
+  type: string | null;
+  tags: unknown;
+}
 
-/** Whether the file's body, timeline and every frontmatter key it carries (ephemeral keys aside) equal `state`'s. */
+/**
+ * Whether the file's body, timeline, every frontmatter key it carries (ephemeral keys aside), its tags, and the title
+ * and type its frontmatter declares equal `state`'s.
+ */
 function fileHeldBy(fileBytes: string, slug: string, state: StoredState): boolean {
   if (!fileBodyMatchesStored(fileBytes, slug, state)) return false;
-  const file = contentHashFrontmatterAndTags({ frontmatter: parseMarkdown(fileBytes, `${slug}.md`).frontmatter });
+  const parsed = parseMarkdown(fileBytes, `${slug}.md`);
+  const declared = parseMarkdownHead(fileBytes).frontmatter;
+  if (declared.title !== undefined && parsed.title.trim() !== (state.title ?? '').trim()) return false;
+  if (parsed.typeExplicit && parsed.type !== state.type) return false;
+  const storedTags = Array.isArray(state.tags) ? state.tags.map(String) : [];
+  if (JSON.stringify([...new Set(parsed.tags)].sort()) !== JSON.stringify([...new Set(storedTags)].sort())) return false;
+  const file = contentHashFrontmatterAndTags({ frontmatter: parsed.frontmatter });
   const stored = contentHashFrontmatterAndTags({ frontmatter: state.frontmatter ?? {} });
   return Object.entries(file.frontmatter).every(([key, value]) => JSON.stringify(value) === JSON.stringify(stored.frontmatter[key]));
 }
@@ -85,10 +99,22 @@ export async function replaceableFile(engine: BrainEngine, sourceId: string, slu
   if (!existsSync(filePath)) return { ok: true, expectedFileBytes: null };
   const bytes = readFileSync(filePath, 'utf-8');
   const states = await engine.executeRaw<StoredState>(
-    `(SELECT compiled_truth, timeline, frontmatter FROM pages WHERE source_id = $1 AND slug = $2)
+    `(SELECT p.compiled_truth, p.timeline, p.frontmatter, p.title, p.type,
+             to_jsonb(ARRAY(SELECT t.tag FROM tags t WHERE t.page_id = p.id)) AS tags
+        FROM pages p WHERE p.source_id = $1 AND p.slug = $2)
      UNION ALL
-     (SELECT v.compiled_truth, v.timeline, v.frontmatter FROM page_versions v JOIN pages p ON p.id = v.page_id
+     (SELECT v.compiled_truth, v.timeline, v.frontmatter, v.title, v.type, v.tags FROM page_versions v JOIN pages p ON p.id = v.page_id
        WHERE p.source_id = $1 AND p.slug = $2 AND v.compiled_truth IS NOT NULL ORDER BY v.id DESC LIMIT ${HISTORY_ROWS})`,
     [sourceId, slug]);
   return states.some(state => fileHeldBy(bytes, slug, state)) ? { ok: true, expectedFileBytes: bytes } : { ok: false };
+}
+
+/**
+ * #6982: the report for a page whose checkout file holds content the database lacks (a hand edit sync has not imported,
+ * or an unindexed file at the page's path), so the file was left as it is; `outcome` says what the caller did not do.
+ */
+export function fileDatabaseDriftHold(slug: string, sourceId: string, outcome: string): string {
+  return `${slug} (file_database_drift: the checkout file holds content the database does not, so it was left as it is and ${outcome}. `
+    + `If the file holds the newer edit, gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
+    + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
 }

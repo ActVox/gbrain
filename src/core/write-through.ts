@@ -537,8 +537,10 @@ export interface DeleteThroughResult {
    *   - url_clone: the source is a clone gbrain owns and pulls (#6946); its checkout is never written.
    *   - file_not_present: the page had no artifact on disk (DB-only page, or
    *     already removed by hand) — a clean no-op, not a failure.
+   *   - file_changed: the caller passed `expectedFileBytes` and the file no
+   *     longer holds them (an edit landed after the caller read it) — kept.
    */
-  skipped?: 'disabled_by_config' | 'url_clone' | 'file_not_present' | Extract<PageWriteTarget, { ok: false }>['skipped'];
+  skipped?: 'disabled_by_config' | 'url_clone' | 'file_not_present' | 'file_changed' | Extract<PageWriteTarget, { ok: false }>['skipped'];
   /** Set when the unlink itself threw (EACCES, EPERM, read-only mount). */
   error?: string;
 }
@@ -566,11 +568,15 @@ export interface DeleteThroughResult {
  * stamp would miss the recorded path, fall back to the slug-derived twin, and
  * report a clean `file_not_present` no-op while the REAL artifact stayed on
  * disk — the very silent-no-op class this helper exists to close.
+ *
+ * `opts.expectedFileBytes`: the file bytes the caller compared; rechecked
+ * under the source filesystem lock right before the unlink, and a file that
+ * changed since is kept (`skipped: 'file_changed'`).
  */
 export async function deletePageThrough(
   engine: BrainEngine,
   slug: string,
-  opts: { sourceId?: string; logger?: WriteThroughLogger; target?: PageWriteTarget } = {},
+  opts: { sourceId?: string; logger?: WriteThroughLogger; target?: PageWriteTarget; expectedFileBytes?: string } = {},
 ): Promise<DeleteThroughResult> {
   const sourceId = opts.sourceId ?? 'default';
   try {
@@ -591,6 +597,9 @@ export async function deletePageThrough(
 
     if (!existsSync(filePath)) {
       return { removed: false, path: filePath, skipped: 'file_not_present' };
+    }
+    if (opts.expectedFileBytes !== undefined && readFileSync(filePath, 'utf-8') !== opts.expectedFileBytes) {
+      return { removed: false, path: filePath, skipped: 'file_changed' };
     }
 
     assertSourceFilesystemActive();
