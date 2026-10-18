@@ -29,7 +29,11 @@
  * A withdrawal-mirror effect only finishes forward: its withdrawal is committed, and keeping the edited file (or the
  * pre-withdrawal bytes) would leave the forgotten fact on disk for the next sync to import again. Its only choice is
  * `--keep withdrawn`: the edited bytes are backed up, the recorded post-withdrawal bytes are written through the
- * record's reserved publication stage, and the effect's own `recoverEffectPublication` finishes it. A record without
+ * record's reserved publication stage, and the effect's own `recoverEffectPublication` finishes it. When a later
+ * withdrawal moved the page past the record, its bytes would put that fact back on disk, so before anything is written
+ * `rebaseStaleEffectRecovery` rebases the record under its page lock on the latest snapshot's rendering (the bytes the
+ * mirror itself writes) and the journal records the rebased identity, so a rerun after any interruption resumes it; a
+ * page deleted, replaced or segmented meanwhile has no current bytes and is refused (`recovery_effect_unsupported`). A record without
  * usable post-withdrawal bytes (or bound to another owner, root or incarnation) stays refused
  * (`recovery_effect_unsupported`) with an ask_user fix naming the exact preview.
  *
@@ -64,6 +68,7 @@ import { isTerminal, recoveryFiles, type FileRecoveryRecord, type RecoveryRecord
 import type { EffectRecovery } from './effect-model.ts';
 import { finishUnpublishedFailure, publishPersistenceFile, recoverPublication, transientDatabaseFailure } from './coordinator.ts';
 import { claimAndRecoverEffect } from './effects.ts';
+import { rebaseStaleEffectRecovery } from './effect-recovery.ts';
 import { trueUpRequests } from './receipt-true-up.ts';
 import { bundleFileHash } from './bundle-files.ts';
 import { mayReprepare } from './semantic.ts';
@@ -120,6 +125,8 @@ export interface StuckRecoveryScan { items: StuckRecovery[]; residuals: Record<s
 interface Journal {
   id: string; request_id: string; source_id: string; slug: string; preview_hash: string; keep: KeepChoice;
   phase: 'backed_up' | 'written' | 'abandoned' | 'done'; backup_dir: string; original: { state: string; blocked_reason: string | null; prior_hashes: Array<string | null>; disk_hashes: Array<string | null> };
+  /** A withdrawal-mirror record rebased on a later page revision: the identity it now has (the preview bound the original). */
+  identity?: RecoveryIdentity;
   result?: ResolutionResult;
 }
 export interface ResolutionResult {
@@ -584,7 +591,7 @@ Promise<ResolutionResult & { replayed: boolean }> {
   const { binding, lock } = await lockOwner(engine, item, hostId, opts.lockWaitMs);
   try {
     const read = async () => (await engine.executeRaw<EffectRow>(`${EFFECT_SQL} WHERE e.id=$1`, [item.effect_id]))[0] ?? null;
-    const same = (effect: EffectRow | null) => !!effect?.recovery && digest(effectIdentity(effect.id, effect.recovery)) === digest(item.identity);
+    const same = (effect: EffectRow | null) => !!effect?.recovery && digest(effectIdentity(effect.id, effect.recovery)) === digest(journal?.identity ?? item.identity);
     let effect = await read();
     if (!journal) {
       if (!same(effect)) throw previewChangedError(opts.previewHash, command);
@@ -602,6 +609,13 @@ Promise<ResolutionResult & { replayed: boolean }> {
     if (journal.phase === 'backed_up' && same(effect)) {
       const now = diskHash(diskView(effect!.recovery!.path).view);
       if (![journal.original.disk_hashes[0], effect!.recovery!.afterHash].includes(now)) throw changedAgain(item, journal.backup_dir, command);
+      const started: Journal = journal;
+      const rebased = await rebaseStaleEffectRecovery(engine, item.effect_id!, hostId, async (tx, record) => {
+        journal = { ...started, identity: effectIdentity(item.effect_id!, record) };
+        await writeJournal(tx, key, journal);
+      });
+      if (rebased === 'unrenderable') throw catalogueError('recovery_effect_unsupported', `Page ${item.slug} in source ${item.source_id} was deleted, replaced or segmented after its withdrawal mirror stopped, so it has no current version to write.`,
+        `Nothing was written; the edited bytes are backed up under ${started.backup_dir}. ${effectFix(item.source_id, item.request_id || null).user_message}`);
       await upgradeRecoveryStaging(engine, 'persistence_effects', item.effect_id!, item.worktree_id, 'forward');
       const record = (await read())!.recovery!;
       await withFilesystemPublication([record.root], async () => {

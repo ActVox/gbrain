@@ -39,12 +39,14 @@ import { expectItemFailure, expectOthersUnchanged, expectUnitNotAborted, managed
 
 const SOURCE = 'default';
 const CLAIM = 'Door code is 4417';
+const CLAIM_B = 'Gate code is 5521';
 const EDITED = beliefPage({ facts: [CLAIM], prose: 'Draft, edited by hand while the withdrawal was being mirrored.' });
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 afterEach(() => installFaultHook(undefined));
 
-interface StuckEffect { b: BeliefBrain; engine: BrainEngine; root: string; file: string; effectId: string; requestId: string; record: { after: string; afterHash: string; beforeHash: string } }
+interface StuckEffect { b: BeliefBrain; engine: BrainEngine; root: string; file: string; effectId: string; requestId: string; edited: string;
+  record: { after: string; afterHash: string; beforeHash: string } }
 
 const mirror = (engine: BrainEngine) => engine.executeRaw<{ id: string; error_code: string | null; recovery: StuckEffect['record'] | null; request_id: string }>(
   "SELECT e.id::text AS id, e.error_code, e.recovery, r.request_id::text AS request_id FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE e.kind='withdrawal-mirror' ORDER BY e.id");
@@ -62,14 +64,15 @@ function commitAll(root: string, message: string): void {
 const sync = (engine: BrainEngine) => performSync(engine, { sourceId: SOURCE, noPull: true, noEmbed: true, noExtract: true, drain: true, deadlineAtMs: Date.now() + 60_000 } as never);
 
 /**
- * A managed brain (git checkout) with `affected` (one fact) and `sibling`, synced; a `forget` of the fact whose mirror
- * dies after writing the file (before its commit), then a hand edit of the file, and the owner's next recovery pass
- * refusing it unexpected_file_bytes.
+ * A managed brain (git checkout) with `affected` (`facts`, default one) and `sibling`, synced; a `forget` of the first
+ * fact whose mirror dies after writing the file (before its commit), then a hand edit of the file (`edit` of the mirrored
+ * bytes, default EDITED), and the owner's next recovery pass refusing it unexpected_file_bytes.
  */
-async function stuckEffect(databaseUrl: string | undefined, run: (s: StuckEffect) => Promise<void>): Promise<void> {
+async function stuckEffect(databaseUrl: string | undefined, run: (s: StuckEffect) => Promise<void>,
+  opts: { facts?: string[]; edit?: (mirrored: string) => string } = {}): Promise<void> {
   await managedBrain(async ({ engine, ctx, root }) => {
     const b = brainApi(engine, ctx, root, SOURCE);
-    await b.put('affected', beliefPage({ facts: [CLAIM] }));
+    await b.put('affected', beliefPage({ facts: opts.facts ?? [CLAIM] }));
     await b.put('sibling', beliefPage({ title: 'Sibling Example', prose: 'Sibling.' }));
     commitAll(root, 'seed');
     await sync(engine);
@@ -81,12 +84,14 @@ async function stuckEffect(databaseUrl: string | undefined, run: (s: StuckEffect
     installFaultHook(undefined);
     const file = join(root, 'affected.md');
     const [crashed] = await mirror(engine);
-    expect(readFileSync(file, 'utf8')).toBe(Buffer.from(crashed!.recovery!.after, 'base64').toString('utf8'));
-    writeFileSync(file, EDITED);
+    const mirrored = Buffer.from(crashed!.recovery!.after, 'base64').toString('utf8');
+    expect(readFileSync(file, 'utf8')).toBe(mirrored);
+    const edited = opts.edit?.(mirrored) ?? EDITED;
+    writeFileSync(file, edited);
     await retryNow(engine);
     await waitFor(async () => (await mirror(engine))[0]?.error_code === 'unexpected_file_bytes', { timeoutMs: 60_000, intervalMs: 100, label: 'mirror recovery refused' });
     const [stuck] = await mirror(engine);
-    await run({ b, engine, root, file, effectId: stuck!.id, requestId: stuck!.request_id, record: stuck!.recovery! });
+    await run({ b, engine, root, file, effectId: stuck!.id, requestId: stuck!.request_id, edited, record: stuck!.recovery! });
   }, { databaseUrl, setup: ({ root }) => {
     git(root, 'init', '-q'); git(root, 'config', 'user.name', 'Example'); git(root, 'config', 'user.email', 'example@example.invalid');
     git(root, 'commit', '-q', '--allow-empty', '-m', 'init');
@@ -189,5 +194,35 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       expect(readFileSync(s.file, 'utf8')).toBe(Buffer.from(s.record.after, 'base64').toString('utf8'));
       expectOthersUnchanged(before, await snapshotItems(s.engine, SOURCE), { changed: ['affected'] });
     }), 240_000);
+
+    test('C-1 stale: a later withdrawal on the same page makes the stuck record stale; no interruption of --keep withdrawn publishes a withdrawn fact, and the same apply resumes to resolved', () => stuckEffect(databaseUrl, async s => {
+      const [second] = await s.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND fact=$2 AND expired_at IS NULL', [SOURCE, CLAIM_B]);
+      await operations.find(o => o.name === 'forget')!.handler(s.b.ctx, { id: Number(second!.id) });
+      const active = async () => (await s.engine.executeRaw<{ fact: string }>('SELECT fact FROM facts WHERE source_id=$1 AND fact = ANY($2::text[]) AND expired_at IS NULL',
+        [SOURCE, [CLAIM, CLAIM_B]])).map(row => row.fact);
+      expect(await active()).toEqual([]);
+      const leaked = () => parseFactsFence(readFileSync(s.file, 'utf8')).facts.filter(f => [CLAIM, CLAIM_B].includes(f.claim) && !f.forgotten).map(f => f.claim);
+
+      const preview = await expectUnitNotAborted(() => repair(s.engine));
+      expect((preview.details as Record<string, any>).recoveries).toHaveLength(1);
+      const apply = () => repair(s.engine, { apply: true, expect: preview.preview_hash!, keep: 'withdrawn' });
+      for (const point of ['stuck_recovery:backed_up', 'stuck_recovery:written', 'stuck_recovery:recovered']) {
+        installFaultHook(async at => { if (at === point) throw new Error(`process ended at ${point}`); });
+        const interrupted = await apply().then(result => result.outcomes, error => ({ thrown: String(error) }));
+        installFaultHook(undefined);
+        expect({ point, resolved: (interrupted as Record<string, unknown>).resolved ?? null }).toEqual({ point, resolved: null });
+        if (point === 'stuck_recovery:backed_up') expect(readFileSync(s.file, 'utf8')).toBe(s.edited);
+        else expect({ point, leaked: leaked() }).toEqual({ point, leaked: [] });
+      }
+      const applied = await expectUnitNotAborted(apply);
+      expect(applied.outcomes).toEqual({ resolved: 1 });
+      expect(leaked()).toEqual([]);
+      expect((await mirror(s.engine))[0]!.recovery).toBeNull();
+
+      commitAll(s.root, 'after recovery');
+      await sync(s.engine);
+      expect(await active()).toEqual([]);
+      expect(leaked()).toEqual([]);
+    }, { facts: [CLAIM, CLAIM_B], edit: mirrored => mirrored.replace('Draft.', 'Draft, edited by hand while the withdrawal was being mirrored.') }), 240_000);
   });
 }
