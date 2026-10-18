@@ -151,6 +151,14 @@ describe('filesDriftedSince refreshes a racy index after a slow diff', () => {
     expect(indexMtime(repo)).toBe(before);
   });
 
+  test('a diff that runs out of time still rewrites the racy index, so the next probe answers', () => {
+    const repo = committedRepoWithRacyIndex();
+    const before = indexMtime(repo);
+    expect(filesDriftedSince(repo, undefined, 60_000, 1)).toBeNull();
+    expect(indexMtime(repo)).toBeGreaterThan(before);
+    expect(filesDriftedSince(repo)).toEqual([]);
+  });
+
   test('a held index.lock leaves the answer unchanged', () => {
     const repo = committedRepoWithRacyIndex();
     writeFileSync(join(repo, '.git', 'index.lock'), '');
