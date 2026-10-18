@@ -3830,6 +3830,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | Withdrawal capacity. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### withdrawal_mirror_failed
+
+<a id="withdrawal_mirror_failed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A page's Git or embedding work is withheld because its withdrawal mirror failed before rewriting the page's file; the file may still hold the withdrawn text. | A withdrawal's Git and embedding effects touch only the pages its mirror committed (GBRA-130 A-12). Retrying the request's effects reruns the mirror for this page and re-arms the withheld work once the mirror commits it. | Read the parked effects with gbrain doctor --only parked_effects, fix the cause the mirror recorded, then preview gbrain sources writer retry-effects <source> --request-id <id> --dry-run and run it without --dry-run. | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/architecture/key-files/core-persistence.md](../../docs/architecture/key-files/core-persistence.md)
+
 ### withdrawal_provenance
 
 <a id="withdrawal_provenance"></a>
