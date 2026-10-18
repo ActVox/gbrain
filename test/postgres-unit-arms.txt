@@ -221,6 +221,7 @@ test/page-state-engine.test.ts
 test/pathological/b-10-ontology-rekey-collision.test.ts
 test/pathological/b-7-facts-pageless-entity.test.ts
 test/pathological/b-9-enrich-retired-alias.test.ts
+test/pathological/c-23-override-and-doctor-fixes.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts
