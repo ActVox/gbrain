@@ -14,6 +14,7 @@
  * page_versions), writes both copies.
  * Fails when: the save imports and calls writePageThrough with no check (the
  * pre-fix path), overwriting the user's edit.
+ * The content carries `source_kind` in its frontmatter as the CLI writes it.
  * Seams: an engine proxy whose first transaction (the import's) lands the
  * concurrent edit. PGLite always, Postgres when DATABASE_URL is set.
  */
@@ -34,7 +35,7 @@ import { expectUnitNotAborted, pathologicalArms } from './harness.ts';
 const SLUG = 'wiki/ideas/2026-10-18-lsd-why-acme-example-nonce01';
 const FILE_EDIT = 'FILE-ONLY-EDIT-MARKER: notes added in the editor, not yet synced.';
 const LATE_EDIT = 'CONCURRENT-EDIT-MARKER: saved while the idea was being saved.';
-const idea = (text: string) => serializeMarkdown({ mode: 'lsd', question: 'why acme-example' }, `# LSD: why acme-example\n\n${text}`, '',
+const idea = (text: string) => serializeMarkdown({ mode: 'lsd', question: 'why acme-example', source_kind: 'lsd' }, `# LSD: why acme-example\n\n${text}`, '',
   { type: 'note', title: 'LSD: why acme-example', tags: [] });
 
 interface Brain {

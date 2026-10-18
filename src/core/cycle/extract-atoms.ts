@@ -67,7 +67,7 @@ import type { ProgressReporter } from '../progress.ts';
 import { chat as gatewayChat, withBudgetTracker, isAvailable } from '../ai/gateway.ts';
 import { createGlobalLlmHaltTracker, haltedClassOf, providerContentBlockReason, type GlobalLlmErrorClass } from '../ai/errors.ts';
 import { importFromContent } from '../import-file.ts';
-import { derivedWriteThrough } from './derived-write-through.ts';
+import { derivedWriteThrough, reportFileHolds } from './derived-write-through.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { DEFAULT_EXTRACT_MAX_INPUT_CHARS, extractAtomsInput, inputTruncatedLine, recordPartialDisposition, releasePartialDispositions, resolveExtractAtomsInputCap, stampTranscriptTombstone, type ExtractAtomsInput, type ExtractAtomsItem } from './extract-atoms-input.ts';
 import { commitExtractionPlan, readPageWatermark } from '../extraction-watermark.ts';
@@ -862,16 +862,13 @@ export async function runPhaseExtractAtoms(
 
   // Phase-level no-op: nothing to extract today.
   if (work.length === 0 && transcripts.length === 0 && pages.length === 0) {
-    const held = atomFiles?.held ?? [];
-    return {
+    return reportFileHolds({
       phase: 'extract_atoms',
-      status: held.length > 0 ? 'warn' : 'skipped',
+      status: 'skipped',
       duration_ms: 0,
-      summary: 'extract_atoms: no transcripts or pages to process'
-        + (held.length > 0 ? ` (${held.length} atom file(s) left as they are: file_database_drift)` : ''),
+      summary: 'extract_atoms: no transcripts or pages to process',
       details: {
         reason: 'no_work',
-        ...(held.length > 0 ? { file_holds: held } : {}),
         source_id: sourceId,
         atoms_extracted: 0,
         transcripts_processed: 0,
@@ -885,7 +882,7 @@ export async function runPhaseExtractAtoms(
         budget_usd: DEFAULT_BUDGET_USD,
         dry_run: opts.dryRun ?? false,
       },
-    };
+    }, atomFiles?.held, 'atom');
   }
 
   // 4. Per work-item: extract atoms via the configured extract_atoms model
@@ -1411,13 +1408,13 @@ export async function runPhaseExtractAtoms(
     });
   }
 
-  return {
+  return reportFileHolds({
     phase: 'extract_atoms',
     // A phase that skipped every work item and produced nothing did not
     // succeed, even though skips are not failures and leave failures[] empty.
     // Reporting 'ok' there hides a total no-op behind a green status.
     status:
-      failures.length > 0 || (atomFiles?.held.length ?? 0) > 0 ||
+      failures.length > 0 ||
       (work.length > 0 &&
         totalAtomsExtracted === 0 &&
         transcriptsSkipped + pagesSkipped === work.length)
@@ -1432,11 +1429,9 @@ export async function runPhaseExtractAtoms(
       (transcriptsSkipped + pagesSkipped > 0
         ? ` (${transcriptsSkipped + pagesSkipped} budget-skipped)`
         : '') +
-      (inputTruncated > 0 ? ` (${inputTruncated} input-truncated: the model did not read the tail)` : '') +
-      ((atomFiles?.held.length ?? 0) > 0 ? ` (${atomFiles!.held.length} atom file(s) left as they are: file_database_drift)` : ''),
+      (inputTruncated > 0 ? ` (${inputTruncated} input-truncated: the model did not read the tail)` : ''),
     details: {
       atoms_extracted: totalAtomsExtracted,
-      ...((atomFiles?.held.length ?? 0) > 0 ? { file_holds: atomFiles!.held } : {}),
       transcripts_processed: transcriptsProcessed,
       transcripts_total: transcripts.length,
       transcripts_skipped_budget: transcriptsSkipped,
@@ -1460,7 +1455,7 @@ export async function runPhaseExtractAtoms(
       source_id: sourceId,
       dry_run: opts.dryRun ?? false,
     },
-  };
+  }, atomFiles?.held, 'atom');
 }
 
 /**

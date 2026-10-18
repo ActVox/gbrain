@@ -19,7 +19,7 @@ import { withCoordinatedWrite } from '../persistence/context.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { acquirePageLock } from '../page-lock.ts';
 import { derivedFileTarget, writeDerivedPageThrough } from './derived-write-through.ts';
-import { fileDatabaseDriftHold, replaceableFile } from '../facts/file-body-guard.ts';
+import { fileDatabaseDriftToken, replaceableFile } from '../facts/file-body-guard.ts';
 import { declareDerivation, deriveTrust, lowerDerivedPage } from '../trust/taint.ts';
 
 /** #5575 I2: the narrative carries the tier of the member atoms its prompt was built from (capped at agent_written). */
@@ -208,7 +208,7 @@ export async function publishClassicConcept(engine: BrainEngine, slug: string, s
     const resolved = await derivedFileTarget(engine, slug, sourceId);
     const file = resolved.ok ? await replaceableFile(engine, sourceId, slug, resolved.target.filePath) : null;
     if (file && !file.ok) {
-      throw Object.assign(new Error(fileDatabaseDriftHold(slug, sourceId, 'the concept was not published')), { code: 'revision_conflict' });
+      throw Object.assign(new Error(fileDatabaseDriftToken(slug, sourceId, 'before', 'the concept was not published')), { code: 'revision_conflict' });
     }
     const markdown = page
       ? composeConceptRepublication(page, snapshot!.tags, synthesized, narrative)

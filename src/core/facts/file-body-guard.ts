@@ -91,7 +91,8 @@ function fileHeldBy(fileBytes: string, slug: string, state: StoredState): boolea
   if (JSON.stringify([...new Set(parsed.tags)].sort()) !== JSON.stringify([...new Set(storedTags)].sort())) return false;
   const file = contentHashFrontmatterAndTags({ frontmatter: parsed.frontmatter });
   const stored = contentHashFrontmatterAndTags({ frontmatter: state.frontmatter ?? {} });
-  return Object.entries(file.frontmatter).every(([key, value]) => stableJson(value) === stableJson(stored.frontmatter[key]));
+  return Object.entries(file.frontmatter).every(([key, value]) =>
+    stored.frontmatter[key] !== undefined && stableJson(value) === stableJson(stored.frontmatter[key]));
 }
 
 /**
@@ -117,14 +118,4 @@ export async function replaceableFile(engine: BrainEngine, sourceId: string, slu
        WHERE p.source_id = $1 AND p.slug = $2 AND v.compiled_truth IS NOT NULL ORDER BY v.id DESC LIMIT ${HISTORY_ROWS})`,
     [sourceId, slug]);
   return states.some(state => fileHeldBy(bytes, slug, state)) ? { ok: true, expectedFileBytes: bytes } : { ok: false };
-}
-
-/**
- * #6982: the report for a page whose checkout file holds content the database lacks (a hand edit sync has not imported,
- * or an unindexed file at the page's path), so the file was left as it is; `outcome` says what the caller did not do.
- */
-export function fileDatabaseDriftHold(slug: string, sourceId: string, outcome: string): string {
-  return `${slug} (file_database_drift: the checkout file holds content the database does not, so it was left as it is and ${outcome}. `
-    + `If the file holds the newer edit, gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
-    + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
 }

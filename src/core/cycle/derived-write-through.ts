@@ -23,10 +23,11 @@
 import { execFileSync } from '../spawn.ts';
 import { relative } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
+import type { PhaseResult } from '../cycle.ts';
 import { isDbOnly, loadStorageConfig } from '../storage-config.ts';
 import { deletePageThrough, isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough, type PageWriteTarget } from '../write-through.ts';
 import { gitChildEnv } from '../git-env.ts';
-import { fileDatabaseDriftHold, replaceableFile } from '../facts/file-body-guard.ts';
+import { fileDatabaseDriftToken, replaceableFile } from '../facts/file-body-guard.ts';
 
 export const DERIVED_WRITE_THROUGH_KEYS = {
   extract_atoms: 'cycle.extract_atoms.write_through',
@@ -108,6 +109,13 @@ async function deleteDerivedPageThrough(engine: BrainEngine, slug: string, sourc
   return deletePageThrough(engine, slug, { sourceId, target: resolved.target, expectedFileBytes: file.expectedFileBytes });
 }
 
+/** `result` with the hook's held pages reported: `details.file_holds`, a `warn` status and a summary note. */
+export function reportFileHolds(result: PhaseResult, held: readonly string[] | undefined, noun: string): PhaseResult {
+  if (!held?.length) return result;
+  return { ...result, status: result.status === 'fail' ? 'fail' : 'warn', details: { ...result.details, file_holds: [...held] },
+    summary: `${result.summary} (${held.length} ${noun} file(s) left as they are: file_database_drift)` };
+}
+
 /** The phase's write-through hook: `write` publishes pages and removes retired ones' files; `held` reports each page left alone. */
 export interface DerivedWriteThrough {
   write(slugs: readonly string[], retired?: readonly string[]): Promise<void>;
@@ -132,12 +140,12 @@ export async function derivedWriteThrough(
   const write = async (slugs: readonly string[], retired: readonly string[] = []) => {
     for (const slug of slugs) {
       if (kept((await writeDerivedPageThrough(engine, slug, sourceId)).skipped)) {
-        held.push(fileDatabaseDriftHold(slug, sourceId, 'the generated page was not written to it'));
+        held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the generated page was not written to its file'));
       }
     }
     for (const slug of retired) {
       if (kept((await deleteDerivedPageThrough(engine, slug, sourceId)).skipped)) {
-        held.push(fileDatabaseDriftHold(slug, sourceId, 'the retired page\'s file was not removed'));
+        held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the retired page\'s file was not removed'));
       }
     }
   };

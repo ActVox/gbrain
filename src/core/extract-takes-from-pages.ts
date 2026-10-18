@@ -419,7 +419,8 @@ export async function extractTakesFromPages(
       }
     } catch (err) {
       const code = (err as { code?: string; writeError?: string })?.code ?? (err as { writeError?: string })?.writeError;
-      if (fromDatabase && (code === 'revision_conflict' || code === 'page_identity_changed' || code === 'source_changed')) {
+      if (fromDatabase && (code === 'revision_conflict' || code === 'page_identity_changed' || code === 'source_changed'
+        || (!managedJournalWrites && code === 'owner_unavailable'))) {
         skipPage(page.slug, code);
         continue;
       }
