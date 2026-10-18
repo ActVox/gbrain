@@ -1003,6 +1003,7 @@ commands a person uses to decide it:
 | `twin_slug_path_occupied` | A file sits at the twin's own slug path (`<twin-slug>.md`), which the twin's purge would compare or remove. Rename or remove it, sync, preview again. |
 | `twin_has_withdrawals` | Claims were forgotten on the twin. Forget the same claims on the legacy page first, or retire the twin by hand. |
 | `legacy_records_file_uri` | The legacy page records a file URI of its own; reconcile it first. |
+| `twin_evidence_conflicts` | The twin holds a link, relationship date, timeline entry or raw data row that the legacy page holds differently, so the merge would lose it. Make them agree, or retire the twin by hand, then preview again. |
 
 The apply needs the user's consent: without `--yes` a terminal asks, and a
 non-interactive run exits 3 (`ask_user`) with the consent payload and changes
@@ -1011,10 +1012,12 @@ the same in one transaction):
 
 1. The legacy page records the file. It keeps its id, slug, links, timeline,
    versions and aliases.
-2. The twin's links (both directions, without duplicating the legacy page's
-   own; links between the two pages stay on the twin), timeline rows, slug
-   aliases, facts other pages assert about it, raw data and attachments move
-   to the legacy page. The twin's slug becomes an alias of the legacy page, so
+2. The twin merge `gbrain repair origin-twins` uses (#6948) moves the twin's
+   links in every role and their dated transitions (links between the two
+   pages stay on the twin), timeline rows, raw data, attachments, user-added
+   tags, slug aliases and facts other pages assert about it to the legacy page;
+   an exact duplicate of a legacy row is dropped, and a differing one makes the
+   pair a `twin_evidence_conflicts` decision. The twin's slug becomes an alias of the legacy page, so
    `[[notes/foo-bar]]` and `gbrain get notes/foo-bar` keep resolving.
 3. The twin's sync import record moves to the legacy page, so the next
    `gbrain sync --source <id>` finds the file and the page unchanged: no new
@@ -1026,7 +1029,7 @@ the same in one transaction):
 
 The legacy page keeps its slug: that is also the slug sync gives a never-forked
 file whose legacy page it takes over (#6727), and the folded slug resolves to it
-through the alias. The twin's tags, chunks, versions and the facts and takes its
+through the alias. The twin's import-owned tags, chunks, versions and the facts and takes its
 own body projects stay with the twin (the legacy page has the same ones, from
 the same content). Restoring the twin brings back a page that records no file;
 what moved stays on the legacy page.

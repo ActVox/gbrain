@@ -129,7 +129,7 @@ export interface ShadowPath { path: string; slug: string | null; pageId: number 
   /** A page-less path unchanged since the baseline whose page a committed request deleted: the bootstrap writes it a `legacy` marker (`legacy_pageless`). */
   legacyPageless?: true;
   /** #6517 (`selectOriginClaimant`): several live pages, or no live page and several tombstones, record this origin. */
-  ambiguousOrigin?: { kind: 'several_live' | 'several_tombstones'; slugs: string[] } }
+  ambiguousOrigin?: { kind: 'several_live' | 'several_tombstones'; slugs: string[]; ids: number[] } }
 
 /**
  * A `matched` path whose state is the converged one (a live page whose record proves the level's blob and revision, nothing
@@ -780,7 +780,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const revision = at === undefined ? null : pages.revision[at] ?? null;
     const claimed = claimants.get(path);
     const { ambiguous } = claimed ? selectOriginClaimant(claimed.map(page => ({ deleted_at: pages.deleted(page) ? true : null }))) : { ambiguous: null };
-    const ambiguousOrigin = ambiguous ? { kind: ambiguous, slugs: claimed!.filter(page => ambiguous === 'several_tombstones' || !pages.deleted(page)).map(page => pages.slug[page]!) } : undefined;
+    const named = ambiguous ? claimed!.filter(page => ambiguous === 'several_tombstones' || !pages.deleted(page)) : [], ambiguousOrigin = ambiguous ? { kind: ambiguous, slugs: named.map(page => pages.slug[page]!), ids: named.map(page => Number(pages.id[page])) } : undefined;
     if (mode === 'committed' && tree.has(path) && (!settledBeforeDirtiness.has(result.cls) || staged)) { candidates.push(path); candidateAt.push(paths.length); }
     else {
       // The row's fields the level keeps are copied onto the entry; only a candidate's row is read again (its dirtiness re-classifies it).
