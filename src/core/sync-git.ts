@@ -627,6 +627,7 @@ export function isWithinRoot(
  */
 export function isPathSafe(filePath: string, gitRoot: string): boolean {
   try {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- this is the containment guard: join normalizes the realpath'd parent plus basename, and isWithinRoot below rejects any result outside gitRoot
     const real = lstatSync(filePath).isSymbolicLink() ? realpathSync(filePath) : join(realpathSync(dirname(filePath)), basename(filePath));
     return isWithinRoot(real, realpathSync(gitRoot));
   } catch {
