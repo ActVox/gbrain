@@ -8,8 +8,9 @@
  * Protects:
  * - an alias bomb whose provenance says a validating older gbrain imported those exact bytes, re-screened on a full
  *   listing: held `frontmatter_alias_limit` alone, the other files import, the run is not stopped, nothing is expanded;
- * - an ordinary `invalid_frontmatter` refusal (no marker) under the same provenance still stops the run with
- *   `sync_parser_regression` under the default policy.
+ * - regression guard: an ordinary `invalid_frontmatter` refusal (no marker, still refused when screened without a schema
+ *   pack) under a provenance from a different gbrain version still stops the run with `sync_parser_regression` under the
+ *   default policy.
  *
  * Six-level bomb only (~530k nodes once expanded, refused before anything walks it); never build a nine-level value.
  * PGLite here; Postgres through test/e2e/sync-alias-limit-hold-6712-postgres.test.ts.
@@ -19,6 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { screenImportContent } from '../src/core/import-screen.ts';
 import { readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
@@ -69,7 +71,9 @@ for (const backend of testBackends()) {
       expect(await largestFrontmatter(engine)).toBeLessThan(10_000);
     }), 180_000);
 
-    test('an ordinary invalid_frontmatter refusal of validated bytes (no marker) still stops the run with sync_parser_regression', () => brain(async ({ engine, root }) => {
+    test('regression guard (a different version, no marker, refused without the pack): validated bytes refused invalid_frontmatter still stop the run with sync_parser_regression', () => brain(async ({ engine, root }) => {
+      const bare = screenImportContent({ content: FOLDED, path: 'notes/target.md' });
+      expect(bare.status === 'refused' ? { code: bare.refusal.code, intended: bare.refusal.intended ?? null } : bare).toEqual({ code: 'invalid_frontmatter', intended: null });
       expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
       writeFileSync(join(root, 'notes/target.md'), FOLDED); commit(root, 'fold target');
       await provenanceClaims(engine, 'notes/target', FOLDED);
