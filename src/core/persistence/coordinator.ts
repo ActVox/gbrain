@@ -587,6 +587,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       // Even a rejected prepare can retain a journal record; do not leave that
       // record unaccounted or let a sibling publication bypass its recovery.
       const interrupted = transactionBodyCompleted ? null : await chargedInterruption(engine, row, error);
+      if (!transactionBodyCompleted && writeInterruption(error)) await faultPoint('persistence:recovery_interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
       const failure = interrupted || (!transactionBodyCompleted && !mayReprepare(row, requestError(error)) && !transientDatabaseFailure(error))
         ? withAttempt(interrupted ?? requestError(error), published ? 'after_file_publication' : 'publication') : undefined;
       try { await markRecovering(engine, row, failure ? 'publication_failed' : published ? 'commit_outcome_uncertain' : 'publication_not_started', failure); }

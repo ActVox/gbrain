@@ -20,7 +20,10 @@
  *    `gbrain sources writer status` as its fix, and `gbrain sources retry-held` re-admits it.
  *    The charge is atomic with the claim's release or failure: a crash right after it (the
  *    `persistence:interruption_charged` seam) leaves no claim for the expired-owner sweep to charge again, so the one
- *    promised re-preparation survives. A group's shared read (preparationReads) the database cancelled is no member's own
+ *    promised re-preparation survives. On the recovery route the charge commits before the request is marked
+ *    recovering; a crash between them (the `persistence:recovery_interruption_charged` seam) leaves a running request
+ *    that holds its recovery record, which neither expired-owner sweep takes (`recovery IS NULL`), so the owner's
+ *    recovery pass finishes it with the one charge. A group's shared read (preparationReads) the database cancelled is no member's own
  *    statement: no member is charged, and a bounded member never reads it as its own deadline.
  * 4. Semantic injection: installFaultHook on the publication's before_commit seam (inside the publication transaction),
  *    throwing an error carrying the SQLSTATE, for every publication of the claims the test names. Counts claims, never
@@ -294,6 +297,37 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
       expect(readFileSync(path).equals(bytes)).toBe(true);
       expect(await engine.readPageSnapshot(slug, { sourceId })).toEqual(before);
       expect(Number((await engine.executeRaw<{ n: string }>('SELECT count(*)::text AS n FROM persistence_requests WHERE recovery IS NOT NULL'))[0]!.n)).toBe(0);
+    }, 120_000);
+
+    test('a crash between the recovery route\'s charge and its recovering mark costs exactly one attempt: the sweep does not charge it again', async () => {
+      const slug = `wt/crash-${++n}`;
+      expect(await call({ slug, content: page(`Prior ${n}`), request_id: randomUUID() }, sourceId)).toMatchObject({ state: 'committed', write_through: { written: true } });
+      const path = join(brainDir, `${slug}.md`);
+      const before = await engine.readPageSnapshot(slug, { sourceId });
+      const requestId = randomUUID();
+      const claims = { n: 0, attempts: [] as number[] };
+      let crashed: Row | null = null;
+      installFaultHook(async (point, detail) => {
+        if (detail.requestId !== requestId) return;
+        if (point === 'consumer:preparing') {
+          claims.n++;
+          claims.attempts.push((await row(requestId)).preparation_attempts);
+        }
+        if (point === 'publication:before_commit' && claims.n === 1) throw interruption('57014');
+        // The owner dies here: the charge has committed, the request is not marked recovering, and its claim lapses.
+        if (point === 'persistence:recovery_interruption_charged' && !crashed) { crashed = await row(requestId); throw new Error('owner died (probe)'); }
+      });
+      const pending = call({ slug, content: page(`Next ${n}`), request_id: requestId, expected_revision: before!.revision }, sourceId).catch(error => error as { code?: string });
+      while (!crashed) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(crashed).toMatchObject({ state: 'running', preparation_attempts: 1, has_recovery: true });
+      await engine.executeRaw("UPDATE persistence_requests SET claim_expires_at=now()-interval '1 second' WHERE request_id=$1::uuid AND state='running'", [requestId]);
+      expect(await pending).toMatchObject({ state: 'committed' });
+      expect(claims.n).toBe(2);
+      expect(claims.attempts).toEqual([0, 1]);
+      // The receipt is returned at commit; the owner clears the recovery record right after it.
+      for (let i = 0; i < 100 && (await row(requestId)).has_recovery; i++) await new Promise(resolve => setTimeout(resolve, 50));
+      expect(await row(requestId)).toMatchObject({ state: 'committed', preparation_attempts: 0, has_recovery: false });
+      expect(readFileSync(path, 'utf8')).toContain(`Next ${n}`);
     }, 120_000);
   });
 });

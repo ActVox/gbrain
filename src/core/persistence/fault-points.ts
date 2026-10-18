@@ -22,6 +22,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'consumer:preparing' | 'lane:applied'
   // Flip lane C: after a statement-cancelled (57014) write's attempt is charged, before its claim is released or finished.
   | 'persistence:interruption_charged'
+  // Flip lane C: on publishMutation's recovery route, after a statement-cancelled (57014) write's attempt is charged, before the request is marked recovering.
+  | 'persistence:recovery_interruption_charged'
   // Before each claim attempt of the consumer, a FIFO claim or a lane head's: a stalling hook keeps this process from starting
   // another request or lane group meanwhile, while the requests it already holds run on.
   | 'consumer:claiming'
