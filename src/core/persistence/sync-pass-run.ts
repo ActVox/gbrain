@@ -32,7 +32,8 @@ import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP
   type PassKind, type PassOutcome, type SyncSelection } from './sync-pass-row.ts';
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { faultPoint } from './fault-points.ts';
-import { passIdleProbe, readShadowLevel, workingIdleChange, type PassLevelCache, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
+import { passFoldBase, passIdleProbe, readShadowLevel, workingIdleChange, type PassLevelCache, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
+import type { PassFold } from './sync-pass-fold.ts';
 import { loopYield } from './sync-yield.ts';
 import { recallWorkingStatCache, rememberWorkingStatCache, SyncTreeReadIncomplete } from './sync-git-stream.ts';
 import { syncPassKind } from './sync-classify.ts';
@@ -512,6 +513,88 @@ function mismatchStreaks(before: ManagedSyncPassValue['obligations']['mismatch']
 }
 
 /** The pass of one managed, non-company source (module header). */
+/** The refused request a blocked pass stopped on, when it replays unchanged under the fail policy (#6712 PR 3, L7); else null. */
+async function unchangedBlockedRefusal(engine: BrainEngine, input: { sourceId: string; incarnation: string; root: string; head: string; blocked: { request_id: string; pass_id: string } }):
+  Promise<{ row: WriteRequest; intent: SyncIntent } | null> {
+  if ((await readSyncHoldPolicy(engine)).mode !== 'fail') return null;
+  const [found] = await engine.executeRaw<{ id: string }>('SELECT id FROM persistence_requests WHERE source_id=$1 AND request_id=$2', [input.sourceId, input.blocked.request_id]);
+  const row = found ? await getWriteRequestById(engine, found.id) : null;
+  const intent = row?.intent as unknown as SyncIntent | null | undefined;
+  if (!row || !intent || !['failed', 'conflict', 'cancelled'].includes(row.state)) return null;
+  const recorded = await recordedStop(engine, passFingerprint(input.sourceId, input.incarnation), input.blocked.pass_id);
+  return recorded && replaysUnchangedRefusal(row, recorded, { root: input.root, intent, target: intent.target ?? '', head: () => input.head }) ? { row, intent } : null;
+}
+
+/** Adds each present count of `add` to `counts`. */
+function addCounts(counts: Record<string, number>, add: Record<string, number | undefined>): void {
+  for (const [key, value] of Object.entries(add)) counts[key] = (counts[key] ?? 0) + (value ?? 0);
+}
+
+/** The pass stamp (design v3.2 §3.3): what its converged checkpoint publishes; closing the open episode counts what it released. */
+async function passStampFor(engine: BrainEngine, input: { context: ManagedSyncContext; head: string; slugMode: Cursor['slugMode']; episode: PassEpisode | undefined; selection: SyncSelection;
+  configured: boolean; mode: SyncSelection['mode']; leaseToken: string; retry: string[]; level: ShadowLevel; selectionFp: string; parserFp: string; pack: string | null; full: boolean;
+  counts: { added: number; modified: number; deleted: number; renamed: number; episodeReleased: number }; extract: boolean; since: string; rescreen: boolean }): Promise<PassStamp> {
+  const { context, episode, configured, counts } = input;
+  // Design §6: an open episode closes by inclusion (a) or at the configured selection (b); chunker_version only by (b) over U_config.
+  const closure = episode ? await passEpisodeClosure({ gitRoot: context.gitRoot, root: context.root, head: input.head, slugMode: input.slugMode, episode, pass: input.selection, configured,
+    configuredSelection: passSelection(await selectionPatterns(engine, { sourceId: context.sourceId } as SyncOpts), { sourceId: context.sourceId } as SyncOpts, context, input.mode) }) : null;
+  const closesEpisode = closure?.closes === true;
+  if (closure?.released) counts.episodeReleased = closure.released;
+  return { leaseToken: input.leaseToken, incarnation: context.incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
+    closesEpisode, retryTaken: [...input.retry], releasedHolds: input.level.releasableHolds, selectionFp: input.selectionFp, parserFp: input.parserFp, pack: input.pack, full: input.full,
+    changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: input.extract, since: input.since, ...(input.rescreen ? { rescreen: true as const } : {}) };
+}
+
+/**
+ * #6926, folded into 4b: the round's fold (sync-pass-fold.ts), when its last import may carry the stamp; null keeps the stamp
+ * path. A committed-mode local round folds only when its imports were its only unsettled paths: no delete, rename,
+ * collision, in-flight write, owed or mismatched path, legacy waiver or retry row, no hold at S1 and none on an import, no
+ * marker or spelling on one, and a marked `I⋈P` to prove against.
+ */
+function passFold(level: ShadowLevel, cache: PassLevelCache, round: { imports: ShadowPath[]; entries: PassEntry[]; unsettled: number; remote: boolean; episodeFullId: string | null }): PassFold | null {
+  const base = !round.remote && level.mode === 'committed' && !round.unsettled ? passFoldBase(cache) : null;
+  if (!base || base.mark.holds.length || !round.imports.length || round.entries.length !== round.imports.length || round.entries.some(entry => entry.action !== 'import' || entry.renameFrom)) return null;
+  if (round.imports.some(entry => entry.state.hold || entry.state.marker || entry.state.spelling)) return null;
+  return { base: base.mark, pages: base.pages, maxId: base.maxId, imports: round.imports.length, newPages: round.imports.filter(entry => entry.pageId === null).length,
+    newRecords: round.imports.filter(entry => entry.state.record === null).length, episodeFullId: round.episodeFullId, scope: level.scope };
+}
+
+/** After a folded stamp: the pass row's obligations as the stamp left them (converged, the closed episode and the resets). */
+async function adoptStampedObligations(engine: BrainEngine, value: ManagedSyncPassValue): Promise<void> {
+  const stamped = (await readPassRow(engine, value.source_id, value.incarnation))?.value.obligations;
+  if (!stamped) return;
+  for (const key of Object.keys(value.obligations)) if (!(key in stamped)) delete (value.obligations as Record<string, unknown>)[key];
+  Object.assign(value.obligations, stamped);
+}
+
+/** Pins the pass row under the drain lease; true when a caller abort stopped the pin (a job abort or a lost lease throws, leaving no row). */
+async function pinPassRow(engine: BrainEngine, value: ManagedSyncPassValue, input: SyncPassInput): Promise<boolean> {
+  try {
+    await engine.transaction(async tx => {
+      // The lease check and the clock read share a round trip: a lost lease aborts the transaction before the row is written.
+      [, value.telemetry.started_at] = await Promise.all([assertDrainLease(tx, input.context.sourceId), databaseNow(tx)]);
+      await writePassRow(tx, value, { pin: true });
+      // An interrupt during the pin rolls the pin back with it: no `open` row is left for a pass that never ran.
+      input.assertActive();
+    });
+    return false;
+  } catch (error) {
+    assertSyncDispatchActive();
+    if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') return true;
+    throw error;
+  }
+}
+
+/** Design §7 (v3 §7): whether this batch crossed the approved envelope, which defers embeddings for the rest of the pass. */
+async function envelopeCrossed(engine: BrainEngine, value: ManagedSyncPassValue, costScope: string, processingOptions: SyncProcessingOptions): Promise<boolean> {
+  const envelope = value.obligations.cost;
+  if (!envelope) return false;
+  envelope.reserved_usd = (await readReservedUsd(engine, value.source_id, value.incarnation, costScope)).usd;
+  if (processingOptions.noEmbed || envelope.approved_usd === null || envelope.reserved_usd <= 0 || envelope.reserved_usd < envelope.approved_usd) return false;
+  processingOptions.noEmbed = true;
+  return true;
+}
+
 export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Promise<SyncResult> {
   const { opts, context, authority, assertActive } = input;
   const { sourceId, incarnation } = context;
@@ -559,6 +642,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const rememberLevel = () => { if (lastLevel?.workingCache) rememberWorkingStatCache(cacheKey, lastLevel.workingCache); };
   const applied = newPassApplyState();
   const readmitted = new Set<string>();
+  // #6926, folded into 4b: the head a round's last import stamped, and what the pass had done by then.
+  let folded: { head: string; done: string } | null = null, batchFolded = false;
+  const doneKey = () => JSON.stringify([counts, passApplyCounts(applied)]);
+  const stampFor = (level: ShadowLevel) => passStampFor(engine, { context, head, slugMode: levelSlugMode, episode, selection, configured, mode, leaseToken: lease.token, retry, level, selectionFp, parserFp,
+    pack, full: kind === 'full', counts, extract: !processingOptions.noExtract, since: value.telemetry.started_at, rescreen: legacyWaived.size > 0 });
 
   const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
     const ended = outcome !== 'open';
@@ -579,26 +667,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     ...(sizeStates ? { size_states: sizeStates } : {}), ...(keptCount() ? { working_tree_kept: keptCount() } : {}),
     pass: { pass_id: passId, kind, round: value.telemetry.round, outcome: value.telemetry.outcome, stop_reason: value.telemetry.stop_reason, candidates: candidatesFirst,
       settled: S.size + yieldSettled, remaining: value.telemetry.remaining, not_converged_streak: value.obligations.not_converged_streak } });
-  try {
-    await engine.transaction(async tx => {
-      // The lease check and the clock read share a round trip: a lost lease aborts the transaction before the row is written.
-      [, value.telemetry.started_at] = await Promise.all([assertDrainLease(tx, sourceId), databaseNow(tx)]);
-      await writePassRow(tx, value, { pin: true });
-      // An interrupt during the pin rolls the pin back with it: no `open` row is left for a pass that never ran.
-      assertActive();
-    });
-  } catch (error) {
-    // A caller abort records the stop on the pass row (the pin it rolled back is replaced); a job abort, a lost lease or a
-    // released context leaves no row.
-    assertSyncDispatchActive();
-    if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') { await save('resumable', 'timeout', true).catch(() => undefined); return result('partial', 'timeout'); }
-    throw error;
-  }
+  // A caller abort records the stop on the pass row (the pin it rolled back is replaced).
+  if (await pinPassRow(engine, value, input)) { await save('resumable', 'timeout', true).catch(() => undefined); return result('partial', 'timeout'); }
   assertActive();
   registerPassCost(passId, { sourceId, incarnation, scope: costScope, pricePerMTok: currentEmbeddingPricePerMTok() });
   /** The batch cursor sync-run.ts drains: the discovery shape with no cursor row behind it. */
   const batchCursor = (entries: PassEntry[], stamp?: PassStamp): Cursor => ({ binding: { ...context.binding, owner_epoch: String(context.binding.owner_epoch), topology_generation: String(context.binding.topology_generation) },
-    root: context.root, gitRoot: context.gitRoot, sourceId, incarnation, from: context.source.last_commit, target: head, entries, slugMode: levelSlugMode, discoveredAt: startedAt,
+    root: context.root, gitRoot: context.gitRoot, sourceId, incarnation, from: folded?.head ?? context.source.last_commit, target: head, entries, slugMode: levelSlugMode, discoveredAt: startedAt,
     runId: passId, passId, index: 0, authority, processingOptions, syncOptions: input.syncOptions, counts: { added: 0, modified: 0, deleted: 0, chunks: 0 },
     failureKey: passFingerprint(sourceId, incarnation), resumeArgs: passResumeArgs(sourceId, { value, updated_at: startedAt }), ...(episode?.full_id ? { fullEpisode: episode.full_id } : {}), ...(stamp ? { stamp } : {}) });
   let levelSlugMode: Cursor['slugMode'] = 'git-root';
@@ -610,9 +685,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     const drained = await input.drainBatch(key, batch, sliceBase);
     if ('entries' in drained) {
       const c = drained.counts;
-      Object.assign(counts, { added: counts.added + c.added, modified: counts.modified + c.modified, deleted: counts.deleted + c.deleted, renamed: counts.renamed + (c.renamed ?? 0),
-        chunks: counts.chunks + c.chunks, waivedImports: counts.waivedImports + (c.waived?.imports ?? 0), waivedDeletes: counts.waivedDeletes + (c.waived?.deletes ?? 0), held: counts.held + (c.held ?? 0),
-        skippedContextualMode: counts.skippedContextualMode + (c.skippedContextualMode ?? 0), skippedCanonicalBytes: counts.skippedCanonicalBytes + (c.skippedCanonicalBytes ?? 0) });
+      batchFolded = c.folded === true;
+      addCounts(counts, { added: c.added, modified: c.modified, deleted: c.deleted, renamed: c.renamed, chunks: c.chunks, waivedImports: c.waived?.imports, waivedDeletes: c.waived?.deletes,
+        held: c.held, skippedContextualMode: c.skippedContextualMode, skippedCanonicalBytes: c.skippedCanonicalBytes });
       for (const index of drained.passLegacyWaived ?? []) legacyWaived.add(settledKey(entries[index]!.path, entries[index]!.level));
       sliceBase.pages += drained.index;
       roundSettled += drained.index;
@@ -621,11 +696,17 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     }
     return drained;
   };
+  /** The pass ended on its stamp; a folded one (sync-pass-fold.ts) saves the round's telemetry beside the obligations it wrote. */
+  const synced = async (onFold: boolean): Promise<SyncResult> => {
+    if (onFold) await save('synced', configured ? null : 'selection_scoped');
+    rememberLevel();
+    await clearPassFailures(engine, sourceId, incarnation);
+    await finishPassApply(engine, sourceId, applied);
+    return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
+  };
   const stop = async (drained: SyncResult): Promise<SyncResult> => {
-    Object.assign(counts, { added: counts.added + drained.added, modified: counts.modified + drained.modified, deleted: counts.deleted + drained.deleted,
-      renamed: counts.renamed + drained.renamed, chunks: counts.chunks + drained.chunksCreated, waivedImports: counts.waivedImports + (drained.waived?.imports ?? 0),
-      waivedDeletes: counts.waivedDeletes + (drained.waived?.deletes ?? 0), skippedContextualMode: counts.skippedContextualMode + (drained.legacySkips?.contextualMode ?? 0),
-      skippedCanonicalBytes: counts.skippedCanonicalBytes + (drained.legacySkips?.canonicalBytes ?? 0) });
+    addCounts(counts, { added: drained.added, modified: drained.modified, deleted: drained.deleted, renamed: drained.renamed, chunks: drained.chunksCreated, waivedImports: drained.waived?.imports,
+      waivedDeletes: drained.waived?.deletes, skippedContextualMode: drained.legacySkips?.contextualMode, skippedCanonicalBytes: drained.legacySkips?.canonicalBytes });
     sliceBase.pages += drained.filesImported ?? 0;
     foldReport(drained.size_states);
     // A slice that stops mid-batch (a writer yield, a deadline, an abort) settled the entries its cursor passed: they count as
@@ -648,18 +729,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     // Under the hold policy the next pass re-admits it instead, and its refusal settles as a hold.
     const blocked = obligations.blocked;
     delete obligations.blocked;
-    if (blocked && (await readSyncHoldPolicy(engine)).mode === 'fail') {
-      const [row] = await engine.executeRaw<{ id: string }>('SELECT id FROM persistence_requests WHERE source_id=$1 AND request_id=$2', [sourceId, blocked.request_id]);
-      const failed = row ? await getWriteRequestById(engine, row.id) : null;
-      const intent = failed?.intent as unknown as SyncIntent | null | undefined;
-      const recorded = failed && intent && ['failed', 'conflict', 'cancelled'].includes(failed.state) ? await recordedStop(engine, passFingerprint(sourceId, incarnation), blocked.pass_id) : null;
-      assertActive();
-      if (failed && intent && recorded && replaysUnchangedRefusal(failed, recorded, { root: context.root, intent, target: intent.target ?? '', head: () => head })) {
-        obligations.blocked = blocked;
-        const replay: Cursor = { ...batchCursor([]), runId: blocked.pass_id, pending: { requestId: failed.request_id, slug: failed.slug, pageId: failed.page_id, intent } };
-        const drained = await input.drainBatch(`${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`, replay, sliceBase);
-        if (!('entries' in drained)) return await stop(drained);
-      }
+    const failed = blocked ? await unchangedBlockedRefusal(engine, { sourceId, incarnation, root: context.root, head, blocked }) : null;
+    assertActive();
+    if (failed) {
+      obligations.blocked = blocked;
+      const replay: Cursor = { ...batchCursor([]), runId: blocked!.pass_id, pending: { requestId: failed.row.request_id, slug: failed.row.slug, pageId: failed.row.page_id, intent: failed.intent } };
+      const drained = await input.drainBatch(`${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`, replay, sliceBase);
+      if (!('entries' in drained)) return await stop(drained);
     }
     // The pass's level cache: its next round at the same commit reuses the tree; it dies with the pass.
     const levelCache: PassLevelCache = {};
@@ -673,7 +749,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
           slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } });
-      await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null } : undefined });
+      await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null, reused: level.reused ?? 0 } : undefined });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is
@@ -744,23 +820,14 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
           await finishPassApply(engine, sourceId, applied);
           return { ...result('up_to_date'), fromCommit: remote ? null : head };
         }
-        // Design §6: an open episode closes by inclusion (a) or at the configured selection (b); chunker_version only by (b) over U_config.
-        const closure = episode ? await passEpisodeClosure({ gitRoot: context.gitRoot, root: context.root, head, slugMode: levelSlugMode, episode, pass: selection, configured,
-          configuredSelection: passSelection(await selectionPatterns(engine, { sourceId } as SyncOpts), { sourceId } as SyncOpts, context, mode) }) : null;
-        const closesEpisode = closure?.closes === true;
-        if (closure?.released) counts.episodeReleased = closure.released;
-        const stamp: PassStamp = { leaseToken: lease.token, incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
-          closesEpisode, retryTaken: [...retry], releasedHolds: level.releasableHolds, selectionFp, parserFp, pack, full: kind === 'full',
-          changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: !processingOptions.noExtract, since: value.telemetry.started_at,
-          ...(legacyWaived.size ? { rescreen: true as const } : {}) };
+        // #6926: a round after a folded stamp that confirmed the level and did nothing more ends on that stamp.
+        if (folded?.head === head && level.confirm?.taken && !applied.recorded.size && folded.done === doneKey()) return synced(true);
+        const stamp = await stampFor(level);
         await save('open', null);
         const stopped = await drain([], stamp);
         if (stopped) return stop(stopped);
         value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: configured ? null : 'selection_scoped', remaining: 0 };
-        rememberLevel();
-        await clearPassFailures(engine, sourceId, incarnation);
-        await finishPassApply(engine, sourceId, applied);
-        return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
+        return synced(false);
       }
       const built = await batchEntries(engine, level, deletes, imports).catch(async (error: unknown) => {
         if ((error as { code?: string }).code === 'page_identity_changed') await save('blocked', 'page_identity_changed');
@@ -774,17 +841,16 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (optOutEpisode && !value.obligations.episode && built.entries.length) value.obligations.episode = episode = optOutEpisode;
       // #6694: the mode this pass publishes pages under is recorded before the first of them, so a pin changed before the stamp refuses there.
       if (level.scope && built.entries.length && !value.obligations.slug_mode) { value.obligations.slug_mode = level.slugMode; await save('open', null); }
+      const fold = passFold(level, levelCache, { imports, entries: built.entries, unsettled: deletes.length + inFlight.length + owed.length + mismatch.length + legacyWaived.size + retry.length,
+        remote, episodeFullId: episode?.full_id ?? null });
       for (let i = 0; i < built.entries.length; i += PASS_BATCH_MAX) {
-        const chunk = built.entries.slice(i, i + PASS_BATCH_MAX);
-        const stopped = await drain(chunk);
+        const chunk = built.entries.slice(i, i + PASS_BATCH_MAX), last = !!fold && i + chunk.length >= built.entries.length;
+        // A folded stamp writes the pass row with the obligations as they stand when its import is frozen.
+        const stopped = await drain(chunk, last ? { ...await stampFor(level), fold: { ...fold, obligations: structuredClone(value.obligations) } } : undefined);
         if (stopped) return stop(stopped);
         value.telemetry.remaining = Math.max(0, built.entries.length - i - chunk.length) + inFlight.length + owed.length + mismatch.length;
-        // Design §7 (v3 §7): crossing the approved envelope defers embeddings for the rest of the pass.
-        const envelope = value.obligations.cost;
-        if (envelope) {
-          envelope.reserved_usd = (await readReservedUsd(engine, sourceId, incarnation, costScope)).usd;
-          if (!processingOptions.noEmbed && envelope.approved_usd !== null && envelope.reserved_usd > 0 && envelope.reserved_usd >= envelope.approved_usd) { processingOptions.noEmbed = true; counts.costDeferred = 1; }
-        }
+        if (await envelopeCrossed(engine, value, costScope, processingOptions)) counts.costDeferred = 1;
+        if (last && batchFolded) { await adoptStampedObligations(engine, value); folded = { head, done: doneKey() }; continue; } // the stamp wrote the pass row
         await save('open', null);
       }
       // Every candidate of the round settled: committed, waived, held, deferred to a hold, a collision, or (a rename's
@@ -804,7 +870,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   } catch (error) {
     assertSyncDispatchActive();
     if (error instanceof SyncAdmissionPaused) { await save('resumable', 'admission_paused').catch(() => undefined); return result('partial', 'admission_paused'); }
-    if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') { await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout'); }
+    if (input.signal?.aborted && error instanceof Error && error.name === 'AbortError') {
+      // A folded stamp with nothing since ended the pass: the abort stops nothing it owes.
+      if (folded?.done === doneKey()) return synced(true);
+      await save('resumable', 'timeout').catch(() => undefined); return result('partial', 'timeout');
+    }
     // A Git listing that did not finish cleanly classifies nothing (design v3.2 §9): the pass stops blocked, having written nothing for that round.
     if (error instanceof SyncTreeReadIncomplete) { await save('blocked', 'reconcile_read_incomplete').catch(() => undefined); return result('blocked_by_failures', 'reconcile_read_incomplete'); }
     throw error;

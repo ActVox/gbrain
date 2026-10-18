@@ -52,6 +52,7 @@ import { readPassRow, writePassRow, OPEN_AT_STAMP_CAP, type ManagedSyncPassValue
 import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
 import { syncLockId } from '../db-lock.ts';
 import { readConvergedWatermark } from './sync-pass-batch.ts';
+import { foldPassCheckpoint, type PassFold } from './sync-pass-fold.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
 import { addFencesNormalized, clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, type FencesTally, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
@@ -134,6 +135,8 @@ export interface PassStamp {
   since?: string;
   /** #5751: the pass settled paths only by a legacy kernel waiver (they record no import), so the next tick re-screens them: no idle. */
   rescreen?: true;
+  /** #6926, folded into 4b: the stamp rides the round's last import (sync-pass-fold.ts), with what its proof needs of the round. */
+  fold?: PassFold;
 }
 /**
  * #5984: the source-wide part of sync validation (managed mode, configured
@@ -509,8 +512,19 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
     `Sync request ${open} of ${row.source_id} is still open or needs recovery, so checkpoint request ${row.request_id} did not commit. Let it finish; do not resubmit it. `
       + `Then run: ${checkpointRetryCommand({ sourceId: row.source_id, processingOptions: p.processingOptions, syncOptions: p.syncOptions, repoPath: p.repoPath })}`,
     { fix: syncInspectFix(row, open, false) });
+  return publishPassStamp(tx, row, p, root, releaseHold, pass, { changed: stamp.changed });
+}
+
+/**
+ * The pass stamp's writes, under the checks its caller made: the checkpoint's (`applyPassCheckpoint`) or a folded
+ * checkpoint's inside the round's last import (sync-pass-fold.ts), which passes the tail's `changed` (that import counted)
+ * and the watermark and source scope it already read.
+ */
+export async function publishPassStamp(tx: BrainEngine, row: WriteRequest, p: SyncIntent, root: string, releaseHold: (tx: BrainEngine, path: string | null) => Promise<void>,
+  pass: { value: ManagedSyncPassValue }, read: { changed: number; watermark?: Awaited<ReturnType<typeof readConvergedWatermark>>; emptyScope?: boolean }): Promise<Record<string, unknown>> {
+  const stamp = p.stamp!;
   if (stamp.configured) {
-    const emptyScope = emptySyncScope(root, syncGitTopLevel(root, p.passId!));
+    const emptyScope = read.emptyScope ?? emptySyncScope(root, syncGitTopLevel(root, p.passId!));
     const changed = await tx.executeRaw(`UPDATE sources SET last_commit=$3,last_sync_at=now(),
       config=jsonb_set(${SOURCE_CONFIG_OBJECT_SQL},'{slug_root_mode}',to_jsonb(CASE WHEN $6::boolean THEN COALESCE(config->>'slug_root_mode',$5::text) ELSE $5::text END)),
       newest_content_at=(SELECT MAX(updated_at) FROM pages WHERE source_id=$1 AND deleted_at IS NULL)
@@ -523,11 +537,11 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
       `Another sync moved the commit checkpoint of ${row.source_id} while this pass published.`);
     if (stamp.stampChunker) await tx.executeRaw('UPDATE sources SET chunker_version=$2 WHERE id=$1', [row.source_id, chunkerStamp()]);
   }
-  await recordPassTail(tx, row.source_id, p.passId!, { changed: stamp.changed, extract: stamp.extract, ...(stamp.since ? { since: stamp.since } : {}) });
+  await recordPassTail(tx, row.source_id, p.passId!, { changed: read.changed, extract: stamp.extract, ...(stamp.since ? { since: stamp.since } : {}) });
   await recordPassFenceTrend(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, passId: p.passId!, since: pass.value.obligations.converged?.request_hwm ?? null });
   for (const path of stamp.releasedHolds) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
-  const watermark = await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP);
+  const watermark = read.watermark ?? await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP);
   const value: ManagedSyncPassValue = structuredClone(pass.value);
   const at = new Date().toISOString(), prior = value.obligations.converged;
   value.obligations.converged = { target: p.target, at, ...watermark, ...(stamp.rescreen ? { open_at_stamp: null } : {}),
@@ -620,8 +634,20 @@ export type SyncPreparedMutation = PreparedMutation & { importProvenance?: SyncI
   /** The import leaves the page as it is (only a canonical writeback of the file may remain); #6712 drift baseline check in sync-run.ts. */
   pageUnchanged?: boolean };
 
-export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: WriteRequest, _config: GBrainConfig, clock?: ClaimPhaseClock,
+/**
+ * A managed-sync preparation. #6926, folded into 4b: an import whose intent carries the pass stamp (the round's last) takes
+ * it into its own publication (`foldPassCheckpoint`).
+ */
+export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: WriteRequest, config: GBrainConfig, clock?: ClaimPhaseClock,
   screening?: { unsaved: true }): Promise<SyncPreparedMutation> {
+  const at: { root?: string } = {};
+  const prepared = await prepareSyncMutation(unbounded, row, config, clock, screening, at);
+  const p = row.intent as SyncIntent | null;
+  return p?.kind === 'managed_sync_import' && p.stamp?.fold && at.root && !screening ? foldPassCheckpoint(prepared, { row, p, root: at.root }) : prepared;
+}
+
+async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _config: GBrainConfig, clock: ClaimPhaseClock | undefined,
+  screening: { unsaved: true } | undefined, at: { root?: string }): Promise<SyncPreparedMutation> {
   const engine = boundedReads(unbounded, clock);
   const p = row.intent as SyncIntent | null;
   if (!p || !['managed_sync_import', 'managed_sync_delete', 'managed_sync_checkpoint'].includes(p.kind)) throw syncPublicationRefusal('invalid_params', 'Unsupported internal sync intent.', row, p,
@@ -648,7 +674,7 @@ export async function prepareManagedSyncMutation(unbounded: BrainEngine, row: Wr
   const binding = await getWorktreeBinding(engine, row.source_id);
   if (!binding?.local_path || String(binding.owner_epoch) !== p.ownerEpoch) throw syncPublicationRefusal('owner_unavailable', 'The accepted sync owner changed.', row, p,
     `The canonical owner of ${row.source_id} changed, or lost its local path, after this sync was admitted. Do not claim or transfer the source to repair content.`, true);
-  const root = join(binding.local_path, binding.relative_path);
+  const root = at.root = join(binding.local_path, binding.relative_path);
   enterClaimStep(clock, 'configured_root', undefined, 'db');
   const [configuredSource] = await engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [row.source_id]);
   assertConfiguredSyncRoot(root, configuredSource?.local_path ?? null);
