@@ -172,6 +172,8 @@ describe('identity comparison', () => {
     expect(testBackend('migrate (postgresql target) > copies')).toBe('postgres');
     expect(testBackend('pglite and postgres agree')).toBe('');
     expect(testBackend('pgliteish postgresify')).toBe('');
+    expect(testBackend('a publish held past the ceiling (pglite) > commits once (on Postgres after a requeue)')).toBe('pglite');
+    expect(testBackend('postgres-unit-arms list > the shards cover every file')).toBe('');
     expect(testBackend('math > adds')).toBe('');
   });
 

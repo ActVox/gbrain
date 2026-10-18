@@ -245,16 +245,21 @@ export interface Side {
 export const identityKey = (lane: string, file: string, test: string, arm: string) => [lane, file, test, arm].join('\u001f');
 
 /**
- * The database backend a test name pins: `pglite` or `postgres` when the name
- * names exactly one of them as a word (testBackends() suites prefix or suffix
- * it, e.g. "postgres: semantic writes …" or "… (pglite)"), else '' (the name
- * does not say, or names both).
+ * The database backend a test name pins: `pglite` or `postgres` when its
+ * top-level describe names exactly one of them as a word (testBackends()
+ * suites prefix or suffix it, e.g. "postgres: semantic writes …" or "…
+ * (pglite)"), else when the whole name does; otherwise '' (the name does not
+ * say, or names both). A hyphenated compound such as postgres-unit-arms is
+ * not a backend.
  */
 export type TestBackend = 'pglite' | 'postgres' | '';
 export function testBackend(test: string): TestBackend {
-  const pglite = /\bpglite\b/i.test(test);
-  const postgres = /\bpostgres(?:ql)?\b/i.test(test);
-  return pglite === postgres ? '' : pglite ? 'pglite' : 'postgres';
+  const pins = (text: string): TestBackend => {
+    const pglite = /(?<![\w-])pglite(?![\w-])/i.test(text);
+    const postgres = /(?<![\w-])postgres(?:ql)?(?![\w-])/i.test(text);
+    return pglite === postgres ? '' : pglite ? 'pglite' : 'postgres';
+  };
+  return pins(test.split(' > ')[0]!) || pins(test);
 }
 const executed = (status: Status | undefined) => status === 'pass' || status === 'fail';
 
