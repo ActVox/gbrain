@@ -34,7 +34,7 @@ import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts'
 import { sha256 } from './digest.ts';
 import { prepareFileTarget } from './page-prepare.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
-import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, failedMirrorAllowlists, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect } from './effect-journal.ts';
+import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, mirrorGates, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
 import { commitGitTargets, DURABILITY_NOT_ENABLED, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
 import { retryIndexLockParks } from './effect-retry.ts';
@@ -172,16 +172,28 @@ function isFileDatabaseDrift(error: unknown): boolean {
 /** The target a failing attempt was working on; unset means the failure is effect-wide. */
 interface EffectAttempt {
   target?: string;
-  /** GBRA-130 A-12: behind a failed withdrawal mirror, the only pages this Git or embedding effect may touch. */
-  allowed?: Set<string>;
+  /** GBRA-130 A-12: the request's withdrawal mirror, read when this Git or embedding attempt executes. */
+  gate?: MirrorGate;
 }
 
 /** The code a page behind a failed withdrawal mirror is parked with: its file may still hold the withdrawn text. */
 export const WITHHELD_BY_MIRROR = 'withdrawal_mirror_failed';
+/** The code a Git or embedding attempt waits with while its request's withdrawal mirror is queued or running again. */
+export const MIRROR_PENDING = 'withdrawal_mirror_pending';
 
-/** Parks a page the failed withdrawal mirror did not commit instead of publishing it; true when it was withheld. */
-async function withheldByMirror(engine: BrainEngine, effect: PersistenceEffect, attempt: EffectAttempt, slug: string): Promise<boolean> {
-  if (!attempt.allowed || attempt.allowed.has(slug)) return false;
+/**
+ * GBRA-130 A-12: Git and embedding work behind a withdrawal mirror touches only
+ * pages the mirror published. While the mirror runs again the attempt waits; a
+ * page the mirror passed without rewriting its file is never committed to Git
+ * (`skip`), since the mirror will not revisit it; behind a failed mirror any
+ * other page is parked. True when the page was not worked on.
+ */
+async function withheldByMirror(engine: BrainEngine, effect: PersistenceEffect, attempt: EffectAttempt, slug: string, skip?: () => Promise<void>): Promise<boolean> {
+  const gate = attempt.gate;
+  if (!gate || gate.published.has(slug)) return false;
+  if (gate.state === 'pending') { await retryEffect(engine, effect, MIRROR_PENDING); return true; }
+  if (skip && gate.passed.has(slug)) { await skip(); return true; }
+  if (gate.state === 'committed') return false;
   await parkEffectTarget(engine, effect, WITHHELD_BY_MIRROR, slug);
   return true;
 }
@@ -231,7 +243,8 @@ async function singleFileGitTarget(engine: BrainEngine, effect: PersistenceEffec
     `The Git effect queued by request ${effect.request_id} in source ${effect.source_id} has no recorded file path, so nothing was committed to Git; the page write itself is committed. Inspect the owner's effects before resubmitting anything.`,
     { fix: effectStatusFix(effect) });
   attempt.target = effect.data.slug ?? effect.data.relative_path;
-  if (await withheldByMirror(engine, effect, attempt, attempt.target)) return null;
+  if (await withheldByMirror(engine, effect, attempt, attempt.target,
+    () => completeEffect(engine, effect, { git: 'skipped', reason: 'withdrawal_not_mirrored' }))) return null;
   const sourceRoot = join(binding.local_path, binding.relative_path);
   let path = join(binding.local_path, effect.data.relative_path);
   if (!isWriteTargetContained(path, sourceRoot)) throw gitTargetEscaped(effect);
@@ -278,7 +291,7 @@ async function publishGitPage(engine: BrainEngine, effect: PersistenceEffect, bi
   const snapshot = await selectedEffectPage(engine, effect);
   if (!snapshot) { await completeEffect(engine, effect); return; }
   attempt.target = snapshot.page.slug;
-  if (await withheldByMirror(engine, effect, attempt, snapshot.page.slug)) return;
+  if (await withheldByMirror(engine, effect, attempt, snapshot.page.slug, () => skipTarget(engine, effect, snapshot, 'withdrawal_not_mirrored'))) return;
   if (isMetafilePage(snapshot)) { await skipTarget(engine, effect, snapshot, 'metafile'); return; }
   if (isSegmentedPage(snapshot.page)) { await skipTarget(engine, effect, snapshot, 'page_body_segmented'); return; }
   let file: Awaited<ReturnType<typeof prepareFileTarget>>;
@@ -713,7 +726,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
         }
       });
       effect = await upgradeWithdrawalEffect(engine, effect, opts.hostId);
-      if (effect.kind === 'git' || effect.kind === 'embedding') attempt.allowed = (await failedMirrorAllowlists(engine, [effect.request_id])).get(effect.request_id);
+      if (effect.kind === 'git' || effect.kind === 'embedding') attempt.gate = (await mirrorGates(engine, [effect.request_id])).get(effect.request_id);
       if (effect.kind === 'withdrawal-mirror') await mirrorPage(engine, effect, binding, opts, attempt);
       else if (effect.kind === 'git') await gitPage(engine, effect, binding, opts, attempt, hardened, lock);
       else await withAIAttribution({ request_id: effect.request_id, effect: effect.kind }, () => effect.kind === 'facts-backstop'
@@ -761,9 +774,9 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
       }
     }
     let lock: Awaited<ReturnType<typeof acquireWorktree>> = null;
-    let allowed: Map<string, Set<string>>;
+    let gates: Map<string, MirrorGate>;
     try {
-      allowed = await failedMirrorAllowlists(engine, effects.map(effect => effect.request_id));
+      gates = await mirrorGates(engine, effects.map(effect => effect.request_id));
       lock = await acquireWorktree(binding, 0, undefined, engine);
       if (!lock) throw writerBusy(effects[0]!);
     } catch (error) {
@@ -774,7 +787,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
     let reclaimed = false;
     try {
       for (const effect of effects) {
-        const attempt: EffectAttempt = { allowed: allowed.get(effect.request_id) };
+        const attempt: EffectAttempt = { gate: gates.get(effect.request_id) };
         try {
           // Sources sharing a worktree have their own relative roots: validate each path against its own binding.
           const own = await engine.transaction(async tx => {
@@ -820,11 +833,11 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
     const guards = new Map<string, unknown>();
     const mirrors = new Map<string, boolean>();
     const recorded: PersistenceEffect[] = [];
-    let allowed: Map<string, Set<string>>;
-    try { allowed = await failedMirrorAllowlists(engine, effects.map(effect => effect.request_id)); }
+    let gates: Map<string, MirrorGate>;
+    try { gates = await mirrorGates(engine, effects.map(effect => effect.request_id)); }
     catch (error) { for (const effect of effects) await recordFailure(engine, effect, error, opts.signal); return; }
     for (const effect of effects) {
-      const attempt: EffectAttempt = { allowed: allowed.get(effect.request_id) };
+      const attempt: EffectAttempt = { gate: gates.get(effect.request_id) };
       try {
         let binding = bindings.get(effect.source_id);
         if (binding === undefined) bindings.set(effect.source_id, binding = await getWorktreeBinding(engine, effect.source_id, opts.hostId));
