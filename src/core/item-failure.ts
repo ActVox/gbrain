@@ -29,6 +29,7 @@ import { acceptedPendingReceipt } from './persistence/accepted-pending.ts';
 export const ISOLATE_SITES = {
   'backfill.rows': 'A-47',
   'purge.recorded_tombstones': 'A-49',
+  'retention.expired_sources': 'A-50',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
