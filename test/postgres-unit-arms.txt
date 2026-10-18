@@ -257,6 +257,8 @@ test/pathological/c-9-facts-absorb-dead.test.ts
 test/pathological/lp-a-segmented-mirror.test.ts
 test/pathological/lp-d-recovery-version.test.ts
 test/pathological/lp-d-segmented-mirror-gate.test.ts
+test/pathological/lp-f-split-fence-withdrawal-capacity.test.ts
+test/pathological/lp-g-file-digest-fence-bound.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts
