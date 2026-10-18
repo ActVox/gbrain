@@ -16,6 +16,7 @@ import { sanitizeText } from '../batch-rows.ts';
 import { parseMarkdown, parseMarkdownHead } from '../markdown.ts';
 import { contentHash, contentHashFrontmatterAndTags } from '../utils.ts';
 import { stableJson } from '../persistence/digest.ts';
+import { classifyItemFailure } from '../item-failure.ts';
 
 export interface StoredBody {
   compiled_truth: string | null;
@@ -51,6 +52,27 @@ export async function readStoredBody(engine: BrainEngine, sourceId: string, slug
   return row ?? null;
 }
 
+async function storedBodyUnchanged(tx: BrainEngine, sourceId: string, slug: string, expected: StoredBody): Promise<boolean> {
+  const current = await readStoredBody(tx, sourceId, slug, true);
+  return current !== null && current.compiled_truth === expected.compiled_truth && current.timeline === expected.timeline;
+}
+
+/**
+ * Keep the preimage lock in the publication transaction while isolating a best-effort cache mirror in a savepoint.
+ * False holds publication on drift. An unexpected mirror failure rolls back only the cache attempt and reports it;
+ * publication may continue under the retained lock. Run-scoped failures still abort the publication transaction.
+ */
+export async function bestEffortStoredBodyMirror(tx: BrainEngine, sourceId: string, slug: string, expected: StoredBody,
+  mirror: (savepoint: BrainEngine) => Promise<boolean>, onFailure: (err: unknown) => void): Promise<boolean> {
+  if (!await storedBodyUnchanged(tx, sourceId, slug, expected)) return false;
+  try { return await tx.transaction(mirror); }
+  catch (err) {
+    if (classifyItemFailure(err).scope === 'run') throw err;
+    onFailure(err);
+    return true;
+  }
+}
+
 /**
  * Inside `tx`: lock the page, and when its stored body is still `expected` (the body the caller compared before
  * planning), keep it in page_versions and store `next`. The row keeps its content_hash unless `hash` is given.
@@ -58,8 +80,7 @@ export async function readStoredBody(engine: BrainEngine, sourceId: string, slug
  */
 export async function replaceStoredBody(tx: BrainEngine, sourceId: string, slug: string, next: { compiled_truth: string; timeline: string },
   expected: StoredBody, hash?: string): Promise<boolean> {
-  const current = await readStoredBody(tx, sourceId, slug, true);
-  if (!current || current.compiled_truth !== expected.compiled_truth || current.timeline !== expected.timeline) return false;
+  if (!await storedBodyUnchanged(tx, sourceId, slug, expected)) return false;
   const page = await tx.getPage(slug, { sourceId });
   if (!page) return false;
   await tx.createVersion(slug, { sourceId });
