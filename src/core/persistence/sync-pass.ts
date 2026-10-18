@@ -40,7 +40,8 @@ import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlock
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
 import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from './sync-pass-row.ts';
-import { filterYielding, loopYield, sortYielding, type LoopYield } from './sync-yield.ts';
+import { faultPoint } from './fault-points.ts';
+import { filterYielding, loopYield, sortYielding, turnYield, type LoopYield } from './sync-yield.ts';
 import { countsMatch, proveConfirm, readLevelMark, type ConfirmProof, type LevelMark } from './sync-pass-confirm.ts';
 
 export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
@@ -338,7 +339,7 @@ async function withRoundSnapshot<T>(engine: BrainEngine, fn: (exec: Exec) => Pro
  * PGLite reads bounded keyset statements so writers interleave.
  */
 async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: string, incarnation: string, expected: SyncImportParser,
-  only?: { table: PageTable; ids: string[]; slots: Map<string, number> }): Promise<{ pages: PageTable; statements: number } | null> {
+  only?: { table: PageTable; ids: string[]; slots: Map<string, number> }, step: LoopYield = loopYield()): Promise<{ pages: PageTable; statements: number } | null> {
   // A record's fields usually repeat the page's (origin = source_path, disk = blob, revision = the page's), so those come back
   // as a flag instead of a second copy of the string, and so does the parser when it is the Markdown one the level expects
   // (`expected`, the same object for every such page; any other comes as text parsed once per distinct value): a 600k-page
@@ -390,6 +391,9 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
     if (parser !== undefined) pages.parser.set(i, parser);
   };
   const take = (page: Raw[]) => { for (const raw of page) put(raw, pages.length); };
+  // A result in hand waits a turn when the turn already ran the budget (`step` is the level's, shared with its Git reads):
+  // its rows are not taken right after a Git chunk, or after a decode that spent the turn.
+  const turn = async () => { await faultPoint('sync:level_result'); if (step.over()) await step.pause(); await faultPoint('sync:level_take'); };
   if (only) {
     // A confirm round: the previous round's rows, with the pages the pass wrote re-read into their slots (a new page last,
     // as the keyset would read it). A rewritten page that left `I⋈P` cannot be patched: the caller reads it whole.
@@ -412,15 +416,17 @@ async function readPages(exec: Exec, kind: 'postgres' | 'pglite', sourceId: stri
       const page = await ahead.shift()!;
       const more = page.length === POSTGRES_FETCH_ROWS;
       if (more) ahead.push(fetch());
+      await turn();
       take(page);
       if (!more) { for (const queued of ahead) await queued; return { pages, statements }; }
-      await new Promise(resolve => setTimeout(resolve, 0));
+      await step.pause();
     }
   }
   let after = 0;
   for (;;) {
     statements++;
     const page = await exec.executeRaw<Raw>(`${select} AND p.id>$5 ORDER BY p.id LIMIT ${PGLITE_KEYSET_ROWS}`, [...params, after]);
+    await turn();
     take(page);
     if (page.length < PGLITE_KEYSET_ROWS) return { pages, statements };
     after = Number(page[page.length - 1]!.id);
@@ -572,7 +578,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     const stripped = recorded.slice(scope.length + 1);
     return sameSyncOrigin(recorded, stripped, originScope, slug) ? stripped : recorded;
   };
-  const step = loopYield();
+  const step = turnYield();
 
   t = timer();
   const head = revParse(gitRoot, 'HEAD');
@@ -594,7 +600,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (cache?.tree?.key === treeKey) return cache.tree;
     if (cache) cache.tree = undefined;
     const tree = new Map<string, GitTreeEntry>(), colon: string[] = [];
-    for (const [path, entry] of await readTreeLevel(gitRoot, head, scope)) {
+    for (const [path, entry] of await readTreeLevel(gitRoot, head, scope, step)) {
       if (isWindowsColonTarget(path)) colon.push(path);
       else if (eligible(path)) tree.set(path, entry);
       if (step.due()) await step.pause();
@@ -609,11 +615,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const [gitLevel, snapshot, held] = await Promise.all([
     // Working mode reads the whole index (its paths join the domain); committed mode only where it differs from T, read
     // after T so the two are never held whole together.
-    Promise.all([timed('T', eligibleTree).then(async ({ tree, colon }) => ({ tree, colon, indexDelta: mode === 'committed' ? await timed('X', () => readIndexDelta(gitRoot, tree)) : null })),
-      mode === 'working' ? timed('X', () => readIndexLevel(gitRoot)) : Promise.resolve(new Map<string, GitIndexEntry>()),
+    Promise.all([timed('T', eligibleTree).then(async ({ tree, colon }) => ({ tree, colon, indexDelta: mode === 'committed' ? await timed('X', () => readIndexDelta(gitRoot, tree, step)) : null })),
+      mode === 'working' ? timed('X', () => readIndexLevel(gitRoot, step)) : Promise.resolve(new Map<string, GitIndexEntry>()),
       timed('U', async () => (mode === 'working' ? (await readUntracked(gitRoot, scope)).filter(eligible) : []))]),
     // Issued together, the snapshot's statements pipeline on its one connection (PGLite runs them in turn).
-    timed('I⋈P', () => readRoundSnapshot(engine, { kind: engineKind, sourceId, incarnation, worktreeId: context.binding.worktree_id, parser: syncImportParser(pack?.identity ?? null),
+    timed('I⋈P', () => readRoundSnapshot(engine, { kind: engineKind, sourceId, incarnation, worktreeId: context.binding.worktree_id, parser: syncImportParser(pack?.identity ?? null), step,
       reuse: cache && input.pass?.passId ? { cache, passId: input.pass.passId, recorded: input.pass.recorded, working: mode === 'working', head } : undefined }, timed)),
     timed('H', () => readLevelHolds(engine, sourceId, incarnation, input.pass?.retryConsumed)),
   ]);
@@ -868,7 +874,7 @@ const confirmGuard = <T>(read: Promise<T>) => read.catch((error: unknown) => { t
  * same key reuses the last `I⋈P` when sync-pass-confirm.ts proves it (else reads it whole). The proof never throws: a
  * failed mark, proof or delta read reads the round again, whole and unmarked.
  */
-async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; worktreeId: string; parser: SyncImportParser;
+async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' | 'pglite'; sourceId: string; incarnation: string; worktreeId: string; parser: SyncImportParser; step: LoopYield;
   reuse?: { cache: PassLevelCache; passId: string; recorded?: ReadonlySet<number>; working: boolean; head: string } }, timed: <T>(key: string, read: () => Promise<T>) => Promise<T>) {
   const { kind, sourceId, incarnation, worktreeId, reuse } = input;
   // Reused only at the same commit, worktree and parser, in committed mode: working mode always reads `I⋈P` whole.
@@ -890,7 +896,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
     // Read whole, the round holds one `I⋈P`, not the reused one beside it.
     if (!confirmed?.read) prior = undefined;
     // A failed mark fails what was pipelined after it: the mark's failure is the one to report.
-    const read = confirmed?.read ?? await timed('pages', () => readPages(exec, kind, sourceId, incarnation, input.parser)).catch(async (error: unknown) => { await marked; throw error; });
+    const read = confirmed?.read ?? await timed('pages', () => readPages(exec, kind, sourceId, incarnation, input.parser, undefined, input.step)).catch(async (error: unknown) => { await marked; throw error; });
     const mark = confirmed?.mark ?? (marked ? await marked : null);
     const [work, markers, passRow] = await others;
     if (reuse && mark) reuse.cache.pages = { key, mark, table: read!.pages };
