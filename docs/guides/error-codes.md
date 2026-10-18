@@ -2904,6 +2904,16 @@ More: [docs/guides/company-brain-ingestion.md#agent-and-ci-use](../../docs/guide
 
 More: [docs/guides/sync-unblock-runbook.md#dry-run-convergence-classes](../../docs/guides/sync-unblock-runbook.md#dry-run-convergence-classes)
 
+### recovery_prior_stage_unavailable
+
+<a id="recovery_prior_stage_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair stuck-recovery cannot apply that --keep choice to a page recovery over the single-string ceiling, because the staged copy of its prior file is missing, does not match its recorded SHA-256, or is not a regular file; nothing was changed. | A prior file over 24 MiB is not embedded in its recovery record: the record names a staged copy beside the file by path and SHA-256, and only that copy can put the prior bytes back. Without it --keep prior has nothing safe to restore, so the remaining exit is --keep disk, which the user must agree to. | Stop and ask the user; re-run only with the authorization the message names. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#recovery-prior-stage-unavailable](../../docs/guides/repair.md#recovery-prior-stage-unavailable)
+
 ### recovery_required
 
 <a id="recovery_required"></a>
@@ -3905,6 +3915,16 @@ Reasons: `override`, `standing_instruction`, `exfiltration`, `credential`, `dete
 | The write gate held this content for the owner's review instead of saving it as memory. | Content from an untrusted source read like an instruction to an agent, so it was quarantined in the write-gate holding table. It is not searchable or recalled until the owner releases it; retrying the same write only re-opens the same hold. | Do not retry. Tell the user what was held and give them the release command from the fix; releasing is their decision. | user | `repeat the read that failed` | 3 | no |
 
 Reasons: `override`, `standing_instruction`, `exfiltration`, `credential`, `detector_error`.
+
+### write_interrupted
+
+<a id="write_interrupted"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The database ended this managed write's statements (SQLSTATE 57014, a statement timeout or cancel) persistence.max_preparation_attempts times (default 2), so the owner finished it failed instead of preparing it again; nothing was published. | Each cancelled statement throws the write's preparation away, and a write whose work outlasts the bound every time (a large page publishing under a 5 s statement bound on a loaded host) used to be released as database_contention and prepared again, its whole body streamed again, without limit. These cancellations now count with cut-off preparations. Contention with other transactions (lock timeout, serialization failure, deadlock), a dropped connection and a restarting database are never counted. The receipt names the attempts, the limit and the SQLSTATE. | Inspect the owner with gbrain sources writer status --source <id> --json (read-only), then submit the write again with a new request_id once the database is less loaded; a held sync file needs gbrain sources retry-held <id> and the same sync. If the same write ends this way again, report its request id with gbrain doctor --json. Run: gbrain sources writer status --source '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#write_interrupted](../../docs/guides/write-refusals.md#write_interrupted)
 
 ### write_outcome_unknown
 
