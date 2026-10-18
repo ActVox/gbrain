@@ -49,7 +49,11 @@ export function settledPast(cursor: Cursor, index: number): Cursor {
  */
 export function promoteWindow(cursor: Cursor): Cursor {
   const [first, ...rest] = cursor.window ?? [];
-  if (cursor.pending || !first?.length || first[0]!.intent.index !== cursor.index) return cursor;
+  if (cursor.pending || !first?.length) return cursor;
+  // A pass's intents carry no index (cursorIntent): its window head is the entry at the cursor's index by path, never frozen again under the same request.
+  const head = first[0]!.intent;
+  if (typeof head.index === 'number' ? head.index !== cursor.index : head.path == null || head.path !== cursor.entries[cursor.index]?.path) return cursor;
+  console.log('ZZW', cursor.index, cursor.passId, first.map(m => [m.intent.path, m.intent.index, m.intent.group, m.requestId]), cursor.entries.map((e: { path?: string }) => e.path));
   const next: Cursor = { ...cursor, pending: first[0], group: first };
   if (rest.length) next.window = rest; else delete next.window;
   return next;
