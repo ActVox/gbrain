@@ -38,7 +38,7 @@ export const PUBLIC_BY_CODE: Readonly<Record<string, PublicCategory>> = {
   settle_mismatch: 'defect', page_write_failed: 'defect',
   invalid_fence: 'content_refused', invalid_frontmatter: 'content_refused', frontmatter_slug_conflict: 'content_refused', rename_held: 'content_refused',
   file_too_large: 'content_refused', content_rejected: 'content_refused', managed_image_sync_unsupported: 'content_refused',
-  purged_content: 'content_refused', write_gate_rejected: 'content_refused', file_unreadable: 'content_refused',
+  purged_content: 'content_refused', write_gate_rejected: 'content_refused', file_unreadable: 'content_refused', frontmatter_alias_limit: 'content_refused',
   file_database_drift: 'drift', raw_file_changed: 'drift', pending_import: 'transient',
   source_binding_changed: 'config', unsafe_file_target: 'config',
   canonical_file_missing: 'file_missing',

@@ -78,7 +78,9 @@ export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regre
   /** GBRA-130 A-7: a file sync cannot read as a regular file inside its root (a symlink, a non-regular file, a permission error). */
   | 'file_unreadable'
   /** GBRA-130 A-17/B-3/B-4: a path whose page identity sync cannot decide (several tombstones, a spelling twin, a takeover whose ids differ). */
-  | 'page_identity_changed';
+  | 'page_identity_changed'
+  /** #6712 PR 4b (S-47): bytes an older gbrain imported and validated whose frontmatter aliases expand past #7018's bound; held alone, never a parser regression. */
+  | 'frontmatter_alias_limit';
 /** GBRA-130 A-6: the fault a `page_write_failed` hold stands for (identifiers and classes only, never content). */
 export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null; request_id: string; attempts: number; gbrain_version: string }
 /**
@@ -547,7 +549,9 @@ export async function holdBasisMoved(engine: Pick<BrainEngine, 'executeRaw'>, so
  * `purged_content` hold rests on a setting, an allow rule or a tombstone its fix lets the user change, so it
  * re-screens on every sync too. #6727: so does a `legacy_slug_conflict` hold, which rests on the legacy pages a person removes. #6948: and an
  * `origin_conflict` hold, which rests on the twin pages the heal, the repair or a person removes. GBRA-130: and a `page_identity_changed`
- * hold, which rests on pages (tombstones, a page at the slug) or spellings a person changes.
+ * hold, which rests on pages (tombstones, a page at the slug) or spellings a person changes. A `frontmatter_alias_limit` hold
+ * rests on the file's bytes alone (the bound is intended, not transient), so like `invalid_frontmatter` it re-screens when
+ * the file changes.
  */
 export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, retried: boolean): boolean {
   return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict', 'origin_conflict', 'page_identity_changed'].includes(record.code)
@@ -795,6 +799,11 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
       return { argv: ['gbrain', 'config', 'get', 'sync.exclude'], consent: [], actor: 'user', requires_exclusive: false,
         user_message: `Multimodal embedding is off, so managed sync holds ${record.path} and the rest of source ${source} keeps syncing. Keeping images held is fine; to import them, set GBRAIN_EMBEDDING_MULTIMODAL=true for the gbrain process (image embeddings can cost money) and sync again; to stop holding them, leave images out of the source with sync.exclude.`,
         why: 'Whether images are embedded is the user\'s call (it costs provider calls). With GBRAIN_EMBEDDING_MULTIMODAL=true the next sync imports every held image; the hold also clears when the file is deleted or excluded, and is re-screened when it changes or on gbrain sources retry-held.',
+        verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
+    case 'frontmatter_alias_limit':
+      return { argv: ['gbrain', 'sources', 'status', source, '--json'], consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code),
+        user_message: `${record.path} nests YAML aliases in its frontmatter that expand past gbrain's size limit, so sync holds it and the rest of source ${source} keeps syncing. An older gbrain imported these bytes; this version refuses them on purpose. Reduce the alias nesting in its frontmatter (or write the values out), or remove the file, then commit and run gbrain sync --source ${source} --no-pull.`,
+        why: 'The alias bound (#7018) stops a few hundred bytes of nested anchors from expanding into gigabytes; it is intended, so the page keeps its last imported version until the file changes.',
         verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
     case 'parser_regression':
       return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'user', requires_exclusive: false,

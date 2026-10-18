@@ -127,6 +127,7 @@ Every hold and error has three fields, from one table
 | `file_too_large` | page | none | yes | always |
 | `content_rejected` | page | none | yes | always |
 | `parser_regression` | page | upgrade | yes | always: a gbrain bug |
+| `frontmatter_alias_limit` | page | none | yes | always: only an edit to the file or its removal clears it |
 | `managed_image_sync_unsupported` | page | none | no | never: images stay held while multimodal embedding is off |
 | `purged_content` | page | none | yes | always: only the owner clears a purge tombstone |
 | `write_gate_rejected` | page | none | yes | always: write_gate.external_mode=reject is the user's setting |
