@@ -1026,8 +1026,8 @@ class ProposeTakesPhase extends BaseCyclePhase {
         });
       } catch (err) {
         // GBRA-130: a run-scoped error (abort, lost connection, failed
-        // transaction) stops the phase and records nothing. Fresh pages feed
-        // the breaker; a page retried after an earlier failure does not.
+        // transaction) stops the phase and records nothing. Every failure feeds
+        // the breaker except a recorded page repeating its content-class code.
         failures.fail(sourceId, page.slug, ch, err);
         result.llm_calls_failed += 1;
         const msg = err instanceof Error ? err.message : String(err);
@@ -1046,8 +1046,9 @@ class ProposeTakesPhase extends BaseCyclePhase {
         // Halt instead of spending an LLM call on every remaining page. A
         // single success anywhere in the run keeps llm_calls_succeeded > 0
         // and permanently disarms this halt (mixed runs are per-page noise).
-        // GBRA-130 A-25: only fresh pages count; pages that failed before are
-        // retried last and their failures are the expected outcome.
+        // GBRA-130 A-25: a recorded page repeating its content-class code is the
+        // expected outcome and does not count; a transient or provider failure
+        // always does, so an outage halts even on pages that failed before.
         if (
           result.llm_calls_succeeded === 0 &&
           failures.freshFailures >= EXTRACTOR_FAILURE_HALT_STREAK

@@ -8,7 +8,9 @@
  *
  * Authoring gate: (1) protects "a deterministically failing page stops being
  * billed and never blocks the rest": a page that failed before is retried
- * after the fresh pages, the halt streak counts fresh pages only, and a page
+ * after the fresh pages, the halt streak skips only a recorded page repeating
+ * its content-class code (a transient or provider failure always counts, so a
+ * 12-page outage halts systemic on every run), and a page
  * failing with the same content-class code in 3 counted runs at the same
  * content hash and prompt version gets a failure tombstone (distinct from a
  * successful empty extraction) that `gbrain takes propose --retry-failed`
@@ -23,7 +25,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import type { OperationContext } from '../../src/core/ops/contract.ts';
-import { AIConfigError } from '../../src/core/ai/errors.ts';
+import { AIConfigError, AITransientError } from '../../src/core/ai/errors.ts';
 import { runPhaseProposeTakes, type ProposeTakesExtractor } from '../../src/core/cycle/propose-takes.ts';
 import { retryFailedProposals } from '../../src/core/cycle/propose-takes-failures.ts';
 import { runTakes } from '../../src/commands/takes.ts';
@@ -32,6 +34,7 @@ import { expectItemFailure, expectOthersUnchanged, expectUnitNotAborted, patholo
 
 const SOURCE = 'default';
 const PAGES = ['page-01', 'page-02', 'page-03', 'page-04', 'page-05', 'page-06'];
+const OUTAGE_PAGES = Array.from({ length: 12 }, (_, i) => `page-${String(i + 1).padStart(2, '0')}`);
 const POISON = new Set(PAGES.slice(0, 5));
 const HEALTHY = 'page-06';
 const tooLong = () => Object.assign(new AIConfigError('[chat(anthropic:claude-example)] prompt is too long: 250000 tokens > 200000 maximum'), { status: 400 });
@@ -172,5 +175,19 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect(details.failed_pages!.filter(f => f.attempts !== 0 || f.held)).toEqual([]);
       }
     }), 120_000);
+
+    test('A-25 breaker: an extractor outage over 12 pages halts systemic on every run, including pages that failed before', () => withBrain(databaseUrl, async engine => {
+      const runs = [];
+      const calls: string[][] = [];
+      for (let i = 0; i < 4; i++) {
+        const c: string[] = []; calls.push(c);
+        runs.push(await run(engine, extractor(() => new AITransientError('[chat(anthropic:claude-example)] 503 Service Unavailable'), c)));
+      }
+      expect(await proposals(engine)).toEqual({});
+      expect(runs.map(({ result, details }, i) => ({ run: i + 1, calls: calls[i]!.length, status: result.status, halted: details.halted,
+        streak: details.aborted_failure_streak, systemic: (details.systemic as { code?: string } | undefined)?.code, succeeded: details.llm_calls_succeeded })))
+        .toEqual([1, 2, 3, 4].map(run => ({ run, calls: 5, status: 'fail', halted: true, streak: true, systemic: 'item_failures_systemic', succeeded: 0 })));
+      for (const { details } of runs) expect(details.failed_pages!.filter(f => f.attempts !== 0 || f.held)).toEqual([]);
+    }, OUTAGE_PAGES), 120_000);
   });
 }

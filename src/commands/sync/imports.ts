@@ -94,6 +94,9 @@ export async function runImportsPhase(
   // the breaker's successes, so a resumed run that re-attempts only the
   // failing files is not mistaken for a run where most files fail.
   for (let i = importsToDo.length; i < addsAndMods.length; i++) run.itemRun.succeed();
+  // Their imports still prove other files of this drain import, so an infra
+  // failure the resumed run re-attempts alone keeps its isolated streak.
+  run.bankedImports = addsAndMods.filter(path => completed.has(path) && !holds?.existing.has(path)).length;
 
   const { effectiveConcurrency, runParallel } = await resolveImportConcurrency(engine, opts, importsToDo.length);
 

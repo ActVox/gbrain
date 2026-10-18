@@ -13,7 +13,8 @@
  * carries a structured code (errno -> PERMISSION_DENIED / FILE_UNREADABLE), the
  * text classifier never reads errno-led messages or path tokens as provider
  * errors, and an infra code on one file while other files import fine goes
- * chronic as EMBEDDING_INFRA_ISOLATED. A run-scoped error during an import
+ * chronic as EMBEDDING_INFRA_ISOLATED, also when resumed runs re-attempt it
+ * alone (the files an earlier run of the drain banked count). A run-scoped error during an import
  * stops the sync and records nothing; a run where most files fail counts no
  * attempt and points at --skip-failed. (2) Reverting the classifier or the
  * structured code makes the item case red (4 blocked runs, new.md never
@@ -120,12 +121,12 @@ describe('A-18 gate: an infra code on one file while the others import goes chro
   });
 });
 
-/** The engine whose page reads inside a file's import (importOnePath) throw `error`. */
-function failingImports(engine: BrainEngine, error: unknown): BrainEngine {
+/** The engine whose page reads inside a file's import (importOnePath) throw `error`, for every slug or the ones `only` picks. */
+function failingImports(engine: BrainEngine, error: unknown, only: (slug: unknown) => boolean = () => true): BrainEngine {
   return new Proxy(engine, { get(target, prop) {
     const value = Reflect.get(target, prop);
     if (prop === 'getPage' && typeof value === 'function') {
-      return (...args: unknown[]) => new Error().stack?.includes('importOnePath') ? Promise.reject(error) : (value as Function).apply(target, args);
+      return (...args: unknown[]) => new Error().stack?.includes('importOnePath') && only(args[0]) ? Promise.reject(error) : (value as Function).apply(target, args);
     }
     return typeof value === 'function' ? value.bind(target) : value;
   } }) as BrainEngine;
@@ -158,6 +159,26 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       for (let i = 0; i < 3; i++) runs.push(await expectUnitNotAborted(() => r.sync()));
       expect(runs.map(x => x.status)).toEqual(['blocked_by_failures', 'blocked_by_failures', 'synced']);
       expect(loadSyncFailures().filter(f => f.source_id === r.sourceId).map(f => [f.path, f.state]).sort()).toEqual(locked.map(p => [p, 'auto_skipped']));
+    }), 180_000);
+
+    test('A-18 item: an embedding timeout on one file among six that import goes chronic on resumed runs (the banked imports count) and drains on run 3', () => legacyRepo(databaseUrl, async r => {
+      const healthy = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].map(n => `ok/${n}.md`);
+      r.commit(Object.fromEntries([...healthy.map(p => [p, md(p)]), ['img/huge.md', md('huge')]]), 'mixed');
+      const timeout = new Error('[embed(openai:text-embedding-3-small)] The operation timed out.');
+      const engine = failingImports(r.engine, timeout, slug => slug === 'img/huge');
+      const runs = [];
+      for (let i = 0; i < 3; i++) {
+        const result = await expectUnitNotAborted(() => r.sync({ engine }));
+        const failure = row(r.sourceId, 'img/huge.md');
+        runs.push({ status: result.status, codes: result.failureCodes, isolated: failure?.state === 'open' ? failure.infra_isolated_runs : failure?.state });
+      }
+      const timedOut = [{ code: 'EMBEDDING_TIMEOUT', count: 1 }];
+      expect(runs).toEqual([{ status: 'blocked_by_failures', codes: timedOut, isolated: 1 }, { status: 'blocked_by_failures', codes: timedOut, isolated: 2 },
+        { status: 'synced', codes: undefined, isolated: 'auto_skipped' }]);
+      expect({ state: row(r.sourceId, 'img/huge.md')?.state, code: row(r.sourceId, 'img/huge.md')?.code })
+        .toEqual({ state: 'auto_skipped', code: 'EMBEDDING_INFRA_ISOLATED' });
+      expect(await r.lastCommit()).toBe(git(r.root, 'rev-parse', 'HEAD'));
+      for (const path of healthy) expect(await r.engine.getPage(path.slice(0, -3), { sourceId: r.sourceId })).not.toBeNull();
     }), 180_000);
 
     test.skipIf(!perms)('A-18 recovery: once the file is readable and edited, the next sync imports it and clears its row', () => legacyRepo(databaseUrl, async r => {

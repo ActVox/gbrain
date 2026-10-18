@@ -120,6 +120,8 @@ export interface SyncRun {
   sinceYield: number;
   /** Add/modify files persisted this run (partial `filesImported`). */
   filesImported: number;
+  /** GBRA-130 A-18: add/modify files of this drain an earlier run banked (held paths excluded); isolation evidence with `filesImported`. */
+  bankedImports: number;
   /** Chunks written this run. */
   chunksCreated: number;
   /** The stall watchdog fired (partial reason `stall_timeout`). */
@@ -178,6 +180,7 @@ export function createSyncRun(
     // this as `filesImported` so cron operators can see how much work the
     // aborted run completed before --timeout fired.
     filesImported: 0,
+    bankedImports: 0,
     chunksCreated: 0,
     stallAborted: false,
   };
