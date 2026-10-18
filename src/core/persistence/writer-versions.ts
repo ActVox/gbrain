@@ -98,6 +98,8 @@ export interface SegmentedGateWriter {
   /** The rows carried the segment-reader mark (migration v254), which only binaries that read segmented pages write. */
   segment_reader: boolean;
   last_seen: string | null; requests: number;
+  /** The earliest of the rows in the window (a resident: the earliest process start). */
+  first_seen: string | null;
 }
 
 /**
@@ -119,26 +121,28 @@ export async function segmentedGateWriters(engine: SqlEngine, days: number, floo
 
 /** Every writer the gate read in the last `days`, passing or not, grouped as `segmentedGateWriters` groups them. */
 export async function segmentedGateEvidence(engine: SqlEngine, days: number): Promise<SegmentedGateWriter[]> {
-  const rows = await engine.executeRaw<Omit<SegmentedGateWriter, 'version_label' | 'last_seen' | 'requests'> & { last_seen: unknown; requests: number }>(
+  const rows = await engine.executeRaw<Omit<SegmentedGateWriter, 'version_label' | 'last_seen' | 'requests' | 'first_seen'> & { last_seen: unknown; requests: number; first_seen: unknown }>(
     `WITH win AS (SELECT now()-($1::double precision*interval '1 day') AS since)
     SELECT 'admitter' AS role,r.admitter_host_id::text AS host_id,r.principal_kind||':'||r.principal_id AS principal,r.admitter_version AS version,
-      COALESCE(r.admitter_segment_reader,false) AS segment_reader,MAX(r.created_at) AS last_seen,COUNT(*)::integer AS requests
+      COALESCE(r.admitter_segment_reader,false) AS segment_reader,MAX(r.created_at) AS last_seen,COUNT(*)::integer AS requests,
+      MIN(r.created_at) AS first_seen
     FROM persistence_requests r CROSS JOIN win WHERE r.created_at>=win.since GROUP BY 2,3,4,5
     UNION ALL
     SELECT 'consumer',COALESCE(r.consumer_host_id,w.owner_host_id)::text,r.principal_kind||':'||r.principal_id,r.consumer_version,
-      COALESCE(r.consumer_segment_reader,false),MAX(COALESCE(r.published_at,r.completed_at)),COUNT(*)::integer
+      COALESCE(r.consumer_segment_reader,false),MAX(COALESCE(r.published_at,r.completed_at)),COUNT(*)::integer,
+      MIN(COALESCE(r.published_at,r.completed_at))
     FROM persistence_requests r LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id CROSS JOIN win
     WHERE r.state='committed' AND COALESCE(r.published_at,r.completed_at)>=win.since GROUP BY 2,3,4,5
     UNION ALL
-    SELECT 'importer',l.writer_host_id::text,'ingest:'||l.source_type,l.writer_version,false,MAX(l.created_at),COUNT(*)::integer
+    SELECT 'importer',l.writer_host_id::text,'ingest:'||l.source_type,l.writer_version,false,MAX(l.created_at),COUNT(*)::integer,MIN(l.created_at)
     FROM ingest_log l CROSS JOIN win WHERE l.writer_segment_reader IS NOT TRUE AND l.created_at>=win.since GROUP BY 2,3,4
     UNION ALL
-    SELECT 'importer',l.writer_host_id::text,'ingest:'||l.source_type,l.writer_version,true,MAX(l.created_at),COUNT(*)::integer
+    SELECT 'importer',l.writer_host_id::text,'ingest:'||l.source_type,l.writer_version,true,MAX(l.created_at),COUNT(*)::integer,MIN(l.created_at)
     FROM ingest_log l CROSS JOIN win WHERE l.writer_segment_reader IS TRUE AND l.created_at>=win.since GROUP BY 2,3,4
     UNION ALL
-    SELECT 'resident',c.host_id::text,'process:'||c.kind,c.version,COALESCE(c.segment_reader,false),MAX(c.renewed_at),COUNT(*)::integer
+    SELECT 'resident',c.host_id::text,'process:'||c.kind,c.version,COALESCE(c.segment_reader,false),MAX(c.renewed_at),COUNT(*)::integer,MIN(c.started_at)
     FROM persistence_consumers c CROSS JOIN win WHERE c.renewed_at>=win.since GROUP BY 2,3,4,5
     ORDER BY last_seen DESC`, [days]);
   return rows.map(row => ({ role: row.role, host_id: row.host_id, principal: row.principal, version: row.version, version_label: writerVersionLabel(row.version),
-    segment_reader: row.segment_reader === true, last_seen: iso(row.last_seen), requests: Number(row.requests) }));
+    segment_reader: row.segment_reader === true, last_seen: iso(row.last_seen), requests: Number(row.requests), first_seen: iso(row.first_seen) }));
 }

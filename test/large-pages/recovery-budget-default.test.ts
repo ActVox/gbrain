@@ -6,7 +6,8 @@
  *    a restore of a page at the ceiling (which reserves its file twice) fits; with the switch off it stays 256 MiB. A
  *    configured value is kept as the user's choice, and the 1 GiB brain budget already holds the largest default. A
  *    page already stored in segments keeps the default at twice its body plus headroom after the switch goes off or
- *    `pages.max_bytes` is lowered (soft-deleted too, since a restore brings it back).
+ *    `pages.max_bytes` is lowered (soft-deleted too, since a restore brings it back). With the size index missing or
+ *    INVALID the limit read leaves `pages` unread (EXPLAIN: never executed) and assumes a page at the ceiling.
  * 2. Fails when: the default stays a flat 256 MiB under a 256 MiB (Postgres) or 128 MiB (PGLite) ceiling, follows a
  *    `pages.max_bytes` above the ceiling, drops below 256 MiB for a lowered `pages.max_bytes`, or overrides a configured
  *    value.
@@ -18,7 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { RECOVERY_FILE_HEADROOM_BYTES, SEGMENTED_PAGE_CEILING_BYTES, SEGMENTED_STORAGE_DEFAULT } from '../../src/core/page-body/limits.ts';
-import { readJournalLimits } from '../../src/core/persistence/limits.ts';
+import { JOURNAL_LIMITS_SQL, readJournalLimits } from '../../src/core/persistence/limits.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { conversationPage } from '../helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
@@ -100,6 +101,26 @@ for (const kind of testBackends()) describe(`worktree recovery default follows t
       await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [slug]);
     }
     await engine.executeRaw("DELETE FROM config WHERE key='persistence.limits.worktree_recovery_bytes'");
+    expect(await worktree()).toBe(OLD_DEFAULT);
+  }, 120_000);
+
+  test('with pages_segmented_body_bytes_idx missing or invalid, the default never scans pages: it assumes a stored page at the ceiling', async () => {
+    const slug = 'notes/stored-unindexed';
+    const plan = async () => (await engine.executeRaw<Record<string, string>>(`EXPLAIN (ANALYZE, COSTS OFF) ${JOURNAL_LIMITS_SQL}`)).map(row => Object.values(row)[0]!);
+    const pagesNodes = async () => (await plan()).filter(line => / on pages\b/.test(line));
+    try {
+      expect((await importFromContent(engine, slug, conversationPage(2 * MiB, { seed: 72 }), { noEmbed: true })).status).toBe('imported');
+      await engine.setConfig('pages.segmented_storage', 'off');
+      expect(await worktree()).toBe(OLD_DEFAULT);
+      await engine.executeRaw('DROP INDEX pages_segmented_body_bytes_idx');
+      const nodes = await pagesNodes();
+      expect(nodes.length).toBeGreaterThan(0);
+      for (const line of nodes) expect(line).toContain('never executed');
+      expect(await worktree()).toBe(2 * (ceiling + RECOVERY_FILE_HEADROOM_BYTES));
+    } finally {
+      await engine.executeRaw("CREATE INDEX IF NOT EXISTS pages_segmented_body_bytes_idx ON pages (body_bytes) WHERE body_storage = 'segmented'");
+      await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [slug]);
+    }
     expect(await worktree()).toBe(OLD_DEFAULT);
   }, 120_000);
 
