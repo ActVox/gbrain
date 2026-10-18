@@ -20,7 +20,7 @@ import { waitForCapacity } from './backoff.ts';
 import { quarantineMarkers } from './extraction-review.ts';
 import { SLUG_WORD_CHARS, SLUG_VARIATION_SELECTORS_RE } from './cjk.ts';
 import { createHash } from 'node:crypto';
-import { RESERVED_DEVICE_NAME, segmentByteBudget, truncateUtf8 } from './portable-slug.ts';
+import { portableSegment, RESERVED_DEVICE_NAME, segmentByteBudget, truncateUtf8 } from './portable-slug.ts';
 // #3994: created stubs route through serializeMarkdown + importFromContent
 // (the same parse→chunk→embed pipeline put_page uses) instead of a bare
 // engine.putPage, so fresh entity pages land in the retrieval surface
@@ -222,6 +222,13 @@ export async function enrichEntity(
       // The legacy slug is lossy (José -> people/jos), so only reuse a page that names this entity.
       const same = (t: string) => t.normalize('NFC').trim().toLowerCase();
       if (legacyPage && same(legacyPage.title ?? '') === same(request.entityName)) { slug = legacySlug; existingPage = legacyPage; legacyFound = true; }
+    }
+    // An over-budget name an older gbrain minted at its cut slug with no hash tag; that slug is shared by every name with the same prefix.
+    const untagged = `${prefix}/${portableSegment(base, true, request.entityType)}`;
+    if (!legacyFound && !existingPage && untagged !== candidateSlug) {
+      const untaggedSlug = await engine.resolveSlugWithAlias(untagged, sourceId);
+      const untaggedPage = await engine.getPage(untaggedSlug, scope);
+      if (untaggedPage && namesEntity(untaggedPage.title)) { slug = untaggedSlug; existingPage = untaggedPage; legacyFound = true; }
     }
     // An escaped slug (Aux -> companies/aux-company) can be another entity's natural slug, and a natural slug can be
     // the escaped slug another entity was minted at (Prn Company's companies/prn-company held by Prn): either way the

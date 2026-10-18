@@ -10,7 +10,8 @@
  * enriching `Aux` wrote its timeline row and backlink to `Aux Company` and
  * never looked at the legacy `companies/aux` page that names it. The fix tags
  * a shortened name with a hash of the full name, checks that a page found at an
- * escaped slug names this entity, prefers the matching legacy page, and gives
+ * escaped slug names this entity, prefers the matching legacy page (also the
+ * untagged cut slug an older gbrain minted for a long name), and gives
  * an entity whose slug another entity holds its own hash-tagged page.
  *
  * Real PGLite, plus the Postgres arm when DATABASE_URL is set
@@ -27,6 +28,10 @@ const page = (type: string, title: string) => `---\ntitle: ${JSON.stringify(titl
 const PREFIX = 'acme-example-holdings-'.repeat(11);
 const LONG_ONE = `${PREFIX}North`;
 const LONG_TWO = `${PREFIX}South`;
+const OLD_PREFIX = 'globex-example-'.repeat(17);
+const OTHER_PREFIX = 'initech-example-'.repeat(16);
+/** The slug the previous slugifyEntity minted for an over-budget name: cut to 235 bytes with no hash. */
+const untagged = (name: string) => `companies/${name.toLowerCase().slice(0, 235).replace(/[-._:]+$/, '')}`;
 
 async function seed(engine: BrainEngine): Promise<void> {
   const pages: Array<[string, string, string]> = [
@@ -36,6 +41,8 @@ async function seed(engine: BrainEngine): Promise<void> {
     ['companies/lpt1-company', 'company', 'Lpt1 Company'],
     [`companies/lpt1-company-${createHash('sha256').update('lpt1').digest('hex').slice(0, 8)}`, 'company', 'Other Example'],
     ['notes/source-example', 'note', 'Source Example'],
+    [untagged(`${OLD_PREFIX}Alpha`), 'company', `${OLD_PREFIX}Alpha`],
+    [untagged(`${OTHER_PREFIX}Beta`), 'company', `${OTHER_PREFIX}Beta`],
   ];
   for (const [slug, type, title] of pages) await importFromContent(engine, slug, page(type, title), { noEmbed: true });
 }
@@ -114,6 +121,25 @@ for (const { backend } of arms) {
       const again = await enrich(LONG_ONE, 'company');
       expect({ slug: again.slug, action: again.action }).toEqual({ slug: one.slug, action: 'updated' });
       expect(await counts(engine(), two.slug)).toEqual({ timeline: 1, links: 1 });
+    });
+
+    test('F8: a long name already stored at the untagged slug an older gbrain minted is updated there, with no tagged duplicate', async () => {
+      const name = `${OLD_PREFIX}Alpha`;
+      expect(untagged(name)).not.toBe(slugifyEntity(name, 'company'));
+      const result = await enrich(name, 'company');
+      expect({ slug: result.slug, action: result.action }).toEqual({ slug: untagged(name), action: 'updated' });
+      expect(await counts(engine(), untagged(name))).toEqual({ timeline: 1, links: 1 });
+      expect(await counts(engine(), slugifyEntity(name, 'company'))).toBeNull();
+    });
+
+    test('F8: an untagged slug holding the other long name with the same prefix is not reused', async () => {
+      const name = `${OTHER_PREFIX}Gamma`;
+      const holder = untagged(`${OTHER_PREFIX}Beta`);
+      expect(untagged(name)).toBe(holder);
+      const result = await enrich(name, 'company');
+      expect({ slug: result.slug, action: result.action }).toEqual({ slug: slugifyEntity(name, 'company'), action: 'created' });
+      expect(await title(engine(), result.slug)).toBe(name);
+      expect(await counts(engine(), holder)).toEqual({ timeline: 0, links: 0 });
     });
   });
 }
