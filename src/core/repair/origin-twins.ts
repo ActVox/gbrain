@@ -213,6 +213,17 @@ export const originTwinsRepair: RepairHandler = {
     const command = originTwinsRepairCommand(sourceId);
     const keep = opts?.slugs?.length ? opts.slugs : undefined;
     if (keep && keep.length !== 1) throw opError('invalid_params', 'gbrain repair origin-twins --slug names the one page that keeps a file.', `Name one slug per run: ${command} --slug '<kept-slug>'.`, { fix: previewFix(sourceId), docs: DOCS });
+    const context = await originOwnerContext(engine, sourceId);
+    if (!context.ok) {
+      // Off the owner host (or with no checkout bound) a source that holds no twin has nothing to resolve; the index needs no checkout.
+      const stored = await engine.executeRaw('SELECT 1 FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND source_path IS NOT NULL GROUP BY source_path HAVING count(*) > 1 LIMIT 1', [sourceId]);
+      if (stored.length) throw ownerRefusal(sourceId, context.reason);
+      const hash = previewHash({ kind: 'origin-twins-v1', brain_id: scope.brain_id, selection: { source_ids: scope.source_ids }, empty: true });
+      if (!opts?.apply) return { items: [], preview_hash: hash, residuals: { groups: 0 }, warnings: [`Source ${sourceId} has no duplicate-origin group; --apply builds the pages_live_origin_key index once no source has one.`] };
+      const built = await buildOriginIndexIfClean(engine, ORIGIN_INDEX_MIGRATION);
+      return { items: [], preview_hash: opts.expect ?? hash, residuals: { index_present: built.state === 'present' ? 1 : 0 }, warnings: [built.state === 'pending'
+        ? `pages_live_origin_key stays pending: ${built.sources.map(s => `source ${s.source_id} still has ${s.groups} group(s)`).join(', ')}.` : `pages_live_origin_key: ${built.state}.`] };
+    }
     const scan = await scanOriginTwins(engine, sourceId);
     const chosen = keep ? scan.groups.filter(group => group.claimants.some(page => page.slug === keep[0])) : scan.groups;
     const pairs = chosen.flatMap(group => groupPairs(group, keep?.[0]));

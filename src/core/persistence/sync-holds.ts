@@ -721,7 +721,7 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
       }
       const keep = claimants.find(page => page.slug === canonical);
       const soft = claimants.filter(page => page !== keep).map(page => `gbrain delete --source-id ${source} --expected-revision ${page.revision} -- '${page.slug}'`);
-      return { argv: ['gbrain', 'get', '--source', source, '--', claimants[0]?.slug ?? canonical], consent: [], actor: 'user', requires_exclusive: false, docs: `docs/guides/write-refusals.md#origin_conflict-${record.meta.reason}`,
+      return { argv: ['gbrain', 'get', '--source', source, '--', claimants[0]?.slug ?? canonical], consent: [], actor: 'user', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#origin_conflict',
         user_message: `Pages ${named} all record ${record.path} as their origin, and sync cannot prove they are one document (${record.meta.reason}), so it held only this file; the rest of the source keeps syncing. `
           + `Read each page (gbrain get --source ${source} -- '<slug>'), pick the one that is this file's page and soft-delete each other one (the file stays, restorable for 72 h)`
           + (soft.length ? `, for example: ${soft.join('; ')}` : '') + `; then run gbrain sync --source ${source} --no-pull. gbrain repair origin-twins --source ${source} lists the group and its commands.`,

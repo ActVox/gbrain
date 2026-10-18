@@ -17,6 +17,7 @@ import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
+import { dropOriginIndex } from './helpers/origin-index.ts';
 
 const page = (id: number, slug: string, over: Partial<OriginClaimant> = {}): OriginClaimant =>
   ({ id, slug, revision: '1', body_hash: 'same', fm_id: null, private: false, restricted: false, trust_tier: 'owner', ...over });
@@ -105,7 +106,7 @@ for (const backend of testBackends()) describe(`[${backend}] #6948 mergeTwinInto
     if (backend === 'pglite') { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
     else { const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!); engine = pg.engine; closePostgres = pg.close; }
     // A brain that already holds twins (written before this release): the index is pending, so twins can be seeded.
-    await engine.executeRaw('DROP INDEX IF EXISTS pages_live_origin_key');
+    await dropOriginIndex(engine);
   }, 120_000);
   afterAll(async () => { await engine.disconnect(); await closePostgres?.(); }, 60_000);
 

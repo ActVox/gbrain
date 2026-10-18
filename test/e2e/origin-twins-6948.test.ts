@@ -33,6 +33,7 @@ import { _resetCliExitVerdictForTests } from '../../src/core/cli-force-exit.ts';
 import { TEST_WRITE_ATTRIBUTION } from '../helpers/write-attribution.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { testBackends } from '../helpers/test-backends.ts';
+import { dropOriginIndex } from '../helpers/origin-index.ts';
 import { withEnv } from '../helpers/with-env.ts';
 
 const op = (name: string) => operations.find(o => o.name === name)!;
@@ -93,7 +94,7 @@ for (const backend of testBackends()) describe(`[${backend}] #6948 duplicate-ori
     if (backend === 'pglite') { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
     else { const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!); engine = pg.engine; closePostgres = pg.close; }
     // Twins exist only on brains written before this release, whose index is pending.
-    await engine.executeRaw('DROP INDEX IF EXISTS pages_live_origin_key');
+    await dropOriginIndex(engine);
   }, 120_000);
   afterAll(async () => {
     await withEnv(env, async () => { await disposePersistenceConsumer(engine); await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'); });
@@ -240,7 +241,7 @@ for (const backend of testBackends()) describe(`[${backend}] #6948 duplicate-ori
     await v257.handler!(engine);
     expect(await originIndexState(engine)).toBe('missing');
     expect(await pages()).toBe(before);
-    const pending = (await originTwinsEntry.run({ engine } as never))[0]!;
+    const pending = ((await originTwinsEntry.run({ engine } as never)) as Array<{ name: string; status: string; message: string }>)[0]!;
     expect(pending).toMatchObject({ name: 'origin_twins', status: 'warn' });
     expect(pending.message).toContain('Index pending');
     expect(pending.message).toContain(`source ${f.id} has 1 file(s) recorded by several live pages`);
@@ -256,7 +257,7 @@ for (const backend of testBackends()) describe(`[${backend}] #6948 duplicate-ori
       }
     }
     expect(await originIndexState(engine)).toBe('present');
-    expect((await originTwinsEntry.run({ engine } as never))[0]).toMatchObject({ status: 'ok' });
+    expect(((await originTwinsEntry.run({ engine } as never)) as Array<{ status: string }>)[0]).toMatchObject({ status: 'ok' });
     // With the index present, a second live claim on an origin is refused by the database.
     const refused = await write(f.id, tx => tx.putPage('alpha-third', { type: 'note', title: 'x', compiled_truth: 'x', timeline: '', frontmatter: {}, content_hash: 'x', source_path: 'alpha.md' }, { sourceId: f.id }))
       .then(() => 'written', () => 'refused');
