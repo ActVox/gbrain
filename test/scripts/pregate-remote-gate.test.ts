@@ -94,7 +94,7 @@ describe('pregate-remote-gate.sh', () => {
     chmodSync(join(bin, 'bun'), 0o755);
     const r = spawnSync('bash', [SCRIPT, '--lanes', 'unit'], {
       cwd: repo, encoding: 'utf8',
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', UBI_OWNER: 'gbra0test', PATH: `${bin}:${process.env.PATH}`, GBRAIN_PREGATE_GATE_CMD: undefined, PREGATE_TREE: undefined } as Record<string, string>,
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', UBI_OWNER: 'gbra0test', PATH: `${bin}:${process.env.PATH}`, GBRAIN_PREGATE_GATE_CMD: undefined, PREGATE_TREE: undefined },
     });
     expect(r.stdout).toContain('fake-bun: run ci:ubicloud:diff --lanes unit');
     expect(r.stdout.trim().split('\n').at(-1)).toBe(`PREGATE_REMOTE: tree=${contentTree()} tests=1 failed=0`);
