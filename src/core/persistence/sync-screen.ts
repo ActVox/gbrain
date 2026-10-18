@@ -30,7 +30,7 @@ import { sha256 } from './digest.ts';
 import { readPageBodyPolicy, type PageBodyPolicy } from '../page-body/limits.ts';
 import { readPagePurgeTombstones } from './page-purge.ts';
 import { listTrustAllowRules } from '../trust/allow-rules.ts';
-import { readSyncContent, readSyncFile, syncGitPath, type SyncDiscovery, type SyncEntry } from './sync-discovery.ts';
+import { readSyncContent, readSyncFile, syncGitPath, UNREADABLE_SYNC_FILE, type SyncDiscovery, type SyncEntry } from './sync-discovery.ts';
 import { pinnedWindowBlock, readBlobBytes, readBlobContents, readPinnedBlob, readPinnedBytes, readPinnedContent, readTreeBlobs, SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
 import { screenSyncImport, type SyncImportScreenInput } from './sync-prepare.ts';
 import type { SyncProcessingOptions } from './sync-authority.ts';
@@ -213,6 +213,23 @@ export function streamedRefusalHold(entry: Pick<SyncEntry, 'path' | 'sourcePath'
 export function oversizeHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'working' | 'renameFrom' | 'renameHeld'>, slug: string, pageId: number | null, size: number | null, blob: TreeBlob | null | undefined): HeldEntry {
   return heldEntry(entry, slug, pageId, { code: 'file_too_large',
     message: `File too large (${size ?? `over ${SYNC_READ_BOUND}`} bytes; the sync read bound is the ${SYNC_READ_BOUND}-byte (24 MiB) page ceiling). Pages up to the ceiling are chunked and searchable; leave this file out of the source (sync.exclude) or keep it outside the brain repo. See docs/guides/memory-boundaries.md#large-pages.` }, null, blob);
+}
+
+/** File-system errors that make one path unreadable while the rest of its source reads (GBRA-130 A-7). */
+const UNREADABLE_ERRNO = new Set(['EACCES', 'EPERM', 'ELOOP', 'EISDIR', 'ENOTDIR']);
+/**
+ * GBRA-130 A-7: the hold of a file sync cannot read as a regular file inside its root (a symlink component, a non-regular
+ * file, a permission or loop error); null for any other error. Its content is never read or followed, and the root-level
+ * refusals (the root itself replaced or escaped) are not per-file and stay run-level.
+ */
+export function unreadableFileHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'working' | 'renameFrom' | 'renameHeld'>, slug: string, pageId: number | null, error: unknown,
+  blob: () => TreeBlob | null | undefined): HeldEntry | null {
+  const errno = (error as NodeJS.ErrnoException | null)?.code;
+  const refused = error instanceof OperationError && error.detail === UNREADABLE_SYNC_FILE;
+  if (!refused && !(typeof errno === 'string' && UNREADABLE_ERRNO.has(errno))) return null;
+  const why = refused ? (error as OperationError).message : `it cannot be read (${errno})`;
+  return heldEntry(entry, slug, pageId, { code: 'file_unreadable',
+    message: `Sync did not read ${entry.path}: ${why} Sync reads only regular files inside the source root and never follows a symlink. Make it a readable regular file there (or exclude it with sync.exclude) and commit, then run gbrain sources retry-held to re-test it.` }, null, blob());
 }
 
 const purgeTombstonesByRun = new WeakMap<SyncScreenRun, Promise<Map<string, string>>>();

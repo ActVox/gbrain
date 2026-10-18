@@ -74,7 +74,9 @@ export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regre
   /** #6712 PR 4b (design v3.2 §3.1): a path a live pass settled in three consecutive passes at one level that never classified settled. */
   | 'settle_mismatch'
   /** GBRA-130 A-6: the path's write failed the same unclassifiable way (an owner exception, an unplaced refusal) on repeated attempts. */
-  | 'page_write_failed';
+  | 'page_write_failed'
+  /** GBRA-130 A-7: a file sync cannot read as a regular file inside its root (a symlink, a non-regular file, a permission error). */
+  | 'file_unreadable';
 /** GBRA-130 A-6: the fault a `page_write_failed` hold stands for (identifiers and classes only, never content). */
 export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null; request_id: string; attempts: number; gbrain_version: string }
 /** #6278: what the owner recorded about a preparation it gave up on (step names and vocabulary only, never content). */
@@ -673,6 +675,13 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
           + 'The receipt (read-only) names the error; report it with the gbrain version, or fix the file when the error names its content. An upgrade re-tests the path on its own.',
         then: { argv: ['gbrain', 'sources', 'retry-held', source], consent: [], actor: 'agent', requires_exclusive: false, verify,
           why: `Schedules ${record.path} for a re-screen on the next sync once the cause is fixed.` },
+        verify };
+    }
+    case 'file_unreadable': {
+      const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+      return { argv: ['gbrain', 'sources', 'retry-held', source], consent: [], actor: 'user', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#file_unreadable',
+        why: `${record.path} is not a readable regular file inside the source root (a symlink, a non-regular file or a permission error), so sync held it without reading or following it and the rest of the source kept syncing. `
+          + 'Make it a readable regular file in the checkout (or exclude it with sync.exclude) and commit; a commit that changes it re-screens the hold on its own, and this schedules the re-screen for a permission fix.',
         verify };
     }
     case 'worktree_dirty': {

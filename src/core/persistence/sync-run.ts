@@ -46,7 +46,7 @@ import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
 import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
-import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
+import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, unreadableFileHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
 import { frozenImageIntent, sameImageBytes } from './sync-image.ts';
 import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
 import { managedSyncWriteDiagnostic, writeWaitOf } from './sync-write-diagnostic.ts';
@@ -366,7 +366,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     let bytes: Buffer | null = null;
     try { bytes = readSyncFile(cursor.root, entry.path); }
     catch (error) {
-      if (!isSyncReadBound(error)) throw error;
+      if (!isSyncReadBound(error)) { const held = holdsOn ? unreadableFileHold(entry, entry.slug!, entry.pageId ?? null, error, () => pinnedBlob(cursor, entry.path)) : null; if (held) return { hold: held }; throw error; } // GBRA-130 A-7
       // Wave B: with segmented storage on, a Markdown file over the read bound is frozen by reference and streamed by its owner.
       if (entry.action === 'import' && !cursor.companyPlan && !image) {
         bodyRef = await streamedSyncBodyRef(engine, { root: cursor.root, path: entry.path, target: cursor.target, working: entry.working,
