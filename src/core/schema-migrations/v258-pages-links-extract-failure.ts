@@ -1,6 +1,6 @@
 import type { Migration } from './types.ts';
 
-export const v257: Migration = {
+export const v258: Migration = {
   // GBRA-130 A-1: managed link extraction's per-page failure record. A page
   // whose derivation fails with a content-class error is recorded here with
   // the knowledge revision and extractor generation it failed at and a run
@@ -12,7 +12,7 @@ export const v257: Migration = {
   // marker. Nullable, no backfill, no index (bootstrap-coverage: column-only).
   // Fresh installs get it from this migration too (not src/schema.sql), so
   // fresh and upgraded brains share pages column ordinals.
-  version: 257,
+  version: 258,
   name: 'pages_links_extract_failure',
   idempotent: true,
   sql: `

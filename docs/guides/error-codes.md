@@ -2388,6 +2388,16 @@ Reasons: `not_owner_host`, `not_applicable`.
 
 More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-pages)
 
+### origin_twin_mass_merge_refused
+
+<a id="origin_twin_mass_merge_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair origin-twins refused to merge duplicate-origin twins amounting to more than half of a source's file-backed pages; nothing was changed. | The sync mass-delete valve (#2828) applied to origin twins (#6948): that many twins at once almost always means a re-import under other slugs or the wrong checkout, not a backlog. | Check the source and its checkout first. If merging these pages is genuinely intended, ask the user, then rerun the same apply command with GBRAIN_ALLOW_MASS_RECONCILE=1. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#origin-twins](../../docs/guides/repair.md#origin-twins)
+
 ### overlapping_path
 
 <a id="overlapping_path"></a>

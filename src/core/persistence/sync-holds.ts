@@ -36,6 +36,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import type { ContentRefusal } from '../import-screen.ts';
 import { RECOVERY_VERSION, type InvalidFrontmatterReason } from '../markdown.ts';
+import { ORIGIN_TWINS_AUTO_RESOLVE_KEY, originTwinsPreviewArgv, type OriginConflictReason } from './origin-twins.ts';
 import { FENCE_REASONS, type FenceMessageLocation } from '../fence-repair/reasons.ts';
 import type { FenceReason, FenceTier, GateLetter } from '../fence-repair/types.ts';
 import { FENCE_VERSION } from '../fence-repair/refusal.ts';
@@ -69,7 +70,7 @@ export const GIT_HOLD_ESCALATE_MIN_SCREENED = 40;
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 
 export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regression' | 'managed_image_sync_unsupported' | 'concurrent_write' | 'preparation_stalled' | 'worktree_dirty' | 'file_drift'
-  | 'legacy_slug_conflict';
+  | 'legacy_slug_conflict' | 'origin_conflict';
 /** #6278: what the owner recorded about a preparation it gave up on (step names and vocabulary only, never content). */
 export interface PreparationStallMeta {
   request_id: string;
@@ -82,7 +83,7 @@ export interface PreparationStallMeta {
   /** The `gbrain sync` arguments that resume the cursor with its stored options (after `sources retry-held`). */
   sync_argv: string[];
 }
-export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason;
+export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason | OriginConflictReason;
 
 export interface GitHoldMeta {
   reason?: GitHoldReason;
@@ -135,6 +136,10 @@ export interface GitHoldMeta {
   blocked_on?: string;
   /** #6727 `legacy_slug_conflict`: the live pages without a recorded origin whose slugs fold to the file's slug. */
   legacy_slugs?: string[];
+  /** #6948 `origin_conflict`: the live pages recording the file as their origin, by id (no `reason`: the sync-time heal resolves it). */
+  origin_claimants?: Array<{ id: number; slug: string; revision: string }>;
+  /** #6948 `origin_conflict`: the slug the file's path gives (the page that keeps the origin). */
+  canonical_slug?: string;
 }
 
 /** #6188: why the last fence repair left a hold in place, and when the maintenance run tries it again (null: it does not). */
@@ -495,10 +500,11 @@ export async function holdBasisMoved(engine: Pick<BrainEngine, 'executeRaw'>, so
  * re-screens whenever multimodal embedding is on, since managed sync then
  * imports the image instead of holding it. #6712 PR 2: a `content_rejected`, `write_gate_rejected` or
  * `purged_content` hold rests on a setting, an allow rule or a tombstone its fix lets the user change, so it
- * re-screens on every sync too. #6727: so does a `legacy_slug_conflict` hold, which rests on the legacy pages a person removes.
+ * re-screens on every sync too. #6727: so does a `legacy_slug_conflict` hold, which rests on the legacy pages a person removes. #6948: and an
+ * `origin_conflict` hold, which rests on the twin pages the heal, the repair or a person removes.
  */
 export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, retried: boolean): boolean {
-  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict'].includes(record.code)
+  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict', 'origin_conflict'].includes(record.code)
     // #6712: a transient hold (the write owner stalled, not the file) is retried by every sync until it has been held HOLD_ATTEMPTS_NEEDS_HUMAN times.
     || (record.code === 'preparation_stalled' && (record.meta.attempts ?? 1) < HOLD_ATTEMPTS_NEEDS_HUMAN)
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
@@ -699,6 +705,27 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
         then: { argv: ['gbrain', 'sync', '--source', source, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false, verify,
           why: `Re-screens ${record.path} after the other pages are removed (this hold is re-screened on every sync).` },
         verify };
+    }
+    case 'origin_conflict': {
+      const claimants = record.meta.origin_claimants ?? [];
+      const canonical = record.meta.canonical_slug ?? '<slug>';
+      const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+      const then: Action = { argv: ['gbrain', 'sync', '--source', source, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+        why: `Re-screens ${record.path} once one page records it (this hold is re-screened on every sync); the file then imports into that page.` };
+      const named = claimants.map(page => page.slug).join(', ');
+      if (!record.meta.reason) {
+        return { argv: originTwinsPreviewArgv(source), consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#origin_conflict',
+          why: `Pages ${named} all record ${record.path} as their origin and hold the same content, and ${canonical} is the page its path names, so the next managed sync resolves them by itself `
+            + `(${ORIGIN_TWINS_AUTO_RESOLVE_KEY}, on by default): each other page's links move to ${canonical}, its slug becomes an alias of ${canonical}, and it is soft-deleted without touching the file (restorable for 72 h). `
+            + `This preview writes nothing; its apply does the same now. The rest of the source is not blocked.`, then, verify };
+      }
+      const keep = claimants.find(page => page.slug === canonical);
+      const soft = claimants.filter(page => page !== keep).map(page => `gbrain delete --source-id ${source} --expected-revision ${page.revision} -- '${page.slug}'`);
+      return { argv: ['gbrain', 'get', '--source', source, '--', claimants[0]?.slug ?? canonical], consent: [], actor: 'user', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#origin_conflict',
+        user_message: `Pages ${named} all record ${record.path} as their origin, and sync cannot prove they are one document (${record.meta.reason}), so it held only this file; the rest of the source keeps syncing. `
+          + `Read each page (gbrain get --source ${source} -- '<slug>'), pick the one that is this file's page and soft-delete each other one (the file stays, restorable for 72 h)`
+          + (soft.length ? `, for example: ${soft.join('; ')}` : '') + `; then run gbrain sync --source ${source} --no-pull. gbrain repair origin-twins --source ${source} lists the group and its commands.`,
+        why: 'Which page owns a file cannot be decided when the pages differ, carry different frontmatter ids, or none is the page the path names; sync never deletes a page it cannot prove is a duplicate.', then, verify };
     }
     case 'rename_held':
       return repair(true, `The page that ${record.path} renames changed after the rename was recorded, so it was not moved; the preview proposes re-binding the rename to the current page for approval.`);

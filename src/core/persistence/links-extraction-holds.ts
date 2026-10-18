@@ -1,5 +1,5 @@
 /**
- * GBRA-130 A-1: the per-page failure record of managed link extraction (`pages.links_extract_failure`, migration v257).
+ * GBRA-130 A-1: the per-page failure record of managed link extraction (`pages.links_extract_failure`, migration v258).
  *
  * Only content-class failures are recorded (a transient one is retried on the next run and never counts). A page that
  * fails with the same code at the same knowledge revision and extractor generation in `LINK_HOLD_THRESHOLD_RUNS`

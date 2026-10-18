@@ -142,7 +142,7 @@ const VALUE_FLAGS = new Set(['--source', '--limit', '--expect', '--only', '--ski
 /** Flags only some kinds accept, with the kinds that do. */
 const KIND_FLAGS: Record<string, readonly string[]> = {
   '--only': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--skip': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--diff': ['frontmatter', 'fences', 'slug-conflicts', CONTENT_LANE], '--yes': ['frontmatter', 'conversation-labels', 'stuck-recovery', 'ghost-pages', 'rename-identity'],
-  '--slug': ['fences', 'file-drift', 'rename-identity', 'overwritten-edits'], '--from': ['rename-identity'], '--close': ['rename-identity'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift'], '--since': ['file-drift'],
+  '--slug': ['fences', 'file-drift', 'rename-identity', 'overwritten-edits', 'origin-twins'], '--from': ['rename-identity'], '--close': ['rename-identity'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift'], '--since': ['file-drift'],
   '--keep': ['stuck-recovery'], '--request-id': ['stuck-recovery'],
   '--older-than': ['receipt-compaction'], '--include-failures': ['receipt-compaction'], '--force': ['receipt-compaction'],
 };
@@ -364,7 +364,8 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
     const preview = ['gbrain', 'repair', kind, ...(source ? ['--source', source] : []), ...only.flatMap(path => ['--only', path]), ...skip.flatMap(path => ['--skip', path]),
       ...(includeAmbiguous ? ['--include-ambiguous'] : []), ...(requestId ? ['--request-id', requestId] : []),
       ...(olderThan ? ['--older-than', olderThan] : []), ...(includeFailures ? ['--include-failures'] : []), ...(force ? ['--force'] : []),
-      ...(kind === 'rename-identity' ? [...slugs.flatMap(slug => ['--slug', slug]), ...(from ? ['--from', from] : []), ...(close ? ['--close'] : [])] : [])];
+      ...(kind === 'rename-identity' ? [...slugs.flatMap(slug => ['--slug', slug]), ...(from ? ['--from', from] : []), ...(close ? ['--close'] : [])] : []),
+      ...(kind === 'origin-twins' ? slugs.flatMap(slug => ['--slug', slug]) : [])];
     const custom = repairSpec(kind as RepairKind).consentText;
     const text = custom ? { ...custom, why: `Preview ${expect}: ${custom.why}`, user_message: `${custom.user_message} (preview ${expect.slice(0, 12)}${keep ? `, keep ${keep}` : ''})` } : {
       what: `Rewrite the previewed ${kind} changes on disk and import them`,
