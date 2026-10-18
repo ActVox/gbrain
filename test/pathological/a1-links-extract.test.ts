@@ -14,12 +14,12 @@
  * transaction (no production seam); the #6808 cases build the real orphan-source state.
  */
 import { describe, expect, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { extractManagedStaleLinks, runManagedStaleExtraction } from '../../src/core/persistence/links-maintenance.ts';
 import { runPhaseExtractDatabaseOnly } from '../../src/core/cycle/connector-extract.ts';
 import { checkLinksExtractionLag } from '../../src/commands/doctor.ts';
-import { submitPageMutation } from '../../src/core/persistence/page-mutations.ts';
+import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
+import { maintenanceAttribution } from '../../src/core/persistence/attribution.ts';
 import { effectiveLinkExtractorWatermark } from '../../src/core/link-extraction-watermark.ts';
 import { expectItemFailure, expectOthersUnchanged, expectUnitNotAborted, managedBrain, pathologicalArms, runScopedErrors, snapshotItems } from './harness.ts';
 
@@ -79,10 +79,11 @@ async function stamped(engine: BrainEngine, slug: string, sourceId = 'default') 
 const run = (engine: BrainEngine) => extractManagedStaleLinks(engine, { sourceId: 'default', mentions: false });
 const runAll = (engine: BrainEngine) => extractManagedStaleLinks(engine, { mentions: false });
 
-async function edit(ctx: Parameters<typeof submitPageMutation>[0], engine: BrainEngine, body: string) {
-  const expected = (await engine.readPageSnapshot(BAD, { sourceId: 'default' }))!.revision;
-  await submitPageMutation(ctx, { operation: 'put_page', params: { slug: BAD, content: `---\ntitle: p-03\ntype: note\n---\n${body}`,
-    request_id: randomUUID(), expected_revision: expected } });
+/** An edit of the bad page: a coordinated content write, so the page gets a new knowledge revision. */
+async function edit(engine: BrainEngine, body: string) {
+  const attribution = await maintenanceAttribution(engine);
+  await engine.transaction(tx => withCoordinatedWrite(tx, ['default'],
+    () => tx.executeRaw('UPDATE pages SET compiled_truth=$1, updated_at=now() WHERE source_id=$2 AND slug=$3', [body, 'default', BAD]), attribution));
 }
 
 for (const { backend, databaseUrl } of pathologicalArms()) {
@@ -93,7 +94,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         try {
           const before = await snapshotItems(engine, 'default');
           const first = await expectUnitNotAborted(() => run(engine));
-          expect(first.pages).toBe(healthy.length);
+          expect(first.pages).toBe(healthy.length + 1);
           expectItemFailure(first.failures?.[0], { key: BAD, code: 'invalid_data', fix: /extract.*--stale.*--source-id.*default/ });
           expect({ held: first.failures?.[0]?.held, attempts: first.failures?.[0]?.attempts }).toEqual({ held: false, attempts: 1 });
           expectOthersUnchanged(before, await snapshotItems(engine, 'default'), { changed: [BAD], expectProgress: healthy, progressFields: ['links'] });
@@ -163,13 +164,13 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
     }, 120_000);
 
     test('A-1 recovery: a held page is retried and lands after --retry-held, an edit or an extractor generation change', async () => {
-      await managedBrain(async ({ engine, ctx }) => {
+      await managedBrain(async ({ engine }) => {
         const restore = failDerive(engine, new Set([BAD]), contentError);
         try { for (let i = 0; i < 3; i++) await run(engine); } finally { restore(); }
         expect((await holds(engine)).map(h => h.state)).toEqual(['held']);
         const versionTs = await effectiveLinkExtractorWatermark(engine);
         expect(await engine.countStalePagesForExtraction({ sourceId: 'default', versionTs, held: 'exclude' })).toBe(0);
-        const bumped = new Date(Date.parse(versionTs) + 1000).toISOString();
+        const bumped = new Date(Date.now() + 86_400_000).toISOString();
         expect(await engine.countStalePagesForExtraction({ sourceId: 'default', versionTs: bumped, held: 'exclude' })).toBe(PAGES.length + 1);
 
         const retried = await runManagedStaleExtraction(engine, { sourceId: 'default', retryHeld: true, counts: false });
@@ -177,11 +178,11 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect(await stamped(engine, BAD)).toBe(true);
         expect(await holds(engine)).toEqual([]);
 
-        await edit(ctx, engine, `See [[${TARGET}]] again.`);
+        await edit(engine, `See [[${TARGET}]] again.`);
         const again = failDerive(engine, new Set([BAD]), contentError);
         try { for (let i = 0; i < 3; i++) await run(engine); } finally { again(); }
         expect((await holds(engine)).map(h => h.state)).toEqual(['held']);
-        await edit(ctx, engine, `See [[${TARGET}]], edited.`);
+        await edit(engine, `See [[${TARGET}]], edited.`);
         const edited = await run(engine);
         expect({ pages: edited.pages, failures: edited.failures ?? [] }).toEqual({ pages: 1, failures: [] });
         expect(await holds(engine)).toEqual([]);

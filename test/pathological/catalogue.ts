@@ -18,4 +18,6 @@ export interface SiteCases {
 }
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
+  'links.extract_stale': { file: 'test/pathological/a1-links-extract.test.ts',
+    item: 'A-1 item: a page whose derive throws is reported', run: 'A-1 run: a run-scoped error at one page stops the unit' },
 };
