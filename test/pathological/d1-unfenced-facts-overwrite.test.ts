@@ -126,6 +126,30 @@ function editsOnceFencePrepared(engine: BrainEngine, file: string, before: () =>
   });
 }
 
+/** An engine whose transactions run `edit` once, right after the body mirror (refreshPageBody) inside the transaction. */
+function editsOnceAfterMirror(engine: BrainEngine, edit: () => Promise<void>): BrainEngine {
+  let fired = false;
+  const wrapTx = (tx: BrainEngine): BrainEngine => new Proxy(tx, {
+    get(target, prop) {
+      if (prop === 'refreshPageBody') return async (...args: unknown[]) => {
+        const result = await (target.refreshPageBody as (...a: unknown[]) => unknown).apply(target, args);
+        if (!fired) { fired = true; await edit(); }
+        return result;
+      };
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return new Proxy(engine, {
+    get(target, prop) {
+      if (prop === 'transaction') return (fn: (tx: BrainEngine) => Promise<unknown>) =>
+        (target.transaction as (f: (tx: BrainEngine) => Promise<unknown>) => Promise<unknown>).call(target, tx => fn(wrapTx(tx)));
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 const fenceClaims = (text: string) => parseFactsFence(text).facts.map(f => f.claim);
 
 for (const { backend, databaseUrl } of pathologicalArms()) {
@@ -213,6 +237,23 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const bodyBefore = await b.body(ALICE);
         let edited = '';
         const racing = editsOnceFencePrepared(b.engine, join(b.root, `${ALICE}.md`), async () => {
+          edited = b.file(ALICE).replace('works at Acme Example.', `works at Acme Example.\n\n${LATE_EDIT}`);
+          writeFileSync(join(b.root, `${ALICE}.md`), edited);
+        });
+        const phase = await expectUnitNotAborted(() => b.cycle(racing));
+        expect(edited).toContain(LATE_EDIT);
+        expect({ file: b.file(ALICE) === edited, body: (await b.body(ALICE)) === bodyBefore }).toEqual({ file: true, body: true });
+        expect(await b.rows(ALICE)).toEqual([{ fact: 'Alice Example moved to Lisbon', row_num: null }]);
+        expect(phase.warnings.filter(w => w.includes(`FACTS_FENCE_FAILED: ${ALICE} (file_database_drift`)).length).toBe(1);
+      });
+    }, 180_000);
+
+    test('D-1 file edit inside the fence transaction, after the body mirror: the editor\'s bytes survive, the mirror and row stamps roll back', async () => {
+      await withBrain(databaseUrl, async b => {
+        await b.unfenced(ALICE, 'Alice Example moved to Lisbon');
+        const bodyBefore = await b.body(ALICE);
+        let edited = '';
+        const racing = editsOnceAfterMirror(b.engine, async () => {
           edited = b.file(ALICE).replace('works at Acme Example.', `works at Acme Example.\n\n${LATE_EDIT}`);
           writeFileSync(join(b.root, `${ALICE}.md`), edited);
         });
