@@ -68,8 +68,8 @@ const SHARED_READ = Symbol('gbrain.shared-read');
 /**
  * Flip lane C: the failure of a read several preparations share (group-publish.ts `preparationReads`), handed to every member
  * waiting on it. It ran without any member's bound, so it is no member's own statement: a bounded member never reads it as
- * its deadline, and the coordinator never charges it as the member's interruption. The SQLSTATE stays, so a transient
- * one still releases the member uncounted.
+ * its deadline, and the coordinator charges it once, to the first member that settles with it (`chargedSharedReads`); the
+ * other members waiting on the same failure are released uncounted.
  */
 export function sharedReadFailure(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
