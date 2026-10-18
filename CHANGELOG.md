@@ -10,28 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.295.0] - 2026-10-17
+## [0.60.294.0] - 2026-10-17
 
-**A Git index lock left by a killed git no longer stops a managed brain's Git backups until someone removes it, and large checkouts stop killing git in the first place.** Hotfix for #6932, plus #6936.
+**Graph walks are breadth-first: each page and edge comes back once, at its shortest depth, and dense clusters walk in milliseconds.** First step of the graph-traversal plan (HydraDB evaluation, autoplan run-20261017033903).
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| A git step of the canonical writer was SIGKILLed after it created `.git/index.lock` (a step past its deadline, a job group killed after its grace, the OOM killer) (#6932) | every later Git effect in that checkout failed `git_index_locked`, then `git_index_stale`, and parked; commits for the whole source stopped until a person removed the lock and ran `gbrain sources writer retry-effects` | while it holds its writer lock, the writer reclaims a lock it can prove abandoned: on Linux with the whole process table visible and a local filesystem, no process has the lock open, no git runs in the checkout or points at it through `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE`, and the lock is empty and at least 5 s old, or older than 10 minutes. It then retries the step and gives effects that lock had parked one more attempt. Each reclaim leaves a receipt under `GBRAIN_HOME/persistence/index-lock-reclaims.jsonl` and a log line, and doctor `parked_effects` reports reclaims from the last 7 days |
-| An index lock the writer cannot prove abandoned (a live git, another platform, a container, a network filesystem) | `git_index_stale` told you to remove it if no git was running | the lock still stays, and `git_index_stale` now says why it was kept and carries an `ask_user` fix: check that no git runs in that checkout, remove the lock, then retry the parked effects |
-| A one-file Git effect on a large checkout under heavy I/O (a 48 MB index took 35–39 s for `commit --only` in a throttled test) | each git step had 20 s, then 2 s between SIGTERM and SIGKILL, so a slow git was killed mid-write and left its lock | each step gets 20 s plus 2 s per MiB of index (at most 120 s; 98 s for a 39 MB index) and 10 s to exit after SIGTERM, and read-only steps run with `GIT_OPTIONAL_LOCKS=0`, so `git status` never takes the index lock |
-| An advisor check that throws (#6936) | it was dropped silently: with no other findings the report said the brain looked healthy and `gbrain advisor` exited 0 | the check is reported as a warn finding `collector_failed:<check>` (static text, no error details, nothing `--apply` can run), so the run exits 1; findings from other checks and critical precedence are unchanged |
+| A graph walk (`traverse_graph`, `gbrain graph`, `think` graph context) | enumerated every simple path, capped at 20,000 paths; a page came back once per depth some path reached it, and an edge once per depth | visits each page once, at its shortest distance, and returns each edge once (one hop past its shallower walked endpoint); the pages and edges reached are the same |
+| A walk over a densely linked cluster (12-page clique, depth 5) | 44 to 91 ms on Postgres under the path cap (22 s before the cap) | 4 to 9 ms |
+| A walk that reaches a large share of the brain | the 20,000-path cap could stop before deeper pages were reached | stops at 20,000 visited pages, shallowest first; the truncation warning names both caps |
+| `frontierCap` on `traverseGraph` | an approximate per-iteration cap applied before deduplication | an exact per-layer cap on new pages, in (slug, id) order |
+
+Every per-hop filter is unchanged and still applies at every step: soft delete, `excludePrivate` (page and link-origin privacy), source scope, link type and temporal policy.
 
 ### What you need to do
 
-Nothing. If doctor `parked_effects` still shows effects parked with `git_index_stale`, its message says why the lock was kept; follow the fix it names.
+Nothing. Callers that relied on a page appearing at several depths now see it once, at its shortest depth.
 
 ### For contributors
 
-- `commitGitTargets` and `publishGitEffect` take an optional `GitEffectOwner` (the caller's writer lock). Only callers that pass one can reclaim a lock; the effect worker passes it.
-- `execFileBounded` takes `termGraceMs` (default 2 s).
-- `test/persistence-index-lock-reclaim-6932.test.ts` kills a real `git add` with SIGKILL while it holds the lock. Where the process table isn't fully visible (macOS, containers), the same cases assert the refusal instead.
+- `src/core/engine-sql/links.ts`: one breadth-first CTE (`bfsWalkCtes`) serves `traverseGraph` and `traversePathsDetailed` on both engines.
+- `test/traverse-bfs.test.ts` checks the walks against a TypeScript shortest-path reference and the old CTE on seeded random graphs, and checks that a private, out-of-scope, private-origin or soft-deleted page in the middle of a chain stops the walk.
+- The dense-hub fixture (`test/helpers/dense-hub.ts`) now has 12 ring links per spoke, so the row-cap tests still overflow 5,000 edges now that each edge is returned once.
+- `scripts/bench-graph-walk.ts` times the walks on PGLite and, with `GBRAIN_BENCH_DATABASE_URL`, on Postgres.
+- `relationalFanout` still enumerates paths (3 hops at most); moving it to breadth-first changes search ranking and is a follow-up.
+- `test/large-pages/segmented-storage-visibility.test.ts`: the sweep-cost test counts rows at table scans only and analyzes every table the sweep reads, so a planner switching aggregate or join strategy between rounds no longer moves the count by one. A full scan of the source still fails it (12 rows against 20,014).
 
 ## [0.60.293.0] - 2026-10-17
 
