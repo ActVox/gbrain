@@ -51,7 +51,7 @@ for (const backend of testBackends()) {
         expect(atoms[0]!.slug).toMatch(/^atoms\/2026-10-16\/example-domains-grew-10-in-q3-[0-9a-f]{8}$/);
         for (const { slug } of atoms) expect(() => validatePageSlug(slug)).not.toThrow();
         const receipts = (result.details as { write_requests: Array<{ slug: string; write_through?: { written?: boolean } }> }).write_requests
-          .filter(receipt => receipt.slug.startsWith('atoms/'));
+          .filter(receipt => receipt.slug?.startsWith('atoms/'));
         expect(receipts.map(receipt => [receipt.slug, receipt.write_through?.written])).toEqual(atoms.map(atom => [atom.slug, true]));
       }, { databaseUrl, setup: seedSource });
     }, 120_000);
