@@ -246,6 +246,8 @@ test/pathological/b6-triage-verdict-surrogate.test.ts
 test/pathological/c1-effect-stuck-recovery.test.ts
 test/pathological/c2-url-clone-fences.test.ts
 test/pathological/c4-bundle-stuck-recovery.test.ts
+test/pathological/c5-writer-transfer-cancel.test.ts
+test/pathological/c7-content-receipt-root.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts

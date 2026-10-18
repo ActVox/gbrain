@@ -740,6 +740,18 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/troubleshooting.md#consumers-without-heartbeat](../../docs/guides/troubleshooting.md#consumers-without-heartbeat)
 
+### content_receipt_stale
+
+<a id="content_receipt_stale"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A gbrain-owned content source's shared-skills content receipt names another root than the source and its owner binding, so doctor sync_freshness cannot exempt it and sync does not apply. | A writer transfer or relocation an older release ran (or a sources set-path still to run after a transfer accept) moved the canonical root but left the receipt (config shared_skills.content.v1.<source>.<incarnation>) on the old one. Current accepts and set-paths rebind it in their own transaction. | Preview gbrain repair content-receipt-root --source <id> on the owner host and apply it with the hash it prints, or do what it names first (sources set-path, or a self-transfer). Run: gbrain repair content-receipt-root --source '{source_id}' | agent | `gbrain doctor --json` | 1 | no |
+
+Reasons: `receipt_root_moved`.
+
+More: [docs/guides/repair.md#content-receipt-root](../../docs/guides/repair.md#content-receipt-root)
+
 ### content_rejected
 
 <a id="content_rejected"></a>
@@ -2424,7 +2436,7 @@ More: [docs/guides/repair.md#origin-twins](../../docs/guides/repair.md#origin-tw
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| The source's canonical owner cannot run this write or maintenance step right now; `reason` says which condition. | A managed source publishes only through the host that owns its checkout. `host_mismatch`: another host id owns it (two GBRAIN_HOME identity files on one machine look the same; both ids are printed, and a retry on this host cannot help). `transfer_in_progress`: the worktree is draining for a writer transfer; `clone_in_progress`: a topology clone is recovering it; both clear by themselves. `binding_missing`, `incarnation_changed`, `local_path_missing` and `coordination_path_missing` name an incomplete or outdated registration. `not_sent` / `outcome_unknown`: the local owner's IPC lane did not take the write, or lost its acknowledgment. `detail: unbound_source`: on Postgres the source has a checkout but no canonical owner, a configuration state rather than a transient one (not retryable); in classic mode the write path is the file, a commit and `gbrain sync`. | Read gbrain sources writer status --source <id> --json on the brain host. A transfer or clone in progress: wait and retry. host_mismatch: run the step on the owner host, or give the worker and the shell one GBRAIN_HOME; never copy or regenerate host.json. Nothing claims or transfers ownership to run maintenance. | agent | `repeat the read that failed` | 1 | yes |
+| The source's canonical owner cannot run this write or maintenance step right now; `reason` says which condition. | A managed source publishes only through the host that owns its checkout. `host_mismatch`: another host id owns it (two GBRAIN_HOME identity files on one machine look the same; both ids are printed, and a retry on this host cannot help). `transfer_in_progress`: the worktree is draining for a writer transfer, which ends when the successor accepts it or the owner host runs `gbrain sources writer transfer cancel`; a drain prepared over 30 minutes ago asks the user which (`ask_user`) instead of waiting. `clone_in_progress`: a topology clone is recovering it and clears by itself. `binding_missing`, `incarnation_changed`, `local_path_missing` and `coordination_path_missing` name an incomplete or outdated registration. `not_sent` / `outcome_unknown`: the local owner's IPC lane did not take the write, or lost its acknowledgment. `detail: unbound_source`: on Postgres the source has a checkout but no canonical owner, a configuration state rather than a transient one (not retryable); in classic mode the write path is the file, a commit and `gbrain sync`. | Read gbrain sources writer status --source <id> --json on the brain host. A transfer or clone in progress: wait and retry. host_mismatch: run the step on the owner host, or give the worker and the shell one GBRAIN_HOME; never copy or regenerate host.json. Nothing claims or transfers ownership to run maintenance. | agent | `repeat the read that failed` | 1 | yes |
 
 Reasons: `host_mismatch`, `transfer_in_progress`, `clone_in_progress`, `binding_missing`, `incarnation_changed`, `coordination_path_missing`, `local_path_missing`, `not_sent`, `outcome_unknown`.
 

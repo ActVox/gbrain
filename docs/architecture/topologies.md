@@ -423,6 +423,7 @@ fingerprint. Each non-dry-run action requires both an exact `--admin-intent` and
 | `activate` | `writer_activate` |
 | `transfer prepare` | `writer_transfer_prepare` |
 | `transfer accept` | `writer_transfer_accept` |
+| `transfer cancel` | `writer_transfer_cancel` |
 
 For example, after reviewing the target host and canonical directory:
 
@@ -468,6 +469,21 @@ gbrain sources writer activate --brain host --confirm-quiesced \
 intent and state checks. Explicit noninteractive provisioning uses the same
 procedure and preconditions. A transfer still requires the prepared epoch and an
 exact successor manifest; stale heartbeats never authorize takeover.
+
+<a id="transfer-cancel"></a>**Ending a transfer nobody accepts.** `transfer prepare` drains the
+worktree and records `prepared_at` with the manifest; until the successor accepts, maintenance,
+fence repair, managed repair roots and lifecycle changes refuse `owner_unavailable` /
+`transfer_in_progress` (`wait`, then `ask_user` once the drain is 30 minutes old). On the owner
+host, `gbrain sources writer transfer cancel <source> --expected-epoch <n> --admin-intent
+writer_transfer_cancel --expected-state <admin_state>` (preview with `--dry-run`) takes the
+coordination lock, requires the worktree draining at that epoch under this owner, sets it back to
+`active` and clears the prepared manifest; the epoch is kept, so an accept bound to it refuses
+`writer_transfer_conflict`, and the owner may prepare again. Nothing cancels a transfer on its own.
+
+**Content receipts follow the root.** An accept and a `sources set-path` rebind the shared-skills
+content receipt of every moved gbrain-owned content source (nested sources by relative path) in
+their own transaction and report them as `content_receipts`; a receipt an older release left
+behind is rebound by `gbrain repair content-receipt-root` ([repair guide](../guides/repair.md#content-receipt-root)).
 
 <a id="transfer-manifest-scope"></a>**What the manifest covers.** In a Git checkout, the transfer, `sources
 set-path` (rebind), clone and reclone manifest covers the files Git tracks
@@ -733,9 +749,9 @@ writer guard is the enforcement, and after deactivation that guard is inert.
 ### Writer admin lock
 
 `gbrain sources writer lock` sets an opt-in, brain-level admin lock; while it
-is set, writer claim, activate, transfer prepare and transfer accept refuse for
+is set, writer claim, activate, transfer prepare, accept and cancel refuse for
 every caller with `writer_admin_locked`, whose hint tells an agent to stop and
-ask the operator. Only these four administrative changes are blocked: ordinary
+ask the operator. Only these administrative changes are blocked: ordinary
 writes continue, including the automatic first-write claim on a PGLite brain.
 There is no `--force`; the escape hatch is the local unlock. Remote callers can
 neither lock nor unlock, and generic `gbrain config set`/`unset` (including
@@ -757,8 +773,9 @@ gbrain sources writer lock --brain host
 
 If administration fails midway, still run `gbrain sources writer lock` before
 investigating, so no agent can retry the change meanwhile. `lock` refuses with
-`writer_transfer_conflict` while a transfer is prepared but not accepted; finish
-or abandon the transfer first. Shared-skill setup, which claims a checkout as
+`writer_transfer_conflict` while a transfer is prepared but not accepted; accept
+it on the successor, or cancel it on the owner host with `gbrain sources writer
+transfer cancel <source> --expected-epoch <n>`, first. Shared-skill setup, which claims a checkout as
 administration rather than as an ordinary first write, is refused while locked.
 `lock` and `unlock` are idempotent and print the resulting state.
 

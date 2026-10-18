@@ -9,7 +9,7 @@ fixes those and the other kinds listed in
 [What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
 you pass `--apply`.
 The explicit-only kinds, among them `google-file-modes`, `stale-atoms`, `extractor-facts`,
-`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `stuck-recovery`, `aliases` and `rename-identity`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
+`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `content-receipt-root`, `stuck-recovery`, `aliases` and `rename-identity`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs --expect <plan_hash>` runs them under a budget
 (see [Run repairs through doctor](#run-repairs-through-doctor)).
@@ -108,7 +108,7 @@ gives each a fresh row number); it never deletes or rewrites a page.
 | `--limit <n>` | Repair at most `n` items per kind in this run (a positive integer; with `--all`, up to `n` for each kind). Rerun the same command to continue. |
 | `--no-embed` | `safe-chunks` and `contextual-mode`: skip the embedding provider. Run `gbrain embed --stale` later. `timeline` and `visibility` pages are re-embedded by their publication either way. |
 | `--all` | Run every automatic kind in order. Explicit-only kinds are listed with their preview command, never run. |
-| `--expect <hash>` | Explicit-only kinds: apply exactly the set the preview printed under this hash. Required with `--apply` for `stale-atoms`, `extractor-facts`, `captured-facts`, `loop-facts`, `failed-writes`, `frontmatter` and `managed-sync-orphans`. |
+| `--expect <hash>` | Explicit-only kinds: apply exactly the set the preview printed under this hash. Required with `--apply` for `stale-atoms`, `extractor-facts`, `captured-facts`, `loop-facts`, `failed-writes`, `frontmatter`, `managed-sync-orphans` and `content-receipt-root`. |
 | `--include-ambiguous` | `extractor-facts` and `captured-facts`: widen the hashed set to `ambiguous` facts. `frontmatter`: add interpretive file changes. Pass it to both the preview and the apply. See [Extractor facts](#extractor-facts), [Captured facts](#captured-facts) and [Frontmatter](#frontmatter). |
 | `--only <path>`, `--skip <path>` | `frontmatter` only: select source-relative files (repeatable). The hash covers the selection, so pass the same flags to the apply. |
 | `--diff` | `frontmatter` only: print every per-file diff instead of one sample per class (`--json` always carries all of them). |
@@ -135,6 +135,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `connector-checkpoints` | `connector_checkpoints` | Deletes managed connector checkpoint rows and retry pointers that no registered connector source can load and that are older than 7 days. They accumulate after a content setting such as `g_history_days` changes, or when a connector host older than v0.60.11.0 runs during an upgrade. Cleanup only: it never copies or re-keys a checkpoint, takes no journal admission and runs brain-wide (`--source` does not narrow it). | Rows a queued or running connector write, or a connector's recorded pending set, still references. |
 | `orphan-bindings` | `orphan_persistence_bindings` | Deletes persistence source bindings whose source was removed, or that belong to an earlier incarnation of a source re-added under the same id. `gbrain sources remove` and `gbrain sources purge` delete the binding; one an older gbrain left behind makes the re-added source read as claimed, so every `gbrain sync --source <id>` fails with `writer_coordinator_required`. Bookkeeping only: no journal admission, no page or file changes, and it runs brain-wide (`--source` does not narrow it). See [orphan bindings](#orphan-bindings). | A binding that a queued, running or recovering write request of the same source incarnation still references. |
 | `managed-sync-orphans` | `sync_failures` | Explicit-only, preview-bound. Retires managed sync bookkeeping nothing current can resume or clear: a `managed-sync-failure` row whose cursor key has no cursor, and an unfinished `managed-sync` cursor recorded by a principal that is no longer an active local writer (or a pre-options cursor a later run superseded) whose pending request is terminal, or (#6834) a cursor whose checkpoint can never publish because the source's `last_commit` moved elsewhere (`checkpoint_moved`). `op_checkpoints` rows only; no journal admission, no page or file changes. The preview prints a hash; `--apply --expect <hash>` retires exactly that set. See [managed sync orphans](#managed-sync-orphans). | An unfinished cursor whose pending request is still queued, running or recovering, or one the live writer can resume with its recorded options (doctor prints that sync command). |
+| `content-receipt-root` | `sync_freshness` (`content_receipt_stale`) | Explicit-only, preview-bound, owner host. Rebinds a gbrain-owned content source's shared-skills content receipt that still names an old root after a writer transfer or relocation, when the owner's tree still hashes to the recorded worktree manifest. The receipt row only; the previous value is kept under `<key>.backup`. See [content receipt root](#content-receipt-root). | A receipt whose source path, owner host or tree does not match: listed with its class and the step to run first. |
 | `stuck-recovery` | none (`gbrain sources writer status` shows the request `recovering`, or the withdrawal-mirror effect, with `unexpected_file_bytes`) | Explicit-only, preview-bound, destructive consent. Resolves a live page or shared-skill bundle publication recovery whose file matches neither its recorded prior nor its published bytes, and a withdrawal-mirror effect recovery whose file was edited while it was mirroring; each stops every write on its worktree. The preview lists each blocked file with both fingerprints and writes a private diff; `--apply --expect <hash> --keep prior\|disk --yes` backs up both versions, then restores the prior (the write publishes again) or keeps the edit and abandons the write (every file of a bundle one way); an effect's only choice, `--keep withdrawn`, backs up the edit and writes the withdrawn version. See [stuck recovery](#stuck-recovery). | A terminal request with its recovery still set (listed as refused, `recovery_choice_refused`), an effect or bundle record that cannot be resolved (listed as refused, `recovery_effect_unsupported` or `recovery_bundle_unsupported`, with an ask_user fix), a recovery blocked on staging bytes, and a recovery whose file already matches a recorded version (the resident writer finishes those). |
 | `frontmatter-keys` | `stale_frontmatter_keys` | Explicit-only, preview-bound. Strips the parser's reserved top-level keys (`type`, `title`, `tags`, `slug`) that an older import stored inside `pages.frontmatter`. Since v0.60.176.0 those keys are not file/database drift and never render (#6454), so this is hygiene: database rows only, in source-scoped coordinated batches of up to 1,000 pages, no file, body or embedding change. Each swept page advances its `knowledge_revision` once, so a client holding an older revision of a swept page gets one `revision_conflict` and re-reads. See [frontmatter keys](#frontmatter-keys). | A page whose keys were cleared by a write between preview and apply (`already_clean`). |
 | `embedding-effects` | `stale_embedding_effects` | Settles stale queued and failed embedding effects of committed writes, which block receipt compaction and activation: `reconciled` when current vectors pass the effect verifier, `superseded` when the page was deleted or a newer revision owns its own effect, `retry_queued` for the owner (paid; a used-up retry allowance gets one new bounded cycle per explicit apply). See [stale queued embedding effects](#stale-queued-embedding-effects). | `blocked` effects, counted by reason (`owner_unavailable`, `embedding_disabled`, `embedding_unconfigured`, `projection_pending`, `no_replacement_obligation`). |
@@ -713,6 +714,44 @@ predicate in the deleting statement and removes the cursor, its same-key
 failure row and its manifest (when no other cursor shares the run) in one
 transaction, so a cursor the writer picked up meanwhile is left alone. Do not
 delete `op_checkpoints` rows by hand.
+
+### Content receipt root
+
+<a id="content-receipt-root"></a>
+
+**Say to your agent:** *"after moving the brain's content directory to another
+machine, doctor fails sync_freshness and the sync it suggests refuses with
+sync_not_applicable."*
+
+A gbrain-owned content directory (created by `gbrain init` or the 0.53.0
+shared-skills migration) never syncs from Git; doctor exempts it because its
+content receipt (config `shared_skills.content.v1.<source>.<incarnation>`)
+names the source's root and that root's device and inode. A writer transfer
+accept and `gbrain sources set-path` rebind the receipt of every moved source
+(nested sources by their relative path) in their own transaction, and report it
+as `content_receipts`. A receipt an older release left on the old root makes
+doctor report `content_receipt_stale` with this repair as its fix.
+
+```bash
+gbrain repair content-receipt-root --source default                       # preview, on the owner host
+gbrain repair content-receipt-root --source default --apply --expect <hash>
+gbrain doctor --only sync_freshness                                       # the source is writer-owned again
+```
+
+Classes in the preview:
+
+| Class | What it means | Next |
+|---|---|---|
+| `rebind` | The owner binding's root is the source's `local_path` and the owner's tree hashes to the worktree manifest the last transfer or rebind verified. | The apply rewrites the receipt's `root` and `root_identity`. |
+| `source_path_mismatch` | The source's `local_path` still names the old root (a transfer was accepted, `set-path` not yet run). | `gbrain sources set-path <source> <owner root>`, which also rebinds the receipt. |
+| `tree_mismatch` | The owner's tree no longer hashes to the recorded manifest (pages were written since), so it is not proven to be the transferred content; the detail prints both digests. | A self-transfer on the owner host (`gbrain sources writer transfer prepare <source> --self-transfer ...`, then the accept it prints) re-verifies the tree and rebinds the receipt. |
+| `not_owner_host`, `root_missing` | This host does not own the checkout, or the owner's root cannot be read. | `gbrain sources writer status --source <source> --json`. |
+
+The apply recomputes the preview and refuses `preview_changed` unless it is
+unchanged, skips a receipt that changed since the preview, and keeps the
+previous value under `<receipt key>.backup` (`gbrain config get <key>.backup`
+prints it; restoring is `gbrain config set <key> '<previous>'`). Do not edit
+the receipt by hand.
 
 ### Stuck recovery
 

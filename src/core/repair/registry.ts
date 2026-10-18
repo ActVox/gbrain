@@ -46,6 +46,7 @@ import { takeSupersessionRepair } from './take-supersession.ts';
 import { acceptedTakesRepair } from './accepted-takes.ts';
 import { orphanBindingsRepair } from './orphan-bindings.ts';
 import { managedSyncOrphansRepair } from './managed-sync-orphans.ts';
+import { contentReceiptRootRepair } from './content-receipt-root.ts';
 import { embeddingEffectsRepair } from './embedding-effects.ts';
 import { googleFileModesRepair } from './google-file-modes.ts';
 import { staleAtomsRepair } from './stale-atoms.ts';
@@ -293,6 +294,13 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'cursors recorded by a principal that is no longer an active local writer (or superseded pre-options cursors) whose pending request is terminal. '
       + 'Bookkeeping only (op_checkpoints); no journal admission. The preview prints a hash; --apply --expect <hash> retires exactly that set. '
       + 'A cursor with a live pending request, or one the live writer can still resume, is kept and counted.',
+  },
+  'content-receipt-root': {
+    handler: contentReceiptRootRepair, embeds: 'none', checks: ['sync_freshness'], explicit_only: true, preview_bound: true,
+    summary: 'Rebind a gbrain-owned content source\'s shared-skills content receipt that still names an old root after a writer transfer or relocation (#6892), '
+      + 'so doctor sync_freshness exempts the source again. Owner host only; rebinds only when the owner\'s tree still hashes to the recorded worktree manifest, '
+      + 'and otherwise lists why (source_path_mismatch: run sources set-path; tree_mismatch: a self-transfer re-verifies). The receipt row only; the previous '
+      + 'value is kept under <key>.backup. Preview-bound: --apply --expect <hash> rebinds exactly the previewed set.',
   },
   'frontmatter-keys': {
     handler: frontmatterKeysRepair, embeds: 'none', checks: ['stale_frontmatter_keys'], explicit_only: true, preview_bound: true,
