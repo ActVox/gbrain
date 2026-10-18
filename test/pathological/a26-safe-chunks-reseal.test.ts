@@ -77,7 +77,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       expect(result).toMatchObject({ applied: 3, complete: true, failed: [] });
       expect(result.outcomes).toMatchObject({ held: 1 });
       const held = result.outcome_items?.find(o => o.outcome === 'held');
-      expectItemFailure({ key: held?.item, code: held?.reason, fix: held?.detail }, { key: SOURCE + ':' + POISON, code: 'projection_unbuildable', fix: /gbrain repair safe-chunks --source default/ });
+      expectItemFailure({ key: held?.item, code: held?.reason, fix: (held?.detail as { fix?: unknown } | undefined)?.fix }, { key: SOURCE + ':' + POISON, code: 'projection_unbuildable', fix: /gbrain repair safe-chunks --source default/ });
       expect(held?.detail).toMatchObject({ code: 'invalid_data', message: expect.stringContaining('chunk refused') });
       expectOthersUnchanged(before, await snapshotItems(engine, SOURCE), { expectProgress: SLUGS.filter(s => s !== POISON), progressFields: ['chunks'] });
       const [poison] = await engine.executeRaw<{ chunker_version: number }>('SELECT chunker_version FROM pages WHERE source_id=$1 AND slug=$2', [SOURCE, POISON]);

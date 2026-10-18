@@ -41,7 +41,7 @@ export interface GroundingHold {
 export interface GroundingRun {
   sourceId: string;
   holds: Record<string, GroundingHold>;
-  failed: Array<ItemFailure & { content_hash: string | null; timeline: boolean }>;
+  failed: Array<ItemFailure & { content_hash: string | null; timelineAppend: boolean }>;
   grounded: Set<string>;
 }
 
@@ -74,7 +74,7 @@ export async function finishGroundingRun(engine: BrainEngine, run: GroundingRun)
   const holds = { ...run.holds };
   for (const slug of run.grounded) delete holds[slug];
   for (const f of run.failed) {
-    if (f.timeline) continue;
+    if (f.timelineAppend) continue;
     if (f.class !== 'content') { delete holds[f.key]; continue; }
     const prior = holds[f.key];
     const attempts = prior && prior.content_hash === f.content_hash && prior.producer === VERSION && prior.code === f.code ? prior.attempts + 1 : 1;
@@ -88,8 +88,8 @@ export async function finishGroundingRun(engine: BrainEngine, run: GroundingRun)
   return {
     failedSlugs: new Set(run.failed.map(f => f.key)),
     details: {
-      grounding_failed: run.failed.map(f => ({ slug: f.key, code: f.code, message: f.message.slice(0, 300), held: !f.timeline && !!holds[f.key]?.held_at,
-        fix: f.timeline ? `gbrain get --source ${run.sourceId} -- ${f.key}` : holds[f.key]?.held_at ? release : retry })),
+      grounding_failed: run.failed.map(f => ({ slug: f.key, code: f.code, message: f.message.slice(0, 300), held: !f.timelineAppend && !!holds[f.key]?.held_at,
+        fix: f.timelineAppend ? `gbrain get --source ${run.sourceId} -- ${f.key}` : holds[f.key]?.held_at ? release : retry })),
       grounding_held: Object.entries(holds).filter(([, h]) => h.held_at && h.producer === VERSION)
         .map(([slug, h]) => ({ slug, code: h.code, content_hash: h.content_hash, held_at: h.held_at!, fix: release })),
     },

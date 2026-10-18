@@ -63,7 +63,8 @@ export const safeChunksRepair: RepairHandler = {
       const failure = classifyItemFailure(error);
       if (failure.scope !== 'item') throw error;
       return { applied: false, outcome: 'held', reason: 'projection_unbuildable', detail: { code: failure.code, message: redactConnectionInfo(failure.message).slice(0, 500),
-        fix: `gbrain repair safe-chunks --source ${item.source_id} --apply` } };
+        fix: { argv: ['gbrain', 'repair', 'safe-chunks', '--source', item.source_id], consent: [], actor: 'agent', requires_exclusive: false,
+          why: 'Previews safe-chunks for this source (read-only); it lists the held page with its current state, and its printed apply command re-seals it once the cause is fixed.' } } };
     }
     if (!resealed) return false;
     if (opts?.embed && resealed.pendingChunks > 0) {

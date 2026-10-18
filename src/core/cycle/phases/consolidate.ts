@@ -23,6 +23,7 @@
  * extractTotals (cycle.ts) — facts_consolidated + takes_written.
  */
 
+import type { Action } from '../../agent-output.ts';
 import type { BrainEngine, FactRow } from '../../engine.ts';
 import type { PhaseResult } from '../../cycle.ts';
 import { cosineSimilarity } from '../../facts/classify.ts';
@@ -198,7 +199,7 @@ export async function runPhaseConsolidate(
 
   const run = new ItemRun('consolidate.buckets');
   let bucketsFailed = 0;
-  const bucketFailures: Array<{ source_id: string; entity_slug: string; code: string; message: string; fix: string }> = [];
+  const bucketFailures: Array<{ source_id: string; entity_slug: string; code: string; message: string; fix: Action }> = [];
   for (const b of buckets) {
     // #1972: bail at the top of the bucket loop on abort. Each prior bucket's
     // per-row INSERT/consolidate is already committed, so breaking returns a
@@ -391,7 +392,8 @@ export async function runPhaseConsolidate(
       bucketsFailed += 1;
       if (bucketFailures.length < BUCKET_FAILURE_SAMPLES) {
         bucketFailures.push({ source_id: b.source_id, entity_slug: b.entity_slug, code: failure.code, message: failure.message.slice(0, 300),
-          fix: `gbrain dream --phase consolidate --source ${b.source_id}` });
+          fix: { argv: ['gbrain', 'dream', '--phase', 'consolidate', '--source', b.source_id], consent: [], actor: 'agent', requires_exclusive: false,
+            why: 'Reruns consolidate for this source; the bucket consolidates once its entity and evidence pages are readable again.' } });
       }
     }
   }

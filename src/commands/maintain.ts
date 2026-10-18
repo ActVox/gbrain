@@ -160,7 +160,8 @@ async function runCycleFreshnessMaintenance(
         name: 'cycle_freshness',
         status: 'blocked',
         message: `Source-scoped dream cycle for ${sourceId} stopped with ${failure.code}: ${failure.message}`,
-        details: { source_id: sourceId, brain_dir: brainDir, code: failure.code, error: failure.message, fix: `gbrain dream --source ${sourceId}` },
+        details: { source_id: sourceId, brain_dir: brainDir, code: failure.code, error: failure.message, fix: { argv: ['gbrain', 'dream', '--source', sourceId], consent: ['paid'], actor: 'agent', requires_exclusive: false,
+          why: `Reruns the source-scoped dream cycle for ${sourceId} once the cause above is fixed; its paid phases spend only within their configured caps.` } },
       });
       continue;
     }

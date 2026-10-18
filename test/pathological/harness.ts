@@ -81,7 +81,17 @@ export function expectItemFailure(failure: { key?: string; slug?: string; item?:
   const key = failure!.key ?? failure!.item ?? failure!.slug;
   const code = failure!.code ?? failure!.reason;
   expect({ key, code }).toEqual({ key: want.key, code: want.code });
-  if (want.fix) expect(String(typeof failure!.fix === 'string' ? failure!.fix : JSON.stringify(failure!.fix))).toMatch(want.fix);
+  if (want.fix) {
+    const forms = [renderFix(failure!.fix), JSON.stringify(failure!.fix)];
+    expect({ fix: forms[0], matches: forms.some(form => want.fix!.test(form)) }).toEqual({ fix: forms[0], matches: true });
+  }
+}
+
+/** A fix as an agent reads it: an Action renders as its argv joined by spaces, a string stays as is. */
+export function renderFix(fix: unknown): string {
+  if (typeof fix === 'string') return fix;
+  const argv = (fix as { argv?: unknown } | null)?.argv;
+  return Array.isArray(argv) ? argv.join(' ') : JSON.stringify(fix);
 }
 
 /** Errors a run-scoped probe injects at a site: each must stop the unit and record no hold. */

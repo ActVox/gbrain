@@ -481,11 +481,8 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
       }
       // An apply bound to an approved preview (`--expect`) applies that set or answers why not; only the kinds' own refusals continue it.
       if (opts.expect && !(error instanceof OperationError && REPAIR_ITEM_FAILURE_CODES.has(error.code))) throw error;
-      let failure: ItemFailure;
-      try {
-        failure = items.fail(`${item.source_id}:${item.slug}`, error);
-      } catch (stop) {
-        if (!(stop instanceof OperationError) || stop.code !== 'item_failures_systemic') throw stop;
+      const { failure, systemic: stop } = items.record(`${item.source_id}:${item.slug}`, error);
+      if (stop) {
         return stopAfterSettle({ reason: stop.code, message: redactConnectionInfo(`${stop.message} Fix the shared cause, then rerun \`${result.apply_command}\` to resume.`),
           fix: readFix(`Previews ${handler.kind} again (read-only) to show whether the shared cause is gone.`, { argv: ['gbrain', 'repair', handler.kind, ...(opts.sourceFlag ? ['--source', opts.sourceFlag] : []), '--json'] }) });
       }

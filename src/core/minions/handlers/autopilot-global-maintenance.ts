@@ -112,7 +112,7 @@ function phaseBlocker(phase: PhaseResult): string | null {
 function phaseFailureError(result: PhaseResult): Error {
   const code = result.code ?? result.error?.code;
   const message = result.error?.message ?? result.summary;
-  if (code && code in CODES) return new OperationError(code as never, message);
+  if (code && code in CODES) return new OperationError(code as never, message, result.error?.hint ?? 'Rerun the phase with gbrain dream --phase ' + result.phase + ' once the cause is fixed.');
   return Object.assign(new Error(message), code ? { code } : {});
 }
 

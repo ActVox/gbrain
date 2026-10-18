@@ -49,7 +49,7 @@ async function credentialProjectionPhase(engine: BrainEngine, opts: Orchestrator
     // A run-scoped failure (connection, schema, abort) or a systemic one: the phase fails and the next run resumes; no page was held.
     const failure = classifyItemFailure(error);
     return { name, status: 'failed', detail: `The credential-safe re-chunk stopped (${failure.code}): ${redactConnectionInfo(failure.message).slice(0, 500)} `
-      + 'Pages it did not reach stay withheld; fix the cause, then rerun: gbrain apply-migrations --yes --no-autopilot-install' };
+      + 'Pages it did not reach stay withheld; fix the cause, and the next gbrain apply-migrations run resumes the re-chunk.' };
   }
   const kept = result.kept ? `; ${result.kept} code page(s) without a recorded source path stay withheld until re-imported` : '';
   const codes = [...new Set(result.held.map(hold => hold.code))].join(', ');

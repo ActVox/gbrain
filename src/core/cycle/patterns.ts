@@ -785,7 +785,7 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
       grounding?.grounded.add(slug);
     } catch (error) {
       if (!run || !grounding) throw error;
-      grounding.failed.push({ ...run.fail(slug, error), content_hash: contentHash, timeline: false });
+      grounding.failed.push({ ...run.fail(slug, error), content_hash: contentHash, timelineAppend: false });
     }
   }
   return stats;
@@ -902,7 +902,7 @@ export async function groundTimelineAppends(engine: BrainEngine, maintenance: Ma
       run?.succeed();
     } catch (error) {
       if (!run || !grounding) throw error;
-      grounding.failed.push({ ...run.fail(slug, error), content_hash: contentHash, timeline: true });
+      grounding.failed.push({ ...run.fail(slug, error), content_hash: contentHash, timelineAppend: true });
     }
   }
   return stats;

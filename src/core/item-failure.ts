@@ -159,15 +159,20 @@ export class ItemRun {
 
   /** Records one item's failure and returns it; rethrows run-scoped errors; throws `item_failures_systemic` when the breaker trips. */
   fail(key: string, error: unknown): ItemFailure {
+    const recorded = this.record(key, error);
+    if (recorded.systemic) throw recorded.systemic;
+    return recorded.failure;
+  }
+
+  /** Like `fail`, but a tripped breaker is returned instead of thrown, so a caller can stop through its own exit; run-scoped errors still throw. */
+  record(key: string, error: unknown): { failure: ItemFailure; systemic: OperationError | null } {
     const classified = classifyItemFailure(error);
     if (classified.scope === 'run') throw error;
     const failure: ItemFailure = { ...classified, key, message: classified.message.slice(0, 500) };
-    if (classified.scope === 'pending') { this.pendingItems.push(failure); return failure; }
+    if (classified.scope === 'pending') { this.pendingItems.push(failure); return { failure, systemic: null }; }
     this.attempted++;
     this.failed.push(failure);
-    const systemic = this.systemic();
-    if (systemic) throw systemic;
-    return failure;
+    return { failure, systemic: this.systemic() };
   }
 
   /** Item failures recorded so far (pending writes excluded). */
