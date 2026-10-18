@@ -1061,6 +1061,30 @@ export function syncImportParserFor(path: string, schemaPack: string | null): Sy
   return syncImportParser(schemaPack);
 }
 
+/**
+ * One parser per importer kind (`syncImportParserFor`) for a whole level, not one object per path. The kind is a test on
+ * the suffix from the path's last dot (every image and code extension is a dot and a dot-free suffix), so a file name's
+ * suffix is looked up once per level. A path whose last dot sits in a directory name asks `syncImportKind` itself, so the
+ * lookup holds file-name suffixes only, never one entry per path.
+ */
+export function syncImportParsers(schemaPack: string | null): (path: string) => SyncImportParser {
+  const parsers = new Map<string, SyncImportParser>(), bySuffix = new Map<string, SyncImportParser>();
+  const ofKind = (path: string) => {
+    const kind = syncImportKind(path);
+    let parser = parsers.get(kind);
+    if (!parser) parsers.set(kind, parser = syncImportParserFor(path, schemaPack));
+    return parser;
+  };
+  return path => {
+    const dot = path.lastIndexOf('.');
+    if (dot < 0 || path.indexOf('/', dot) >= 0) return ofKind(path);
+    const suffix = path.slice(dot);
+    let parser = bySuffix.get(suffix);
+    if (!parser) bySuffix.set(suffix, parser = ofKind(path));
+    return parser;
+  };
+}
+
 const provenanceFingerprint = (sourceId: string, incarnation: string, pageId: number) => `${sourceId}:${incarnation}:${pageId}`;
 
 export async function recordSyncImportProvenance(tx: Exec, value: Omit<SyncImportProvenance, 'recorded_at' | 'validated'>): Promise<void> {
