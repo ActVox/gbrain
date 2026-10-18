@@ -104,11 +104,12 @@ describe('A-21 managed extract_facts isolates one deleted page whose expiry is r
       test(`[${backend}] a run-scoped error during a deleted-page expiry still stops extract_facts (${name})`, async () => {
         await managedSource(databaseUrl, seedDeleted, async ({ engine, sourceId }) => {
           const injected = error();
-          const read = engine.readPageSnapshot.bind(engine);
-          engine.readPageSnapshot = (async (slug: string, opts?: Parameters<BrainEngine['readPageSnapshot']>[1]) => {
+          // Transaction engines inherit from the engine, so the override forwards `this` (a bound read would leave the transaction).
+          const read = engine.readPageSnapshot;
+          engine.readPageSnapshot = async function (this: BrainEngine, slug: string, opts?: Parameters<BrainEngine['readPageSnapshot']>[1]) {
             if (opts?.includeDeleted && slug.endsWith('-example') && slug !== 'people/carol-example') throw injected;
-            return read(slug, opts);
-          }) as BrainEngine['readPageSnapshot'];
+            return read.call(this, slug, opts);
+          } as BrainEngine['readPageSnapshot'];
           await expect(runExtractFacts(engine, { sourceId })).rejects.toBe(injected);
           engine.readPageSnapshot = read;
           expect(await active(engine, sourceId, 'people/alice-example')).toHaveLength(1);
