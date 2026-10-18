@@ -93,7 +93,7 @@ function fileHeldBy(fileBytes: string, slug: string, state: StoredState): boolea
   if (!fileBodyMatchesStored(fileBytes, slug, state)) return false;
   const parsed = parseMarkdown(fileBytes, `${slug}.md`);
   const declared = parseMarkdownHead(fileBytes).frontmatter;
-  if (declared.title !== undefined && parsed.title.trim() !== (state.title ?? '').trim()) return false;
+  if (declared.title !== undefined && sanitizeText(parsed.title).trim() !== (state.title ?? '').trim()) return false;
   if (parsed.typeExplicit && parsed.type !== state.type) return false;
   const storedTags = Array.isArray(state.tags) ? state.tags.map(String) : [];
   if (JSON.stringify([...new Set(parsed.tags)].sort()) !== JSON.stringify([...new Set(storedTags)].sort())) return false;
