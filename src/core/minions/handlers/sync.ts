@@ -11,7 +11,6 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
   return async (job) => {
     const { performSync } = await import('../../../commands/sync.ts');
     const repoPath = typeof job.data.repoPath === 'string' ? job.data.repoPath : undefined;
-    const noPull = !resolveJobPull(job.data);
     // noEmbed defaults to true (embed is a separate job — submit `embed --stale`
     // after sync, OR run via the autopilot cycle which has its own embed phase).
     // Caller can opt in by passing { noEmbed: false } in job params.
@@ -35,6 +34,13 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
         // global config.sync.* anchor in performSync.
       }
     }
+    // GBRA-133: a job that does not say whether to pull gets the CLI's managed default (no pull); an explicit pull: true is still refused.
+    const pullFlags = { noPull: !resolveJobPull(job.data), dryRun: false };
+    if (typeof job.data.pull !== 'boolean' && typeof job.data.noPull !== 'boolean') {
+      const { implyManagedNoPull } = await import('../../../commands/sync/managed-no-pull.ts');
+      await implyManagedNoPull(engine, pullFlags, sourceId ?? 'default');
+    }
+    const noPull = pullFlags.noPull;
     // #4399: a queued automatic freshness sync re-reads the source when it runs, so a source
     // disabled after enqueue is not synced. Explicit jobs still run; a failed lookup falls through.
     if (job.data.embed_reason === 'autopilot_freshness') {
