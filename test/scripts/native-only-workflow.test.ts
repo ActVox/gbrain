@@ -14,7 +14,7 @@ const workflow = load(readFileSync(join(import.meta.dir, '../../.github/workflow
 type Diagnostic = { race_hunt?: boolean; stress_files?: string; stress_base?: string };
 // test.yml `changes` outputs a pull request's diff selectors; the default
 // selects every native target and the persistence lanes.
-type Changes = { 'native-scope'?: string; convergence?: string };
+type Changes = { 'native-scope'?: string; convergence?: string; reuse?: string };
 function context(event: string, flag?: boolean, diagnostic: Diagnostic = {}, changes: Changes = {}) {
   // Dispatch inputs carry their declared defaults; other events have no inputs.
   const inputs = event === 'workflow_dispatch' ? { native_only: flag, race_hunt: false, stress_files: '', stress_base: '', stress_head: '', ...diagnostic } : {};
@@ -28,7 +28,7 @@ function evaluate(expression: string, event: string, flag?: boolean, diagnostic?
 function template(value: string, event: string, flag?: boolean, diagnostic?: Diagnostic): string {
   return value.replace(/\$\{\{(.*?)\}\}/g, (_, expression) => String(evaluate(expression.trim(), event, flag, diagnostic)));
 }
-// Jobs a pull request (the cheap tier) never runs (docs/TESTING.md#full-ci-on-pull-requests).
+// Jobs a pull request (the cheap tier) never runs (docs/ci-event-parity.md#full-ci-on-pull-requests).
 const FULL_ONLY = new Set(['serial-tests', 'slow-brainbench-e2e', 'brainbench', 'slow-entity-resolve-perf', 'test', 'admin-browser',
   'shared-skills-compatibility', 'coverage-report', 'test-status', 'full-suite']);
 
@@ -47,6 +47,7 @@ describe('native-only CI remains separate from full validation', () => {
           const nativeOnly = event === 'workflow_dispatch' && flag === true;
           const expected = name === 'native-only-status' ? nativeOnly
             : name === 'cheap-tier' ? event === 'pull_request'
+            : name === 'reused-full-suite' ? false
             : !nativeOnly && !(event === 'pull_request' && FULL_ONLY.has(name));
           expect(Boolean(evaluate(job.if!, event, flag)), `${name}/${event}/${flag}`).toBe(expected);
         }

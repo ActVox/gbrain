@@ -150,7 +150,7 @@ esac
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
-  // Pull requests run the cheap tier (docs/TESTING.md#full-ci-on-pull-requests):
+  // Pull requests run the cheap tier (docs/ci-event-parity.md#full-ci-on-pull-requests):
   // of the persistence lanes only the crash robot and convergence; the rest run
   // in the full-ci dispatch, on every push, in the merge queue and nightly.
   test('security and persistence matrices run both supported Bun versions on every event that runs them; pull requests run only the crash robot and convergence', () => {

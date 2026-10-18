@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Record the tree a full-profile run tested (docs/TESTING.md#full-ci-on-pull-requests).
+# Record the tree a full-profile run tested (docs/ci-event-parity.md#full-ci-on-pull-requests).
 # Called by test.yml `full-suite` and e2e.yml `e2e-full-suite` after their
 # aggregate succeeded. scripts/ci-reuse.ts reads the artifact on a push to master.
 # Input (environment): ARTIFACT_DIR, RUN_ID, RUN_ATTEMPT, WORKFLOW, EVENT.

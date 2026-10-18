@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  # Event parity (docs/TESTING.md#full-ci-on-pull-requests): full profile only; a
+  # Event parity (docs/ci-event-parity.md#full-ci-on-pull-requests): full profile only; a
   # pull request (cheap tier) runs only the crash robot and convergence here. The
   # full-ci dispatch on its head, every push and the nightly run this lane.
   read-performance:
@@ -61,7 +61,7 @@ jobs:
           path: .context/persistence-read-latency.json
           if-no-files-found: error
 
-  # Event parity (docs/TESTING.md#full-ci-on-pull-requests): full profile only; a
+  # Event parity (docs/ci-event-parity.md#full-ci-on-pull-requests): full profile only; a
   # pull request (cheap tier) runs only the crash robot and convergence here. The
   # full-ci dispatch on its head, every push and the nightly run this lane.
   deployment-matrix:
@@ -190,7 +190,7 @@ jobs:
   # balanced by measured runtime (scripts/postgres-arm-weights.json, mined from
   # this job's logs); each shard's measured sum, doubled for a slow runner, must
   # end a minute inside the step's 20 minutes (ARM_SHARD_BUDGET_MS).
-  # Event parity (docs/TESTING.md#full-ci-on-pull-requests): full profile only; a
+  # Event parity (docs/ci-event-parity.md#full-ci-on-pull-requests): full profile only; a
   # pull request (cheap tier) runs only the crash robot and convergence here. The
   # full-ci dispatch on its head, every push and the nightly run this lane.
   unit-postgres-arms:
@@ -278,7 +278,7 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
-  # Event parity (docs/TESTING.md#full-ci-on-pull-requests): full profile only; a
+  # Event parity (docs/ci-event-parity.md#full-ci-on-pull-requests): full profile only; a
   # pull request (cheap tier) runs only the crash robot and convergence here. The
   # full-ci dispatch on its head, every push and the nightly run this lane.
   invariants:
@@ -418,7 +418,7 @@ jobs:
 
   # The reconciliation crash suites run beside the soak instead of after it, so
   # neither holds the other's runner: each is about four minutes on PGLite.
-  # Event parity (docs/TESTING.md#full-ci-on-pull-requests): full profile only; a
+  # Event parity (docs/ci-event-parity.md#full-ci-on-pull-requests): full profile only; a
   # pull request (cheap tier) runs only the crash robot and convergence here. The
   # full-ci dispatch on its head, every push and the nightly run this lane.
   reconciliation:

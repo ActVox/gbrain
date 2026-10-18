@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test.yml cheap-tier aggregator (docs/TESTING.md#full-ci-on-pull-requests).
+# test.yml cheap-tier aggregator (docs/ci-event-parity.md#full-ci-on-pull-requests).
 # Inputs: job results in GITLEAKS SECURITY AUDIT VERIFY TYPECHECK STRESS NATIVE
 # PERSISTENCE, and the selectors NATIVE_SCOPE and CONVERGENCE.
 # Every cheap lane must succeed. The native and persistence lanes may be
