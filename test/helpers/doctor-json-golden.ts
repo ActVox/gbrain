@@ -27,7 +27,7 @@ import { delimiter, join } from 'node:path';
 import { defineNormalizer, mapStrings, scrubKeys, scrubPaths, scrubTimestamps } from './golden.ts';
 import { PROVIDER_ENV_KEYS } from './provider-env.ts';
 import { MIGRATIONS } from '../../src/core/schema-migrations/registry.generated.ts';
-import { SEGMENTED_WRITER_FLOOR } from '../../src/core/persistence/writer-versions.ts';
+import { SEGMENTED_WRITER_FLOOR } from '../../src/core/page-body/writer-floor.ts';
 
 const REPO_ROOT = join(import.meta.dir, '..', '..');
 const CLI = join(REPO_ROOT, 'src', 'cli.ts');

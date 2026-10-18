@@ -6,19 +6,6 @@ import type { SqlEngine } from './model.ts';
 /** Writers older than this may still delete database-only timeline rows during publication. */
 export const WRITER_VERSION_FLOOR = '0.60.5.0';
 export const UNSTAMPED_WRITER = 'unstamped (binary older than this release)';
-/**
- * Writers older than this do not understand segmented page bodies (Wave B): a pre-Wave-B binary reads a segmented
- * page's NULL body columns, and the release that added segmented storage behind the switch purges, forgets and exports
- * without its segment texts. A recent one keeps `pages.segmented_storage` effectively off (`page-body/limits.ts`).
- * v0.60.290.0 shipped segment readers with the switch off, but its withdrawal mirror skips segmented pages and its
- * projection builder renews a claim it may have lost, so the floor is the release that turns the switch on: a
- * placeholder equal to the branch's VERSION until the merge-slot stamp sets it and the `since` of the switch-on
- * BEHAVIOR_CHANGES row to the same release (pinned by test/large-pages/segmented-switch.test.ts). A version alone
- * cannot tell a build with segment readers from a release of the same version without them (every release from
- * v0.60.252.0 until the stamp has none), so the gate also requires the segment-reader mark (migration v254) on
- * every write it sees: an unmarked writer blocks whatever its version, the floor included (`segmentedGateWriters`).
- */
-export const SEGMENTED_WRITER_FLOOR = '0.60.293.0';
 
 /** Numeric comparison on all four components; null when either side is not a version. */
 export function compareWriterVersions(a: string, b: string): number | null {
@@ -114,17 +101,24 @@ export interface SegmentedGateWriter {
 }
 
 /**
- * Writers seen in the last `days` that keep segmented storage off: evidence without the segment-reader mark (an
- * older binary inserts NULL into a column it does not know; rows from before v254 count too), or marked evidence
- * stamped below `floor` (an unparsable or missing stamp counts as below) from any role: a release below the floor
- * may write the mark (v0.60.290.0 does). Admitters count in any state, so a failed or still-queued request of an
+ * Writers seen in the last `days` that keep segmented storage off (`floor`: page-body/writer-floor.ts
+ * SEGMENTED_WRITER_FLOOR): evidence without the segment-reader mark (an older binary inserts NULL into a column it does
+ * not know; rows from before v254 count too), or marked evidence stamped below `floor` (an unparsable or missing stamp
+ * counts as below) from any role. Both are needed: a version string cannot tell a build with segment readers from a
+ * build of the same version without them, so an unmarked writer blocks whatever its version, and a release below the
+ * floor may write the mark (v0.60.290.0 does). Admitters count in any state, so a failed or still-queued request of an
  * older binary is seen as well. The ingest log is read in two arms, unmarked and marked rows, each over its
  * window on its partial index (ingest_log_unmarked_idx, v254; ingest_log_marked_idx, v257), so the read never
  * scans the whole log. Not seen: an older binary that writes neither a request nor an
  * ingest-log row (a single-page put on a brain without managed persistence, a run that dies before logging), and
  * one-shot readers and exporters, which write nothing.
  */
-export async function segmentedGateWriters(engine: SqlEngine, days: number, floor = SEGMENTED_WRITER_FLOOR): Promise<SegmentedGateWriter[]> {
+export async function segmentedGateWriters(engine: SqlEngine, days: number, floor: string): Promise<SegmentedGateWriter[]> {
+  return (await segmentedGateEvidence(engine, days)).filter(row => !row.segment_reader || writerVersionBelowFloor(row.version, floor));
+}
+
+/** Every writer the gate read in the last `days`, passing or not, grouped as `segmentedGateWriters` groups them. */
+export async function segmentedGateEvidence(engine: SqlEngine, days: number): Promise<SegmentedGateWriter[]> {
   const rows = await engine.executeRaw<Omit<SegmentedGateWriter, 'version_label' | 'last_seen' | 'requests'> & { last_seen: unknown; requests: number }>(
     `WITH win AS (SELECT now()-($1::double precision*interval '1 day') AS since)
     SELECT 'admitter' AS role,r.admitter_host_id::text AS host_id,r.principal_kind||':'||r.principal_id AS principal,r.admitter_version AS version,
@@ -146,6 +140,5 @@ export async function segmentedGateWriters(engine: SqlEngine, days: number, floo
     FROM persistence_consumers c CROSS JOIN win WHERE c.renewed_at>=win.since GROUP BY 2,3,4,5
     ORDER BY last_seen DESC`, [days]);
   return rows.map(row => ({ role: row.role, host_id: row.host_id, principal: row.principal, version: row.version, version_label: writerVersionLabel(row.version),
-    segment_reader: row.segment_reader === true, last_seen: iso(row.last_seen), requests: Number(row.requests) }))
-    .filter(row => !row.segment_reader || writerVersionBelowFloor(row.version, floor));
+    segment_reader: row.segment_reader === true, last_seen: iso(row.last_seen), requests: Number(row.requests) }));
 }

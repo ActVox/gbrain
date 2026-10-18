@@ -4,7 +4,9 @@
  * 1. Protects: with `pages.segmented_storage on`, an unset `persistence.limits.worktree_recovery_bytes` reads as twice
  *    the effective `pages.max_bytes` (the engine ceiling when unset) plus headroom per copy, never below 256 MiB, so
  *    a restore of a page at the ceiling (which reserves its file twice) fits; with the switch off it stays 256 MiB. A
- *    configured value is kept as the user's choice, and the 1 GiB brain budget already holds the largest default.
+ *    configured value is kept as the user's choice, and the 1 GiB brain budget already holds the largest default. A
+ *    page already stored in segments keeps the default at twice its body plus headroom after the switch goes off or
+ *    `pages.max_bytes` is lowered (soft-deleted too, since a restore brings it back).
  * 2. Fails when: the default stays a flat 256 MiB under a 256 MiB (Postgres) or 128 MiB (PGLite) ceiling, follows a
  *    `pages.max_bytes` above the ceiling, drops below 256 MiB for a lowered `pages.max_bytes`, or overrides a configured
  *    value.
@@ -17,6 +19,8 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { RECOVERY_FILE_HEADROOM_BYTES, SEGMENTED_PAGE_CEILING_BYTES, SEGMENTED_STORAGE_DEFAULT } from '../../src/core/page-body/limits.ts';
 import { readJournalLimits } from '../../src/core/persistence/limits.ts';
+import { importFromContent } from '../../src/core/import-file.ts';
+import { conversationPage } from '../helpers/conversation-page.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { testBackends } from '../helpers/test-backends.ts';
 
@@ -72,6 +76,32 @@ for (const kind of testBackends()) describe(`worktree recovery default follows t
     await engine.setConfig('pages.max_bytes', String(4 * ceiling));
     expect(await worktree()).toBe(2 * (ceiling + RECOVERY_FILE_HEADROOM_BYTES));
   });
+
+  test('a stored segmented page keeps room for its restore after the switch goes off or pages.max_bytes is lowered', async () => {
+    const slug = 'notes/stored-at-ceiling';
+    try {
+      expect((await importFromContent(engine, slug, conversationPage(2 * MiB, { seed: 71 }), { noEmbed: true })).status).toBe('imported');
+      expect((await engine.executeRaw<{ s: string }>('SELECT body_storage AS s FROM pages WHERE slug=$1', [slug]))[0]!.s).toBe('segmented');
+      // A page stored at the ceiling while the switch was on (only its recorded size is read).
+      await engine.executeRaw('UPDATE pages SET body_bytes=$2 WHERE slug=$1', [slug, ceiling]);
+      const expected = 2 * (ceiling + RECOVERY_FILE_HEADROOM_BYTES);
+      expect(expected).toBeGreaterThan(OLD_DEFAULT);
+      await engine.setConfig('pages.segmented_storage', 'off');
+      expect(await worktree()).toBe(expected);
+      await engine.setConfig('pages.segmented_storage', 'on');
+      await engine.setConfig('pages.max_bytes', String(64 * MiB));
+      expect(await worktree()).toBe(expected);
+      // A soft-deleted page can still be restored, so it still counts; a purged one does not.
+      await engine.executeRaw('UPDATE pages SET deleted_at=now() WHERE slug=$1', [slug]);
+      expect(await worktree()).toBe(expected);
+      await engine.setConfig('persistence.limits.worktree_recovery_bytes', String(OLD_DEFAULT));
+      expect(await worktree()).toBe(OLD_DEFAULT);
+    } finally {
+      await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [slug]);
+    }
+    await engine.executeRaw("DELETE FROM config WHERE key='persistence.limits.worktree_recovery_bytes'");
+    expect(await worktree()).toBe(OLD_DEFAULT);
+  }, 120_000);
 
   test('a configured worktree_recovery_bytes is the user\'s choice', async () => {
     await engine.setConfig('pages.segmented_storage', 'on');

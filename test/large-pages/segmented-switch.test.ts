@@ -10,7 +10,9 @@
  *    segment-reader mark (v254): a release at exactly the floor version without it, an older binary's import or sync
  *    run (ingest_log), its resident heartbeat and its uncommitted requests all block; this build's do not. An
  *    unreadable gate blocks, an unparsable stamp blocks, the 7-day window ends between day 6 and day 8, and the gate is
- *    read once per TTL (work counter) while doctor reads through.
+ *    read once per TTL (work counter) while doctor reads through. A failed read of the switch or `pages.max_bytes` keeps
+ *    it off (never "unset", which is on). Doctor reports a hold left only by this host's pre-upgrade writes, after a
+ *    later passing write of this host, as information. (The floor's derivation: segmented-writer-floor.test.ts.)
  * 2. Fails when: the default stays off, the gate ignores old or unstamped writers, an explicit `on` overrides the
  *    gate, a cleared gate keeps writes inline, export sizes stored segmented pages by the write limit, a writer without
  *    the mark passes on its version, a write path of this build stops marking, or the gate's error, window, parse or
@@ -26,8 +28,8 @@ import { importFromContent } from '../../src/core/import-file.ts';
 import { PAGE_MAX_BYTES } from '../../src/core/page-size-policy.ts';
 import { _resetSegmentedWriterGateForTests, readPageBodyPolicy, SEGMENTED_WRITER_GATE_TTL_MS, SEGMENTED_WRITER_WINDOW_DAYS, segmentedPageCeiling, segmentedWriterGateWork } from '../../src/core/page-body/limits.ts';
 import { declarePersistenceProtocol } from '../../src/core/persistence/protocol.ts';
-import { compareWriterVersions, SEGMENTED_WRITER_FLOOR, segmentedGateWriters, UNSTAMPED_WRITER } from '../../src/core/persistence/writer-versions.ts';
-import { BEHAVIOR_CHANGES } from '../../src/core/behavior-change-notice.ts';
+import { compareWriterVersions, segmentedGateWriters, UNSTAMPED_WRITER } from '../../src/core/persistence/writer-versions.ts';
+import { SEGMENTED_WRITER_FLOOR } from '../../src/core/page-body/writer-floor.ts';
 import { VERSION } from '../../src/version.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
 import { segmentedStorageCheck } from '../../src/commands/doctor/checks/segmented-storage.ts';
@@ -42,13 +44,6 @@ const content = conversationPage(2 * 1024 * 1024, { seed: 61 });
 async function storage(engine: BrainEngine, slug: string): Promise<string | undefined> {
   return (await engine.executeRaw<{ body_storage: string }>('SELECT body_storage FROM pages WHERE slug=$1', [slug]))[0]?.body_storage;
 }
-
-test('SEGMENTED_WRITER_FLOOR is this build\'s VERSION until the stamp, then the release of the switch-on BEHAVIOR_CHANGES row, and never above this build', () => {
-  const row = BEHAVIOR_CHANGES.find(c => typeof c.text === 'string' && c.text.startsWith('Pages over 1 MiB are now stored in segments'));
-  expect(row).toBeDefined();
-  expect(row!.since === 'TBD' ? VERSION : row!.since).toBe(SEGMENTED_WRITER_FLOOR);
-  expect(compareWriterVersions(SEGMENTED_WRITER_FLOOR, VERSION)).toBeLessThanOrEqual(0);
-});
 
 for (const kind of testBackends()) {
   describe(`segmented storage switch: ${kind}`, () => {
@@ -173,7 +168,7 @@ for (const kind of testBackends()) {
         VALUES ('default', 'sync', $1, '[]'::jsonb, 'run', $2, $3::uuid, $4)`, [ref, version, randomUUID(), marked]);
       const heartbeat = (nonce: string, version: string, marked: boolean | null) => engine.executeRaw(`INSERT INTO persistence_consumers (host_id, pid, nonce, kind, mode, host_json_path, persistence_home, version, segment_reader)
         VALUES ($1::uuid, 4242, $2, 'serve', 'full', '/tmp/host.json', '/tmp', $3, $4)`, [randomUUID(), nonce, version, marked]);
-      const seen = async (floor?: string) => (await segmentedGateWriters(engine, SEGMENTED_WRITER_WINDOW_DAYS, floor)).map(b => [b.role, b.version, b.segment_reader]).sort();
+      const seen = async (floor = SEGMENTED_WRITER_FLOOR) => (await segmentedGateWriters(engine, SEGMENTED_WRITER_WINDOW_DAYS, floor)).map(b => [b.role, b.version, b.segment_reader]).sort();
 
       await importRun('marked-run', SEGMENTED_WRITER_FLOOR, true);
       await heartbeat('marked-nonce', SEGMENTED_WRITER_FLOOR, true);
@@ -265,6 +260,60 @@ for (const kind of testBackends()) {
       await editRequest(engine, published.id, "admitter_version='nightly-build'");
       expect(await segmentedNow()).toBe(false);
       expect(await blockersNow()).toEqual([expect.objectContaining({ role: 'admitter', version: 'nightly-build', segment_reader: true })]);
+    }), 120_000);
+
+    test('a failed read of pages.segmented_storage or pages.max_bytes keeps the switch off; it never reads as unset (on by default)', async () => {
+      const failing = (key: string) => Object.create(engine, { getConfig: { value: (k: string) => k === key
+        ? Promise.reject(Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }))
+        : engine.getConfig(k) } }) as BrainEngine;
+      await engine.setConfig('pages.segmented_storage', 'off');
+      expect(await readPageBodyPolicy(failing('pages.segmented_storage'))).toMatchObject({ segmented: false, maxBytes: PAGE_MAX_BYTES });
+      await engine.executeRaw("DELETE FROM config WHERE key='pages.segmented_storage'");
+      expect(await segmentedNow()).toBe(true);
+      expect(await readPageBodyPolicy(failing('pages.segmented_storage'))).toMatchObject({ segmented: false, maxBytes: PAGE_MAX_BYTES });
+      await engine.setConfig('pages.max_bytes', String(8 * 1024 * 1024));
+      expect(await readPageBodyPolicy(engine)).toMatchObject({ segmented: true, maxBytes: 8 * 1024 * 1024 });
+      expect(await readPageBodyPolicy(failing('pages.max_bytes'))).toMatchObject({ segmented: false, maxBytes: PAGE_MAX_BYTES });
+    }, 120_000);
+
+    test('doctor: a hold left only by this host\'s writes from before it upgraded is information with its clear time; another host or a live older process on this host keeps the upgrade warning', async () => inHome(async () => {
+      await engine.setConfig('pages.segmented_storage', 'on');
+      const self = localHostId();
+      const older = '0.60.290.0';
+      expect(compareWriterVersions(older, SEGMENTED_WRITER_FLOOR)).toBeLessThan(0);
+      await engine.executeRaw(`INSERT INTO ingest_log (source_id, source_type, source_ref, pages_updated, summary, writer_version, writer_host_id, writer_segment_reader, created_at)
+        VALUES ('default', 'sync', 'self-before-upgrade', '[]'::jsonb, 'run', $1, $2::uuid, true, now() - interval '1 hour')`, [older, self]);
+      await engine.executeRaw(`INSERT INTO persistence_consumers (host_id, pid, nonce, kind, mode, host_json_path, persistence_home, version, segment_reader, renewed_at)
+        VALUES ($1::uuid, 4242, 'self-old-serve', 'serve', 'full', '/tmp/host.json', '/tmp', $2, true, now() - interval '10 minutes')`, [self, older]);
+      expect(await segmentedNow()).toBe(false);
+      // Until this host writes with a build that passes the gate, the rows cannot be told from an older gbrain still
+      // writing here: the upgrade warning stays.
+      expect(await segmentedStorageCheck(engine)).toMatchObject({ status: 'warn', fix: { argv: ['gbrain', 'upgrade'] } });
+      await engine.logIngest({ source_type: 'import', source_ref: 'self-after-upgrade', pages_updated: [], summary: 'this build' });
+      expect(Number((await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM ingest_log WHERE writer_host_id=$1::uuid AND writer_segment_reader AND writer_version=$2", [self, VERSION]))[0]!.n)).toBe(1);
+      expect(await segmentedNow()).toBe(false);
+      const own = await segmentedStorageCheck(engine);
+      expect(own).toMatchObject({ status: 'ok', severity: 'info', details: { effective: 'off' } });
+      expect(own.fix).toBeUndefined();
+      const listed = own.details!.blockers as Array<{ host_id: string; role: string; version: string; clears_at: string }>;
+      expect(listed.map(b => [b.host_id, b.role, b.version]).sort()).toEqual([[self, 'importer', older], [self, 'resident', older]]);
+      const clears = listed.map(b => b.clears_at).sort().at(-1)!;
+      expect(own.message).toContain(self);
+      expect(own.message).toContain(clears);
+      expect(own.message).not.toContain('gbrain upgrade');
+
+      // An older serve on this host that is still renewing its heartbeat is a process to restart: still a warning.
+      await engine.executeRaw("UPDATE persistence_consumers SET renewed_at=now() WHERE nonce='self-old-serve'");
+      expect(await segmentedStorageCheck(engine)).toMatchObject({ status: 'warn', fix: { argv: ['gbrain', 'upgrade'] } });
+      await engine.executeRaw("UPDATE persistence_consumers SET renewed_at=now() - interval '10 minutes' WHERE nonce='self-old-serve'");
+      expect(await segmentedStorageCheck(engine)).toMatchObject({ status: 'ok', severity: 'info' });
+
+      const other = randomUUID();
+      await engine.executeRaw(`INSERT INTO ingest_log (source_id, source_type, source_ref, pages_updated, summary, writer_version, writer_host_id, writer_segment_reader)
+        VALUES ('default', 'import', 'other-host', '[]'::jsonb, 'run', $1, $2::uuid, true)`, [older, other]);
+      const both = await segmentedStorageCheck(engine);
+      expect(both).toMatchObject({ status: 'warn', fix: { argv: ['gbrain', 'upgrade'], actor: 'host_admin' } });
+      expect(both.message).toContain(other);
     }), 120_000);
 
     test('explicit off keeps pages inline and doctor reports it as a choice', async () => {
