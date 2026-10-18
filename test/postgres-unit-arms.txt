@@ -271,6 +271,7 @@ test/pathological/c2-url-clone-fences.test.ts
 test/pathological/c4-bundle-stuck-recovery.test.ts
 test/pathological/c5-writer-transfer-cancel.test.ts
 test/pathological/c7-content-receipt-root.test.ts
+test/pathological/d-7013-conversation-facts-zero-yield.test.ts
 test/pathological/d1-unfenced-facts-overwrite.test.ts
 test/pathological/d10-derived-atom-file-overwrite.test.ts
 test/pathological/d11-derived-retired-atom-unlink.test.ts
