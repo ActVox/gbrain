@@ -42,8 +42,8 @@ export const RETIRED_SYNC_KEYS = {
     replacement: { env: 'GBRAIN_SYNC_HOLD_ESCALATE_COUNT', default: '50' } },
   'sync.hold_escalate_pct': { key: 'sync.hold_escalate_pct', retired_in: '0.60.266.0', tuned: 'the share of a run\'s screened imports above which it escalates, in percent',
     replacement: { env: 'GBRAIN_SYNC_HOLD_ESCALATE_PCT', default: '5' } },
-  'sync.parser_regression': { key: 'sync.parser_regression', retired_in: '0.60.266.0', tuned: 'whether sync stops (stop) or holds the file (hold) when bytes that imported before are refused',
-    replacement: { env: 'GBRAIN_SYNC_PARSER_REGRESSION', default: 'stop' } },
+  'sync.parser_regression': { key: 'sync.parser_regression', retired_in: '0.60.266.0', tuned: 'whether sync holds the file (hold) or stops (stop) when bytes that imported before are refused',
+    replacement: { env: 'GBRAIN_SYNC_PARSER_REGRESSION', default: 'hold' } },
   'sync.knock_on_refreeze_limit': { key: 'sync.knock_on_refreeze_limit', retired_in: '0.60.255.0', tuned: 'the knock-on re-freeze budget', replacement: null },
   'sync.knock_on_run_limit': { key: 'sync.knock_on_run_limit', retired_in: '0.60.255.0', tuned: 'the knock-on re-freeze budget per run', replacement: null },
 } as const satisfies Record<string, RetiredSyncKey>;

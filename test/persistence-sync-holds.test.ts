@@ -422,7 +422,7 @@ test('a flagless pass inherits a blocked --no-embed pass\'s options from its epi
   expect((await t.holds()).map(hold => [hold.path, hold.code, hold.meta.attempts])).toEqual([['notes/z.md', 'worktree_dirty', 1]]);
 }), 240_000);
 
-test('parser regression: stops only when provenance proves the same bytes imported validated; hold policy continues; no provenance holds normally', () => each(async engine => {
+test('parser regression: GBRAIN_SYNC_PARSER_REGRESSION=stop stops only when provenance proves the same bytes imported validated; the default holds and continues; no provenance holds normally', () => each(async engine => {
   const s = await source(engine, { 'notes/a.md': note('A'), 'notes/ok.md': note('Ok') });
   await s.sync();
   const page = (await engine.getPage('notes/a', { sourceId: s.id }))!;
@@ -434,14 +434,16 @@ test('parser regression: stops only when provenance proves the same bytes import
   await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_set(completed_keys,'{0,raw_sha256}',to_jsonb($3::text)) WHERE op=$1 AND fingerprint LIKE $2`,
     [SYNC_IMPORT_PROVENANCE_OP, `${s.id}:%:${page.id}`, sha256(FOLDED)]);
   const head = await s.lastCommit();
-  await expect(s.sync()).rejects.toMatchObject({ code: 'sync_parser_regression' });
+  await withEnv({ GBRAIN_SYNC_PARSER_REGRESSION: 'stop' }, () => expect(s.sync()).rejects.toMatchObject({ code: 'sync_parser_regression' }));
   expect(await s.lastCommit()).toBe(head);
   // #6712 PR 2: a stored sync.parser_regression (retired) is not applied; the process's GBRAIN_SYNC_PARSER_REGRESSION is.
   await engine.setConfig('sync.parser_regression', 'hold');
-  await expect(s.sync({ retryFailed: true })).rejects.toMatchObject({ code: 'sync_parser_regression' });
+  await withEnv({ GBRAIN_SYNC_PARSER_REGRESSION: 'stop' }, () => expect(s.sync({ retryFailed: true })).rejects.toMatchObject({ code: 'sync_parser_regression' }));
   expect(await s.lastCommit()).toBe(head);
+  await engine.setConfig('sync.parser_regression', 'stop');
+  // GBRA-108: with the variable unset the default holds (and a stored stop is not applied either).
+  const held = await withEnv({ GBRAIN_SYNC_PARSER_REGRESSION: undefined }, () => s.sync({ retryFailed: true }));
   await engine.unsetConfig('sync.parser_regression');
-  const held = await withEnv({ GBRAIN_SYNC_PARSER_REGRESSION: 'hold' }, () => s.sync({ retryFailed: true }));
   expect(held.held?.[0]).toMatchObject({ path: 'notes/a.md', code: 'parser_regression' });
   expect(await s.lastCommit()).not.toBe(head);
 

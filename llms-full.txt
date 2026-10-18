@@ -6916,7 +6916,7 @@ Timing knobs the drain uses:
 | `sync.hold_cap` | `GBRAIN_SYNC_HOLD_CAP` | 500 |
 | `sync.hold_escalate_count` | `GBRAIN_SYNC_HOLD_ESCALATE_COUNT` | 50 |
 | `sync.hold_escalate_pct` | `GBRAIN_SYNC_HOLD_ESCALATE_PCT` | 5 |
-| `sync.parser_regression` | `GBRAIN_SYNC_PARSER_REGRESSION` | stop |
+| `sync.parser_regression` | `GBRAIN_SYNC_PARSER_REGRESSION` | hold |
 | `sync.knock_on_refreeze_limit`, `sync.knock_on_run_limit` | none (removed with the knock-on re-freeze in 0.60.255.0) | — |
 
 `gbrain config set` of a retired key warns, names the variable and writes nothing. `gbrain config get <key>` prints

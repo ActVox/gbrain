@@ -28,8 +28,7 @@ function reference(s: SyncPathState): SyncClass {
   const rest = referenceAfterHold(s);
   if (!s.hold) return rest;
   if (s.level !== null && (rest === 'matched' || rest === 'import')) return 'held';
-  const live = s.page?.live === true;
-  const dirtySettled = (s.tree !== null && !!s.record?.blobOids.includes(s.tree)) || (s.diskOid !== null && !!s.record?.blobOids.includes(s.diskOid)) || s.published || (s.dirty === 'deleted' && !live);
+  const dirtySettled = (s.tree !== null && !!s.record?.blobOids.includes(s.tree)) || (s.diskOid !== null && !!s.record?.blobOids.includes(s.diskOid)) || s.published;
   return SETTLED.has(rest) || (rest === 'dirty' && dirtySettled) ? 'held' : rest;
 }
 
@@ -39,7 +38,7 @@ function referenceAfterHold(s: SyncPathState): SyncClass {
   const fileSame = s.level !== null && absorbed.has(s.level);
   const dbSame = s.page !== null && s.record !== null && s.record.revision !== null && s.record.revision === s.page.revision;
   const proof = dbSame || s.attested !== null;
-  const dirtyCommitted = s.mode === 'committed' && s.tree !== null && !CLEAN.has(s.dirty);
+  const dirtyCommitted = s.mode === 'committed' && s.tree !== null && !CLEAN.has(s.dirty) && s.dirty !== 'deleted';
   const dirtyClass = (): SyncClass => 'dirty';
   const state = s.page === null ? 'none' : s.page.live ? 'live' : 'tombstone';
   if (state !== 'live') {
@@ -230,12 +229,21 @@ describe('P0 properties', () => {
     }
   });
 
-  test('fail closed: a committed path that is not clean never imports, adopts or writes DB-wins', () => {
+  test('fail closed: a committed path with uncommitted bytes never imports, adopts or writes DB-wins', () => {
     fc.assert(fc.property(stateArb, s => {
-      if (s.mode === 'committed' && s.tree !== null && !CLEAN.has(s.dirty) && !s.spelling && !(s.hold?.atLevel && !s.hold.rescreenDue && !s.hold.retried)) {
+      if (s.mode === 'committed' && s.tree !== null && !CLEAN.has(s.dirty) && s.dirty !== 'deleted' && !s.spelling && !(s.hold?.atLevel && !s.hold.rescreenDue && !s.hold.retried)) {
         expect(['import', 'adopt', 'reparse', 'keep_db']).not.toContain(classifySyncPath(s).action);
       }
     }), { numRuns: 40_000, seed: 67122 });
+  });
+
+  test('GBRA-133 S-27/S-28: a committed path no file backs (deleted, skip-worktree, sparse) classifies at its committed level, as a clean one does, except for the DB-wins write', () => {
+    fc.assert(fc.property(stateArb, s => {
+      if (s.mode !== 'committed' || s.tree === null || s.dirty !== 'deleted') return;
+      const got = classifySyncPath(s), clean = classifySyncPath({ ...s, dirty: 'clean' });
+      expect(got.cls === 'keep_db' ? 'drift' : got.cls).toBe(clean.cls === 'keep_db' ? 'drift' : clean.cls);
+      expect(got.action).not.toBe('keep_db');
+    }), { numRuns: 40_000, seed: 67133 });
   });
 
   test('no DB-wins write without keep_db on a clean committed path, and never for unproven pages', () => {
