@@ -71,7 +71,7 @@ function failingReconcile(engine: BrainEngine, error: () => unknown): BrainEngin
 }
 
 const syncWith = (r: ProbeRepo, engine: BrainEngine) => performSync(engine, { repoPath: r.root, sourceId: r.sourceId, noPull: true, noEmbed: true, noExtract: true, concurrency: 1 });
-const live = async (r: ProbeRepo, slug: string) => (await r.engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [r.sourceId, slug]))[0]?.id ?? null;
+const live = async (r: ProbeRepo, slug: string): Promise<number | null> => (await r.engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [r.sourceId, slug]))[0]?.id ?? null;
 const ledger = (r: ProbeRepo) => loadSyncFailures().filter(f => f.source_id === r.sourceId).map(f => ({ path: f.path, state: f.state }));
 
 for (const { backend, databaseUrl } of pathologicalArms()) {

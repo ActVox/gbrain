@@ -18,7 +18,7 @@ import { expectUnitNotAborted, pathologicalArms } from './harness.ts';
 import { md, withProbeEngine, withProbeRepo, type ProbeRepo } from './s-blockers-fixture.ts';
 
 const body = (title: string, extra = '') => `---\ntitle: ${title}\ntype: note\n---\n${Array.from({ length: 12 }, (_, i) => `Line ${i} of the ${title} note, long enough that git pairs an edited move.`).join('\n')}\n${extra}`;
-const page = async (engine: BrainEngine, sourceId: string, slug: string) =>
+const page = async (engine: BrainEngine, sourceId: string, slug: string): Promise<number | null> =>
   (await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [sourceId, slug]))[0]?.id ?? null;
 const holdsOf = async (engine: BrainEngine, sourceId: string) => ((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? []);
 const syncWith = (r: ProbeRepo, engine: BrainEngine) => performSync(engine, { repoPath: r.root, sourceId: r.sourceId, noPull: true, noEmbed: true, noExtract: true, concurrency: 1 });
