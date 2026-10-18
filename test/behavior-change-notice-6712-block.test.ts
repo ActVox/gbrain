@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { BEHAVIOR_CHANGES, compareReleases } from '../src/core/behavior-change-notice.ts';
 
 const MARKER = '// #6712 PR 4b (the level-triggered sync pass';
-const ROWS = 29;
+const ROWS = 30;
 const NOTICE_CAP = 2_000;
 
 /** The array literal's row lines in order, and where the block's rows start and how many there are. */

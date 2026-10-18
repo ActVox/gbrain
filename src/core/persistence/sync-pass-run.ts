@@ -46,7 +46,7 @@ import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { loadConfig } from '../config.ts';
 import { startPersistenceConsumer } from './service.ts';
 import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
-import { managedCursorKey, resolveManagedCursor, retireManagedCursor, retireOrphanSliceRecords } from './sync-cursor-key.ts';
+import { managedCursorKey, passFailureKeys, resolveManagedCursor, retireManagedCursor, retireOrphanSliceRecords } from './sync-cursor-key.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { principalAttribution } from './attribution.ts';
@@ -914,7 +914,6 @@ async function databaseNow(tx: Pick<BrainEngine, 'executeRaw'>): Promise<string>
 }
 
 /** A converged or idle pass clears what earlier stops recorded: the pass row's failure key and the incarnation's cursor key. */
-const passFailureKeys = (sourceId: string, incarnation: string) => [passFingerprint(sourceId, incarnation), managedCursorKey(incarnation, undefined)];
 async function clearPassFailures(engine: BrainEngine, sourceId: string, incarnation: string): Promise<void> {
   await Promise.all(passFailureKeys(sourceId, incarnation).map(key => clearManagedSyncFailureAfterSuccess(engine, key)));
 }

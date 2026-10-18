@@ -18,6 +18,8 @@
  * - S-60: a `storage_error` that two syncs in a row record on one file with the same message stayed `connection` / `retry`
  *   with `next` = rerun the same sync forever; it is now `page` class and `needs_human`, naming the file. A message that
  *   changes between runs stays a rerun, and the count survives a resumed cursor's repeated observation.
+ * - S-61: a pass that stopped in discovery (path `<discovery>`) or on one entry left no cursor and an `open` pass row, so
+ *   doctor `managed_sync_blocked` (`readBlockedManagedSyncs`) said nothing was blocked; it lists the stop until a sync succeeds.
  * The deliberate-refusal, systemic and changing-message guards pass before and after.
  *
  * PGLite here; Postgres through test/e2e/sync-entry-faults-6712-postgres.test.ts.
@@ -34,6 +36,7 @@ import { recordManagedSyncFailure } from '../src/core/persistence/sync-failures.
 import { readGitSourceHolds } from '../src/core/persistence/sync-holds.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
+import { readBlockedManagedSyncs } from '../src/core/persistence/sync-blocked.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
@@ -209,4 +212,16 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: one odd f
     expect((await recordManagedSyncFailure(engine, { ...base, invocation: 'three', observation_id: 'run-2:0:freeze:storage_error' })).failure).toMatchObject({ repeats: 3, attempts: 2 });
     expect((await recordManagedSyncFailure(engine, { ...base, invocation: 'four', observation_id: 'run-3:0:freeze:storage_error', path: 'notes/other.md' })).failure).toMatchObject({ repeats: 1, attempts: 3 });
   }), 240_000);
+  for (const [stop, point, path] of [['discovery', 'sync:level_read', '<discovery>'], ['entry', 'sync:mid_checkpoint', 'notes/odd.md']] as const) {
+    test(`S-61: doctor managed_sync_blocked lists a pass's ${stop} stop until a sync succeeds`, () => brain(async ({ engine, root }) => {
+      expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+      writeFileSync(join(root, 'notes/odd.md'), note('notes/odd')); commit(root, 'odd');
+      installFaultHook(at => { if (at === point) throw new Error('synthetic stop'); });
+      await expect(performManagedSync(engine, OPTS)).rejects.toThrow(`path=${path} code=storage_error: synthetic stop`);
+      expect(await readBlockedManagedSyncs(engine, ['default'])).toEqual([expect.objectContaining({ source_id: 'default', code: 'storage_error' })]);
+      installFaultHook(undefined);
+      expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+      expect(await readBlockedManagedSyncs(engine, ['default'])).toEqual([]);
+    }), 240_000);
+  }
 });

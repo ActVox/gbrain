@@ -33,6 +33,7 @@ import { clearManagedSyncFailureAfterSuccess } from './sync-failures.ts';
 import { assertDrainLease } from './sync-lease.ts';
 import { faultPoint } from './fault-points.ts';
 import { SYNC_SLICE_OP } from './sync-slices.ts';
+import { passFingerprint } from './sync-pass-row.ts';
 
 type CompanySync = ReturnType<typeof currentCompanyBrainSync>;
 
@@ -46,6 +47,9 @@ export function __setManagedCursorKeyForTests(key: ((incarnation: string) => str
 export function managedCursorKey(incarnation: string, company: CompanySync): string {
   return keyForTests?.(incarnation) ?? digest({ source: incarnation, ...companyPart(company) });
 }
+
+/** #6712 PR 4b: where a pass records its stops (the pass row's key, and the incarnation's cursor key for discovery); a converged or idle pass clears both. */
+export const passFailureKeys = (sourceId: string, incarnation: string) => [passFingerprint(sourceId, incarnation), managedCursorKey(incarnation, undefined)];
 
 export const SUPERSEDED_BY_ADOPTION_MESSAGE = 'Another unfinished sync run of this source was adopted; this queued page of a superseded run was not published, and the adopted run (or the next sync) imports it.';
 
