@@ -314,6 +314,7 @@ test/sync-legacy-retry-actions-6696.test.ts
 test/sync-legacy-slug-adoption-6727.test.ts
 test/sync-origin-live-wins-6517.test.ts
 test/sync-page-write-failed-gbra130.test.ts
+test/sync-pass-cost-grouping-gbra130.test.ts
 test/sync-pass-dirty-after-freeze-gbra130.test.ts
 test/sync-prescreen-both-delta-6712.test.ts
 test/sync-prescreen-drift-6712.test.ts

@@ -109,6 +109,7 @@ export interface PricedIntent { passId?: string; kind: string; path?: string | n
 /**
  * Inside a group's admission transaction: reserves the group's priced embedding spend as one `sync-pass-cost` row,
  * `ON CONFLICT DO NOTHING` (a replay of the same group reserves nothing more). A group with no paid import reserves nothing.
+ * The spend is the sum of each page's own estimate, so a total never depends on how pages were grouped (GBRA-130).
  */
 export async function reservePassCost(tx: Exec, intents: ReadonlyArray<PricedIntent>): Promise<void> {
   const passId = intents.find(intent => intent.passId)?.passId;
@@ -116,11 +117,10 @@ export async function reservePassCost(tx: Exec, intents: ReadonlyArray<PricedInt
   if (!scope) return;
   const paid = intents.filter(intent => intent.passId === passId && intent.kind === 'managed_sync_import' && intent.processingOptions?.noEmbed !== true && typeof intent.content === 'string');
   if (!paid.length) return;
-  const chars = paid.reduce((sum, intent) => sum + intent.content!.length, 0);
   const groupId = digest(['sync-pass-cost-v1', passId!, ...paid.map(intent => `${intent.path ?? ''}\0${intent.level ?? ''}`).sort()]).slice(0, 32);
   await tx.executeRaw(`INSERT INTO op_checkpoints(op,fingerprint,completed_keys,updated_at) VALUES($1,$2,jsonb_build_array($3::text::jsonb),now()) ON CONFLICT (op,fingerprint) DO NOTHING`,
     [SYNC_PASS_COST_OP, `${costPrefix(scope.sourceId, scope.incarnation, scope.scope)}${groupId}`,
-      JSON.stringify({ source_id: scope.sourceId, incarnation: scope.incarnation, usd: estimateCostFromChars(chars, scope.pricePerMTok) })]);
+      JSON.stringify({ source_id: scope.sourceId, incarnation: scope.incarnation, usd: paid.reduce((sum, intent) => sum + estimateCostFromChars(intent.content!.length, scope.pricePerMTok), 0) })]);
 }
 
 /** `reserved_usd`: the reservations of one episode (or pass) scope, or of the whole incarnation; a range read. */
