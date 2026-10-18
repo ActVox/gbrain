@@ -36,8 +36,11 @@ describe('CI execution evidence', () => {
       expect(source).not.toMatch(/(?:ci|e2e)-pass-|cache-check|cache-write/);
       expect(source).toContain('bun-cache-');
       expect(source).toContain('pglite-snapshot-');
-      expect(workflow.on.pull_request.paths).toBeUndefined();
     }
+    expect(unit.on.pull_request.paths).toBeUndefined();
+    // E2E never runs on pull_request events: the full-ci dispatch runs it on the
+    // head before merge (docs/TESTING.md#full-ci-on-pull-requests).
+    expect(e2e.on.pull_request).toBeUndefined();
     for (const name of ['gitleaks', 'verify', 'typecheck']) {
       expect(unit.jobs[name].needs).toBeUndefined();
       expect(unit.jobs[name].if).toBe("${{ github.event_name != 'workflow_dispatch' || (inputs.native_only != true && inputs.race_hunt != true && !inputs.stress_files && !inputs.stress_base) }}");
@@ -74,7 +77,7 @@ describe('CI execution evidence', () => {
   });
 
   test('unit aggregate rejects failed, cancelled or skipped required jobs', () => {
-    expect(unit.jobs['test-status'].if).toBe("${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.native_only != true && inputs.race_hunt != true && !inputs.stress_files && !inputs.stress_base)) }}");
+    expect(unit.jobs['test-status'].if).toBe("${{ always() && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || (inputs.native_only != true && inputs.race_hunt != true && !inputs.stress_files && !inputs.stress_base)) }}");
     expect(unit.jobs['test-status'].needs).toEqual([
       'gitleaks', 'security-regressions', 'dependency-audit', 'verify', 'typecheck', 'serial-tests',
       'slow-entity-resolve-perf', 'slow-brainbench-e2e', 'brainbench', 'test', 'native-locks', 'persistence-validation',
