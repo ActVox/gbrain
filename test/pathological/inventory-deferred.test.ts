@@ -76,7 +76,6 @@ export const DEFERRED: ReadonlyArray<readonly [string, string, string]> = [
   ['B-16', 'GBRA-101 (4b)', 'legacy_slug_conflict (#6727): several legacy pages fold to one file slug'],
   ['C-1', 'GBRA-130 PR 2', 'A withdrawal-mirror effect holds a recovery record and the file on disk was edited so it matches neither recorded version'],
   ['C-2', 'GBRA-130 PR 2', 'Sync-time fact capture appends a ## Facts fence into a gbrain-owned sources add --url clone'],
-  ['C-3', 'GBRA-130 PR 2', 'First kernel-v1 acquisition on a PGLite brain whose .gbrain-lock/ was left by a crashed pre-kernel process, when its lock metadata is torn or missi...'],
   ['C-4', 'GBRA-130 PR 2', 'A shared-skill bundle publication (recovery version: 2) is stuck in recovery, which "stops every write on its worktree" (repair.md:138)'],
   ['C-5', 'GBRA-130 PR 2', 'sources writer transfer prepare leaves the worktree draining until accept'],
   ['C-7', 'GBRA-130 PR 2', 'After a cross-host writer transfer (or relocation) of a gbrain-owned content-directory source, the shared-skills content receipt keeps the old host...'],
