@@ -141,6 +141,7 @@ CHECKS=(
   "check:fixture-privacy"
   "check:source-scope-onboard"
   "check:getpage-scope"
+  "check:origin-assignment"
   "check:no-double-retry"
   "check:batch-audit-site"
   "check:engine-dynamic-import"

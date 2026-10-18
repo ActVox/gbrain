@@ -256,6 +256,7 @@ or a physical projection that leaves attribution untouched):
 - `src/core/facts/relink-publish.ts` (2): `relink_facts` request preparer.
 - `src/core/facts/unfenced-facts.ts` (2): the cycle and v0.32.2 fence of `row_num`-NULL facts: a maintenance request on managed brains; the unmanaged body mirror and row-number stamp run in `maintenanceTransaction`.
 - `src/core/facts/withdrawal.ts` (1): runs inside the `forget` request's coordinated write.
+- `src/core/persistence/twin-merge.ts` (5): the #6948 twin merge runs in the `managed_maintenance_resolve_origin_twin` preparer's coordinated transaction on managed brains and in one `maintenanceTransaction` on unmanaged brains (`gbrain repair origin-twins` and the post-sync heal).
 - `src/core/trust/timeline-projection.ts` (2): `gbrain extract` timeline walks (file, incremental, stale) and the per-entry fallback write through it: one `maintenanceTransaction` per page tier.
 - `src/core/facts/write-single.ts` (2): the legacy single-fact insert and its supersession link each run in `maintenanceTransaction`; managed brains publish through the fact request.
 - `src/core/import-file.ts` (12): direct markdown, code and image imports, the moved-file rename (`updateSlug`) and the #3694 legacy-hash re-stamp run in `maintenanceTransaction`; managed imports go through the page request preparer.

@@ -10,6 +10,102 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.296.0] - 2026-10-18
+
+**Several live pages recording one file no longer stop a source's whole managed sync, verified duplicates heal on their own, and no writer can create such a pair any more.** Hotfix for #6948.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed sync of a source where two or more live pages record the same file as their origin (duplicate-origin twins) | the run refused `page_identity_changed` and nothing in the source synced | only that file is held `origin_conflict`; every other file syncs, and the hold re-screens on each run |
+| Twins that are verified duplicates: one of them is the page the path names, one body, a readable file, no conflicting frontmatter `id`, one visibility and trust tier, no slug-keyed withdrawals, no file at a twin's own slug path, and nothing the merge would lose | they stayed until a person merged them by hand | right after the managed sync, on the source's owner host, each other page is merged into the canonical one: links in every role, relationship dates, timeline, raw data, user tags, aliases and facts move, its slug becomes an alias, and it is soft-deleted without touching the file (restorable for 72 h). The receipt lists every frontmatter key the twin carried that the file lacks. A run handles at most 200 files in 60 s and 1000 twin pages per source per day, and the mass-delete valve applies. Kill switch: `gbrain config set sync.origin_twins.auto_resolve false` |
+| Any other group of twins | the source stayed stopped | the file stays held with a reason (`no_canonical_claimant`, `content_differs`, `file_unreadable`, `explicit_id_conflict`, `visibility_differs`, `trust_tier_differs`, `twin_has_withdrawals`, `twin_slug_path_occupied`, `twin_evidence_conflicts`). `gbrain repair origin-twins --source <id>` previews every group; `--slug <kept-slug>` keeps one page and detaches the others without deleting them. A merge never raises or lowers a trust tier |
+| A write that would give a second live page an origin another live page records (`put_page`, write-through, an import's origin refresh, sync renames and rename collisions, file and frontmatter repairs, managed sync no-ops, segmented flips, restoring a tombstone) | it wrote a new twin | it refuses `page_identity_changed` (detail `origin_already_claimed`) inside the write's transaction, under a per-origin advisory lock that also covers a scoped source's legacy `<scope>/<origin>` spelling |
+| Readers and repairs that resolve a file to a page (classic sync deletes, fence, frontmatter and file-drift repairs) | took an arbitrary twin | take the page the path names, and refuse when no single page is canonical |
+
+New index `pages_live_origin_key` (one live page per recorded origin). Migration v257 builds it online only on a brain with no twins; on a brain with twins it writes nothing, and doctor `origin_twins` reports "Index pending" until the repair resolves them, after which `gbrain repair origin-twins --source <id> --apply` builds it.
+
+### What you need to do
+
+Nothing on most brains. If doctor `origin_twins` reports "Index pending", run the preview it names (`gbrain repair origin-twins --source <id>`), let the next sync heal the verified groups or apply the preview, and decide the held ones.
+
+### For contributors
+
+- Every origin assignment goes through `src/core/persistence/origin-guard.ts` (`bindOrigin` or `assertOriginUnclaimed` in the same transaction). `bun run check:origin-assignment` (in verify) fails on a new `UPDATE pages SET source_path = <value>`, `INSERT INTO pages (... source_path ...)` or slug rename outside it unless the statement carries `origin-guard-ok: <reason>`.
+- A test that seeds legacy twins drops the index first with `dropOriginIndex` (`test/helpers/origin-index.ts`) and sets the origin with raw SQL; E2E `setupDB` restores the index for the next file.
+
+## [0.60.295.0] - 2026-10-18
+
+**A Git index lock left by a killed git no longer stops a managed brain's Git backups until someone removes it, and large checkouts stop killing git in the first place.** Hotfix for #6932, plus #6936.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A git step of the canonical writer was SIGKILLed after it created `.git/index.lock` (a step past its deadline, a job group killed after its grace, the OOM killer) (#6932) | every later Git effect in that checkout failed `git_index_locked`, then `git_index_stale`, and parked; commits for the whole source stopped until a person removed the lock and ran `gbrain sources writer retry-effects` | while it holds its writer lock, the writer reclaims a lock it can prove abandoned: on Linux with the whole process table visible and a local filesystem, no process has the lock open, no git runs in the checkout or points at it through `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`/`GIT_INDEX_FILE`, and the lock is empty and at least 5 s old, or older than 10 minutes. It then retries the step and gives effects that lock had parked one more attempt. Each reclaim leaves a receipt under `GBRAIN_HOME/persistence/index-lock-reclaims.jsonl` and a log line, and doctor `parked_effects` reports reclaims from the last 7 days |
+| An index lock the writer cannot prove abandoned (a live git, another platform, a container, a network filesystem) | `git_index_stale` told you to remove it if no git was running | the lock still stays, and `git_index_stale` now says why it was kept and carries an `ask_user` fix: check that no git runs in that checkout, remove the lock, then retry the parked effects |
+| A one-file Git effect on a large checkout under heavy I/O (a 48 MB index took 35–39 s for `commit --only` in a throttled test) | each git step had 20 s, then 2 s between SIGTERM and SIGKILL, so a slow git was killed mid-write and left its lock | each step gets 20 s plus 2 s per MiB of index (at most 120 s; 98 s for a 39 MB index) and 10 s to exit after SIGTERM, and read-only steps run with `GIT_OPTIONAL_LOCKS=0`, so `git status` never takes the index lock |
+| An advisor check that throws (#6936) | it was dropped silently: with no other findings the report said the brain looked healthy and `gbrain advisor` exited 0 | the check is reported as a warn finding `collector_failed:<check>` (static text, no error details, nothing `--apply` can run), so the run exits 1; findings from other checks and critical precedence are unchanged |
+
+### What you need to do
+
+Nothing. If doctor `parked_effects` still shows effects parked with `git_index_stale`, its message says why the lock was kept; follow the fix it names.
+
+### For contributors
+
+- `commitGitTargets` and `publishGitEffect` take an optional `GitEffectOwner` (the caller's writer lock). Only callers that pass one can reclaim a lock; the effect worker passes it.
+- `execFileBounded` takes `termGraceMs` (default 2 s).
+- `test/persistence-index-lock-reclaim-6932.test.ts` kills a real `git add` with SIGKILL while it holds the lock. Where the process table isn't fully visible (macOS, containers), the same cases assert the refusal instead.
+
+## [0.60.294.0] - 2026-10-17
+
+**Graph walks are breadth-first: each page and edge comes back once, at its shortest depth, and dense clusters walk in milliseconds.** First step of the graph-traversal plan (HydraDB evaluation, autoplan run-20261017033903).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A graph walk (`traverse_graph`, `gbrain graph`, `think` graph context) | enumerated every simple path, capped at 20,000 paths; a page came back once per depth some path reached it, and an edge once per depth | visits each page once, at its shortest distance, and returns each edge once (one hop past its shallower walked endpoint); the pages and edges reached are the same |
+| A walk over a densely linked cluster (12-page clique, depth 5) | 44 to 91 ms on Postgres under the path cap (22 s before the cap) | 4 to 9 ms |
+| A walk that reaches a large share of the brain | the 20,000-path cap could stop before deeper pages were reached | stops at 20,000 visited pages, shallowest first; the truncation warning names both caps |
+| `frontierCap` on `traverseGraph` | an approximate per-iteration cap applied before deduplication | an exact per-layer cap on new pages, in (slug, id) order |
+
+Every per-hop filter is unchanged and still applies at every step: soft delete, `excludePrivate` (page and link-origin privacy), source scope, link type and temporal policy.
+
+### What you need to do
+
+Nothing. Callers that relied on a page appearing at several depths now see it once, at its shortest depth.
+
+### For contributors
+
+- `src/core/engine-sql/links.ts`: one breadth-first CTE (`bfsWalkCtes`) serves `traverseGraph` and `traversePathsDetailed` on both engines.
+- `test/traverse-bfs.test.ts` checks the walks against a TypeScript shortest-path reference and the old CTE on seeded random graphs, and checks that a private, out-of-scope, private-origin or soft-deleted page in the middle of a chain stops the walk.
+- The dense-hub fixture (`test/helpers/dense-hub.ts`) now has 12 ring links per spoke, so the row-cap tests still overflow 5,000 edges now that each edge is returned once.
+- `scripts/bench-graph-walk.ts` times the walks on PGLite and, with `GBRAIN_BENCH_DATABASE_URL`, on Postgres.
+- `relationalFanout` still enumerates paths (3 hops at most); moving it to breadth-first changes search ranking and is a follow-up.
+- `test/large-pages/segmented-storage-visibility.test.ts`: the sweep-cost test counts rows at table scans only and analyzes every table the sweep reads, so a planner switching aggregate or join strategy between rounds no longer moves the count by one. A full scan of the source still fails it (12 rows against 20,014).
+
+## [0.60.293.0] - 2026-10-17
+
+**CI only: the unit-lane PostgreSQL arms run in 14 shards, sized from fresh measured timings.** Nothing changes for gbrain users.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Measured runtime of the 316 unit-lane PostgreSQL arm files | the shard weights predated current timings (6,697 s in total), so 12 shards looked like they fit the 570 s per-shard budget | re-mined from a green 24-job persistence-validation run (7,696 s in total): 12 shards would carry about 643 s each, so the lane now runs 14 shards of at most 551 s |
+| A shard that selects no files | its error said `shard N/8` and suggested a 12-shard command | names the real shard count, and the workflow pin test keeps it in step with `ARM_SHARDS` |
+
+### What you need to do
+
+Nothing.
+
+### For contributors
+
+- `persistence-validation.yml` `unit-postgres-arms` is now a 14-shard matrix (`ARM_SHARDS` in `scripts/postgres-unit-arms.ts`). Its required checks are named `Unit-lane PostgreSQL arms N/14 / Bun …`.
+- The 20-minute step timeout and the 570 s budget rule (twice a shard's measured weight still ends a minute inside the step) are unchanged; re-mine `scripts/postgres-arm-weights.json` with `bun scripts/postgres-unit-arms.ts mine <job.log>…` after adding heavy arm files.
+
 ## [0.60.292.0] - 2026-10-17
 
 **Writes on a brain whose schema is behind are refused up front, `repair ghost-pages` works on a source with a shared skillpack, and large fact batches no longer stall a managed brain.** Fix wave 19 (#6910, #6904, #6898, #6906, plus two test-infra flakes).

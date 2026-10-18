@@ -81,6 +81,12 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // GBRA-130 A-6: one path's write failed the same unclassifiable way on repeated attempts; held so the rest of the source moves.
   { code: 'page_write_failed', class: 'page', safe_actions: ['upgrade'], needs_human: true, escalate: 'always: the writer cannot place the failure',
     human_reason: 'The write of this file keeps failing with an error gbrain cannot classify (an owner exception or an unplaced refusal); read its receipt (gbrain write-request <request_id>), report it with the gbrain version or fix the file when the error names its content, then run gbrain sources retry-held <source>.' },
+  // #6948: several live pages record the file as their origin; the sync-time heal resolves verified duplicates, a person decides the rest.
+  { code: 'origin_conflict', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the hold carries a reason (the pages differ, ids conflict or none is the page the path names), or the heal is off',
+    human_reason: 'Several live pages record this file as their origin and sync cannot prove they are one document; a person keeps the page that is the file\'s and soft-deletes the others (gbrain repair origin-twins --source <source> lists them with the commands), then syncs.' },
+  // #6948: an `origin_conflict` hold whose verdict carries a reason (sync-status.ts holdVerdict): nothing resolves it without a person.
+  { code: 'origin_conflict_decision', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: the pages differ, their ids conflict or none is the page the path names',
+    human_reason: 'Several live pages record this file as their origin and sync cannot prove they are one document; a person keeps the page that is the file\'s and soft-deletes the others (gbrain repair origin-twins --source <source> lists them with the commands), then syncs.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
   { code: 'revision_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'page_identity_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },

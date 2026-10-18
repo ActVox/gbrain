@@ -85,6 +85,7 @@ import { lineDiff } from './frontmatter.ts';
 import { repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairPlanOptions, type RepairResult, type RepairScope } from './core.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { recordSlugLineAlias } from '../page-state/rename-alias.ts';
+import { canonicalOriginPage, originConflictMessage } from '../persistence/origin-guard.ts';
 
 type Tier = 'deterministic' | 'llm';
 type DeterministicRule = 'absent_page' | 'different_type';
@@ -288,7 +289,7 @@ function slugPageMismatch(cand: Candidate, other: string, why: string): Analysis
     + `By hand: make the slug: line name ${cand.slug} exactly or move the file to the path that derives ${cand.slug}, commit, and run gbrain sync --source ${cand.src.id} --no-pull.` };
 }
 
-async function readCandidate(engine: BrainEngine, src: FenceSource, path: string): Promise<{ ok: true; cand: Candidate } | { ok: false; reason: 'gone' | 'unsafe_path' | 'not_utf8' | 'no_checkout' }> {
+async function readCandidate(engine: BrainEngine, src: FenceSource, path: string): Promise<{ ok: true; cand: Candidate } | { ok: false; reason: 'gone' | 'unsafe_path' | 'not_utf8' | 'no_checkout' } | { ok: false; reason: 'origin_conflict'; message: string }> {
   if (!src.root) return { ok: false, reason: 'no_checkout' };
   const abs = join(src.root, path);
   if (!existsSync(abs)) return { ok: false, reason: 'gone' };
@@ -301,7 +302,8 @@ async function readCandidate(engine: BrainEngine, src: FenceSource, path: string
   if (!Buffer.from(content, 'utf8').equals(bytes)) return { ok: false, reason: 'not_utf8' };
   const hold = await readGitHold(engine, src.id, src.incarnation, path);
   const sourcePath = hold?.source_path ?? path;
-  const [byOrigin] = await engine.executeRaw<{ slug: string }>('SELECT slug FROM pages WHERE source_id=$1 AND source_path=$2 AND deleted_at IS NULL LIMIT 1', [src.id, sourcePath]);
+  const byOrigin = await canonicalOriginPage(engine, src.id, sourcePath);
+  if (byOrigin && 'ambiguous' in byOrigin) return { ok: false, reason: 'origin_conflict', message: originConflictMessage(src.id, sourcePath, byOrigin.ambiguous) };
   const slug = byOrigin?.slug ?? hold?.slug ?? resolveSlugForPath(sourcePath);
   const snapshot = await engine.readPageSnapshot(slug, { sourceId: src.id, includeDeleted: true });
   const declared = declaredSlug(content) ?? '';
@@ -446,7 +448,7 @@ export const slugConflictsRepair: RepairHandler = {
         const read = await readCandidate(engine, src, path);
         if (!read.ok) {
           if (read.reason === 'gone' || read.reason === 'no_checkout') { skip(read.reason === 'gone' ? 'gone' : 'local_path_missing'); continue; }
-          await keep({ reason: read.reason, tier: 'manual', resolution: read.reason === 'unsafe_path'
+          await keep({ reason: read.reason, tier: 'manual', resolution: read.reason === 'origin_conflict' ? read.message : read.reason === 'unsafe_path'
             ? `${path} is a symlink, sits under one, or resolves outside the source root; gbrain never writes through one. Replace it with the real file.`
             : `${path} is not valid UTF-8; re-save it as UTF-8 and preview again.` });
           continue;

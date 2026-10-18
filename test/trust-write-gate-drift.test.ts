@@ -54,6 +54,7 @@ const EXEMPT: Record<string, string> = {
   'src/core/repair/captured-facts.ts': 'owner repair of existing rows',
   'src/core/repair/extractor-facts.ts': 'owner repair of existing rows',
   'src/core/repair/frontmatter.ts': 'owner repair of existing frontmatter',
+  'src/core/persistence/twin-merge.ts': 'owner repair or post-sync heal of verified duplicate-origin twins (#6948): moves rows the twin already stores (links, timeline, raw data, tags, aliases, facts) onto the canonical page with their tiers unchanged, then soft-deletes the twin; no new text, and a tier difference holds the file instead of merging',
   'src/core/repair/ghost-pages.ts': 'retires an owner-approved ghost page (version + soft delete, lifecycle); no new text',
   'src/core/repair/ontology-facts.ts': 'owner repair restoring existing ontology rows',
   'src/core/repair/stale-atoms.ts': 'retires stale atoms (lifecycle)',
