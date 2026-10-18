@@ -134,6 +134,35 @@ describe('groundQuote — the repair ladder', () => {
   });
 });
 
+describe('groundQuote — strict closing punctuation inside the marks (#6952)', () => {
+  const content = '**alice-example** (10:02): The deal desk is always open at the right price for us.\n\n**bob-example** (10:03): Fine, send terms.\n';
+  const strict = groundSource('conversations/2026-10-01-acme-example', content);
+  const start = content.indexOf('always open at the right price');
+  const span: Array<[number, number]> = [[start, start + 'always open at the right price'.length]];
+
+  test.each(['.', ',', '?', '!', '…'])('a verbatim quote ending in %s grounds exact on its core', (mark) => {
+    expect(groundQuote(`always open at the right price${mark}`, strict)).toEqual({ status: 'exact', spans: span });
+  });
+
+  test('a normalized core substitutes the verbatim source slice', () => {
+    expect(groundQuote('ALWAYS open at the  right price.', strict)).toEqual({
+      status: 'normalized', replacement: 'always open at the right price', spans: span,
+    });
+  });
+
+  test('verifyBody keeps the quote and quarantines nothing', () => {
+    const body = '## Reflection\n\nalice-example said the desk is "always open at the right price." That framing recurs.\n';
+    const r = verifyBody(body, [strict]);
+    expect(r.quarantined).toEqual([]);
+    expect(r.body).toBe(body);
+  });
+
+  test('strict grounding still refuses absent words and keeps no bracket folding', () => {
+    expect(groundQuote('always open at the wrong price.', strict).status).toBe('none');
+    expect(groundQuote('[T]he deal desk is always open.', strict).status).toBe('none');
+  });
+});
+
 describe('verifyBody', () => {
   // The principle sentence carries an INTERIOR em-dash + curly apostrophe —
   // a page quote written with a hyphen + straight apostrophe is normalized-

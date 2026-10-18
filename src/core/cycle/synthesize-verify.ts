@@ -686,7 +686,7 @@ const PUNCT_EDGE = /[.,;:!?]/;
  * in another's mouth.
  */
 export function groundQuote(inner: string, t: GroundedTranscript): GroundResult {
-  if (!t.tolerant) return groundQuoteSpan(inner, t, true);
+  if (!t.tolerant) return groundStrictQuote(inner, t);
   const bare = withoutInsertions(inner);
   const forms = [...new Set([inner, quoteCore(inner), bare, quoteCore(bare)])]
     .filter((form, i) => i === 0 || form.split(/\s+/).filter(Boolean).length >= 2);
@@ -698,6 +698,21 @@ export function groundQuote(inner: string, t: GroundedTranscript): GroundResult 
     return r;
   }
   return groundQuoteSpan(inner, t, true);
+}
+
+/**
+ * Strict grounding (dream synthesis). A quote that misses only because the
+ * writer put closing punctuation or elision inside the marks grounds on its
+ * core: an exact core keeps the writer's edges, a normalized core is replaced
+ * by the verbatim source slice. No bracket or quote-style folding.
+ */
+function groundStrictQuote(inner: string, t: GroundedTranscript): GroundResult {
+  const full = groundQuoteSpan(inner, t, true);
+  if (full.status !== 'none') return full;
+  const core = quoteCore(inner);
+  if (core === inner || core.split(/\s+/).filter(Boolean).length < 2) return full;
+  const r = groundQuoteSpan(core, t, false);
+  return r.status === 'none' ? full : r;
 }
 
 function groundQuoteSpan(inner: string, t: GroundedTranscript, near: boolean): GroundResult {
