@@ -22,6 +22,10 @@
 #
 # A move passes only when the target identity executes in head; a skip row
 # (planned pass-to-skip) passes only when head reports the test skipped.
+# The target keeps the arm, except for a test whose name pins its database
+# backend (pglite or postgres, as testBackends() suites name it): a PGLite
+# test may move to any arm, including the unit lane's empty one, and a
+# PostgreSQL test to another database arm.
 kind	lane	file	test	arm	new_lane	new_file	new_test	reason	evidence
 skip	tier2	test/e2e/skills.test.ts	*					D-1: the baseline runs predate the OPENAI_API_KEY and ANTHROPIC_API_KEY repo secrets (set 2026-10-05), so Tier 2 skipped every skill test there; head runs execute them	
 move	serial	test/admin-embed-spawn.serial.test.ts	*		unit	test/admin-embed-spawn.test.ts		D6: lint-clean, no process-wide state, 615/615 in one bun process forward and reverse; rejoins the parallel unit lane	
