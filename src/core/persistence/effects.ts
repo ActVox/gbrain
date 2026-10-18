@@ -565,6 +565,23 @@ const GIT_YIELD_ATTEMPTS = 20;
 const GIT_YIELD_MS = 250;
 
 /**
+ * Claims one effect recovery and finishes it forward (`recoverEffectPublication`); a failure is recorded on the effect,
+ * whose record stays. The caller holds the worktree's native lock: any old process holding it has exited, so no lease
+ * timeout is needed and no second process can steal this claim. Returns the claimed row, or undefined when the effect
+ * no longer holds a recovery record.
+ */
+export async function claimAndRecoverEffect(engine: BrainEngine, id: string | number, hostId: string,
+  hooks: Parameters<typeof recoverEffectPublication>[3] = {}): Promise<PersistenceEffect | undefined> {
+  let claimed: PersistenceEffect | undefined;
+  try {
+    [claimed] = await engine.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
+      claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 AND recovery IS NOT NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING *`, [id, randomUUID()]);
+    if (claimed) await recoverEffectPublication(engine, claimed, hostId, hooks);
+  } catch (error) { if (claimed) await recordFailure(engine, claimed, error); }
+  return claimed;
+}
+
+/**
  * Bounded, idempotent work. Recovery obtains kernel exclusion before a DB claim.
  * Resolves with the number of effects attempted, so a caller can keep draining.
  */
@@ -585,15 +602,10 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
     if (!binding) continue;
     const lock = await acquireWorktree(binding, 0, undefined, engine);
     if (!lock) continue;
-    let claimed: PersistenceEffect | undefined;
     try {
-      // Any old process holding this native lock has exited. No lease timeout
-      // can provide that proof and no second process can steal this claim now.
-      [claimed] = await engine.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
-        claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 AND recovery IS NOT NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING *`, [recovery.id, randomUUID()]);
-      if (claimed) { attempted++; touched.add(claimed.request_id); await recoverEffectPublication(engine, claimed, opts.hostId, opts); }
-    } catch (error) { if (claimed) await recordFailure(engine, claimed, error); }
-    finally { await lock.release(); }
+      const claimed = await claimAndRecoverEffect(engine, recovery.id, opts.hostId, opts);
+      if (claimed) { attempted++; touched.add(claimed.request_id); }
+    } finally { await lock.release(); }
   }
   const run = async (claimed: PersistenceEffect, binding: WorktreeBinding | null, hardened?: boolean) => {
     let effect = claimed;

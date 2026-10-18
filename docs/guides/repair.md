@@ -135,7 +135,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `connector-checkpoints` | `connector_checkpoints` | Deletes managed connector checkpoint rows and retry pointers that no registered connector source can load and that are older than 7 days. They accumulate after a content setting such as `g_history_days` changes, or when a connector host older than v0.60.11.0 runs during an upgrade. Cleanup only: it never copies or re-keys a checkpoint, takes no journal admission and runs brain-wide (`--source` does not narrow it). | Rows a queued or running connector write, or a connector's recorded pending set, still references. |
 | `orphan-bindings` | `orphan_persistence_bindings` | Deletes persistence source bindings whose source was removed, or that belong to an earlier incarnation of a source re-added under the same id. `gbrain sources remove` and `gbrain sources purge` delete the binding; one an older gbrain left behind makes the re-added source read as claimed, so every `gbrain sync --source <id>` fails with `writer_coordinator_required`. Bookkeeping only: no journal admission, no page or file changes, and it runs brain-wide (`--source` does not narrow it). See [orphan bindings](#orphan-bindings). | A binding that a queued, running or recovering write request of the same source incarnation still references. |
 | `managed-sync-orphans` | `sync_failures` | Explicit-only, preview-bound. Retires managed sync bookkeeping nothing current can resume or clear: a `managed-sync-failure` row whose cursor key has no cursor, and an unfinished `managed-sync` cursor recorded by a principal that is no longer an active local writer (or a pre-options cursor a later run superseded) whose pending request is terminal, or (#6834) a cursor whose checkpoint can never publish because the source's `last_commit` moved elsewhere (`checkpoint_moved`). `op_checkpoints` rows only; no journal admission, no page or file changes. The preview prints a hash; `--apply --expect <hash>` retires exactly that set. See [managed sync orphans](#managed-sync-orphans). | An unfinished cursor whose pending request is still queued, running or recovering, or one the live writer can resume with its recorded options (doctor prints that sync command). |
-| `stuck-recovery` | none (`gbrain sources writer status` shows the request `recovering` with `unexpected_file_bytes`) | Explicit-only, preview-bound, destructive consent. Resolves a live page publication recovery whose file matches neither its recorded prior nor its published bytes, which stops every write on its worktree. The preview lists each blocked file with both fingerprints and writes a private diff; `--apply --expect <hash> --keep prior\|disk --yes` backs up both versions, then restores the prior (the write publishes again) or keeps the edit and abandons the write. See [stuck recovery](#stuck-recovery). | A terminal request with its recovery still set (listed as refused, `recovery_choice_refused`), a withdrawal-mirror effect recovery (listed as refused, `recovery_effect_unsupported`), a shared-skill bundle recovery (`recovery_bundle_unsupported`), a recovery blocked on staging bytes, and a recovery whose file already matches a recorded version (the resident writer finishes those). |
+| `stuck-recovery` | none (`gbrain sources writer status` shows the request `recovering`, or the withdrawal-mirror effect, with `unexpected_file_bytes`) | Explicit-only, preview-bound, destructive consent. Resolves a live page or shared-skill bundle publication recovery whose file matches neither its recorded prior nor its published bytes, and a withdrawal-mirror effect recovery whose file was edited while it was mirroring; each stops every write on its worktree. The preview lists each blocked file with both fingerprints and writes a private diff; `--apply --expect <hash> --keep prior\|disk --yes` backs up both versions, then restores the prior (the write publishes again) or keeps the edit and abandons the write (every file of a bundle one way); an effect's only choice, `--keep withdrawn`, backs up the edit and writes the withdrawn version. See [stuck recovery](#stuck-recovery). | A terminal request with its recovery still set (listed as refused, `recovery_choice_refused`), an effect or bundle record that cannot be resolved (listed as refused, `recovery_effect_unsupported` or `recovery_bundle_unsupported`, with an ask_user fix), a recovery blocked on staging bytes, and a recovery whose file already matches a recorded version (the resident writer finishes those). |
 | `frontmatter-keys` | `stale_frontmatter_keys` | Explicit-only, preview-bound. Strips the parser's reserved top-level keys (`type`, `title`, `tags`, `slug`) that an older import stored inside `pages.frontmatter`. Since v0.60.176.0 those keys are not file/database drift and never render (#6454), so this is hygiene: database rows only, in source-scoped coordinated batches of up to 1,000 pages, no file, body or embedding change. Each swept page advances its `knowledge_revision` once, so a client holding an older revision of a swept page gets one `revision_conflict` and re-reads. See [frontmatter keys](#frontmatter-keys). | A page whose keys were cleared by a write between preview and apply (`already_clean`). |
 | `embedding-effects` | `stale_embedding_effects` | Settles stale queued and failed embedding effects of committed writes, which block receipt compaction and activation: `reconciled` when current vectors pass the effect verifier, `superseded` when the page was deleted or a newer revision owns its own effect, `retry_queued` for the owner (paid; a used-up retry allowance gets one new bounded cycle per explicit apply). See [stale queued embedding effects](#stale-queued-embedding-effects). | `blocked` effects, counted by reason (`owner_unavailable`, `embedding_disabled`, `embedding_unconfigured`, `projection_pending`, `no_replacement_obligation`). |
 | `attribution-backfill` | none | Fills write attribution (who wrote it) on pages, page versions and facts written before attribution was recorded, only where exactly one committed request in the write journal proves the writer: the page write whose recorded result is the row's revision, or the `remember` that inserted the fact. Fills NULLs only, in committed batches of 1,000 that resume after an interruption; no content, revision, page file or request ID changes. See [write attribution](../mcp/ADMIN.md#write-attribution). | `unrecorded_pages`, `unrecorded_page_versions`, `unrecorded_facts`: rows the journal cannot prove. They stay `unrecorded`; nothing is inferred. |
@@ -721,6 +721,10 @@ delete `op_checkpoints` rows by hand.
 hour and writer status says a request is recovering with unexpected_file_bytes.
 Show me what changed and let me pick which version to keep."*
 
+The same applies to a shared-skill bundle publication (several skill files
+published together) and to a withdrawal-mirror effect (gbrain rewriting a page
+file after `forget`) whose file was edited while it was being written.
+
 A page write records its file's prior bytes before it publishes. If the
 process dies mid-publication, the owner's recovery pass restores the prior
 bytes or finishes the write. When the file matches neither the recorded prior
@@ -740,10 +744,12 @@ gbrain repair stuck-recovery --source notes                    # preview: each b
 gbrain repair stuck-recovery --source notes --request-id <uuid>   # only one request
 gbrain repair stuck-recovery --source notes --keep prior --apply --expect <hash> --yes
 gbrain repair stuck-recovery --source notes --keep disk --apply --expect <hash> --yes
+gbrain repair stuck-recovery --source notes --request-id <uuid> --keep withdrawn --apply --expect <hash> --yes   # a withdrawal-mirror effect
 ```
 
 The preview starts from the blocker of the source's queued head and lists
-every recovery record on the worktree. For each file it prints the prior
+every recovery record on the worktree, and every withdrawal-mirror effect
+recovery whose file matches neither recorded version. For each file it prints the prior
 (hash, size, mode, or `absent: prior was a create`), the bytes on disk (or
 `deleted on disk`), what recovery sees, and a private diff written under
 `~/.gbrain/backups/stuck-recovery/<request>/` with the exact `diff -u`
@@ -765,6 +771,29 @@ What a choice does depends on the request's state:
 | Live with a recorded failure (`publication_failed`) | Prior bytes back; the request ends `failed` or `conflict` with that failure. | Disk bytes kept; the request ends with that failure. |
 | Terminal (`committed`, `failed`, `conflict`, `cancelled`) with its recovery record still set | Refused (`recovery_choice_refused`): recovery never restores a terminal request's file, so this would roll back committed bytes. | Refused (`recovery_choice_refused`): a terminal outcome is immutable and there is no publication to abandon. |
 
+A shared-skill bundle record is listed with every file of the bundle, each
+with both fingerprints, and either choice applies to the whole bundle: every
+file is backed up first, then `--keep prior` writes the prior bytes of the
+edited files back and recovery restores the rest (the publication requeues, or
+ends with its recorded failure), and `--keep disk` keeps every file as it is on
+disk and abandons the publication. After `--keep disk` the shared-skill records
+keep the version from before the publication; publish the skill again if the
+files on disk should become its new version.
+
+A withdrawal-mirror effect has one choice, `--keep withdrawn`. The withdrawal
+is already committed, so keeping the edited file (or the bytes from before the
+withdrawal) would leave the forgotten fact on disk, and the next sync would
+import it again; `--keep disk` and `--keep prior` are refused
+(`recovery_choice_refused`) before anything runs. The preview lists the file,
+its bytes from before the withdrawal, the withdrawn bytes the mirror recorded
+and the bytes on disk, with a diff of the withdrawn and disk bytes. The apply
+backs the edited file up (`0.disk` beside `0.withdrawn` and the diff), writes
+the withdrawn bytes through the mirror's own staged publication, and finishes
+the effect forward, so the writes queued behind it resume. Commit the file
+before the next sync, and make any other change from the edit again from the
+backup, leaving the forgotten fact out. A record without usable withdrawn
+bytes is listed as refused ([`recovery_effect_unsupported`](#recovery-effect-unsupported)).
+
 The preview lists a terminal request as `refused` with the reason and offers
 no choice for it. After `--keep disk` the database page still holds the
 content from before the write, so the page shows as file/database drift until
@@ -780,9 +809,10 @@ same apply again after it finished replays the recorded result; the same hash
 with the other `--keep` refuses `idempotency_conflict`. The finished journal
 row is the resolution's audit entry and does not expire; the request's own
 receipt is never rewritten by this command (`--keep disk` completes the live
-request; it never changes a terminal one). A shared-skill bundle recovery is
-refused with [`recovery_bundle_unsupported`](#recovery-bundle-unsupported), and
-a withdrawal-mirror effect recovery on the worktree is listed as refused with
+request; it never changes a terminal one). A bundle record this binary cannot
+read is listed as refused with
+[`recovery_bundle_unsupported`](#recovery-bundle-unsupported), and an effect
+record without usable withdrawn bytes with
 [`recovery_effect_unsupported`](#recovery-effect-unsupported). The apply waits
 at most 10 seconds for the worktree lock, then refuses `writer_lock_unavailable`
 with nothing changed; `--keep prior` on a record that predates reserved staging
@@ -2741,12 +2771,14 @@ applies to `gbrain jobs authorize-legacy --select`, `gbrain jobs cancel
 
 `recovery_bundle_unsupported`: `gbrain repair stuck-recovery` found a
 shared-skill bundle recovery record (several skill files published together)
-among the selected requests. It resolves page recoveries only, so nothing was
-changed. Inspect the request read-only with `gbrain sources writer status
---source <id> --json`, ask the user which version of each skill file to keep,
-put those bytes in place by hand, and let the resident writer finish the
-recovery. Pass `--request-id` to resolve the page recoveries on the same
-source.
+that this binary cannot read: an unknown shape, or more files than a bundle
+holds. A readable bundle record is resolved like a page recovery (see
+[stuck recovery](#stuck-recovery)). Nothing was changed. The preview lists it
+under `refused`, and its `fix` is `ask_user` with the exact preview command;
+naming it with `--request-id` refuses with this code. Upgrade gbrain on the
+brain host and preview again, or ask the user which version of each skill file
+to keep, put those bytes in place by hand, and let the resident writer finish
+the recovery.
 
 ### Recovery large file unsupported
 
@@ -2772,22 +2804,30 @@ recovery never restores its file, and `--keep prior` would roll back committed
 bytes; the record only waits for staging cleanup, see `gbrain sources writer
 status --source <id> --json`), or the record cannot support the choice
 (`--keep prior` without stored prior bytes, or a blocked path that is not a
-regular file). The preview lists only the choices it can make safe.
+regular file), or a record in the approved preview does not offer that choice
+(`--keep disk` or `--keep prior` on a withdrawal-mirror effect, `--keep
+withdrawn` on a page or bundle; refused before anything runs, so narrow the
+preview with `--request-id`). The preview lists only the choices it can make
+safe.
 
 ### Recovery effect unsupported
 
 `recovery_effect_unsupported`: a withdrawal-mirror effect recovery blocks the
-source's worktree, and `gbrain repair stuck-recovery` does not resolve it.
-That recovery only finishes forward (it never restores the bytes from before a
-withdrawal), so either `--keep` choice could put withdrawn content back on
-disk. Nothing was changed. Inspect the effect read-only with `gbrain sources
-writer status --source <id> --json` and ask the user whether the edited file
-may be replaced by its withdrawn version; the resident writer finishes the
-effect once the file matches one of its recorded versions. The preview lists
-the effect as `refused`; naming its request with `--request-id` refuses with
-this code. A sync queued behind such an effect stops at once with
+source's worktree, and its record cannot be written forward: it holds no
+usable withdrawn bytes (missing or corrupt), or it was recorded for another
+owner epoch, root or source incarnation. A usable record is resolved with
+`--keep withdrawn` (see [stuck recovery](#stuck-recovery)). That recovery
+only finishes forward (it never restores the bytes from before a withdrawal),
+so nothing was changed. The preview lists the effect as `refused`, and its
+`fix` is `ask_user` with the exact preview command
+(`gbrain repair stuck-recovery --source <id> --request-id <request>`) and a
+`user_message` to relay; naming its request with `--request-id` refuses with
+this code and the same fix. The user copies the edited file aside and puts it
+back to its committed version (never deletes it); the resident writer then
+finishes the effect, and the edit is made again without the forgotten fact. A
+sync queued behind a stuck effect stops at once with
 [`drain_stalled`, `cause: head_blocked`](write-refusals.md#head-blocked), and
-its fix names the file.
+its fix runs the stuck-recovery preview.
 
 ### Legacy job authority
 
