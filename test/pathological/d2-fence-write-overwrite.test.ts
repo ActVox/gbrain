@@ -15,7 +15,7 @@ import { runFactsPipeline } from '../../src/core/facts/backstop.ts';
 import { writeSingleFact } from '../../src/core/facts/write-single.ts';
 import { parseFactsFence } from '../../src/core/facts-fence.ts';
 import { pathologicalArms } from './harness.ts';
-import { CLAIM, EDIT, SLUG, editWhenPrepared, withFactsBrain } from './facts-overwrite-fixture.ts';
+import { CLAIM, EDIT, SLUG, editAfterWrite, editWhenPrepared, withFactsBrain } from './facts-overwrite-fixture.ts';
 
 afterEach(() => { __setChatTransportForTests(null); resetGateway(); });
 
@@ -45,6 +45,20 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`D-2 fence w
       expect(parseFactsFence(b.bytes()).facts.map(f => f.claim)).toEqual([CLAIM]);
       expect(parseFactsFence(await b.body()).facts.map(f => f.claim)).toEqual([CLAIM]);
       expect(await b.engine.executeRaw('SELECT compiled_truth FROM page_versions WHERE compiled_truth = $1', [before])).toHaveLength(1);
+    });
+  }, 180_000);
+
+  test('an editor save after fact insertion rolls back the mirror, rows and versions before rename', async () => {
+    await withFactsBrain(databaseUrl, async b => {
+      const before = { file: b.bytes(), body: await b.body(), versions: await b.engine.executeRaw('SELECT id FROM page_versions ORDER BY id') };
+      let saved = '';
+      const result = await b.append(editAfterWrite(b, 'insertFacts', () => { b.fileEdit(); saved = b.bytes(); }));
+      expect(saved).toBe(before.file + EDIT);
+      expect({ file: b.bytes(), body: await b.body() }).toEqual({ file: saved, body: before.body });
+      expect(result).toMatchObject({ inserted: 0, legacyFallback: true, databaseOnlyReason: 'file_database_drift' });
+      expect(result.warning).toContain(`${SLUG} (file_database_drift`);
+      expect(await b.engine.executeRaw('SELECT id FROM facts')).toEqual([]);
+      expect(await b.engine.executeRaw('SELECT id FROM page_versions ORDER BY id')).toEqual(before.versions);
     });
   }, 180_000);
 

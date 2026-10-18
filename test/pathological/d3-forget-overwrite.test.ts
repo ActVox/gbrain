@@ -11,7 +11,7 @@ import { forgetFactInFence } from '../../src/core/facts/forget.ts';
 import { parseFactsFence } from '../../src/core/facts-fence.ts';
 import { _resetWriteThroughCacheForTest } from '../../src/core/write-through.ts';
 import { pathologicalArms, runScopedErrors } from './harness.ts';
-import { EDIT, SLUG, editWhenPrepared, withFactsBrain } from './facts-overwrite-fixture.ts';
+import { EDIT, SLUG, editAfterWrite, editWhenPrepared, withFactsBrain } from './facts-overwrite-fixture.ts';
 
 for (const { backend, databaseUrl } of pathologicalArms()) describe(`D-3 forget mirrors (${backend})`, () => {
   for (const action of ['withdrawal', 'supersession'] as const) for (const mode of ['database', 'file', 'late-database', 'late-file'] as const) test(`${action}: ${mode} edit holds the mirror but commits expiry`, async () => {
@@ -38,6 +38,22 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`D-3 forget 
       expect((await forgetFactInFence(b.engine, id)).path).toBe('fence');
       expect(parseFactsFence(b.bytes()).facts[0]!.active).toBe(false);
       expect(parseFactsFence(await b.body()).facts[0]!.active).toBe(false);
+    });
+  }, 180_000);
+
+  test('an editor save after the body mirror rolls back that mirror and its version before rename', async () => {
+    await withFactsBrain(databaseUrl, async b => {
+      const id = (await b.append()).ids[0]!;
+      const before = { file: b.bytes(), body: await b.body(), versions: await b.engine.executeRaw('SELECT id FROM page_versions ORDER BY id') };
+      let saved = '';
+      const racing = editAfterWrite(b, 'refreshPageBody', () => { b.fileEdit(); saved = b.bytes(); });
+      const result = await forgetFactInFence(racing, id, { supersededBy: { rowNum: null } });
+      expect(saved).toBe(before.file + EDIT);
+      expect({ file: b.bytes(), body: await b.body() }).toEqual({ file: saved, body: before.body });
+      expect(result).toMatchObject({ ok: true, path: 'legacy_db' });
+      expect(result.warning).toContain(`${SLUG} (file_database_drift`);
+      expect(await b.engine.executeRaw('SELECT id FROM page_versions ORDER BY id')).toEqual(before.versions);
+      expect(await b.engine.executeRaw('SELECT id FROM facts WHERE expired_at IS NULL')).toEqual([]);
     });
   }, 180_000);
 
