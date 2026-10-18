@@ -26,6 +26,7 @@ test('SEGMENTED_WRITER_FLOOR follows the switch-on BEHAVIOR_CHANGES row\'s since
   // The merge-slot stamp edits only allowlisted lines (the row's since, VERSION, the CHANGELOG header): the floor
   // holds no version of its own. A stamp that writes the CHANGELOG entry turning the switch on but forgets the since
   // fails here.
+  // test-reads-source-ok[structural]: the stamp contract is that writer-floor.ts carries no version literal of its own.
   expect(readFileSync(join(import.meta.dir, '../../src/core/page-body/writer-floor.ts'), 'utf8')).not.toMatch(/'\d+\.\d+\.\d+\.\d+'/);
   const announcing = readFileSync(join(import.meta.dir, '../../CHANGELOG.md'), 'utf8').split(/^## /m).slice(1)
     .filter(entry => /`pages\.segmented_storage`\)? (?:is )?(?:now )?on by default/i.test(entry)).map(entry => /^\[([^\]]+)\]/.exec(entry)?.[1]);
