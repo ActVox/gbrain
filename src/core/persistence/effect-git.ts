@@ -368,7 +368,7 @@ async function publishKeepingCheckout(root: string, signal?: AbortSignal): Promi
 function heldConflict(root: string, error: OperationError): OperationError {
   const fix = error.fix as Action | undefined;
   const held = opError('integrate_conflict', `Git backups of canonical page writes are held: ${error.message}`,
-    `${error.suggestion ?? ''} The page writes themselves are committed in the database and in local commits; nothing is lost, and nothing is pushed from ${root} until the conflict is resolved. After the choice is pushed, gbrain sources writer retry-effects <source> --parked-pushes retries the Git effects that parked meanwhile; gbrain sources refresh <source> then brings the merged remote files into the checkout.`,
+    `${error.suggestion ?? ''} The page writes themselves are committed in the database and in local commits; nothing is lost, and nothing is pushed from ${root} until the conflict is resolved. After the choice is pushed, gbrain sources writer retry-effects with --parked-pushes for the source this checkout backs (gbrain sources writer status names it) retries the Git effects that parked meanwhile, and gbrain sources refresh for that source brings the merged remote files into the checkout.`,
     { ...(error.detail ? { detail: error.detail } : {}), fix: { ...(fix ?? { ask_user: true, consent: [], actor: 'user', requires_exclusive: false,
       why: 'Choosing which version of a file wins discards the other side; ask the user before resolving.' }),
     user_message: `${fix?.user_message ?? 'This machine and the remote changed the same file.'} Until you choose, Git backups of new page writes from ${root} are held (nothing is lost; the database has every write).`,
