@@ -165,4 +165,67 @@ for (const { backend: kind } of pathologicalArms()) {
       for (const [slug, bytes] of Object.entries(files())) expect({ slug, same: bytes.equals(snapshot[slug]!) }).toEqual({ slug, same: true });
     }, 600_000);
   });
+  describe(kind + ': a segmented-mirror apply whose file changes before its mirror runs refuses with preview_changed', () => {
+    let brain: TwinBrain;
+    const PAGE = 'people/held-mirror-example';
+    const HELD_CLAIM = 'Mirror Example locker code is 5511';
+    const run = (apply: boolean, expectHash?: string, env: Record<string, string> = {}): Promise<RepairResult> => withEnv({ ...brain.env(), ...env }, () => withVerifiedLocalRegistration(brain.engine, brain.cli, async () => {
+      const scope = await resolveRepairScope(brain.engine, brain.sourceId);
+      const runner = await repairRunner(brain.engine, { apply, logger: quiet });
+      return runner.run('segmented-mirror', scope, { explicit: true, sourceFlag: brain.sourceId, ...(expectHash ? { expect: expectHash } : {}) });
+    }));
+
+    beforeAll(async () => {
+      brain = await openTwinBrain(kind, [], async seed => { await seed.setSwitch(true); await seed.put(PAGE, 1_100_000); });
+      await extract(brain, PAGE, [HELD_CLAIM, KEPT]);
+      await settle(brain, kind);
+      expect(await brain.storageOf(PAGE)).toBe('segmented');
+      durableGitRepo(brain.root, [PAGE + '.md']);
+      const stale = readFileSync(fileOf(brain, PAGE));
+      await purge(brain, kind, PAGE, HELD_CLAIM);
+      writeFileSync(fileOf(brain, PAGE), stale);
+      git(brain.root, 'add', '-A'); git(brain.root, 'commit', '-q', '-m', 'older binary state');
+      // The owner's consumer is held: the repair's effects are inserted unclaimable until the test releases them.
+      await brain.engine.executeRaw(`CREATE OR REPLACE FUNCTION lp_a_hold_remirror() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF EXISTS (SELECT 1 FROM persistence_requests r WHERE r.id=NEW.request_id AND r.operation='repair_segmented_mirror') THEN
+          NEW.next_attempt_at := now() + interval '1 day'; END IF; RETURN NEW; END $$`);
+      await brain.engine.executeRaw('CREATE TRIGGER lp_a_hold_remirror BEFORE INSERT ON persistence_effects FOR EACH ROW EXECUTE FUNCTION lp_a_hold_remirror()');
+    }, 900_000);
+
+    afterAll(() => brain.close(), 120_000);
+
+    test('a formatting-only edit made while the mirror waits is refused, not overwritten', async () => {
+      const preview = await run(false);
+      expect(preview.listing?.map(entry => entry.item)).toEqual([`${brain.sourceId}:${PAGE}`]);
+      const applied = await run(true, preview.preview_hash, { GBRAIN_WRITE_WAIT_MS: '500' });
+      expect(applied.outcomes).toEqual({ mirror_queued: 1 });
+
+      // A formatting-only edit: the quoted title parses the same, so the mirror's own drift check still passes.
+      const original = readFileSync(fileOf(brain, PAGE), 'utf8');
+      const edited = original.replace(/^title: Twin Example$/m, "title: 'Twin Example'");
+      expect(edited).not.toBe(original);
+      writeFileSync(fileOf(brain, PAGE), edited);
+      const head = (await gitAsync(brain.root, 'rev-parse', 'HEAD')).trim();
+
+      await brain.engine.executeRaw('DROP TRIGGER lp_a_hold_remirror ON persistence_effects');
+      await brain.engine.executeRaw(`UPDATE persistence_effects SET next_attempt_at=now() WHERE source_id=$1 AND state='queued'`, [brain.sourceId]);
+      await settle(brain, kind);
+
+      expect(readFileSync(fileOf(brain, PAGE), 'utf8')).toBe(edited);
+      expect((await gitAsync(brain.root, 'rev-parse', 'HEAD')).trim()).toBe(head);
+      const [mirror] = await brain.engine.executeRaw<{ state: string; skipped: unknown }>(`SELECT e.state, e.data->'skipped' AS skipped FROM persistence_effects e
+        JOIN persistence_requests r ON r.id=e.request_id WHERE r.operation='repair_segmented_mirror' AND e.kind='withdrawal-mirror'`);
+      expect({ state: mirror!.state, skipped: typeof mirror!.skipped === 'string' ? JSON.parse(mirror!.skipped) : mirror!.skipped })
+        .toEqual({ state: 'committed', skipped: [{ slug: PAGE, reason: 'preview_changed' }] });
+
+      // Replaying the apply reports the typed refusal with the preview as its fix; a new preview lists the page again.
+      const replay = await run(true, preview.preview_hash);
+      const refused = replay.outcome_items?.find(entry => entry.item === `${brain.sourceId}:${PAGE}`);
+      expect(refused).toMatchObject({ outcome: 'refused', reason: 'preview_changed' });
+      expect((refused!.detail!.fix as { argv: string[] }).argv).toEqual(['gbrain', 'repair', 'segmented-mirror', '--source', brain.sourceId, '--json']);
+      const again = await run(false);
+      expect(again.listing?.map(entry => entry.item)).toEqual([`${brain.sourceId}:${PAGE}`]);
+      expect(again.preview_hash).not.toBe(preview.preview_hash);
+    }, 600_000);
+  });
 }
