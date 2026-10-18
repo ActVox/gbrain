@@ -126,6 +126,8 @@ describe('issue #1801 fix #3 — computeWedgedQueueCheck', () => {
     expect(check.message).not.toContain('worker alive but not claiming work');
     expect(check.message).not.toContain('No worker subscribed');
     expect(check.details?.worker_registry_unreadable).toBe(true);
+    expect(check.details?.worker_registry_errno).toBe('Error');
+    expect(check.details?.worker_registry_path).toBeNull();
   });
 
   it('mixed stuck + no-worker queues → both messages, details count each subset', async () => {
