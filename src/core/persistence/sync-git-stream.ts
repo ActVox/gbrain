@@ -12,7 +12,8 @@ import { join, relative, sep } from 'node:path';
 import { hardenedGitStream, hardenedStreamComplete, NulRecordSplitter, type HardenedGitStreamResult } from '../hardened-git.ts';
 import { gitBlobOid, sha256 } from './digest.ts';
 import { readSyncFile } from './sync-discovery.ts';
-import { loopYield } from './sync-yield.ts';
+import { faultPointNow } from './fault-points.ts';
+import { loopYield, type LoopYield } from './sync-yield.ts';
 
 export type Dp = 'clean' | 'clean_eol' | 'clean_lfs' | 'modified' | 'deleted' | 'staged' | 'untracked' | 'unknown';
 export interface GitTreeEntry { mode: string; oid: string }
@@ -46,16 +47,27 @@ function outcome(result: HardenedGitStreamResult): string {
 
 const malformed = (read: string, record: string) => new SyncTreeReadIncomplete(read, `malformed record ${JSON.stringify(record.slice(0, 80))}`);
 
-async function readRecords(gitRoot: string, args: string[], read: string, visit: (record: Buffer) => void): Promise<void> {
+async function readRecords(gitRoot: string, args: string[], read: string, visit: (record: Buffer) => void, shared?: LoopYield): Promise<void> {
   const splitter = new NulRecordSplitter();
   // A 600k-path read arrives faster than it parses: past the stretch budget, the stream waits one macrotask.
-  const step = loopYield();
-  const result = await gitStream(gitRoot, args, { timeoutMs: READ_TIMEOUT_MS,
-    onChunk: chunk => {
-      const records = splitter.push(chunk);
-      for (const record of records) visit(record);
-      return step.due(records.length) ? step.pause() : undefined;
-    } });
+  const step = shared ?? loopYield();
+  const visitChunk = (chunk: Buffer) => {
+    if (shared) faultPointNow('sync:level_chunk', { read });
+    const records = splitter.push(chunk);
+    for (const record of records) visit(record);
+    return step.due(records.length) ? step.pause() : undefined;
+  };
+  // A budget shared with the level's cursor (sync-yield.ts `turnYield`): a chunk waits a turn the cursor already spent.
+  const take = (chunk: Buffer) => shared?.over() ? shared.pause().then(() => visitChunk(chunk)) : visitChunk(chunk);
+  // Bun can close the stream (and hand the next chunk) before a held chunk settles: chunks chain here and the read waits for the last.
+  let tail: Promise<void> | undefined;
+  const result = await gitStream(gitRoot, args, { timeoutMs: READ_TIMEOUT_MS, onChunk: chunk => {
+    const held = tail ? tail.then(() => take(chunk)) : take(chunk);
+    if (!held) return;
+    const settled: Promise<void> = held.finally(() => { if (tail === settled) tail = undefined; });
+    return tail = settled;
+  } });
+  await tail;
   if (!hardenedStreamComplete(result) || !splitter.atRecordBoundary) throw new SyncTreeReadIncomplete(read, outcome(result));
 }
 
@@ -106,30 +118,30 @@ function* lines(items: readonly string[], terminator: string): Generator<Buffer>
  * Symlinks (120000) and gitlinks (160000) are kept with their mode so a caller
  * can mark them unknown.
  */
-export async function readTreeLevel(gitRoot: string, commit: string, scope: string): Promise<Map<string, GitTreeEntry>> {
+export async function readTreeLevel(gitRoot: string, commit: string, scope: string, shared?: LoopYield): Promise<Map<string, GitTreeEntry>> {
   const tree = new Map<string, GitTreeEntry>();
-  await walkTreeLevel(gitRoot, commit, scope, (path, mode, oid) => tree.set(path, { mode, oid }));
+  await walkTreeLevel(gitRoot, commit, scope, (path, mode, oid) => tree.set(path, { mode, oid }), shared);
   return tree;
 }
 
 /** `readTreeLevel`'s entries handed to `visit` in `ls-tree` order as they arrive, none kept: a caller that needs only a pass over `T` holds no map of it. */
-export async function walkTreeLevel(gitRoot: string, commit: string, scope: string, visit: (path: string, mode: string, oid: string) => void): Promise<void> {
+export async function walkTreeLevel(gitRoot: string, commit: string, scope: string, visit: (path: string, mode: string, oid: string) => void, shared?: LoopYield): Promise<void> {
   await readRecords(gitRoot, ['ls-tree', '-r', '-z', commit, '--', scope === '' ? '.' : scope], 'ls-tree', record => {
     const fields = headerFields(record);
     if (!fields || !OID.test(fields.b)) throw malformed('ls-tree', record.toString('utf8'));
     if (fields.a === 'blob' || fields.a === 'commit') visit(fields.path, fields.mode, fields.b);
-  });
+  }, shared);
 }
 
 /** `X`: the index (never the worktree), keyed by Git-root-relative path; a conflicted path keeps its highest stage. */
-export async function readIndexLevel(gitRoot: string): Promise<Map<string, GitIndexEntry>> {
+export async function readIndexLevel(gitRoot: string, shared?: LoopYield): Promise<Map<string, GitIndexEntry>> {
   const index = new Map<string, GitIndexEntry>();
   await readRecords(gitRoot, ['ls-files', '-s', '-z'], 'ls-files', record => {
     const fields = headerFields(record);
     if (!fields || !OID.test(fields.a) || !/^[0-3]$/.test(fields.b)) throw malformed('ls-files', record.toString('utf8'));
     const stage = Number(fields.b);
     if ((index.get(fields.path)?.stage ?? -1) < stage) index.set(fields.path, { mode: fields.mode, oid: fields.a, stage });
-  });
+  }, shared);
   return index;
 }
 
@@ -139,7 +151,7 @@ export async function readIndexLevel(gitRoot: string): Promise<Map<string, GitIn
  * map of every path. Paths outside `tree` are not kept; when some tree path never appeared, the index is read whole
  * once more to name them.
  */
-export async function readIndexDelta(gitRoot: string, tree: Map<string, GitTreeEntry>): Promise<Map<string, GitIndexEntry | null>> {
+export async function readIndexDelta(gitRoot: string, tree: Map<string, GitTreeEntry>, shared?: LoopYield): Promise<Map<string, GitIndexEntry | null>> {
   const delta = new Map<string, GitIndexEntry | null>();
   let same = 0;
   await readRecords(gitRoot, ['ls-files', '-s', '-z'], 'ls-files', record => {
@@ -153,9 +165,9 @@ export async function readIndexDelta(gitRoot: string, tree: Map<string, GitTreeE
     const stage = Number(fields.b);
     if (stage === 0 && fields.a === committed.oid && fields.mode === committed.mode) { same++; return; }
     if ((delta.get(fields.path)?.stage ?? -1) < stage) delta.set(fields.path, { mode: fields.mode, oid: fields.a, stage });
-  });
+  }, shared);
   if (same + delta.size === tree.size) return delta;
-  const index = await readIndexLevel(gitRoot);
+  const index = await readIndexLevel(gitRoot, shared);
   const whole = new Map<string, GitIndexEntry | null>();
   for (const [path, committed] of tree) {
     const indexed = index.get(path);

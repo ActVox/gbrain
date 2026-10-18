@@ -40,6 +40,10 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 4b: before each round of a pass reads its level (`round`), and after it read it (`level`: its statements and its
   // confirm-round verdict), before it applies.
   | 'sync:round_start' | 'sync:level_read'
+  // #6712 PR 4b: the level's overlapping reads, which share one loop budget (sync-yield.ts `turnYield`): a Git chunk as its
+  // records are visited (`read`: ls-tree or ls-files; a synchronous hook), an `I⋈P` result in hand before the shared budget
+  // decides whether it waits a turn, and the same result right before its rows are taken.
+  | 'sync:level_chunk' | 'sync:level_result' | 'sync:level_take'
   // #6712 PR 4b (#6926): inside the round's last import's publication, before its folded stamp's checks (sync-pass-fold.ts); a hook
   // that throws models a failed check statement there: the stamp rolls back to its savepoint and the pass stamps by its checkpoint request.
   | 'sync:pass_fold'
@@ -59,7 +63,7 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
  */
 /** `writeId` is the write request row: rows of a caller-bound replay share one `requestId` (crash-robot per-request seams key on the row). */
 export interface FaultDetail { requestId?: string; writeId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string;
-  round?: number; level?: { statements: number; confirm: { taken: boolean; reason: string | null; rows: number } | null; reused?: number } }
+  round?: number; read?: string; level?: { statements: number; confirm: { taken: boolean; reason: string | null; rows: number } | null; reused?: number } }
 /** Postgres returns `persistence_effects.id` (bigserial) as a BigInt; `faultPoint` hands hooks its decimal string (#6584). */
 export type FaultDetailInput = Omit<FaultDetail, 'effectId'> & { effectId?: string | number | bigint };
 type FaultHook = (point: FaultPoint, detail: FaultDetail) => Promise<void> | void;
@@ -76,6 +80,10 @@ export const EFFECT_FAULT_POINTS: Record<EffectKind, FaultPoint> = {
 let installed: FaultHook | undefined;
 /** Gate workers only. */
 export function installFaultHook(hook: FaultHook | undefined): void { installed = hook; }
+/** A seam inside synchronous work: the hook runs to its first await, and what it returns is not awaited. */
+export function faultPointNow(point: FaultPoint, detail: FaultDetailInput = {}): void {
+  if (installed) void faultPoint(point, detail).catch(() => undefined);
+}
 export async function faultPoint(point: FaultPoint, detail: FaultDetailInput = {}): Promise<void> {
   if (!installed) return;
   const { effectId, ...rest } = detail;
