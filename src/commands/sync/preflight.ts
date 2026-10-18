@@ -54,6 +54,7 @@ import { sweepOrphanedRenameSentinels } from './rename-reconcile.ts';
 import type { SyncPlan, SyncActivePack } from './sync-run.ts';
 import { holdUnsupportedPaths, NO_BYTE_PATHS, selectBytePaths, type BytePaths } from './unsupported-paths.ts';
 import { formatUrlClonePullBlock, urlClonePullBlock } from '../../core/url-clone.ts';
+import { formatUpstreamNotice, recordUpstreamBeforeFetch, settleUpstreamAfterPull } from '../../core/sync-upstream-rewrite.ts';
 
 export type PreflightOutcome = { readonly done: SyncResult } | { readonly plan: SyncPlan };
 
@@ -617,6 +618,7 @@ async function pullAndResolveHead(
     // process exits could fast-forward the tree behind a released lock.
     const { pullRepo, isStoppedGitPull } = await import('../../core/git-remote.ts');
     const shutdown = abortOnCleanupPass('sync-git-pull');
+    if (opts.sourceId) await recordUpstreamBeforeFetch(engine, opts.sourceId, gitContextRoot);
     try {
       // v0.41.13.0 (T3 / D-V4-mech-7): the pull is bounded by the operator's
       // --timeout through opts.signal, and by pullRepo's own 300s default
@@ -624,6 +626,7 @@ async function pullAndResolveHead(
       // (gitContextRoot), not just the sync scope — git has no per-subdir pull.
       await pullRepo(gitContextRoot, { signal: composeAbortSignals(opts.signal, shutdown.signal) });
       serr(`[gbrain phase] sync.git_pull done ${Date.now() - _t0}ms`);
+      if (opts.sourceId) await settleUpstreamAfterPull(engine, opts.sourceId, gitContextRoot, true);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       serr(`[gbrain phase] sync.git_pull error ${Date.now() - _t0}ms (${msg.slice(0, 200)})`);
@@ -646,6 +649,8 @@ async function pullAndResolveHead(
       } else {
         serr(`Warning: git pull failed: ${msg.slice(0, 200)}`); // #1315 stderr-first
       }
+      const upstream = opts.sourceId ? await settleUpstreamAfterPull(engine, opts.sourceId, gitContextRoot, false) : null;
+      if (upstream) serr(formatUpstreamNotice(upstream));
       // #6946: an owned clone's own checkout blocks it; name the files and the preview-first repair.
       const block = opts.sourceId ? await urlClonePullBlock(engine, opts.sourceId) : null;
       if (block) serr(formatUrlClonePullBlock(block));

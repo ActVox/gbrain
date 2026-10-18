@@ -15,6 +15,7 @@ import {
   type EmbedBackfillWorkerSurface,
 } from './minions/embed-backfill-admission.ts';
 import { runInlineCostGate } from './sync-cost-gate.ts';
+import { renderUpstreamDivergence, type UpstreamDivergenceReport } from './sync-upstream-rewrite.ts';
 
 type SyncCostGateSource = {
   id: string;
@@ -220,6 +221,7 @@ export function buildSingleSyncJsonEnvelope(
     fromCommit?: string | null;
     toCommit?: string;
     bankedFiles?: number;
+    upstream?: UpstreamDivergenceReport;
   },
   embedBackfill?: SyncEmbedBackfillOutcome,
   costGate?: Record<string, unknown>,
@@ -231,6 +233,7 @@ export function buildSingleSyncJsonEnvelope(
     ...syncFailureJsonFields(result),
     ...syncHoldJsonFields(result),
     ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.upstream ? { upstream: renderUpstreamDivergence(result.upstream) } : {}),
     added: result.added,
     modified: result.modified,
     deleted: result.deleted,
