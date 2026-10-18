@@ -53,8 +53,9 @@ test('a drain re-enters sliced passes over one cursor until it is synced and rec
     expect(result.added).toBe(5);
     expect(result.drain).toMatchObject({ outcome: 'synced', written: 5, waived: 0, remaining: 0 });
     expect(result.drain!.passes).toBeGreaterThanOrEqual(5);
-    const requests = await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1', [f.id]);
-    expect(requests[0]!.n).toBe(6);
+    // Five imports; the last carries the checkpoint (#6926, folded into 4b).
+    const requests = await engine.executeRaw<{ kind: string; stamp: string | null }>("SELECT intent->>'kind' AS kind, outcome->>'pass_stamp' AS stamp FROM persistence_requests WHERE source_id=$1 ORDER BY sequence", [f.id]);
+    expect(requests).toEqual([...Array.from({ length: 4 }, () => ({ kind: 'managed_sync_import', stamp: null })), { kind: 'managed_sync_import', stamp: 'folded' }]);
   }
 }), 180_000);
 

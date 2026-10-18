@@ -30,6 +30,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -89,7 +90,8 @@ describe('#6834 a managed-sync checkpoint whose source checkpoint moved', () => 
   /** Stops the run after its page writes and before its checkpoint publishes. */
   async function beforeCheckpoint(engine: BrainEngine, f: Fixture, variant: 'entries' | 'zero') {
     const abort = new AbortController();
-    const partial = await outcome(performManagedSync(engine, { ...f.opts, signal: abort.signal, onProgress: p => { if (variant === 'zero' || p.bankedFiles === 1) abort.abort(); } }));
+    // A folded stamp has no window between the last import and the checkpoint (#6926): this run stamps by its request.
+    const partial = await outcome(stampByCheckpoint(() => performManagedSync(engine, { ...f.opts, signal: abort.signal, onProgress: p => { if (variant === 'zero' || p.bankedFiles === 1) abort.abort(); } })));
     expect(partial.status).toBe('partial');
   }
   const superseded = async (engine: BrainEngine, id: string) => (await engine.executeRaw(

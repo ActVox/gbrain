@@ -16,6 +16,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -71,7 +72,8 @@ describe('#6694 managed-sync checkpoint under a pinned slug_root_mode', () => {
   /** Runs until every page committed and stops before the checkpoint publishes. */
   async function beforeCheckpoint(engine: BrainEngine, f: Fixture, pages: number) {
     const abort = new AbortController();
-    const partial = await performManagedSync(engine, { ...f.opts, signal: abort.signal, onProgress: p => { if (p.bankedFiles === pages) abort.abort(); } });
+    // A folded stamp has no window between the last import and the checkpoint (#6926): this run stamps by its request.
+    const partial = await stampByCheckpoint(() => performManagedSync(engine, { ...f.opts, signal: abort.signal, onProgress: p => { if (p.bankedFiles === pages) abort.abort(); } }));
     expect(partial).toMatchObject({ status: 'partial', filesImported: pages });
   }
   /** A checkpoint column only the owner publishes; the test edits it with managed persistence switched off for the statement. */

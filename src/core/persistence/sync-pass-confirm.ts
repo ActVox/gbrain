@@ -59,12 +59,15 @@ export async function readLevelMark(exec: Exec, sourceId: string, incarnation: s
 /** Whether `col` (an xid) was committed before S1: it is older than S1's `xmin` (`age` of a frozen id is the largest). */
 const unchanged = (col: string) => `age(${col}) > x.lo_age`;
 
-/** One scan of the source's pages and one of the incarnation's op rows: the counts, and the rows S1 does not prove unchanged. */
+/**
+ * One scan of the source's pages and one of the incarnation's op rows: the counts, and the rows S1 does not prove unchanged.
+ * `$6`: the request publishing in this transaction (a folded checkpoint, sync-pass-fold.ts), whose page is not committed yet.
+ */
 const PROOF = `WITH x AS MATERIALIZED (SELECT txid_snapshot_xmin(txid_current_snapshot()) AS now_lo, txid_snapshot_xmax(txid_current_snapshot()) AS hi,
     age(($4::bigint % 4294967296)::text::xid) AS lo_age),
   pg AS (SELECT count(*) FILTER (WHERE p.source_path IS NOT NULL)::int AS n,
       COALESCE(jsonb_agg(jsonb_build_array(p.id::text, EXISTS (SELECT 1 FROM persistence_requests r WHERE r.id=p.revision_write_request_id AND r.source_id=$1
-        AND r.state='committed' AND r.intent->>'passId'=$5 AND r.outcome->>'revision'=p.knowledge_revision::text), p.knowledge_revision::text))
+        AND (r.id=$6::uuid OR r.state='committed' AND r.intent->>'passId'=$5 AND r.outcome->>'revision'=p.knowledge_revision::text)), p.knowledge_revision::text))
         FILTER (WHERE NOT ${unchanged('p.xmin')}), '[]'::jsonb) AS changed
     FROM pages p, x WHERE p.source_id=$1),
   oc AS (SELECT o.op, count(*)::int AS n, jsonb_agg(jsonb_build_array(o.op, o.fingerprint, o.completed_keys->0->>'revision', o.completed_keys->0->>'run_id'))
@@ -86,14 +89,14 @@ export type ConfirmProof = { ok: true; mark: LevelMark; pages: string[]; records
  * Proves, in S2 (the round's snapshot), that every change since `base` (S1) to what the level read consumes is the pass's
  * own write (see the header). The counts still need the reused rows: `countsMatch` checks them after the delta read.
  */
-export async function proveConfirm(exec: Exec, input: { sourceId: string; incarnation: string; passId: string; base: LevelMark; recorded?: ReadonlySet<number>; postgres: boolean }): Promise<ConfirmProof> {
+export async function proveConfirm(exec: Exec, input: { sourceId: string; incarnation: string; passId: string; base: LevelMark; recorded?: ReadonlySet<number>; postgres: boolean; self?: string }): Promise<ConfirmProof> {
   const scope = `${input.sourceId}:${input.incarnation}`;
   // Two plain scans: compiling them (JIT, which the planner's cost picks at 600k) cost more than running them (about 200 ms).
   const jit = input.postgres ? exec.executeRaw('SET LOCAL jit = off') : Promise.resolve([]);
   jit.catch(() => undefined);
   const [row] = await exec.executeRaw<{ xmin: string; span: number; ops: Record<string, number> | null; holds: string[]; pages: number;
     pages_changed: Array<[string, boolean, string]>; ops_changed: Array<[string, string, string | null, string | null]> }>(
-    PROOF, [input.sourceId, CONFIRM_OPS, scope, input.base.xmin, input.passId]);
+    PROOF, [input.sourceId, CONFIRM_OPS, scope, input.base.xmin, input.passId, input.self ?? null]);
   await jit;
   const mark: LevelMark = { xmin: row!.xmin, ops: row!.ops ?? {}, holds: row!.holds };
   if (!(Number(row!.span) >= 0 && Number(row!.span) < 2 ** 31)) return { ok: false, reason: 'xid_span', mark };

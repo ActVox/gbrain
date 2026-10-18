@@ -104,7 +104,7 @@ export interface Held { hold: HeldEntry; overtaken?: true }
 export interface Settled { settled: { path: string; request_id: string } }
 export interface Cursor extends SyncDiscovery { runId: string; index: number; authority: SyncAuthority; pending?: Pending; done?: boolean; companyReceiptId?: string;
   processingOptions?: SyncProcessingOptions; syncOptions?: SyncCursorOptions; overtaken?: true;
-  counts: { added: number; modified: number; deleted: number; chunks: number; renamed?: number;
+  counts: { added: number; modified: number; deleted: number; chunks: number; renamed?: number; folded?: true;
     /** #5751: unchanged working-tree files skipped only because a no-op publication could never resolve their admit reason. */
     skippedContextualMode?: number; skippedCanonicalBytes?: number;
     /** DX-A7: entries advanced without an admission because their publication would change nothing. */
@@ -474,7 +474,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     ...(!entry ? { syncOptions: cursor.syncOptions ?? run.syncOptions, ...(run.repoPath ? { repoPath: run.repoPath } : {}) } : {}),
     ...(!entry && cursor.overtaken ? { overtaken: true } : {}),
     ownerEpoch: String(cursor.binding.owner_epoch), syncAuthority: cursor.authority, ...cursorIntent(cursor, key),
-    ...(cursor.passId ? { level: passLevel ?? null, ...(!entry && cursor.stamp ? { stamp: cursor.stamp } : {}) } : {}),
+    ...(cursor.passId ? { level: passLevel ?? null, ...(cursor.stamp && (!entry || cursor.index === cursor.entries.length - 1) ? { stamp: cursor.stamp } : {}) } : {}),
     slugMode: cursor.slugMode, from: cursor.from, target: cursor.target, working: entry?.working ?? false,
     ...(cursor.companyPlan ? { companyApproval: { schema: cursor.companyPlan.schema!, planDigest: cursor.companyPlan.plan_digest, extractorVersion: cursor.companyPlan.extractor_version,
       policyFingerprint: currentCompanyBrainSync(cursor.sourceId)!.policyFingerprint } } : {}) } });
@@ -845,7 +845,7 @@ function countCommitted(counts: Cursor['counts'], pending: Pending, outcome: Wri
     else if (pending.intent.renameFrom) counts.renamed = (counts.renamed ?? 0) + 1;
     else if (pending.pageId === null) counts.added++; else counts.modified++;
   }
-  counts.chunks += Number(outcome?.chunks ?? 0);
+  counts.chunks += Number(outcome?.chunks ?? 0); if (outcome?.pass_stamp === 'folded') counts.folded = true;
   if ((outcome?.recovered_frontmatter || outcome?.comment_value) && pending.intent.path) counts.recovered = addRecovered(counts.recovered,
     { paths: outcome.recovered_frontmatter ? [pending.intent.path] : [], commentValues: outcome.comment_value ? 1 : 0 });
   const sizeState = outcome?.size_state as PageSizeState | undefined;
@@ -1430,8 +1430,8 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
       opts.onProgress?.({ phase: 'managed_sync.start', bankedFiles: cursor.index, total: cursor.entries.length });
       while (!cursor.done) {
         assertActive();
-        // #6712 PR 4b: a pass's round batch ends at its last entry; the pass classifies again (its stamp is its own batch).
-        if (cursor.passId && !cursor.stamp && !cursor.pending && cursor.index >= cursor.entries.length && !cursor.deferred?.length) return cursor;
+        // #6712 PR 4b: a pass's batch ends at its last entry; its stamp is its own batch or rides the last import (#6926, `folded`).
+        if (cursor.passId && (!cursor.stamp || cursor.entries.length > 0) && !cursor.pending && cursor.index >= cursor.entries.length && !cursor.deferred?.length) return cursor;
         if (!cursor.pending) {
           // A source remains fair in both directions: foreground gets service, then sync earns one bounded batch even if new interactive work keeps arriving.
           if (creditedPages && performance.now() - creditStarted >= 250) creditedPages = 0;
@@ -1551,7 +1551,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         const next: Cursor = committedPast({ ...cursor, ...committedBreaker(cursor), counts: { ...cursor.counts }, progress: stampProgress(cursor.progress, cursor.index, cursor.index + 1, drainStartedAt) }, pending);
         countCommitted(next.counts, pending, done.outcome);
         cursor = await saveCursor(engine, key, cursor, next);
-        opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length });
+        opts.onProgress?.({ phase: 'managed_sync.page_committed', bankedFiles: cursor.index, total: cursor.entries.length }); if (next.counts.folded) return cursor;
         // F4b: PGLite plans the rest of a large sync against fresh statistics (spec Addendum A item 2).
         if (analyzeEvery > 0 && cursor.index % analyzeEvery === 0) await maybeRefreshPlannerStats(engine, 'managed_sync', { throttle: false }).catch(() => undefined);
         assertActive();

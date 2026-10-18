@@ -38,6 +38,7 @@ import { managedBrain } from './helpers/managed-brain.ts';
 import { put } from './helpers/wave-fixture.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 
 /** The embedding provider, simulated like the network: the printed sync commands run as on a brain with a working key. */
@@ -271,14 +272,18 @@ test('journey (c): a checkpoint timeout with a dropped index recovers with the r
     const j = journey('checkpoint timeout with a dropped index');
     const restore = timeoutOnce(engine);
     let refused: { text: string; exit: number };
+    // The checkpoint request's validation times out: this run stamps by its request, not folded into its last import (#6926).
     try {
-      refused = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
-      // A real 5 s statement timeout outlasts the sync's own wait; the terminal refusal is then reported by the same command's receipt.
-      for (let waited = 0; !refused.text.includes('checkpoint_validation_timeout') && waited < 30_000; waited += 500) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        const [row] = await engine.executeRaw<{ state: string }>("SELECT state FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_checkpoint'", [id]);
-        if (row?.state === 'failed') refused = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
-      }
+      refused = await stampByCheckpoint(async () => {
+        let ran = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
+        // A real 5 s statement timeout outlasts the sync's own wait; the terminal refusal is then reported by the same command's receipt.
+        for (let waited = 0; !ran.text.includes('checkpoint_validation_timeout') && waited < 30_000; waited += 500) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const [row] = await engine.executeRaw<{ state: string }>("SELECT state FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_checkpoint'", [id]);
+          if (row?.state === 'failed') ran = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
+        }
+        return ran;
+      });
     } finally { restore(); }
     expect(refused.text).toContain('checkpoint_validation_timeout');
     expect((await j.run(engine, printed(refused.text, 'gbrain repair request-indexes'))).exit).toBe(0);
