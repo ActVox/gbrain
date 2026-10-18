@@ -907,6 +907,7 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   // Fix wave 20 lane 3.
   { since: '0.60.307.0', text: 'The bundled `gbrain-base-v2` schema pack (the `init` default, also inherited by `company-brain`) is now version 1.5.0 and declares the `code` page type the code importer stamps and the `extract_receipt` page type the extract receipt writer stamps under `extracts/` (#6818), so neither makes doctor `schema_pack_consistency` warn `page_type_undeclared` and `unify-types` no longer retypes those pages to `note`. Existing pages keep their type; no data changes. The active pack identity reads `gbrain-base-v2@1.5.0+<hash>`.' },
   { since: '0.60.307.0', text: 'The `advisor` MCP operation now judges the cached backup verdict the way the doctor does: a remote readback older than one hour, a future-dated cache or a degraded compute reports the `backup_coverage_aggregate` warning instead of no finding. It still reads the cache only and names reason counts, never source ids.' },
+  { since: '0.60.307.0', text: '`gbrain advisor` (and the `advisor` MCP operation) reports a database read that fails inside the `usage-shape` or `stalled-jobs` check as `collector_failed:<check>` and exits 1, instead of returning no findings for that check and possibly reporting a healthy brain. A brain with no pages, and an older brain without `minion_jobs`, `sources` or `sources.last_sync_at`, still report nothing for those checks.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */
