@@ -84,6 +84,17 @@ page whose write-back is refused does not fail the run:
   `gbrain config unset dream.patterns.grounding_holds.<source>` followed by
   `gbrain dream --phase patterns --once --source <source>` retries every held
   page now.
+- A page the child only appended timeline entries to is different: those
+  entries exist in that run alone. When its write-back is refused, the entries
+  and the reflections they are checked against are saved in
+  `dream.patterns.grounding_appends.<source>` before the evidence watermark is
+  stamped. Every later run retries them first, before the evidence check and
+  before any paid child, and reports the retry in `timeline_append_retry`. A
+  retry that fails warns (even when the run otherwise skips). After 3 content
+  refusals at the same page content and gbrain version the page's entries are
+  held: they stay saved, are listed in `grounding_held` with
+  `timeline_appends`, and editing the page or upgrading gbrain retries them.
+  Don't unset that key: it is the only copy of the entries still to check.
 - A lost database connection, a cancelled run, or most pages failing at once
   still fails the phase and holds nothing.
 
