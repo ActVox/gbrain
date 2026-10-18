@@ -18,4 +18,7 @@ export interface SiteCases {
 }
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
+  'transcripts.ingest_session': { file: 'test/pathological/a2-transcripts-ingest.test.ts',
+    item: 'item: a session the coordinator refuses is reported with its code and the other sessions land',
+    run: 'run: a run-scoped failure inside a session stops the ingest' },
 };
