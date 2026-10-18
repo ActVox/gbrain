@@ -223,5 +223,19 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect(phase.warnings.filter(w => w.includes(`FACTS_FENCE_FAILED: ${ALICE} (file_database_drift`)).length).toBe(1);
       });
     }, 180_000);
+
+    test('D-20 a declared storage.db_only page with no file, write-through on: its rows are fenced into the database body and no file is created', async () => {
+      await withBrain(databaseUrl, async b => {
+        writeFileSync(join(b.root, 'gbrain.yml'), 'storage:\n  db_only:\n    - meetings/\n');
+        const slug = 'meetings/2026-04-03-acme-example';
+        await b.engine.putPage(slug, { type: 'meeting', title: 'Acme example sync', compiled_truth: '# Acme example sync\n\nNotes.' });
+        await b.unfenced(slug, 'Acme example agreed to weekly reviews');
+        const phase = await expectUnitNotAborted(() => b.cycle());
+        expect(phase.warnings.filter(w => w.includes(slug))).toEqual([]);
+        expect(await b.rows(slug)).toEqual([{ fact: 'Acme example agreed to weekly reviews', row_num: 1 }]);
+        expect(fenceClaims(await b.body(slug))).toEqual(['Acme example agreed to weekly reviews']);
+        expect(existsSync(join(b.root, `${slug}.md`))).toBe(false);
+      });
+    }, 180_000);
   });
 }

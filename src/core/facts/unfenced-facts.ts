@@ -79,6 +79,7 @@ import { fileBodyMatchesStored, mirrorFileBody, readStoredBody } from './file-bo
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
 import { commitFactFenceFile, gitPathState } from './fence-write.ts';
 import { isOwnedClone } from '../url-clone.ts';
+import { isSourceDbOnlySlug } from '../persistence/source-storage.ts';
 
 export interface UnfencedFactRow {
   id: string;
@@ -224,8 +225,8 @@ export interface UnfencedFactsPlan {
   groups: Map<string, UnfencedFactRow[]>;
   /** Unmanaged: the canonical file per group key. */
   filePaths: Map<string, string>;
-  /** Unmanaged (#6610): groups whose page is database-only, fenced into its database body under this reason. */
-  databaseOnly: Map<string, NonNullable<WriteAuthority['databaseOnlyReason']>>;
+  /** Unmanaged (#6610): groups whose page is database-only, fenced into its database body under this reason (null: a declared `storage.db_only` page, under the writer's own reason). */
+  databaseOnly: Map<string, NonNullable<WriteAuthority['databaseOnlyReason']> | null>;
   localPathById: Map<string, string | null>;
   outcome: UnfencedFactsOutcome;
 }
@@ -304,7 +305,7 @@ export async function planUnfencedFacts(engine: BrainEngine, opts: { sourceId?: 
     groups.set(key, [...groups.get(key) ?? [], row]);
   }
   const filePaths = new Map<string, string>();
-  const databaseOnly = new Map<string, NonNullable<WriteAuthority['databaseOnlyReason']>>();
+  const databaseOnly = new Map<string, NonNullable<WriteAuthority['databaseOnlyReason']> | null>();
   const writeThroughOff = !managed && await isWriteThroughDisabled(engine);
   for (const [key, group] of managed ? [] : [...groups]) {
     const [sourceId, entitySlug] = key.split('\0');
@@ -314,6 +315,9 @@ export async function planUnfencedFacts(engine: BrainEngine, opts: { sourceId?: 
       else filePaths.set(key, target.filePath);
       continue;
     }
+    // A declared storage.db_only page is canonical in the database; its missing file is by design, not a fault.
+    const root = localPathById.get(sourceId);
+    if (root && isSourceDbOnlySlug(root, entitySlug, 'not_db_only')) { databaseOnly.set(key, null); continue; }
     const placement = await databaseOnlyPlacement(engine, sourceId, entitySlug);
     if (placement.kind === 'fence') { databaseOnly.set(key, placement.reason); continue; }
     groups.delete(key);
@@ -522,7 +526,7 @@ async function fenceManaged(engine: BrainEngine, plan: UnfencedFactsPlan): Promi
  * same page (#6608): the receipt, page version and projection follow, and an `unbound_source` write rechecks at
  * publication that the source is still unbound and the page still has no canonical file.
  */
-async function fenceDatabaseOnlyPage(engine: BrainEngine, sourceId: string, entitySlug: string, reason: NonNullable<WriteAuthority['databaseOnlyReason']>,
+async function fenceDatabaseOnlyPage(engine: BrainEngine, sourceId: string, entitySlug: string, reason: NonNullable<WriteAuthority['databaseOnlyReason']> | null,
   group: UnfencedFactRow[], outcome: UnfencedFactsOutcome): Promise<void> {
   try {
     const snapshot = await engine.readPageSnapshot(entitySlug, { sourceId });
@@ -535,7 +539,7 @@ async function fenceDatabaseOnlyPage(engine: BrainEngine, sourceId: string, enti
     if (!currentVerifiedLocalWriter()) await registerLocalWriter(engine, 'cli');
     const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [sourceId]);
     const writer = await submissionAuthority({ engine, remote: false, sourceId } as OperationContext, 'submit_job', sourceId, source!.incarnation, 'maintenance');
-    writer.databaseOnlyReason = reason;
+    if (reason) writer.databaseOnlyReason = reason;
     await submitFactFenceAdoption(engine, { writer, binding: null }, entitySlug, { content: fence.body, expectedRevision: snapshot.revision,
       assignments: fence.assignments.map(a => ({ id: Number(a.id), row_num: a.row_num })), file: false });
     outcome.fenced += fence.assignments.length;
@@ -678,8 +682,7 @@ export async function fenceUnfencedFacts(engine: BrainEngine, plan: UnfencedFact
   }
   for (const [key, group] of plan.groups) {
     const [sourceId, entitySlug] = key.split('\0');
-    const databaseOnly = plan.databaseOnly.get(key);
-    if (databaseOnly) await fenceDatabaseOnlyPage(engine, sourceId, entitySlug, databaseOnly, group, plan.outcome);
+    if (plan.databaseOnly.has(key)) await fenceDatabaseOnlyPage(engine, sourceId, entitySlug, plan.databaseOnly.get(key)!, group, plan.outcome);
     else await fenceFilePage(engine, sourceId, entitySlug, plan.filePaths.get(key)!, group, plan.outcome, opts.pageLockRoot);
   }
   return plan.outcome;
