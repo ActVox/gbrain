@@ -676,18 +676,8 @@ keys stripped and local environment-file loading disabled. No partition relies
 on a preceding file to create shared tables. Bootstrap is a separate timed CI
 step and must be included in end-to-end comparisons.
 
-Each unit shard's mined weight must fit the `test` job's 22 minutes twice
-over, after a minute of setup, with a minute to spare (`UNIT_SHARD_BUDGET_MS`,
-600 s, in `scripts/sharding.ts`): master shards ran 0.8-1.4x their predicted
-weight, and at 10 shards one was cancelled at the timeout with no failing test.
-`test/scripts/unit-shard-budget.test.ts` sums each shard of
-`test-shard.sh`'s own partition at `UNIT_SHARDS` and fails over the budget;
-`test/scripts/ci-gates.test.ts` pins test.yml's matrix, step and coverage
-manifest and e2e.yml's `coverage-full-unit` to `UNIT_SHARDS`. When it fails,
-re-mine the unit weights from a green master run, then raise `UNIT_SHARDS` and
-both workflows to the smallest count that leaves room for new files. With the
-unit and slow lanes, `ci:ubicloud` also sums its measured durations over that
-partition and fails when a shard passes the job's 21 minutes after setup.
+Twice a unit shard's mined weight, plus setup, must end a minute inside its
+job (`UNIT_SHARD_BUDGET_MS`); on failure re-mine, then raise `UNIT_SHARDS`.
 
 Refresh after a large test wave or when the longest shard repeatedly exceeds
 the mean shard execution time by 25%. `bun run check:weight-coverage` (in
@@ -712,9 +702,7 @@ serial or explicit full-profile E2E run replaces that lane's entire map. Capture
 successful completion marker, and GitHub imports verify every expected job.
 Incomplete or failed inputs leave the existing map intact. Sidecar metadata
 records the source run/commit, units, and counts. Unit/E2E weights are milliseconds;
-serial weights remain seconds. New files receive the corpus p75 estimate. Empty
-maps and zero-cost ties distribute files deterministically; corrupt serial
-weights warn and retain safe fallback scheduling.
+serial weights remain seconds. New files receive the corpus p75 estimate.
 
 The default E2E miner reads selected jobs and merges partial observations.
 `--e2e-profile full` instead requires a successful GitHub run with a source SHA
@@ -1282,7 +1270,7 @@ there even though they pass on Linux and macOS.
 
 ### CI vs local: intentionally divergent file sets
 
-- **CI matrix** (`.github/workflows/test.yml`) runs `scripts/test-shard.sh` across `UNIT_SHARDS` (18) shards split by weight-aware LPT bin-packing (`scripts/sharding.ts`; unweighted files get the p75 weight) and includes `*.slow.test.ts` files without a dedicated job, plus keyless-allowlisted `evals/**/*.test.ts` (`test/scripts/evals-collection.test.ts`). Shards keep planned file order (`test-shard.sh --dry-run-list <i> 18`) and print their predicted weight (`sharding.ts --sum`). Every Bun job activates the PGLite schema snapshot (built in-runner, cached across jobs; the runner's hash check is authoritative). Serial files run across four `serial-tests` workers via `bun run test:serial`; `verify` and the BrainBench memory-conformance gate (`scripts/ci-brainbench-gate.sh`, compared against `evals/brainbench/baselines/main.json`) have their own jobs, all aggregated by `test-status`. `e2e.yml` aggregates through `e2e-status`, with jsonb-parity gating Tier 2's token spend; scheduled runs also require the full-corpus lanes. Both aggregates reject failures, cancellations and unexpected skips, and successful test results are never reused. CI is the ground truth for "did everything pass."
+- **CI matrix** (`.github/workflows/test.yml`) runs `scripts/test-shard.sh` across 18 shards split by weight-aware LPT bin-packing (`scripts/sharding.ts`; unweighted files get the p75 weight) and includes `*.slow.test.ts` files without a dedicated job, plus keyless-allowlisted `evals/**/*.test.ts` (`test/scripts/evals-collection.test.ts`). Shards keep planned file order (`test-shard.sh --dry-run-list <i> 18`) and print their predicted weight (`sharding.ts --sum`). Every Bun job activates the PGLite schema snapshot (built in-runner, cached across jobs; the runner's hash check is authoritative). Serial files run across four `serial-tests` workers via `bun run test:serial`; `verify` and the BrainBench memory-conformance gate (`scripts/ci-brainbench-gate.sh`, compared against `evals/brainbench/baselines/main.json`) have their own jobs, all aggregated by `test-status`. `e2e.yml` aggregates through `e2e-status`, with jsonb-parity gating Tier 2's token spend; scheduled runs also require the full-corpus lanes. Both aggregates reject failures, cancellations and unexpected skips, and successful test results are never reused. CI is the ground truth for "did everything pass."
 - **Local fast loop** (`scripts/run-unit-shard.sh` via the parallel wrapper) uses the same weighted partitioner as CI and EXCLUDES `*.slow.test.ts` AND `*.serial.test.ts`. Each shard runs its complete ordered selection with a fresh Bun process per file, without adding workers. Later groups still run after failures; missing summaries or file-completion evidence fail the shard. Local trades coverage for inner-loop speed; CI catches what local skips.
 
 `test/scripts/run-unit-shard.test.ts` pins what the local loop includes, and
