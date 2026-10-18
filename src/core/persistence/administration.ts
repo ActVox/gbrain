@@ -282,7 +282,10 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
       host: { host_id: existingLocalHostId(), ...await (await import('./consumer-diagnostics.ts')).hostConsumersReport(engine, existingLocalHostId()) },
       worktree_refreshes: await (await import('./worktree-refresh.ts')).activeWorktreeRefreshes(engine, params.source_id as string | undefined),
       // #6317 (B4): per managed source, whether sync data moves (shares the reader of sources status, doctor and writer movement).
-      movement: await (await import('./sync-movement.ts')).readSourceMovement(engine, params.source_id === undefined ? {} : { sourceIds: [source(params.source_id)] }).catch(() => []) };
+      // GBRA-130 A-59: a failed read says so (not_read with its code), never an empty list that reads as no movement.
+      movement: await (await import('./sync-movement.ts')).readSourceMovement(engine, params.source_id === undefined ? {} : { sourceIds: [source(params.source_id)] })
+        .catch((error: unknown) => ({ status: 'not_read' as const, code: String((error as { code?: unknown } | null)?.code ?? 'storage_error'),
+          fix: readFix('Reads source movement on its own, read-only.', { argv: ['gbrain', 'sources', 'writer', 'movement', ...(params.source_id === undefined ? [] : [String(params.source_id)]), '--json'] }) })) };
   }
   if (operation === 'writer_claim') {
     keys(params, ['source_id', 'path', 'dry_run', 'admin_intent', 'expected_state']);
