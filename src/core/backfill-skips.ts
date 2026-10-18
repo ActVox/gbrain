@@ -15,7 +15,6 @@
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 import type { ItemFailure } from './item-failure.ts';
-import { VERSION } from '../version.ts';
 
 export const BACKFILL_HOLD_RUNS = 3;
 
@@ -77,17 +76,17 @@ export function rowRevision(row: unknown): string {
 }
 
 /** A held record whose row and gbrain version are unchanged: reported, not retried. */
-export function heldUnchanged(record: BackfillSkipRecord | undefined, revision: string): boolean {
-  return record?.state === 'held' && record.revision === revision && record.producer === VERSION;
+export function heldUnchanged(record: BackfillSkipRecord | undefined, revision: string, producer: string): boolean {
+  return record?.state === 'held' && record.revision === revision && record.producer === producer;
 }
 
 /** Counts one run's failure of a row: consecutive at the same revision, version and class; held at BACKFILL_HOLD_RUNS content failures. */
-export function noteSkip(ledger: BackfillSkipLedger, id: number, revision: string, failure: ItemFailure, now: string): void {
+export function noteSkip(ledger: BackfillSkipLedger, id: number, revision: string, failure: ItemFailure, now: string, producer: string): void {
   const prev = ledger.items[String(id)];
-  const consecutive = prev && prev.revision === revision && prev.producer === VERSION && prev.class === failure.class;
+  const consecutive = prev && prev.revision === revision && prev.producer === producer && prev.class === failure.class;
   const attempts = consecutive ? prev.attempts + 1 : 1;
   ledger.items[String(id)] = {
-    id, code: failure.code, class: failure.class, message: failure.message.slice(0, 300), revision, producer: VERSION, attempts,
+    id, code: failure.code, class: failure.class, message: failure.message.slice(0, 300), revision, producer, attempts,
     state: failure.class === 'content' && attempts >= BACKFILL_HOLD_RUNS ? 'held' : 'failing',
     first_failed_at: consecutive ? prev.first_failed_at : now, last_failed_at: now,
   };

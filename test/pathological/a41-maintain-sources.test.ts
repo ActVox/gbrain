@@ -51,7 +51,7 @@ const maintain = async (engine: BrainEngine) => {
 
 describe('A-41 maintain isolates one source whose cycle throws', () => {
   beforeEach(() => { _resetCliExitVerdictForTests(); });
-  afterEach(() => { _resetCliExitVerdictForTests(); });
+  afterEach(() => { _resetCliExitVerdictForTests(); process.exitCode = 0; });
 
   for (const { backend, databaseUrl } of pathologicalArms()) {
     test(`[${backend}] a source whose cycle throws is blocked with its code and the next source still cycles`, async () => {

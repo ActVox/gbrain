@@ -17,7 +17,7 @@
  * Seams: a test-only trigger on content_chunks builds the unbuildable page
  * directly; run-scoped errors are injected at the engine's transaction.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { resolveRepairScope, runRepair } from '../../src/core/repair/core.ts';
 import { safeChunksRepair } from '../../src/core/repair/safe-chunks.ts';
@@ -56,6 +56,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
     let close: () => Promise<void>;
     beforeAll(async () => { ({ engine, close } = await isolatedSharedSkillsEngine(databaseUrl)); }, 120_000);
     afterAll(async () => { await disposePersistenceConsumer(engine); await close(); });
+    afterEach(() => { _resetCliExitVerdictForTests(); process.exitCode = 0; });
     beforeEach(async () => {
       await engine.executeRaw('DROP TRIGGER IF EXISTS pathological_refuse_chunk ON content_chunks');
       await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='repair'");
