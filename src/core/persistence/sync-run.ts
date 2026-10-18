@@ -60,7 +60,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
 import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
-import { addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
+import { outOfAttemptsHold, addFencesNormalized, addRecovered, buildHoldReport, clearGitHold, clearGitHoldRetryPaths, heldGitPaths, fencesNormalizedReport, holdsEscalated, readGitHoldRetryPaths, readGitSourceHolds, readSyncHoldPolicy, recordSyncConversion, releaseDiscoveredHolds, recoveredReport, requestGitHoldRetry, writeGitHold, type FencesTally, type GitHoldCode, type SyncHoldPolicy } from './sync-holds.ts';
 import { withScreeningPaths } from './screening-paths.ts';
 import { withBoundedReadSession } from './bounded-reads.ts';
 import { receiptClass, recordedStop, replaysContentRefusal, replaysUnchangedRefusal, resumableStop, stopRecorded } from './sync-stop-class.ts';
@@ -564,7 +564,7 @@ const heldWrite = (held: Cursor, hold: HeldEntry, observedAt: string) => (tx: Br
 
 /** #6278: the terminal code an owner stamps on a request whose preparation never settled within its attempts (Lane A, consumer.ts). */
 export const PREPARATION_STALLED = 'preparation_stalled';
-const preparationStalled = (row: Pick<WriteRequest, 'state' | 'error_code'>) => row.state === 'failed' && row.error_code === PREPARATION_STALLED;
+const preparationStalled = (row: Pick<WriteRequest, 'state' | 'error_code'>) => row.state === 'failed' && outOfAttemptsHold(row.error_code);
 /** The run's page requests, as `persistence_requests_sync_run_open` indexes them. */
 const SYNC_PAGE_KINDS_SQL = "intent->>'kind' IN ('managed_sync_import','managed_sync_delete')";
 /** The `gbrain sync` arguments a hold or receipt prints to resume this cursor with its own options. */
@@ -681,7 +681,7 @@ async function convertBlockedCursor(engine: BrainEngine, blocked: Cursor, key: s
       const base: Cursor = { ...withoutPending(blocked), convertedFromFailed: converted }; delete base.breaker;
       const again = await freezeEntry(engine, at(base), key, assertActive, run);
       const rescreen = ((await readGitSourceHolds(engine, { sourceIds: [blocked.sourceId], runId: blocked.runId }))[0]?.holds ?? [])
-        .filter(hold => hold.code === PREPARATION_STALLED).map(hold => hold.path);
+        .filter(hold => outOfAttemptsHold(hold.code)).map(hold => hold.path);
       const inTx = async (tx: BrainEngine) => {
         if (rescreen.length) await requestGitHoldRetry(tx, blocked.sourceId, blocked.incarnation, rescreen);
         if ('hold' in again) await heldWrite(blocked, again.hold, run.observedAt!)(tx);
