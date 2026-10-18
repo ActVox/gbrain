@@ -9,7 +9,7 @@ fixes those and the other kinds listed in
 [What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
 you pass `--apply`.
 The explicit-only kinds, among them `google-file-modes`, `stale-atoms`, `extractor-facts`,
-`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `stuck-recovery`, `aliases` and `rename-identity`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
+`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `stuck-recovery`, `aliases`, `rename-identity` and `segmented-mirror`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs --expect <plan_hash>` runs them under a budget
 (see [Run repairs through doctor](#run-repairs-through-doctor)).
@@ -150,6 +150,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `rename-identity` | `rename_identity_downgrades` | Explicit-only, preview-bound, destructive consent. For an inexact Git rename that sync split into a delete plus an add (#6729): carries the old page's identity (id, version history, timeline, links, facts, aliases) onto the new slug, imports the new file onto it as an edit and retires the provisional page; or, with `--close`, settles the pair and moves nothing. `--slug <new-slug>` (and `--from <old-slug>`) names one pair; `--apply --expect <hash> --yes`. See [rename identity](#rename-identity). | `fact_rows_collide` (a fence row of the old page the new file does not keep with the same claim); `managed_remedy_unavailable` (a carry on a managed source; `--close` is the remedy there); pages changed after the preview (`changed_since_preview`). |
 | `overwritten-edits` | `sync_overwritten_db_edits` | Explicit-only, preview-bound. Restores database edits that an incremental managed sync replaced with a committed file edit and no `file_drift` hold (#6712, fixed by #6887). It restores only what the records prove: a database-only revision (its receipt published no file) archived by a managed-sync import that wrote different content, with no later revision holding the edit again. The preview diffs the live page against the edit; `--apply --expect <hash>` reverts each page to that version through a revision-bound, database-only `revert_version` and holds the committed file `file_drift` when it differs. See [overwritten edits](#overwritten-edits). | `unknown_*` findings (no persistence outcome on the writer's receipt, the import's content no longer readable, a segmented version), listed but not restored; pages that moved after the preview (`changed_since_preview`). |
 | `missing-tables` | `schema_missing_tables` | Explicit-only, preview-bound. Recreates, empty, a rebuildable cache table (`query_cache`, `code_traversal_cache`) that the applied migrations created but the brain no longer has, on a brain whose schema version already covers its creating migration, so `apply-migrations` never recreates it (#6911). DDL only (`IF NOT EXISTS`), no journal admission, brain-wide. See [missing tables](#missing-tables). | `user_data_tables`: a missing table that holds user data; this repair never recreates it, so restore its rows from a backup first. `other_tables`: a missing table that holds no user data; `gbrain init --migrate-only` recreates it if the base schema defines it. |
+| `segmented-mirror` | none (doctor does not read segmented files; run the preview once if the brain ran a version before v0.60.299.0) | Explicit-only, preview-bound, destructive consent. Rewrites the canonical file of a page stored in segments that an older binary's withdrawal mirror passed by (`page_body_segmented`), so the file still holds a row `forget`, `forget_fact` or `purge_fact` removed from the database. The file becomes the page's canonical render (`gbrain export`'s bytes), written by the withdrawal mirror and committed by its Git effect. See [segmented mirror](#segmented-mirror). | `file_database_drift`: the file also differs from the database for another reason; it is listed held and never rewritten. `not_owner_host`: the preview ran off the source's owner host and read none of its files. |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -314,6 +315,66 @@ one table.
 
 The repair runs only when named and never on upgrade, `apply-migrations`,
 `db-repair` or the maintenance cycle.
+
+<a id="segmented-mirror"></a>
+### Segmented mirror
+
+Before v0.60.299.0, a withdrawal (`forget`, `forget_fact` or `purge_fact`) of
+a row in a page stored in segments struck the row in the database, but the
+withdrawal mirror and Git walk skipped the page (`skipped` reason
+`page_body_segmented`). Its canonical file kept the withdrawn or purged row.
+Current versions mirror such a page, but upgrading rewrites nothing, so a file
+an older binary left behind keeps the row until this repair runs. Doctor does
+not look for these files, because finding one means reading every segmented
+page file in full. Run the preview once on each source's owner host if the
+brain ever ran an older version with `pages.segmented_storage` on.
+
+**Say to your agent:** *"We forgot facts on big pages before upgrading. Make
+sure the files don't still have them."*
+
+```bash
+gbrain repair segmented-mirror --source notes        # read-only: each stale file, its hash and size, the render's, and a hash
+gbrain repair segmented-mirror --source notes --apply --expect <preview-hash> --yes
+```
+
+The preview reads each live, file-backed segmented page of a source that has
+withdrawals. Files are hashed in pieces and never held whole. A page is listed
+when its file is an older render the repair can explain:
+
+- the file passes the check the withdrawal mirror itself runs before it
+  rewrites a file: with the withdrawals applied to its facts fences, the file
+  matches the stored page; and
+- applying the withdrawals changes the file, so it still holds a withdrawn or
+  purged row.
+
+Each listed page shows its path, the file's SHA-256 and size, and the SHA-256
+and size of the page's canonical render: the bytes `gbrain export` writes for
+it. A file that differs from the database for any other reason, such as a
+local edit, is listed as held with `file_database_drift` and the
+`gbrain sources reconcile ... --preview` command. It is never overwritten:
+reconcile it, then preview again. A clean segmented file and an inline page are
+never listed.
+
+The apply re-checks every listed page first. If a page's revision or its file's
+hash changed since the preview, the apply refuses with `preview_changed` and
+writes nothing. Run the preview again and use the new hash. Each page then gets
+one write request (`operation: repair_segmented_mirror`, its request id derived
+from the hash). That request is the page's receipt; read it with
+`gbrain write-request <request id>`. It commits a withdrawal-mirror effect and
+a Git effect for the page, and the existing mirror does the rewrite. The mirror
+keeps its recovery record, streamed staging file, owner and lock checks, and its
+own file/database check. The Git effect commits the file. Outcomes are
+`mirrored`, `mirror_queued` (the owner's consumer has not run it yet; preview
+again later), `held` (the mirror's own check refused the file) or `failed`
+(the mirror's error code). Replaying an apply with the same hash finds each
+receipt and writes nothing (`replayed`).
+
+The rewrite replaces the file with the page's canonical render, so any other
+formatting differences in it are normalized as well. The old bytes stay in
+earlier Git commits; this repair does not rewrite history.
+
+The repair runs only when named and never on upgrade, `apply-migrations` or the
+maintenance cycle.
 
 <a id="request-growth"></a>
 ### Request-table growth
@@ -2759,7 +2820,7 @@ Each heading below is the `docs` anchor a refusal carries.
 ### Explicit-only repair kinds
 
 `google-file-modes`, `stale-atoms`, `extractor-facts`, `captured-facts`,
-`loop-facts`, `ontology-facts`, `file-drift` and `missing-tables` run only when named: `gbrain repair <kind>` previews, and
+`loop-facts`, `ontology-facts`, `file-drift`, `missing-tables` and `segmented-mirror` run only when named: `gbrain repair <kind>` previews, and
 `gbrain repair <kind> --apply` applies (every kind but `google-file-modes`
 also needs `--expect <hash>`, so it applies exactly the previewed set; `google-file-modes` re-checks each file's owner,
 type and mode at apply time). They are excluded everywhere else:
