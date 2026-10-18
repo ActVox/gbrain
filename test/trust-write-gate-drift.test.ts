@@ -62,6 +62,7 @@ const EXEMPT: Record<string, string> = {
   'src/core/repair/ghost-pages.ts': 'retires an owner-approved ghost page (version + soft delete, lifecycle); no new text',
   'src/core/repair/ontology-facts.ts': 'owner repair restoring existing ontology rows',
   'src/core/repair/stale-atoms.ts': 'retires stale atoms (lifecycle)',
+  'src/core/repair/atoms-restore.ts': 'restores an owner-approved retired atom to its own earlier version (lifecycle); no new text',
   'src/core/repair/take-supersession.ts': 'owner repair of take supersession pointers',
   'src/core/repair/timeline-comments.ts': 'owner repair of timeline comment markup',
   'src/core/schema-pack/page-to-alias.ts': 'schema-pack retype of existing pages',
