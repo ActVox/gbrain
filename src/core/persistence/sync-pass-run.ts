@@ -33,6 +33,7 @@ import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { faultPoint } from './fault-points.ts';
 import { passFoldBase, passIdleProbe, readShadowLevel, workingIdleChange, type PassLevelCache, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
 import { ownWritebackCommit, type PassFold } from './sync-pass-fold.ts';
+import { openPassRequests, settleCarried } from './sync-pass-carried.ts';
 import { loopYield } from './sync-yield.ts';
 import { recallWorkingStatCache, rememberWorkingStatCache, SyncTreeReadIncomplete } from './sync-git-stream.ts';
 import { syncPassKind } from './sync-classify.ts';
@@ -268,12 +269,14 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
  * Waits (bounded) until no open request or Git effect of the worktree names one of the in-flight pages or origins, and
  * returns what the requests open at its start committed meanwhile: an earlier drain's work this pass reports as its own.
  */
-async function awaitInFlight(engine: BrainEngine, level: ShadowLevel, inFlight: ShadowPath[], budgetMs: number, assertActive: () => void): Promise<{ added: number; modified: number; deleted: number; renamed: number }> {
+async function awaitInFlight(engine: BrainEngine, level: ShadowLevel, inFlight: ShadowPath[], budgetMs: number, assertActive: () => void,
+  /** Earlier passes' open requests (sync-pass-carried.ts): counted here when they commit, even after the open read below. */
+  carried: readonly string[] = []): Promise<{ added: number; modified: number; deleted: number; renamed: number; committed: string[] }> {
   const pageIds = inFlight.flatMap(entry => entry.pageId === null ? [] : [entry.pageId]);
   const origins = inFlight.map(entry => entryPaths(level, entry.path).sourcePath);
   const names = `r.page_id=ANY($2::int[]) OR r.intent->>'sourcePath'=ANY($3::text[]) OR r.intent->>'path'=ANY($3::text[])`;
-  const opened = await engine.executeRaw<{ id: string }>(`SELECT r.id FROM persistence_requests r WHERE r.source_id=$1 AND r.state IN ('queued','running','recovering') AND (${names})`,
-    [level.sourceId, pageIds, origins]);
+  const opened = [...new Set([...(await engine.executeRaw<{ id: string }>(`SELECT r.id FROM persistence_requests r WHERE r.source_id=$1 AND r.state IN ('queued','running','recovering') AND (${names})`,
+    [level.sourceId, pageIds, origins])).map(row => String(row.id)), ...carried])];
   const until = Date.now() + budgetMs;
   while (Date.now() < until) {
     // The open work readOpenWork marked: an open request, or a pending Git effect named by its request or its relative_path
@@ -285,11 +288,12 @@ async function awaitInFlight(engine: BrainEngine, level: ShadowLevel, inFlight: 
     if (!open) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  const credited = { added: 0, modified: 0, deleted: 0, renamed: 0 };
+  const credited = { added: 0, modified: 0, deleted: 0, renamed: 0, committed: [] as string[] };
   if (!opened.length) return credited;
   const created = new Set(inFlight.filter(entry => entry.pageId === null).map(entry => entryPaths(level, entry.path).sourcePath));
-  const committed = await engine.executeRaw<{ kind: string | null; source_path: string | null; renamed: boolean }>(`SELECT intent->>'kind' AS kind, intent->>'sourcePath' AS source_path,
-    intent ? 'renameFrom' AS renamed FROM persistence_requests WHERE id=ANY($1::uuid[]) AND state='committed'`, [opened.map(row => row.id)]);
+  const committed = await engine.executeRaw<{ id: string; kind: string | null; source_path: string | null; renamed: boolean }>(`SELECT id::text AS id, intent->>'kind' AS kind, intent->>'sourcePath' AS source_path,
+    intent ? 'renameFrom' AS renamed FROM persistence_requests WHERE id=ANY($1::uuid[]) AND state='committed'`, [opened]);
+  credited.committed = committed.map(row => row.id);
   for (const row of committed) {
     if (row.kind === 'managed_sync_delete') credited.deleted++;
     else if (row.kind !== 'managed_sync_import') continue;
@@ -658,6 +662,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
 
   const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
     const ended = outcome !== 'open';
+    if (ended && outcome !== 'synced') {
+      const open = await openPassRequests(engine, { sourceId, passId, carried: value.obligations.pending_requests ?? [] });
+      if (open.length) value.obligations.pending_requests = open; else delete value.obligations.pending_requests;
+    }
     value.telemetry = { ...value.telemetry, outcome, stop_reason: stopReason, settled: S.size + yieldSettled, counts: { ...counts, ...passApplyCounts(applied) },
       classes: applied.classes, ...(applied.summary ? { summary: applied.summary } : {}),
       ...(ended ? { ended_at: new Date().toISOString(), duration_ms: Date.now() - started } : {}) };
@@ -782,6 +790,13 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (applied.sweptAll && !value.obligations.legacy_sweep) value.obligations.legacy_sweep = { first_full_at: new Date().toISOString() };
       if (!remote) value.obligations.deletes_withheld = applied.withheld?.set_hash ?? null;
       const { deletes, imports, inFlight, mismatch, owed } = await triageRound(level, { S, legacyWaived, readmitted, admission, remote, counts });
+      // Earlier passes' requests that committed since they stopped are this pass's imports (sync-pass-carried.ts).
+      if (value.obligations.pending_requests?.length) {
+        const carried = await settleCarried(engine, value.obligations.pending_requests);
+        addCounts(counts, carried.counts);
+        sliceBase.pages += carried.counts.added + carried.counts.modified + carried.counts.renamed;
+        if (carried.open.length) value.obligations.pending_requests = carried.open; else delete value.obligations.pending_requests;
+      }
       lastMismatch = mismatch;
       const candidates = deletes.length + imports.length;
       if (round === 1) candidatesFirst = candidates + inFlight.length + owed.length;
@@ -791,8 +806,10 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       if (!candidates && inFlight.length && waits < IN_FLIGHT_WAITS) {
         waits++; round--;
         startPersistenceConsumer(engine, loadConfig() ?? { engine: engine.kind }).wake(true);
-        const credited = await awaitInFlight(engine, level, inFlight, opts.drainStartedAt ? 30_000 : 5_000, assertActive);
+        const credited = await awaitInFlight(engine, level, inFlight, opts.drainStartedAt ? 30_000 : 5_000, assertActive, value.obligations.pending_requests);
         Object.assign(counts, { added: counts.added + credited.added, modified: counts.modified + credited.modified, deleted: counts.deleted + credited.deleted, renamed: counts.renamed + credited.renamed });
+        const carried = value.obligations.pending_requests?.filter(id => !credited.committed.includes(id));
+        if (carried?.length) value.obligations.pending_requests = carried; else delete value.obligations.pending_requests;
         sliceBase.pages += credited.added + credited.modified + credited.renamed;
         continue;
       }
