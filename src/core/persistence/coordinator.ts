@@ -211,10 +211,15 @@ export function transientDatabaseFailure(error: unknown): boolean {
  * shutting down or out of connections is not the write's doing: neither is charged, so a restart never fails a write.
  */
 function writeInterruption(error: unknown): string | null {
-  // A group's shared read (`sharedReadFailure`) is no member's own statement.
-  if (isSharedReadFailure(error)) return null;
   return String((error as {code?:string})?.code) === '57014' ? '57014' : null;
 }
+/**
+ * Flip lane C: the shared-read failures (`sharedReadFailure`) already charged. A group's memoized read the database cancelled
+ * ran once, for the whole group, and every member waiting on it gets the same failure: it is charged once, to the first
+ * member that settles with it (in group order, the member that would have sent it alone), and the other members are
+ * released uncounted. A read cancelled on every pass so still reaches the limit, one member at a time, never unbounded.
+ */
+const chargedSharedReads = new WeakSet<object>();
 function writeInterruptedFailure(row: WriteRequest, sqlstate: string, attempts: number, limit: number): PublicationFailure {
   const fix = preparationKind(row) === 'sync'
     ? `The file is held and the rest of the source syncs; reduce the load, then gbrain sources retry-held ${row.source_id} and the same gbrain sync with the same options.`
@@ -232,6 +237,10 @@ function writeInterruptedFailure(row: WriteRequest, sqlstate: string, attempts: 
 async function interruptionCharge(engine: BrainEngine, error: unknown): Promise<{ sqlstate: string; limit: number } | null> {
   const sqlstate = writeInterruption(error);
   if (!sqlstate) return null;
+  if (isSharedReadFailure(error)) {
+    if (chargedSharedReads.has(error as object)) return null;
+    chargedSharedReads.add(error as object);
+  }
   try {
     const { switches, preparation } = await readWriteSwitchSnapshot(engine);
     return switches.preparation_deadlines ? { sqlstate, limit: preparation.maxAttempts } : null;

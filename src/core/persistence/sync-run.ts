@@ -147,18 +147,18 @@ export interface CursorProgress { startedAt: number; startIndex: number; lastAt:
  * run stops `blocked` / `preparation_systemic`, and the next run re-freezes the entry and schedules the run's earlier
  * stalled holds for a re-screen instead of holding.
  */
-export interface CursorBreaker { stalled: string[]; streak: number; tripped?: { at: string; rule: 'count' | 'consecutive'; stalled: number; streak: number; step: string | null; request_id: string } }
+export interface CursorBreaker { stalled: string[]; streak: number; interrupted?: number; tripped?: { at: string; rule: 'count' | 'consecutive'; stalled: number; streak: number; step: string | null; request_id: string; interrupted?: number } }
 /** The second trip rule: this many consecutive stalled entries with no commit between them. */
 export const BREAKER_STREAK = 5;
 /** The breaker after this receipt: the count rule is `holdsEscalated`'s "greater than" rule over the run's screened imports, the streak rule is `BREAKER_STREAK`. */
-function breakerAfter(cursor: Cursor, done: Pick<WriteRequest, 'request_id' | 'error_detail'>, policy: Pick<SyncHoldPolicy, 'escalateCount' | 'escalatePct'>): CursorBreaker {
+function breakerAfter(cursor: Cursor, done: Pick<WriteRequest, 'request_id' | 'error_code' | 'error_detail'>, policy: Pick<SyncHoldPolicy, 'escalateCount' | 'escalatePct'>): CursorBreaker {
   const prior = cursor.breaker ?? { stalled: [], streak: 0 };
   if (prior.tripped || prior.stalled.includes(done.request_id)) return prior;
-  const stalled = [...prior.stalled, done.request_id], streak = prior.streak + 1;
+  const stalled = [...prior.stalled, done.request_id], streak = prior.streak + 1, interrupted = (prior.interrupted ?? 0) + (done.error_code === 'write_interrupted' ? 1 : 0);
   const screened = cursor.entries.slice(0, cursor.index + 1).filter(entry => entry.action === 'import').length;
   const rule = holdsEscalated(policy, stalled.length, { held: stalled.length, screened }) ? 'count' : streak >= BREAKER_STREAK ? 'consecutive' : null;
   const step = done.error_detail && typeof done.error_detail === 'object' && typeof (done.error_detail as Record<string, unknown>).step === 'string' ? String((done.error_detail as Record<string, unknown>).step) : null;
-  return { stalled, streak, ...(rule ? { tripped: { at: new Date().toISOString(), rule, stalled: stalled.length, streak, step, request_id: done.request_id } } : {}) };
+  return { stalled, streak, interrupted, ...(rule ? { tripped: { at: new Date().toISOString(), rule, stalled: stalled.length, streak, step, request_id: done.request_id, interrupted } } : {}) };
 }
 /** The cursor after a committed page: a commit ends the breaker's consecutive streak. */
 function committedBreaker(cursor: Cursor): Pick<Cursor, 'breaker'> {
@@ -176,15 +176,15 @@ export interface ManagedSyncBreaker {
   fix: import('../agent-output.ts').Action;
 }
 function breakerResult(cursor: Cursor, pending: Pending, done: WriteRequest, remote: boolean): SyncResult {
-  const trip = cursor.breaker!.tripped!;
-  const where = trip.step ? ` at step ${trip.step}` : '';
+  const trip = cursor.breaker!.tripped!, interrupted = trip.interrupted ?? 0, prepared = trip.stalled - interrupted;
+  const causes = [prepared ? `${prepared} could not finish preparing${trip.step ? ` at step ${trip.step}` : ''}` : '', interrupted ? `${interrupted} had their statements ended by the database (write_interrupted)` : ''].filter(Boolean).join(', ');
   const fix: ManagedSyncBreaker['fix'] = { argv: ['gbrain', 'sources', 'writer', 'status', '--source', cursor.sourceId, '--json'], consent: [], actor: remote ? 'host_admin' : 'agent', requires_exclusive: false,
     docs: 'docs/guides/write-refusals.md#preparation_systemic', verify: { argv: ['gbrain', 'sources', 'status', cursor.sourceId, '--json'] },
-    why: `${trip.stalled} write(s) of this sync could not finish preparing${where} (${trip.rule === 'consecutive' ? `${trip.streak} in a row with no page committed between them` : 'more than a source should hold'}), `
+    why: `${trip.stalled} write(s) of this sync ran out of attempts: ${causes} (${trip.rule === 'consecutive' ? `${trip.streak} in a row with no page committed between them` : 'more than a source should hold'}), `
       + 'so the run stopped instead of holding every file: the write owner, not the files, is the likely cause. Writer status (read-only) shows the owner process, its gbrain version and the step '
       + 'each stuck write reached; fix what it names or upgrade gbrain, then rerun the same sync: it re-freezes the stopped entry and re-screens the files this run held.',
-    ...(remote ? { user_message: `A managed sync of source ${cursor.sourceId} stopped because ${trip.stalled} writes could not finish preparing. Please run 'gbrain sources writer status --source ${cursor.sourceId} --json' on the brain host, fix what it names, then rerun the sync.` } : {}) };
-  return { ...result(cursor, 'blocked_by_failures'), failedFiles: 1, failureCodes: [{ code: PREPARATION_STALLED, count: trip.stalled }],
+    ...(remote ? { user_message: `A managed sync of source ${cursor.sourceId} stopped because ${trip.stalled} writes ran out of attempts (${causes}). Please run 'gbrain sources writer status --source ${cursor.sourceId} --json' on the brain host, fix what it names, then rerun the sync.` } : {}) };
+  return { ...result(cursor, 'blocked_by_failures'), failedFiles: 1, failureCodes: [{ code: PREPARATION_STALLED, count: prepared }, { code: 'write_interrupted', count: interrupted }].filter(code => code.count > 0),
     breaker: { code: 'preparation_systemic', rule: trip.rule, stalled: trip.stalled, consecutive: trip.streak, step: trip.step, request_id: trip.request_id, fix },
     ...(remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done) }) };
 }

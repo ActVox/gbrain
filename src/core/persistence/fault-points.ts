@@ -24,6 +24,8 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'persistence:interruption_charged'
   // Flip lane C: on publishMutation's recovery route, after a statement-cancelled (57014) write's attempt is charged, before the request is marked recovering.
   | 'persistence:recovery_interruption_charged'
+  // Flip lane C: before a group's memoized shared preparation read (group-publish.ts `preparationReads`) is sent; a hook that throws a 57014 models the database cancelling it.
+  | 'group:shared_read'
   // Before each claim attempt of the consumer, a FIFO claim or a lane head's: a stalling hook keeps this process from starting
   // another request or lane group meanwhile, while the requests it already holds run on.
   | 'consumer:claiming'
@@ -80,6 +82,8 @@ export const EFFECT_FAULT_POINTS: Record<EffectKind, FaultPoint> = {
 let installed: FaultHook | undefined;
 /** Gate workers only. */
 export function installFaultHook(hook: FaultHook | undefined): void { installed = hook; }
+/** Whether a hook is installed: a seam that must not delay a synchronous send in production checks it first. */
+export function faultHookInstalled(): boolean { return installed !== undefined; }
 export async function faultPoint(point: FaultPoint, detail: FaultDetailInput = {}): Promise<void> {
   if (!installed) return;
   const { effectId, ...rest } = detail;

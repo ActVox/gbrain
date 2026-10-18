@@ -24,7 +24,12 @@
  *    recovering; a crash between them (the `persistence:recovery_interruption_charged` seam) leaves a running request
  *    that holds its recovery record, which neither expired-owner sweep takes (`recovery IS NULL`), so the owner's
  *    recovery pass finishes it with the one charge. A group's shared read (preparationReads) the database cancelled is no member's own
- *    statement: no member is charged, and a bounded member never reads it as its own deadline.
+ *    statement: a bounded member never reads it as its own deadline, and it is charged once, to the first member that
+ *    settles with it (the member that would have sent it alone), never to every member. A shared read the database
+ *    cancels every time therefore ends bounded: each charged member reaches the limit and ends write_interrupted, and
+ *    the last member, alone, takes the single path. write_interrupted is a write error code (a foreground receipt and a
+ *    source lifecycle failure name it, never storage_error), and the sync breaker names the write_interrupted receipts
+ *    it tripped on instead of reporting them as preparations that could not finish.
  * 4. Semantic injection: installFaultHook on the publication's before_commit seam (inside the publication transaction),
  *    throwing an error carrying the SQLSTATE, for every publication of the claims the test names. Counts claims, never
  *    time. Runs on PGLite and, with DATABASE_URL, on Postgres.
@@ -54,6 +59,10 @@ import { receiptClass, resumableStop } from '../src/core/persistence/sync-stop-c
 import { classifyRecordedFault } from '../src/core/persistence/terminal-classify.ts';
 import type { WriteRequest } from '../src/core/persistence/model.ts';
 import { _resetWriteThroughCacheForTest } from '../src/core/write-through.ts';
+import { importManagedFiles } from '../src/core/persistence/import-mutations.ts';
+import { registerLocalWriter } from '../src/core/persistence/identity.ts';
+import { assertTopologyCommitted } from '../src/core/persistence/managed-sources.ts';
+import { isWriteErrorCode } from '../src/core/persistence/types.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -91,6 +100,13 @@ test('a shared read the database cancelled is no member\'s own deadline: each me
     expect(preparationAbortReason(failure)).toBeNull();
     expect((failure as { code?: string }).code).toBe('57014');
   }
+});
+
+test('write_interrupted is a write error code: a failed source lifecycle names it instead of storage_error', () => {
+  expect(isWriteErrorCode('write_interrupted')).toBe(true);
+  let thrown: unknown;
+  try { assertTopologyCommitted({ state: 'failed', write_error: 'write_interrupted', request_id: randomUUID() }); } catch (error) { thrown = error; }
+  expect(thrown).toMatchObject({ code: 'write_interrupted', writeError: 'write_interrupted', writeRequest: { state: 'failed' } });
 });
 
 type Row = { state: string; error_code: string | null; error_message: string | null; error_detail: Record<string, unknown> | null; preparation_attempts: number; has_recovery: boolean };
@@ -155,6 +171,10 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
     expect(failed.error_message).toContain('57014');
     expect(failed.error_detail).toMatchObject({ origin: 'database_interruption', attempts: 2, limit: 2, sqlstate: '57014' });
     expect(await engine.readPageSnapshot(slug, { sourceId: 'default' })).toBeNull();
+    // The receipt names the code and its diagnostic, like every other write error.
+    const receipt = await withEnv({ GBRAIN_HOME: home }, () => op('get_write_request').handler(context(), { request_id: requestId })) as Record<string, unknown>;
+    expect(receipt).toMatchObject({ state: 'failed', write_error: 'write_interrupted' });
+    expect(String(receipt.write_error_message)).toContain('57014');
     // The source keeps moving: the next write commits.
     expect(await call({ slug: `db/after-${n}`, content: page(`After ${n}`), request_id: randomUUID() })).toMatchObject({ state: 'committed' });
   }, 120_000);
@@ -248,7 +268,7 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
     expect(claims.attempts).toEqual([0, 1]);
   }, 120_000);
 
-  test('a group\'s shared read the database cancelled charges no member: the member is released uncounted and commits', async () => {
+  test('a group\'s shared read the database cancelled is charged once: the same failure settling a member again is released uncounted', async () => {
     const [shared] = await sharedReadFailures();
     const slug = `db/shared-${++n}`, requestId = randomUUID();
     const claims = { n: 0, attempts: [] as number[] };
@@ -260,7 +280,7 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
     });
     expect(await call({ slug, content: page(`Shared ${n}`), request_id: requestId })).toMatchObject({ state: 'committed' });
     expect(claims.n).toBe(4);
-    expect(claims.attempts).toEqual([0, 0, 0, 0]);
+    expect(claims.attempts).toEqual([0, 1, 1, 1]);
   }, 120_000);
 
   describe('worktree-backed page', () => {
@@ -329,5 +349,32 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
       expect(await row(requestId)).toMatchObject({ state: 'committed', preparation_attempts: 0, has_recovery: false });
       expect(readFileSync(path, 'utf8')).toContain(`Next ${n}`);
     }, 120_000);
+
+    test('a group\'s shared read the database cancels every time ends bounded: each cancelled read is charged to one member, and every member ends write_interrupted', async () => withEnv({ GBRAIN_HOME: home,
+      OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
+      await registerLocalWriter(engine, 'cli');
+      const dir = `shared-${++n}`;
+      mkdirSync(join(brainDir, dir), { recursive: true });
+      const files = ['a', 'b', 'c'].map(name => {
+        writeFileSync(join(brainDir, dir, `${name}.md`), page(`Shared ${n} ${name}`));
+        return { filePath: join(brainDir, dir, `${name}.md`), sourcePath: `${dir}/${name}.md` };
+      });
+      // Every shared read of a group's preparation is cancelled; a guard far above the bound stops it, so an unbounded loop
+      // ends committed instead of hanging the test.
+      const GUARD = 40;
+      let cancelled = 0;
+      installFaultHook(async point => {
+        if (point === 'group:shared_read' && cancelled < GUARD) { cancelled++; throw interruption('57014'); }
+      });
+      const settled = await importManagedFiles(engine, files, { sourceId, noEmbed: true });
+      installFaultHook(undefined);
+      const rows = await engine.executeRaw<{ slug: string; state: string; error_code: string | null; preparation_attempts: number }>(
+        `SELECT slug,state,error_code,preparation_attempts FROM persistence_requests WHERE source_id=$1 AND slug LIKE $2 ORDER BY slug`, [sourceId, `${dir}/%`]);
+      // Each cancelled read is charged to exactly one member (the first that settles with it), so the reads stop once every
+      // member has used its max_preparation_attempts (2): 3 members x 2.
+      expect(cancelled).toBe(3 * 2);
+      expect(rows).toEqual(['a', 'b', 'c'].map(name => ({ slug: `${dir}/${name}`, state: 'failed', error_code: 'write_interrupted', preparation_attempts: 2 })));
+      expect(settled.map(result => result.status === 'rejected' ? (result.reason as { code?: string }).code : 'ok')).toEqual(['write_interrupted', 'write_interrupted', 'write_interrupted']);
+    }), 120_000);
   });
 });
