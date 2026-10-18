@@ -43,7 +43,7 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 4b: the level's overlapping reads, which share one loop budget (sync-yield.ts `turnYield`): a Git chunk as its
   // records are visited (`read`: ls-tree or ls-files; a synchronous hook), an `I⋈P` result in hand before the shared budget
   // decides whether it waits a turn, and the same result right before its rows are taken.
-  | 'sync:level_chunk' | 'sync:level_result' | 'sync:level_take'
+  | 'sync:level_chunk' | 'sync:level_result' | 'sync:level_take' | 'sync:closure_walk'
   // #6712 PR 4b (#6926): inside the round's last import's publication, before its folded stamp's checks (sync-pass-fold.ts); a hook
   // that throws models a failed check statement there: the stamp rolls back to its savepoint and the pass stamps by its checkpoint request.
   | 'sync:pass_fold'
