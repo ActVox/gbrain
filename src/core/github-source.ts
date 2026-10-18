@@ -52,6 +52,7 @@ import { replaceableFile } from './facts/file-body-guard.ts';
 import { assertInlineBody } from './page-body/page-shape.ts';
 import { OperationError } from './ops/contract.ts';
 import { isWriteThroughDisabled } from './write-through.ts';
+import { isSourceDbOnlySlug } from './persistence/source-storage.ts';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -972,7 +973,7 @@ async function materializePage(deps: GitHubSyncDeps, filePath: string, content: 
   const slug = slugifyPath(rel);
   const existing = await deps.engine.getPage(slug, { sourceId: deps.sourceId });
   if (existing) assertInlineBody(existing, 'GitHub connector materialization');
-  const databaseOnly = await isWriteThroughDisabled(deps.engine);
+  const databaseOnly = await isWriteThroughDisabled(deps.engine) || isSourceDbOnlySlug(deps.cfg.dir, slug, 'refuse');
   if (databaseOnly) return { ...await importPage(deps, filePath, activePack, rel, content), created: !existing };
   const guard = await replaceableFile(deps.engine, deps.sourceId, slug, filePath);
   const drift = () => new OperationError('file_database_drift',
@@ -993,8 +994,10 @@ async function materializePage(deps: GitHubSyncDeps, filePath: string, content: 
 }
 
 async function storedPage(deps: GitHubSyncDeps, filePath: string, apiUpdatedAt: string) {
-  if (!deps.managed && !await isWriteThroughDisabled(deps.engine)) return { fresh: isPageFresh(filePath, apiUpdatedAt), hasDetail: pageHasDetail(filePath), exists: existsSync(filePath) };
   const slug = relative(deps.cfg.dir, filePath).replace(/\\/g, '/').replace(/\.md$/, '');
+  if (!deps.managed && !await isWriteThroughDisabled(deps.engine) && !isSourceDbOnlySlug(deps.cfg.dir, slugifyPath(slug), 'refuse')) {
+    return { fresh: isPageFresh(filePath, apiUpdatedAt), hasDetail: pageHasDetail(filePath), exists: existsSync(filePath) };
+  }
   const page = deps.managed ? await deps.managed.page(slug) : await deps.engine.getPage(slugifyPath(slug), { sourceId: deps.sourceId });
   return { exists: !!page, fresh: typeof page?.frontmatter.updated_at === 'string' && page.frontmatter.updated_at >= apiUpdatedAt,
     hasDetail: !!page && page.frontmatter.detail_fetched !== false };

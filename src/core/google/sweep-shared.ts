@@ -18,6 +18,7 @@ import { assertInlineBody } from '../page-body/page-shape.ts';
 import { OperationError } from '../ops/contract.ts';
 import { slugifyPath } from '../sync.ts';
 import { isWriteThroughDisabled } from '../write-through.ts';
+import { isSourceDbOnlySlug } from '../persistence/source-storage.ts';
 import type { GoogleSourceConfig, GoogleSourceState } from './types.ts';
 import type { LoopsExclusionPolicy } from './loops-exclusion.ts';
 
@@ -143,7 +144,7 @@ export async function importRendered(
   const slug = slugifyPath(relPath);
   const existing = await deps.engine.getPage(slug, { sourceId: deps.sourceId });
   if (existing) assertInlineBody(existing, 'Google connector materialization');
-  const databaseOnly = await isWriteThroughDisabled(deps.engine);
+  const databaseOnly = await isWriteThroughDisabled(deps.engine) || isSourceDbOnlySlug(deps.cfg.dir, slug, 'refuse');
   const guard = databaseOnly ? null : await replaceableFile(deps.engine, deps.sourceId, slug, filePath);
   const drift = () => new OperationError('file_database_drift',
     `${slug}: the checkout file has an edit not retained in the database, or changed during import. The file was not replaced. If the file is newer, run gbrain sync --source ${deps.sourceId}; if the database is newer, re-save its page with write-through on; if both changed, ask the user which version to keep before retrying.`,

@@ -3,9 +3,10 @@
  * Protects: unmanaged Google materialization preserves checkout-only
  * edits, including an edit after the replacement comparison, while healthy
  * contacts still import. A stale file held in page_versions is replaceable;
- * write-through off imports only to the database, and segmented pages are held.
+ * write-through off or a declared db_only prefix imports only to the database,
+ * and segmented pages are held.
  * Fails when: unconditional temp-import-rename destroys an unimported file edit
- * and ignores sync.write_through. Existing materialization tests cover upstream
+ * and ignores sync.write_through or storage.db_only. Existing materialization tests cover upstream
  * changes and import failures, not divergent copies or a late editor write.
  * Seams: no production seam; real importer and engines, fake Google HTTP, an engine
  * proxy edits the file when the import transaction starts after temp creation.
@@ -176,6 +177,27 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect(existsSync(`${b.path}.tmp`)).toBe(false);
       });
     }, 180_000);
+
+    for (const divergent of [false, true]) {
+      test(`declared db_only prefix: ${divergent ? 'divergent' : 'agreeing'} file stays exact and absent sibling stays absent`, async () => {
+        await withSource(databaseUrl, async b => {
+          writeFileSync(join(b.root, 'gbrain.yml'), 'storage:\n  db_only:\n    - people/\n');
+          const file = b.file() + (divergent ? EDIT : '');
+          writeFileSync(b.path, file);
+          const old = await b.body();
+          const sibling = await b.body(GOOD);
+          const goodPath = join(b.root, `${GOOD}.md`);
+          rmSync(goodPath);
+          const result = await expectUnitNotAborted(() => b.sync());
+          expect({ file: b.file(), siblingFile: existsSync(goodPath), body: await b.body(), sibling: await b.body(GOOD) })
+            .toEqual({ file, siblingFile: false, body: old.replace('Upstream 0', 'Upstream 1'), sibling: sibling.replace('Upstream 0', 'Upstream 1') });
+          expect(result.failedFiles ?? 0).toBe(0);
+          expect(await b.versions(old)).toBeGreaterThan(0);
+          expect(existsSync(`${b.path}.tmp`)).toBe(false);
+          expect(existsSync(`${goodPath}.tmp`)).toBe(false);
+        });
+      }, 180_000);
+    }
 
     test('segmented pages hold without changing either copy; agreeing inline controls import', async () => {
       await withSource(databaseUrl, async b => {
