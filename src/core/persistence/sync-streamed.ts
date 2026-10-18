@@ -33,6 +33,7 @@ import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
 import { recordSyncImportProvenance, type SyncImportProvenanceBase } from './sync-holds.ts';
 import type { WriteRequest } from './model.ts';
 import type { SyncIntent, SyncPreparedMutation } from './sync-prepare.ts';
+import { bindOrigin } from './origin-guard.ts';
 
 /** A frozen Markdown file over the single-string ceiling: the bytes the owner streams and verifies. */
 export interface SyncBodyRef { kind: 'git_blob' | 'input_file'; sha256: string; bytes: number; blob_oid: string }
@@ -124,7 +125,7 @@ export async function prepareManagedSyncStreamed(engine: BrainEngine, row: Write
       await prepared.apply(tx);
       // An unchanged body keeps its chunks (the no-op required a sealed page), so the move's new revision is sealed here.
       if (renamed && prepared.noop) await sealSegmentedPage(tx, renamed.pageId);
-      await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2 AND source_path IS DISTINCT FROM $3', [row.source_id, row.slug, p.sourcePath]);
+      await bindOrigin(tx, { sourceId: row.source_id, slug: row.slug, sourcePath: p.sourcePath });
       await tx.executeRaw("UPDATE pages SET database_only_reason=NULL WHERE source_id=$1 AND slug=$2 AND database_only_reason='unbound_source'", [row.source_id, row.slug]);
       const final = await tx.readPageSnapshot(row.slug, { ...source, includeDeleted: true });
       await pipelined(tx, [

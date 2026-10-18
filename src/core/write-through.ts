@@ -35,6 +35,7 @@ import {
   isDurabilityHardened, commitWriteThroughFile, currentBranch, getLastPushOutcome,
   type PushLogOutcome,
 } from './brain-repo-durability.ts';
+import { bindOrigin } from './persistence/origin-guard.ts';
 
 /** Minimal logger surface — structurally compatible with operations.ts `Logger`. */
 export interface WriteThroughLogger {
@@ -474,18 +475,9 @@ export async function writePageThrough(
       return { written: false, skipped: 'file_changed' };
     }
 
+    await engine.transaction(tx => bindOrigin(tx, { sourceId, slug, sourcePath: sourcePathToBind, onlyIfUnset: true, liveOnly: true }));
     assertSourceFilesystemActive();
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-    await engine.executeRaw(
-      `UPDATE pages
-          SET source_path = $1
-        WHERE source_id = $2
-          AND slug = $3
-          AND deleted_at IS NULL
-          AND source_path IS NULL`,
-      [sourcePathToBind, sourceId, slug],
-    );
     assertSourceFilesystemActive();
     atomicWriteFileSync(filePath, md, { verify: () => assertSourceFilesystemActive() });
 
