@@ -18,4 +18,9 @@ export interface SiteCases {
 }
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
+  'autopilot.global_maintenance': {
+    file: 'test/pathological/a10-global-maintenance-stamp.test.ts',
+    item: 'a phase failing the same way in three passes stops withholding the stamp',
+    run: 'a run-scoped failure at the phase loop stops the job and records no streak',
+  },
 };

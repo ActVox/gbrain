@@ -576,6 +576,38 @@ maintenance job completed (the phase records a partial result). Raise that
 child's timeout with `gbrain config set dream.<phase>.subagent_timeout_ms <ms>`;
 `gbrain dream --phase <phase>` reruns it and spends model tokens, so ask the
 user first. The warning clears once that phase's next child completes.
+
+## Global maintenance stalled
+
+**Doctor reports `global_maintenance_stalled`, or `gbrain autopilot --status`
+exits 1 with a `Global maintenance:` line?** A brain-wide maintenance pass
+stamps `autopilot.last_global_at` only when no phase blocked it. Each blocking
+phase keeps a streak in `autopilot.global_maintenance.progress`, keyed by why
+it blocked: `fail:<code>` (the phase failed), `budget`, `child:<outcome>` or
+`deferred`. After a phase fails with the same code in three passes in a row,
+later passes stamp past it (the job result lists it under
+`pass_completed_with_failing_phase`) and the phase backs off: it is skipped
+for two global intervals, then four, up to a day. Budget, deferral and child
+blockers never let a pass stamp past them; child failures back off too.
+
+Doctor warns when the stamp is older than three global intervals
+(`autopilot.global_floor_min`, 60 minutes by default) while maintenance jobs
+failed or a phase streak is active, fails once it is a week old, and also
+warns while passes stamp past a phase that keeps failing. The message names
+the phase, its blocker key and back-off, or the last failed job.
+
+1. Run the named phase in the foreground to see its error:
+   `gbrain dream --phase <name>`. LLM and embedding phases spend tokens, so
+   ask the user first. With no phase named, read the failed job:
+   `gbrain jobs get <id>`.
+2. Fix the cause the error names, then end the back-off so the next pass
+   runs the phase again: `gbrain autopilot --retry-global --phase <name>`
+   (without `--phase`, every backed-off phase). The streak count stays, so a
+   phase that still fails backs off again. Upgrading gbrain drops every
+   streak, and a phase that fails for a different reason starts a new one.
+3. Confirm with `gbrain doctor --only global_maintenance_stalled`: it is `ok`
+   after a pass completes with the phase passing.
+
 ## auto_chronicle has no effect
 
 **Say to your agent:** *"Why aren't my meetings showing up as timeline events?"*
