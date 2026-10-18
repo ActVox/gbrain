@@ -51,6 +51,7 @@ import { categorizeCheck } from '../src/core/doctor-categories.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { waitFor } from './helpers/wait-for.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (root: string, message: string) => { git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', message); };
@@ -93,6 +94,7 @@ async function seedOverwrite(engine: BrainEngine, ctx: OperationContext, root: s
   const incarnation = await incarnationOf(engine);
   const [earlier] = await engine.executeRaw<{ id: string; principal_kind: string; principal_id: string }>(`SELECT id::text AS id, principal_kind, principal_id FROM persistence_requests
     WHERE source_id='default' AND slug=$1 AND state='committed' AND intent->>'kind'='managed_sync_import' ORDER BY sequence DESC LIMIT 1`, [slug]);
+  // A released cursor run's checkpoint receipt: the test's first sync stamps by its request (`stampByCheckpoint`, #6926).
   const [checkpoint] = await engine.executeRaw<{ id: string }>(`SELECT id::text AS id FROM persistence_requests
     WHERE source_id='default' AND state='committed' AND intent->>'kind'='managed_sync_checkpoint' ORDER BY sequence DESC LIMIT 1`);
   const importId = randomUUID(), checkpointId = randomUUID();
@@ -131,7 +133,7 @@ const repair = async (engine: BrainEngine, opts: { expect?: string; slugs?: stri
 
 for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DATABASE_URL] : [undefined]) describe(`#6712 overwritten database edits (${databaseUrl ? 'postgres' : 'pglite'})`, () => {
   test('a seeded overwrite is detected and restored without publishing over the committed file', () => managedBrain(async ({ engine, ctx, root }) => {
-    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    expect((await stampByCheckpoint(() => performManagedSync(engine, OPTS))).status).toBe('first_sync');
     await seedOverwrite(engine, ctx, root, 'notes/a');
 
     const scan = await scanOverwrittenEdits(engine, 'default');
@@ -236,7 +238,7 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
   }, { setup, databaseUrl }), 180_000);
 
   test('a page that moved after the preview is refused and nothing is restored or held', () => managedBrain(async ({ engine, ctx, root }) => {
-    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    expect((await stampByCheckpoint(() => performManagedSync(engine, OPTS))).status).toBe('first_sync');
     await seedOverwrite(engine, ctx, root, 'notes/a');
     const preview = await repair(engine, { slugs: ['notes/a'] });
     expect(preview.listing?.map(entry => entry.class)).toEqual(['restore_database_edit']);
@@ -250,7 +252,7 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
   }, { setup, databaseUrl }), 180_000);
 
   test('an apply interrupted after its restore committed replays it and writes the hold', () => managedBrain(async ({ engine, root }) => {
-    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    expect((await stampByCheckpoint(() => performManagedSync(engine, OPTS))).status).toBe('first_sync');
     const ctx = { engine, config: { engine: engine.kind }, logger, dryRun: false, remote: false, sourceId: 'default' } as unknown as OperationContext;
     await seedOverwrite(engine, ctx, root, 'notes/a');
     const preview = await repair(engine, { slugs: ['notes/a'] });
@@ -271,7 +273,7 @@ for (const databaseUrl of process.env.DATABASE_URL ? [undefined, process.env.DAT
   }, { setup, databaseUrl }), 180_000);
 
   test('a restore on a host that does not own the checkout reports the file left unheld and names the owner host command', () => managedBrain(async ({ engine, ctx, root }) => {
-    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    expect((await stampByCheckpoint(() => performManagedSync(engine, OPTS))).status).toBe('first_sync');
     await seedOverwrite(engine, ctx, root, 'notes/a');
     const preview = await repair(engine, { slugs: ['notes/a'] });
     expect(preview.warnings?.join(' ')).toContain("Only the host that owns the source's checkout compares the file");

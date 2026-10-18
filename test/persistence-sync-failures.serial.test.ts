@@ -27,6 +27,7 @@ import type { OperationContext } from '../src/core/ops/contract.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { recordFactWithdrawal } from '../src/core/facts/withdrawal.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { renderFactsTable, parseFactsFence } from '../src/core/facts-fence.ts';
 
 const backends = testBackends();
@@ -510,7 +511,8 @@ test('a new failed admission increments attempts but repeating retry during repa
     expect(await performManagedSync(engine, options)).toEqual(replayOf(second));
     writeFileSync(join(f.root, 'bad.md'), 'Repaired successful second observation.\n'); commit(f.root);
     const slice = { maxPages: 1, maxMs: 1000 };
-    const start = await performManagedSync(engine, options, slice);
+    // The slice stops after the import, before its checkpoint request: a folded stamp would converge in it (#6926).
+    const start = await stampByCheckpoint(() => performManagedSync(engine, options, slice));
     expect(start.status).toBe('partial'); expect(start.filesImported).toBe(1);
     expect(loadSyncFailures().filter(row => row.source_id === f.id)).toHaveLength(1);
     // #6712 PR 4b: the retry is the next pass. It does not re-admit the import the interrupted pass committed, and it

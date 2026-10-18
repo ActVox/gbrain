@@ -22,6 +22,7 @@ import { disposePersistenceConsumer, registerMutationPreparer } from '../src/cor
 import { UNFINISHED_PAGE_REQUEST_SQL } from '../src/core/persistence/sync-waivers.ts';
 import { waitFor } from './helpers/wait-for.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { loadSyncFailures, syncFailuresPath } from '../src/core/sync-failure-ledger.ts';
@@ -81,9 +82,10 @@ test('imports files without rewriting bytes and checkpoints only committed page 
     expect(readFileSync(join(f.root,'notes/example.md'),'utf8')).toBe(bytes);
     expect((await engine.getPage('notes/example',{sourceId:f.id}))?.source_path).toBe('notes/example.md');
     const [source] = await engine.executeRaw<{last_commit:string}>('SELECT last_commit FROM sources WHERE id=$1',[f.id]); expect(source.last_commit).toBe(f.head);
-    const requests = await engine.executeRaw<{state:string}>('SELECT state FROM persistence_requests WHERE source_id=$1',[f.id]); expect(requests).toHaveLength(2); expect(requests.every(r=>r.state==='committed')).toBe(true);
+    // #6926 (folded into 4b): the checkpoint commits inside the import's own publication, so the import is the one receipt.
+    const requests = await engine.executeRaw<{state:string;stamp:string|null}>("SELECT state, outcome->>'pass_stamp' AS stamp FROM persistence_requests WHERE source_id=$1",[f.id]); expect(requests).toEqual([{state:'committed',stamp:'folded'}]);
     expect((await performManagedSync(engine,{sourceId:f.id,noPull:true})).status).toBe('up_to_date');
-    expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1',[f.id])).toHaveLength(2);
+    expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1',[f.id])).toHaveLength(1);
   }
 }),120_000);
 
@@ -169,8 +171,9 @@ test('managed sync refreshes quiet-source freshness only after a complete up-to-
     commit(f.root, 'changed content');
     await backdateLastSync(engine, f.id);
     const abort = new AbortController();
-    const partial = await performManagedSync(engine, { sourceId: f.id, noPull: true, signal: abort.signal,
-      onProgress: progress => { if (progress.bankedFiles === 1) abort.abort(); } });
+    // Stopped between the import and its checkpoint request: a folded stamp has no such window (#6926).
+    const partial = await stampByCheckpoint(() => performManagedSync(engine, { sourceId: f.id, noPull: true, signal: abort.signal,
+      onProgress: progress => { if (progress.bankedFiles === 1) abort.abort(); } }));
     expect(partial.status).toBe('partial');
     expect(await lastSyncMs(engine, f.id)).toBe(Date.parse(OLD_SYNC_AT));
   }

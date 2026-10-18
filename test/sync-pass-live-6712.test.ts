@@ -244,8 +244,9 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     let late: string | null = null;
     installFaultHook(async (point, detail) => {
       if (point !== 'consumer:prepared' || late || detail.operation !== 'submit_job') return;
-      const [row] = await engine.executeRaw<{ kind: string }>("SELECT intent->>'kind' AS kind FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
-      if (row?.kind !== 'managed_sync_checkpoint') return;
+      // The request that carries the pass stamp: its checkpoint, or the last import it folded into (#6926).
+      const [row] = await engine.executeRaw<{ stamp: boolean }>("SELECT intent ? 'stamp' AS stamp FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
+      if (!row?.stamp) return;
       const current = (await engine.readPageSnapshot('notes/c', { sourceId: 'default' }))!;
       const prepared = await preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/c', request_id: randomUUID(), expected_revision: current.revision, content: note('notes/c', 'A late agent edit.') } });
       late = (await admitWrite(engine, prepared.admission!)).request_id;

@@ -40,6 +40,9 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 4b: before each round of a pass reads its level (`round`), and after it read it (`level`: its statements and its
   // confirm-round verdict), before it applies.
   | 'sync:round_start' | 'sync:level_read'
+  // #6712 PR 4b (#6926): inside the round's last import's publication, before its folded stamp's checks (sync-pass-fold.ts); a hook
+  // that throws models a failed check statement there: the stamp rolls back to its savepoint and the pass stamps by its checkpoint request.
+  | 'sync:pass_fold'
   // #6650: `gbrain repair stuck-recovery` (recovery-resolve.ts): after the backup is durable (before its journal step), after the prior
   // bytes are written (before their journal step), after a --keep disk write is abandoned (its journal step written), and after recoverPublication returns.
   | 'stuck_recovery:backed_up' | 'stuck_recovery:written' | 'stuck_recovery:abandoned' | 'stuck_recovery:recovered'
@@ -56,7 +59,7 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
  */
 /** `writeId` is the write request row: rows of a caller-bound replay share one `requestId` (crash-robot per-request seams key on the row). */
 export interface FaultDetail { requestId?: string; writeId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string;
-  round?: number; level?: { statements: number; confirm: { taken: boolean; reason: string | null; rows: number } | null } }
+  round?: number; level?: { statements: number; confirm: { taken: boolean; reason: string | null; rows: number } | null; reused?: number } }
 /** Postgres returns `persistence_effects.id` (bigserial) as a BigInt; `faultPoint` hands hooks its decimal string (#6584). */
 export type FaultDetailInput = Omit<FaultDetail, 'effectId'> & { effectId?: string | number | bigint };
 type FaultHook = (point: FaultPoint, detail: FaultDetail) => Promise<void> | void;

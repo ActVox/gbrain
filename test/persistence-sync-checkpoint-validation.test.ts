@@ -19,6 +19,7 @@ import { printManagedSyncDiagnostic } from '../src/commands/sync-diagnostics.ts'
 import { WRITE_ERROR_CODES } from '../src/core/persistence/types.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 
 // #5762: the managed sync checkpoint validation ran one OR predicate with a
 // correlated sub-select over all of persistence_requests under the
@@ -112,17 +113,20 @@ function failValidation(engine: BrainEngine, failure: 'timeout' | 'lock'): () =>
   return () => { engine.transaction = transaction; };
 }
 
-/** Runs the fixture's sync until its checkpoint validation times out terminally. */
+/**
+ * Runs the fixture's sync until its checkpoint validation times out terminally. The validation under test is the checkpoint
+ * request's, so the pass stamps by that request rather than folding the stamp into its import (#6926).
+ */
 async function timedOutSync(engine: BrainEngine, f: Awaited<ReturnType<typeof fixture>>) {
   const restore = failValidation(engine, 'timeout');
   let result: Awaited<ReturnType<typeof performManagedSync>>;
   try {
-    result = await performManagedSync(engine, f.opts);
+    result = await stampByCheckpoint(() => performManagedSync(engine, f.opts));
     // A real 5 s statement timeout outlasts the sync's own 5 s wait; the same options then report the terminal outcome.
     for (let waited = 0; result.status === 'partial' && waited < 30_000; waited += 250) {
       await new Promise(resolve => setTimeout(resolve, 250));
       const [row] = await engine.executeRaw<{ state: string }>("SELECT state FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_checkpoint' ORDER BY sequence DESC LIMIT 1", [f.id]);
-      if (row?.state === 'failed') result = await performManagedSync(engine, f.opts);
+      if (row?.state === 'failed') result = await stampByCheckpoint(() => performManagedSync(engine, f.opts));
     }
   } finally { restore(); }
   return result;

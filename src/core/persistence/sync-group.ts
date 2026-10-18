@@ -89,9 +89,12 @@ async function whole(engine: BrainEngine, env: string, key: string, fallback: nu
   return Math.floor(raw);
 }
 
-/** Entries a group may carry: plain page imports and deletes; renames, company plans, streamed pages (Wave B) and the checkpoint stay single. */
+/**
+ * Entries a group may carry: plain page imports and deletes; renames, company plans, streamed pages (Wave B), the checkpoint
+ * and a pass's last import carrying its folded stamp (#6926, folded into 4b: its proof admits its own page alone) stay single.
+ */
 export function groupableIntent(intent: SyncIntent): boolean {
-  return (intent.kind === 'managed_sync_import' || intent.kind === 'managed_sync_delete') && !intent.renameFrom && !intent.companyApproval && !intent.body_ref;
+  return (intent.kind === 'managed_sync_import' || intent.kind === 'managed_sync_delete') && !intent.renameFrom && !intent.companyApproval && !intent.body_ref && !intent.stamp;
 }
 
 /** Apply budgets for a lane group: normally, and while a foreground write on the worktree is queued or just committed. */
