@@ -12,7 +12,6 @@ src/core/context/ipc-path.ts	1
 src/core/cycle/conversation-facts-backfill.ts	1
 src/core/cycle/extract-facts.ts	2
 src/core/cycle/extract-takes.ts	1
-src/core/destructive-guard.ts	1
 src/core/export-publish.ts	1
 src/core/persistence/bundle-files.ts	2
 src/core/persistence/control.ts	1
