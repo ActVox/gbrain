@@ -114,7 +114,7 @@ export class ProposeTakesFailures {
   private readonly itemRun = new ItemRun('propose_takes.pages');
   private readonly failures: RunFailure[] = [];
   private readonly succeeded: Array<{ sourceId: string; slug: string }> = [];
-  /** Failures of pages not recorded before; only these feed the breaker and the #3763 halt. */
+  /** Failures that feed the breaker and the #3763 halt: every failure except a recorded page repeating its content-class code. */
   freshFailures = 0;
 
   private constructor(private readonly ledgers: Map<string, ProposeTakesFailureLedger>, private readonly promptVersion: string) {}
@@ -137,17 +137,23 @@ export class ProposeTakesFailures {
     return [...pages.filter(page => !failing(page)), ...pages.filter(failing)];
   }
 
-  /** Records an extractor failure; a run-scoped error (abort, lost connection, failed transaction) is rethrown. */
+  /**
+   * Records an extractor failure; a run-scoped error (abort, lost connection, failed transaction) is rethrown.
+   * Only a recorded page repeating its content-class code is the expected outcome and stays out of the
+   * breaker and the #3763 halt; a transient or provider failure always counts, so an outage still halts.
+   */
   fail(sourceId: string, slug: string, contentHash: string, err: unknown): void {
-    const known = this.known(sourceId, slug, contentHash) !== undefined;
-    const failure = known ? classifyItemFailure(err) : this.itemRun.record(slug, err).failure;
-    if (failure.scope === 'run') throw err;
+    const classified = classifyItemFailure(err);
+    if (classified.scope === 'run') throw err;
+    const prior = this.known(sourceId, slug, contentHash);
+    const repeat = prior?.class === 'content' && classified.class === 'content' && prior.code === classified.code;
+    const failure = repeat ? classified : this.itemRun.record(slug, err).failure;
     this.failures.push({ sourceId, slug, contentHash, failure });
-    if (!known) this.freshFailures += 1;
+    if (!repeat) this.freshFailures += 1;
   }
 
   succeed(sourceId: string, slug: string, contentHash: string): void {
-    if (this.known(sourceId, slug, contentHash) === undefined) this.itemRun.succeed();
+    if (this.known(sourceId, slug, contentHash)?.class !== 'content') this.itemRun.succeed();
     this.succeeded.push({ sourceId, slug });
   }
 

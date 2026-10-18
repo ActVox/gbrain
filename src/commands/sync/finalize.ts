@@ -332,10 +332,11 @@ async function applyBookmarkGate(
     commit: pin,
     skipFailed: !company && opts.skipFailed === true,
     ...(company ? { threshold: 0 } : {}),
-    // GBRA-130 A-18: files imported this run (an infra code on one file while
-    // others import goes chronic) and the import breaker's verdict (a run
+    // GBRA-130 A-18: files of this drain imported this run or banked by an
+    // earlier run of it (an infra code on one file while others import goes
+    // chronic, also across resumes) and the import breaker's verdict (a run
     // where most files failed counts no attempt and auto-skips nothing).
-    imported: run.filesImported,
+    imported: run.filesImported + run.bankedImports,
     systemic: run.itemRun.systemic() !== null,
     advance,
   });
