@@ -39,3 +39,9 @@ export async function dropRekeyDuplicates(
   await tx.executeRaw('DELETE FROM facts WHERE id = ANY($1::bigint[])', [ids]);
   return ids.length;
 }
+
+/** The phantom redirect's fact migration (`migrateFactsToCanonical`): the phantom page's active rows move onto the canonical slug. */
+export function dropPhantomMigrationDuplicates(tx: Pick<BrainEngine, 'executeRaw'>, sourceId: string, canonicalSlug: string, phantomSlug: string): Promise<number> {
+  return dropRekeyDuplicates(tx, sourceId, { where: 'f.source_markdown_slug = $3 AND f.expired_at IS NULL', entity: '$2::text', sms: '$2::text',
+    params: [canonicalSlug, phantomSlug] });
+}

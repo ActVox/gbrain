@@ -12,7 +12,7 @@ import { readPageSnapshot as readCanonicalPageSnapshot } from './page-state/snap
 import { readPageSnapshotsBatch } from './page-snapshot-batch.ts';
 import { createPageVersion } from './page-state/versions.ts';
 import { moveSlugBindings, recordRenameAlias } from './page-state/rename-alias.ts';
-import { dropRekeyDuplicates } from './facts/ontology-rekey.ts';
+import { dropPhantomMigrationDuplicates } from './facts/ontology-rekey.ts';
 import { composablePgliteTransaction, transactionMemo } from './page-state/transactions.ts';
 import { configurePgliteCodecs, PgliteStatementCache } from './pglite-statements.ts';
 import { snapshotSchemaInputs } from './snapshot-schema-inputs.ts';
@@ -1322,15 +1322,11 @@ export class PGLiteEngine implements BrainEngine {
     canonicalSlug: string,
     sourceId: string,
   ): Promise<{ migrated: number }> {
-    // Parity with PostgresEngine.migrateFactsToCanonical. UPDATE preserves
-    // every column except entity_slug + source_markdown_slug + row_num,
-    // which is offset past canonical's current MAX(row_num) (#4558; NULL
-    // stays NULL, expired rows count — see the Postgres twin). Active rows
-    // only (expired_at IS NULL) so we don't disturb the supersession audit
-    // trail.
-    // B-10: an observation the canonical page already holds would collide on idx_facts_ontology_stint_dedup; drop it first.
-    await dropRekeyDuplicates(this, sourceId, { where: 'f.source_markdown_slug = $3 AND f.expired_at IS NULL', entity: '$2::text', sms: '$2::text',
-      params: [canonicalSlug, phantomSlug] });
+    // Parity with PostgresEngine.migrateFactsToCanonical: only entity_slug, source_markdown_slug and row_num change
+    // (row_num offset past canonical's MAX(row_num), #4558; NULL stays NULL, expired rows count — see the Postgres twin),
+    // on active rows only (expired_at IS NULL) so the supersession audit trail stays. B-10: first drop an observation
+    // the canonical page already holds, which would collide on idx_facts_ontology_stint_dedup.
+    await dropPhantomMigrationDuplicates(this, sourceId, canonicalSlug, phantomSlug);
     const { rows } = await this.db.query(
       `UPDATE facts
          SET entity_slug = $1,
