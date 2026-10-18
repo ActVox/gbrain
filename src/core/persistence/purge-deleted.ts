@@ -157,7 +157,8 @@ export interface PurgeCandidate { source_id: string; slug: string; cutoff: strin
  * #6741 C: what a purge with these options would do, read-only. The one eligibility selector behind the
  * `pages purge-deleted` dry-run preview, its consent request, the `purge_deleted_pages` op and the real purge (the
  * CLI, the cycle phase and the Minion job), so the preview, the consent and the run cannot disagree. The
- * `--older-than` cutoff and the #6729 rename-recovery hold (identityDowngradePurgeHold) apply to every page, parked
+ * `--older-than` cutoff, the #6729 rename-recovery hold (identityDowngradePurgeHold) and the #7013 restorable-atom hold
+ * (atomRetirementPurgeHold) apply to every page, parked
  * or not, so `retryParked` retries only parked pages the cutoff selects and never a held page.
  */
 export interface PurgeSelection {

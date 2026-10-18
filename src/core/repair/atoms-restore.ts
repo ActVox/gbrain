@@ -13,9 +13,9 @@
  * is rechecked when it is restored; one whose revision or rule match changed reports `changed_since_preview` and
  * stays deleted. A managed brain restores one atom per `managed_maintenance_restore_reextract_atom` request bound to
  * the atom's deleted revision: its preparer rechecks the rule under the atom's and its origin's page locks and
- * publishes the atom live through a revision-bound `put_page` of its stored body without `retired_by`/`retired_at`
- * (the canonical file is written back, at the derived tier an extraction gives it), and the outcome names the
- * request id. An unmanaged brain versions the atom, clears `deleted_at` and drops the two keys in one
+ * publishes the atom live through a revision-bound `revert_version` to the live version its retirement archived (same
+ * source hash, no `retired_by`/`retired_at`; the canonical file is written back, at the derived tier an extraction
+ * gives it), and the outcome names the request id; an atom with no such version reports `no_version`. An unmanaged brain versions the atom, clears `deleted_at` and drops the two keys in one
  * maintenance transaction. Neither changes the origin's extraction state.
  */
 import type { BrainEngine } from '../engine.ts';
@@ -24,7 +24,6 @@ import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { opError, OperationError, type OperationContext } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
-import { serializePageToMarkdown } from '../markdown.ts';
 import { authorizeWrite } from '../persistence/authority.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
@@ -54,6 +53,8 @@ export interface RestorableAtom {
   /** The atom's source hash with a `pending:` prefix stripped. */
   hash: string;
   retired_at: string | null;
+  /** The newest live version of the atom (the one its retirement archived) at the same hash and unstamped; a managed restore reverts to it. */
+  version_id: number | null;
 }
 
 interface RestoreItem extends RepairItem { atom: RestorableAtom; hash: string; last: boolean }
@@ -70,11 +71,15 @@ async function restorableAtoms(db: BrainEngine, sourceIds: string[], atomId?: nu
            COALESCE(NULLIF(a.frontmatter->>'source_slug',''), a.frontmatter->>'source_path') AS origin,
            (SELECT o.id FROM pages o WHERE o.source_id=a.source_id AND o.slug=a.frontmatter->>'source_slug' AND o.deleted_at IS NULL) AS origin_page_id,
            regexp_replace(COALESCE(a.frontmatter->>'source_hash',''),'^pending:','') AS hash,
-           a.frontmatter->>'retired_at' AS retired_at
+           a.frontmatter->>'retired_at' AS retired_at,
+           (SELECT v.id FROM page_versions v WHERE v.page_id=a.id AND v.is_deleted=false AND v.frontmatter->>'retired_by' IS NULL
+               AND regexp_replace(COALESCE(v.frontmatter->>'source_hash',''),'^pending:','')=regexp_replace(COALESCE(a.frontmatter->>'source_hash',''),'^pending:','')
+             ORDER BY v.id DESC LIMIT 1) AS version_id
       FROM pages a
      WHERE a.source_id=ANY($1::text[]) AND ($2::int IS NULL OR a.id=$2::int) AND ${restorableAtomRetirementSql('a')}
      ORDER BY a.id`, [sourceIds, atomId ?? null]);
-  return rows.map(row => ({ ...row, id: Number(row.id), origin_page_id: row.origin_page_id === null ? null : Number(row.origin_page_id) }));
+  return rows.map(row => ({ ...row, id: Number(row.id), origin_page_id: row.origin_page_id === null ? null : Number(row.origin_page_id),
+    version_id: row.version_id === null ? null : Number(row.version_id) }));
 }
 
 /** The re-extraction retirements of these sources the rule keeps, by reason. */
@@ -90,7 +95,7 @@ async function keptCounts(db: BrainEngine, sourceIds: string[]): Promise<{ origi
 }
 
 function sameAtom(live: RestorableAtom | undefined, approved: RestorableAtom): boolean {
-  return !!live && (['id', 'source_id', 'incarnation', 'slug', 'revision', 'origin_kind', 'origin', 'origin_page_id', 'hash', 'retired_at'] as const)
+  return !!live && (['id', 'source_id', 'incarnation', 'slug', 'revision', 'origin_kind', 'origin', 'origin_page_id', 'hash', 'retired_at', 'version_id'] as const)
     .every(field => live[field] === approved[field]);
 }
 
@@ -148,6 +153,8 @@ async function restoreAtom(ctx: OperationContext, atom: RestorableAtom): Promise
   const changed = (reason: string): RepairItemOutcome => ({ applied: false, outcome: 'changed_since_preview', reason });
   if (!sameAtom((await restorableAtoms(engine, [atom.source_id], atom.id))[0], atom)) return changed('the atom, its origin or a later generation changed');
   if (await managedPersistenceEnabled(engine)) {
+    if (atom.version_id === null) return { applied: false, outcome: 'no_version',
+      reason: 'the atom has no archived live version at its source hash to revert to, so a managed restore cannot rebuild it' };
     const authority = (await maintenancePreflight(engine, atom.source_id))!;
     const requestId = await repairRequestId(ctx, 'atoms-restore', atom, atom.revision);
     try {
@@ -177,7 +184,7 @@ const previewFix = (sourceId: string) => readFix('Previews the atoms-restore rep
 /** Preparer for `managed_maintenance_restore_reextract_atom`: rechecks the rule under the atom's and its origin's page locks, then publishes the atom live. */
 export async function prepareAtomRestore(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
   const atom = row.intent!.atom as RestorableAtom;
-  if (!atom || atom.slug !== row.slug || atom.source_id !== row.source_id || atom.id !== Number(row.page_id)) {
+  if (!atom || atom.slug !== row.slug || atom.source_id !== row.source_id || atom.id !== Number(row.page_id) || atom.version_id === null) {
     throw opError('invalid_params', 'The atom restore intent does not name its atom.',
       `Request ${row.request_id} for ${row.slug} in source ${row.source_id} does not name the atom it restores, so nothing changed. Preview the repair again and apply the new preview after the user approves.`,
       { fix: previewFix(row.source_id) });
@@ -190,17 +197,14 @@ export async function prepareAtomRestore(engine: BrainEngine, row: WriteRequest,
     }
   };
   await unchanged(engine);
-  await authorizeWrite(engine, row.authority, 'put_page', row.slug);
-  const snapshot = (await engine.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true }))!;
-  const { retired_by: _retiredBy, retired_at: _retiredAt, ...frontmatter } = snapshot.page.frontmatter;
+  await authorizeWrite(engine, row.authority, 'revert_version', row.slug);
   const derivation = await deriveTrust(engine, atom.origin_page_id !== null ? [{ table: 'pages', id: atom.origin_page_id }] : [],
     { channel: 'derive:atoms', requestId: row.id });
-  const page = await preparePageMutation(engine, { ...row, operation: 'put_page', intent: { kind: ATOMS_RESTORE_INTENT, expected_revision: atom.revision,
-    content: serializePageToMarkdown({ ...snapshot.page, frontmatter }, snapshot.tags), derivation: declareDerivation(derivation.trust, derivation.inputs) } },
-  config, undefined, undefined, { allowMissingFile: true });
+  const page = await preparePageMutation(engine, { ...row, operation: 'revert_version', intent: { kind: ATOMS_RESTORE_INTENT, expected_revision: atom.revision,
+    version_id: atom.version_id, derivation: declareDerivation(derivation.trust, derivation.inputs) } }, config, undefined, undefined, { allowMissingFile: true });
   return { ...page, trust: derivation.trust,
     additionalPageKeys: [...(page.additionalPageKeys ?? []), ...(atom.origin_kind === 'page' ? [{ sourceId: row.source_id, slug: atom.origin }] : [])],
-    validate: async tx => { await page.validate?.(tx); await authorizeWrite(tx, row.authority, 'put_page', row.slug); await unchanged(tx); },
+    validate: async tx => { await page.validate?.(tx); await authorizeWrite(tx, row.authority, 'revert_version', row.slug); await unchanged(tx); },
     apply: async tx => {
       const outcome = await page.apply(tx);
       const [live] = await tx.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [row.source_id, row.slug]);
