@@ -241,10 +241,12 @@ async function acquireLockWithRetry(
  * #6982: the rows are planned on the file only when its body and timeline
  * equal the canonical's database body, so the mirror can only add them. The
  * canonical row is then locked and re-read in a maintenance transaction: when
- * the database body or the file moved since the comparison, nothing is
- * written and the phantom is held (`file_database_drift`). Otherwise the prior
- * body is kept in page_versions, the body is mirrored and stamped with the
- * hash the importer computes for the new file, and the `.tmp` is renamed last.
+ * the database body moved since the comparison, nothing is written and the
+ * phantom is held (`file_database_drift`). Otherwise the prior body is kept in
+ * page_versions, the body is mirrored and stamped with the hash the importer
+ * computes for the new file, and the file is re-read immediately before the
+ * `.tmp` is renamed last: a file that moved rolls the transaction back and
+ * holds the phantom the same way.
  * A parse-validation failure throws before any DB state has moved.
  */
 async function mergeIntoCanonicalFile(
@@ -280,11 +282,13 @@ async function mergeIntoCanonicalFile(
   const parsed = parseMarkdown(newBody, `${canonical}.md`);
   const hash = contentHash({ title: parsed.title, type: parsed.type, compiled_truth: parsed.compiled_truth, timeline: parsed.timeline,
     frontmatter: parsed.frontmatter, tags: await engine.getTags(canonical, { sourceId }) });
+  const fileMoved = new Error('canonical file changed during the phantom redirect');
   const written = await maintenanceTransaction(engine, async tx => {
-    if (fs.readFileSync(canonicalPath, 'utf-8') !== bytes || !await mirrorFileBody(tx, sourceId, canonical, newBody, stored, hash)) return false;
+    if (!await mirrorFileBody(tx, sourceId, canonical, newBody, stored, hash)) return false;
+    if (fs.readFileSync(canonicalPath, 'utf-8') !== bytes) throw fileMoved;
     fs.renameSync(tmpPath, canonicalPath);
     return true;
-  });
+  }).catch(err => { if (err === fileMoved) return false; throw err; });
   if (written) return { renumber };
   fs.rmSync(tmpPath, { force: true });
   return { held: canonicalDriftToken(canonical, phantomSlug, sourceId, 'during') };

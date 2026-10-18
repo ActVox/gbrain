@@ -21,7 +21,7 @@
  * the page is reported in the hook's `held` list (`file_database_drift`).
  */
 import { execFileSync } from '../spawn.ts';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
@@ -177,7 +177,8 @@ export type DreamPageFileWrite = { written: true; path: string } | { written: fa
  * file of record (`resolvePageWriteTarget`: recorded source_path, own-local_path roots); a source with no usable
  * checkout (no root configured, or the root is missing) keeps the caller's brainDir layout (`<brainDir>/<slug>.md`,
  * foreign sources under `.sources/<id>/`). The file is replaced only when `replaceableFile` finds nothing in it the
- * database lacks, and is re-read right before the atomic write, so an edit that lands in between is kept as well.
+ * database lacks, and is re-read after the replacement is staged, right before the rename, so an edit that lands in
+ * between is kept as well.
  *
  * This is the reverse-write's own direct write (a staged sibling renamed over the file), as before, not
  * `writePageThrough` or `atomicWriteFileSync`: once a subagent's tool write has gone through the coordinator, the
@@ -198,12 +199,13 @@ export async function writeDreamPageFile(engine: BrainEngine, brainDir: string, 
     : sourceId === opts.nativeSourceId ? join(brainDir, `${slug}.md`) : join(brainDir, '.sources', sourceId, `${slug}.md`);
   const check = await replaceableFile(engine, sourceId, slug, filePath);
   if (!check.ok) return { written: false, held: dreamFileDriftToken(slug, sourceId, 'before') };
-  if ((existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null) !== check.expectedFileBytes) {
-    return { written: false, held: dreamFileDriftToken(slug, sourceId, 'during') };
-  }
   mkdirSync(dirname(filePath), { recursive: true });
   const staged = `${filePath}.${process.pid}.tmp`;
   writeFileSync(staged, opts.markdown, 'utf-8');
+  if ((existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null) !== check.expectedFileBytes) {
+    rmSync(staged, { force: true });
+    return { written: false, held: dreamFileDriftToken(slug, sourceId, 'during') };
+  }
   renameSync(staged, filePath);
   return { written: true, path: filePath };
 }
