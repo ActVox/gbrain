@@ -51,6 +51,7 @@ import { contentHash } from '../utils.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { rewrittenContentHash } from '../page-body/segment-rewrite.ts';
 import { stagingNeedsTextSql } from '../page-body/schema.ts';
+import { claimTextForms } from '../fence-shared.ts';
 import type { PagePurgeContext } from '../facts/purge-verify.ts';
 import { assertHeldPageKeys } from '../page-state/guards.ts';
 import { noteBelief } from '../belief/ledger.ts';
@@ -333,7 +334,7 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
     derived_hidden: await appendDerivedHidden(tx, { sourceId, request: row.id, publicationId: row.id, op: 'delete_page', targets: heldTargets, truncated: walk === 'truncated' }),
     derived_walk: walk })) : null;
   if (ledger) removed.belief_events = ledger.purged_events + ledger.redacted_fields.length;
-  const { shas, ...segmentRows } = await deletePageWithSegments(tx, sourceId, slug, page.id);
+  const { shas, ...segmentRows } = await deletePageWithSegments(tx, sourceId, slug, page.id, needles);
   Object.assign(removed, segmentRows);
   if (!retention) appendPurgeIntent({ request: row.id, request_id: row.request_id, source_id: sourceId, source_incarnation: row.source_incarnation,
     scope: 'page', slug, purge_epoch: epoch, content_hashes: [...hashes], facts: mirrorFacts, takes: mirrorTakes, lifetimes });
@@ -421,8 +422,13 @@ export async function unpurgePage(ctx: OperationContext, p: Record<string, unkno
  * page still references stays, and so does one an unpublished write of another page staged or deduped onto (a create
  * holds its manifest rows in memory until it publishes): that write's copy, not this page's. The restore-time purge
  * replay deletes a page this way too.
+ *
+ * A text can outlive the staging that recorded it: another page's write that dedupes onto it refreshes its created_at
+ * (stageSegmentTexts), so it stays younger than the grace window after this page's stagings expired. So, with
+ * `claims` (the page's own claims, withdrawn ones included), every unreferenced text of the source holding one of them,
+ * plain or as a facts-fence cell stores it (escapeFenceCell; the match purgeSegmentStorage uses), goes too.
  */
-export async function deletePageWithSegments(tx: BrainEngine, sourceId: string, slug: string, pageId: number):
+export async function deletePageWithSegments(tx: BrainEngine, sourceId: string, slug: string, pageId: number, claims: readonly string[] = []):
   Promise<{ shas: string[]; page_body_manifest: number; page_body_stagings: number; page_segment_texts: number }> {
   const shas = (await tx.executeRaw<{ sha: string }>(`SELECT encode(sha256,'hex') AS sha FROM page_body_manifest WHERE page_id=$1
     UNION SELECT encode(r.sha256,'hex') FROM page_body_stagings s JOIN page_body_staging_texts r ON r.staging_id=s.id
@@ -432,5 +438,10 @@ export async function deletePageWithSegments(tx: BrainEngine, sourceId: string, 
   await tx.deletePage(slug, { sourceId });
   const texts = shas.length ? (await tx.executeRaw(`DELETE FROM page_segment_texts t WHERE t.source_id=$1 AND t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h)
     AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')} RETURNING 1`, [sourceId, shas])).length : 0;
-  return { shas, page_body_manifest: manifest, page_body_stagings: stagings, page_segment_texts: texts };
+  const forms = claimTextForms(claims);
+  const carrying = forms.length ? (await tx.executeRaw<{ sha: string }>(`DELETE FROM page_segment_texts d WHERE (d.source_id,d.sha256) IN (SELECT t.source_id,t.sha256
+      FROM page_segment_texts t WHERE t.source_id=$1 AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) OFFSET 0)
+    AND EXISTS (SELECT 1 FROM unnest($2::text[]) AS n WHERE strpos(lower(convert_from(d.body,'UTF8')),n)>0) AND NOT ${stagingNeedsTextSql('d')}
+    RETURNING encode(d.sha256,'hex') AS sha`, [sourceId, forms])).map(r => r.sha) : [];
+  return { shas: [...shas, ...carrying], page_body_manifest: manifest, page_body_stagings: stagings, page_segment_texts: texts + carrying.length };
 }

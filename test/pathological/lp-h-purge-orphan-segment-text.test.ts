@@ -10,7 +10,10 @@
  *    references, in the same transaction. A text a live staging of another write recorded stays (that unpublished
  *    write's copy, the rule for referenced texts); purge_fact aborts a live staging holding the claim, so its texts go.
  *    purge_fact's text delete also matches the claim as a fence cell stores it (escapeFenceCell: `|` as `\|`), the
- *    forms stagingsHoldingClaim matches, so an orphan holding a claim with `|` goes too.
+ *    forms stagingsHoldingClaim matches, so an orphan holding a claim with `|` goes too. A text can outlive the staging
+ *    that recorded it (another page's write that dedupes onto it refreshes its created_at, and terminal stagings go
+ *    after 24 h), so the page purge also deletes the source's unreferenced texts holding one of the page's claims,
+ *    withdrawn ones included, in both forms; a text a live staging holds still stays.
  * 2. Fails when: right after the purge, before any GC, a row of page_segment_texts still holds the planted claim, plain
  *    or escaped.
  * 3. A 2 MB conversation page with a facts fence: put_page, forget_fact, delete_page, restore_page, then delete_page
@@ -186,5 +189,64 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`a purge aft
     expect(hash).toBe(row.content_hash);
     expect(body.compiled_truth).not.toContain(PIPE_MARKER);
     for (const needle of NEEDLES) expect(body.compiled_truth).toContain(needle);
+  }), 600_000);
+
+  /**
+   * Page A's fence text, deduped onto by a write of page B (stageSegmentTexts refreshes its created_at, page-body.ts),
+   * after A's stagings expired (terminal stagings go after BODY_STAGING_HARD_MS). forget_fact, delete_page and
+   * restore_page then leave the text unreferenced, younger than the GC grace window, and named by no staging of A.
+   */
+  async function expiredStagingOrphan(slug: string, other: string, seed: number, marker: string, keepOpen: boolean) {
+    const claim = `The vault marker is quill|${marker}`, cell = escapeFenceCell(claim);
+    await op('put_page', { slug, content: page(seed, cell), request_id: randomUUID(), wait_ms: 30000 });
+    const { id: pageId } = await segmentedPageRow(engine, slug);
+    const [text] = await engine.executeRaw<{ sha: string; body: Uint8Array; line_count: number }>(`SELECT DISTINCT encode(t.sha256,'hex') AS sha, t.body, t.line_count
+      FROM page_body_manifest m JOIN page_segment_texts t ON t.source_id=m.source_id AND t.sha256=m.sha256
+      WHERE m.page_id=$1 AND position(convert_to($2::text,'UTF8') in t.body)>0`, [pageId, cell]);
+    const sha = text!.sha;
+    const [source] = await engine.executeRaw<{ incarnation: string }>(`SELECT incarnation FROM sources WHERE id='default'`);
+    const staging = randomUUID();
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], async () => {
+      await tx.openBodyStaging({ id: staging, kind: 'put', principalKind: 'application', principalId: 'test:fixture', clientRequestId: randomUUID(),
+        sourceId: 'default', sourceIncarnation: source!.incarnation, slug: other, pageId: null, mode: 'create', baseRevision: null, baseGeneration: null,
+        declaredBytes: 16, declaredSha256: null, reservedBytes: 0, idleExpiresAt: new Date(Date.now() + 3_600_000), hardExpiresAt: new Date(Date.now() + 7_200_000) });
+      await tx.stageSegmentTexts('default', [{ sha256: Buffer.from(sha, 'hex'), body: new Uint8Array(text!.body), lineCount: Number(text!.line_count) }], { stagingId: staging });
+      if (!keepOpen) await tx.setBodyStagingState(staging, 'aborted');
+    }, TEST_WRITE_ATTRIBUTION));
+    await engine.executeRaw(`UPDATE page_body_stagings SET updated_at=now() - interval '25 hours' WHERE source_id='default' AND slug=$1`, [slug]);
+    await engine.sweepSegments({ sourceId: 'default', expireStagings: true });
+    expect(await engine.executeRaw(`SELECT 1 FROM page_body_stagings WHERE source_id='default' AND (slug=$1 OR page_id=$2)`, [slug, pageId])).toHaveLength(0);
+    const [fact] = await engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND strpos(fact,$2)>0', ['default', marker]);
+    expect((await op('forget_fact', { id: Number(fact!.id), reason: 'lp-h lifecycle' })).expired).toBe(true);
+    expect((await op('delete_page', { slug, request_id: randomUUID(), expected_revision: await revision(slug) })).status).toBe('soft_deleted');
+    expect((await op('restore_page', { slug, request_id: randomUUID(), expected_revision: await revision(slug, true) })).status).toBe('restored');
+    expect(await textExists(sha)).toBe(true);
+    expect(await engine.executeRaw(`SELECT 1 FROM page_body_manifest WHERE source_id='default' AND sha256=decode($1,'hex')`, [sha])).toHaveLength(0);
+    expect(await orphansOf(slug)).not.toContain(sha);
+    return { claim, cell, sha, staging };
+  }
+
+  test('delete_page purge:true deletes an unreferenced text holding the page\'s withdrawn claim after its staging expired', async () => withEnv(env(), async () => {
+    const slug = 'notes/lp-h-expired-staging';
+    const { claim, cell, sha, staging } = await expiredStagingOrphan(slug, 'notes/lp-h-expired-dedupe', 23, 'vault5501', false);
+    const purge = await op('delete_page', { slug, purge: true, request_id: randomUUID(), expected_revision: await revision(slug) });
+    expect(purge.status).toBe('purged');
+    const left = { escaped: await textsHolding(cell), plain: await textsHolding(claim), text: await textExists(sha) };
+    console.log(`[lp-h] ${backend} expired-staging page purge: after: ${JSON.stringify(left)}`);
+    expect(left).toEqual({ escaped: 0, plain: 0, text: false });
+    expect((purge.receipt.stores as Array<{ store: string; status: string }>).find(s => s.store === 'page_segment_texts')?.status).toBe('deleted');
+    await engine.executeRaw('DELETE FROM page_body_stagings WHERE id=$1::uuid', [staging]);
+  }), 600_000);
+
+  test('that text survives the page purge while an unpublished write of another page still holds it', async () => withEnv(env(), async () => {
+    const slug = 'notes/lp-h-expired-held';
+    const { sha, staging } = await expiredStagingOrphan(slug, 'notes/lp-h-expired-held-create', 29, 'vault5502', true);
+    const purge = await op('delete_page', { slug, purge: true, request_id: randomUUID(), expected_revision: await revision(slug) });
+    expect(purge.status).toBe('purged');
+    expect(await stagingState(staging)).toBe('open');
+    expect(await textExists(sha)).toBe(true);
+    expect((purge.receipt.stores as Array<{ store: string; status: string }>).find(s => s.store === 'page_segment_texts')?.status).not.toBe('incomplete');
+    await engine.executeRaw('DELETE FROM page_body_stagings WHERE id=$1::uuid', [staging]);
+    await engine.executeRaw(`DELETE FROM page_segment_texts WHERE source_id='default' AND sha256=decode($1,'hex')`, [sha]);
   }), 600_000);
 });

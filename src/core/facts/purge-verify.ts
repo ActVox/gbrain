@@ -20,7 +20,7 @@ import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { getCode } from '../retry-matcher.ts';
-import { escapeFenceCell } from '../fence-shared.ts';
+import { claimTextForms, escapeFenceCell } from '../fence-shared.ts';
 import { gbrainPath } from '../config.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from '../deletion-inventory.ts';
@@ -521,12 +521,14 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
   await keyed('write_gate_holds', 'SELECT 1 FROM write_gate_holds WHERE source_id=$1 AND slug=$2', [src, slug]);
   if (!await relationExists(engine, 'query_cache')) stores.push(missingCache('query_cache'));
   else await keyed('query_cache', 'SELECT 1 FROM query_cache WHERE $1::text IS NOT NULL', [src]);
-  // The page's own segment texts only: a text of another page holding the same words is that page's body, never a
-  // residue of this purge (an inline page referenced none, so the inventory sweep below must not probe the table).
-  if (context && !context.segmentShas.length) stores.push({ store: 'page_segment_texts', status: 'not_present', removed: removed.page_segment_texts ?? 0 });
-  if (context?.segmentShas.length) await keyed('page_segment_texts', `SELECT 1 FROM page_segment_texts t WHERE t.source_id=$1
-    AND t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h)
-    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')}`, [src, context.segmentShas]);
+  // The page's own segment texts, and unreferenced texts holding one of its claims (plain or as a fence cell stores it),
+  // only: a text of another page holding the same words is that page's body, never a residue of this purge (an inline
+  // page with no claims referenced none, so the inventory sweep below must not probe the table).
+  const claimForms = context ? claimTextForms(context.needles) : [];
+  if (context && !context.segmentShas.length && !claimForms.length) stores.push({ store: 'page_segment_texts', status: 'not_present', removed: removed.page_segment_texts ?? 0 });
+  if (context && (context.segmentShas.length || claimForms.length)) await keyed('page_segment_texts', `SELECT 1 FROM page_segment_texts t WHERE t.source_id=$1
+    AND (t.sha256=ANY(SELECT decode(h,'hex') FROM unnest($2::text[]) AS h) OR EXISTS (SELECT 1 FROM unnest($3::text[]) AS n WHERE strpos(lower(convert_from(t.body,'UTF8')),n)>0))
+    AND NOT EXISTS (SELECT 1 FROM page_body_manifest m WHERE m.source_id=t.source_id AND m.sha256=t.sha256) AND NOT ${stagingNeedsTextSql('t')}`, [src, context.segmentShas, claimForms]);
   if (context) {
     const refs = context.factIds.map(String);
     for (const table of ['decide_review_queue', 'decide_review_proposals']) await keyed(table, `SELECT 1 FROM ${table} WHERE source_id=$1 AND (a_ref=ANY($2::text[]) OR b_ref=ANY($2::text[]))`, [src, refs]);
