@@ -235,6 +235,8 @@ test/pathological/a49-unmanaged-purge-tombstones.test.ts
 test/pathological/a50-unmanaged-expired-sources.test.ts
 test/pathological/a9-repair-core.test.ts
 test/pathological/b6-triage-verdict-surrogate.test.ts
+test/pathological/c1-effect-stuck-recovery.test.ts
+test/pathological/c4-bundle-stuck-recovery.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts
