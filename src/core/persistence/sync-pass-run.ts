@@ -754,10 +754,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       // The previous round's level is done with: dropped before the next one is read, so a large source holds one level, not two.
       lastLevel = null;
       await faultPoint('sync:round_start', { sourceId, round });
-      const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
+      const levelInput = { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
-          slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } });
-      await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null, reused: level.reused ?? 0 } : undefined });
+          slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } };
+      const level = await readShadowLevel(engine, levelInput);
+      await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null, reused: level.reused ?? 0, shadow: level, input: levelInput } : undefined });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is
