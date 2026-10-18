@@ -412,15 +412,21 @@ export async function unpurgePage(ctx: OperationContext, p: Record<string, unkno
 }
 
 /**
- * Delete a purged page with its segment storage (Wave B, spec 11), in the caller's transaction: the segment texts only
- * its manifests referenced go with it, and so do its stagings (one of a create has no page row to cascade from). A text
- * another page still references stays, and so does one an unpublished write of another page staged or deduped onto (a
- * create holds its manifest rows in memory until it publishes): that write's copy, not this page's. The restore-time
- * purge replay deletes a page this way too.
+ * Delete a purged page with its segment storage (Wave B, spec 11), in the caller's transaction: the segment texts its
+ * manifests referenced go with it, and so do its stagings (one of a create has no page row to cascade from). So do the
+ * texts its stagings recorded (page_body_staging_texts) that no manifest row references any more: a sweep that drops
+ * a closed generation's rows keeps a text younger than the GC grace window, so the text a forget rewrite replaced is
+ * no longer in the manifest after a later write's sweep (N14-5), and only the staging that wrote it still names it.
+ * Stagings outlive that window (BODY_STAGING_HARD_MS), so the page's stagings name every such text. A text another
+ * page still references stays, and so does one an unpublished write of another page staged or deduped onto (a create
+ * holds its manifest rows in memory until it publishes): that write's copy, not this page's. The restore-time purge
+ * replay deletes a page this way too.
  */
 export async function deletePageWithSegments(tx: BrainEngine, sourceId: string, slug: string, pageId: number):
   Promise<{ shas: string[]; page_body_manifest: number; page_body_stagings: number; page_segment_texts: number }> {
-  const shas = (await tx.executeRaw<{ sha: string }>(`SELECT DISTINCT encode(sha256,'hex') AS sha FROM page_body_manifest WHERE page_id=$1`, [pageId])).map(r => r.sha);
+  const shas = (await tx.executeRaw<{ sha: string }>(`SELECT encode(sha256,'hex') AS sha FROM page_body_manifest WHERE page_id=$1
+    UNION SELECT encode(r.sha256,'hex') FROM page_body_stagings s JOIN page_body_staging_texts r ON r.staging_id=s.id
+      WHERE s.source_id=$2 AND (s.slug=$3 OR s.page_id=$1) AND r.source_id=$2`, [pageId, sourceId, slug])).map(r => r.sha);
   const manifest = (await tx.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM page_body_manifest WHERE page_id=$1', [pageId]))[0]?.n ?? 0;
   const stagings = (await tx.executeRaw('DELETE FROM page_body_stagings WHERE source_id=$1 AND (slug=$2 OR page_id=$3) RETURNING 1', [sourceId, slug, pageId])).length;
   await tx.deletePage(slug, { sourceId });

@@ -277,6 +277,7 @@ test/pathological/lp-d-recovery-version.test.ts
 test/pathological/lp-d-segmented-mirror-gate.test.ts
 test/pathological/lp-f-split-fence-withdrawal-capacity.test.ts
 test/pathological/lp-g-file-digest-fence-bound.test.ts
+test/pathological/lp-h-purge-orphan-segment-text.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts
