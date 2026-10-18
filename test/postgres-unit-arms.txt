@@ -293,6 +293,7 @@ test/pathological/d6-phantom-file-unlink.test.ts
 test/pathological/d7-synthesize-reverse-write.test.ts
 test/pathological/d8-patterns-reverse-write.test.ts
 test/pathological/d9-dream-summary-overwrite.test.ts
+test/pathological/w1-write-through-staging-window.serial.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts

@@ -484,7 +484,13 @@ export async function writePageThrough(
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     assertSourceFilesystemActive();
     if (fileChanged()) return { written: false, skipped: 'file_changed' };
-    atomicWriteFileSync(filePath, md, { verify: () => assertSourceFilesystemActive() });
+    const changedWhileStaging = new Error('file_changed');
+    try {
+      atomicWriteFileSync(filePath, md, { verify: () => { assertSourceFilesystemActive(); if (fileChanged()) throw changedWhileStaging; } });
+    } catch (error) {
+      if (error === changedWhileStaging) return { written: false, skipped: 'file_changed' };
+      throw error;
+    }
 
     // #2426: on a durability-hardened repo (user ran `gbrain sources harden`),
     // commit the artifact so it reaches git — pre-fix, write-through content
