@@ -133,6 +133,9 @@ test('a model provider\'s transport failure is the item\'s transient failure, ne
   expect(classifyItemFailure(new Error('fetch failed: ECONNRESET'))).toMatchObject({ code: 'provider_error', scope: 'item', class: 'transient' });
   expect(classifyItemFailure(Object.assign(new Error("ENOSPC: no space left on device, open '/brain/fetch failed.md'"), { code: 'ENOSPC' }))).toMatchObject({ code: 'disk_full', scope: 'run' });
   expect(classifyItemFailure(Object.assign(new Error('could not write notes/fetch failed.md'), { code: '42501' }))).toMatchObject({ code: 'permission_denied', scope: 'run' });
+  expect(classifyItemFailure(Object.assign(new Error('current transaction is aborted while importing /brain/fetch failed.md'), { code: '25P02' }))).toMatchObject({ code: 'database_contention', scope: 'run' });
+  expect(classifyItemFailure(Object.assign(new Error('fetch failed.md: connection terminated'), { code: '08006' }))).toMatchObject({ code: 'database_contention', scope: 'run' });
+  expect(classifyItemFailure(new OperationError('disk_full', "No space left writing '/brain/fetch failed.md'.", 'Free space, then rerun.'))).toMatchObject({ code: 'disk_full', scope: 'run' });
   expect(classifyItemFailure(new AITransientError('[chat(openai:gpt-example)] socket hang up', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }))))
     .toMatchObject({ code: 'provider_error', scope: 'item' });
   expect(classifyItemFailure(Object.assign(new Error('Connection terminated unexpectedly'), { code: '08006' })).scope).toBe('run');
