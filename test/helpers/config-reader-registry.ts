@@ -30,6 +30,7 @@ export const INTERNAL_CONFIG_STATE: readonly InternalConfigState[] = [
   { key: 'embedding_migration.state', reason: 'gbrain migrate-embeddings resume state' },
   { key: 'embedding_migration.completed', reason: 'gbrain migrate-embeddings completion marker' },
   { key: 'facts.drain_state', reason: 'facts drain scheduler state (facts/drain.ts)' },
+  { key: 'facts.absorb_retry.state', reason: 'dead facts-absorb re-submit set (facts/dead-absorb-retry.ts); gbrain facts retry-dead edits it' },
   { key: 'google.file_modes_notice', reason: 'one-time upgrade notice marker (v0.60.31 migration)' },
   { key: 'notices.behavior_changes.http', reason: 'behavior-change notice shown-marker for serve --http' },
   { key: 'ocr_attempted', reason: 'image-OCR run counter (import-file.ts), read by doctor queue_assets' },

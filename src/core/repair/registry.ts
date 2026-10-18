@@ -54,6 +54,7 @@ import { conversationLabelsRepair } from './conversation-labels.ts';
 import { capturedFactsRepair } from './captured-facts.ts';
 import { loopFactsRepair } from './loop-facts.ts';
 import { ontologyFactsRepair } from './ontology-facts.ts';
+import { factsRehomeRepair } from './facts-rehome.ts';
 import { orphanChildrenRepair } from './orphan-children.ts';
 import { failedWritesRepair } from './failed-writes.ts';
 import { frontmatterRepair } from './frontmatter.ts';
@@ -225,6 +226,14 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'table: each gets its own provenance back, leaves the fence and, if a later page write retired it, becomes active again. Withdrawn, consolidated '
       + 'and duplicated observations are never restored. Preview-bound: --apply --expect <hash> restores exactly the previewed set; a row that changed '
       + 'since reports changed_since_preview. Database-only; no page is rewritten.',
+  },
+  'facts-rehome': {
+    handler: factsRehomeRepair, embeds: 'none', checks: [], explicit_only: true, preview_bound: true,
+    summary: 'Move facts off an entity slug no page answers for (#6925: companies/x minted while the page is orgs/x) onto the page the strict resolver '
+      + 'reaches by identity evidence (exact page, organization directory variant, unique alias; never a bare-name guess). The preview lists every '
+      + 'page-less slug with its class; ambiguous, unverified, unresolved and fence-owned slugs are listed and never moved. Preview-bound: --apply '
+      + '--expect <hash> moves exactly the previewed database-only facts; a slug that gained a page, lost its target or whose facts changed reports '
+      + 'changed_since_preview. Database-only; no page is rewritten.',
   },
   'orphan-children': {
     handler: orphanChildrenRepair, embeds: 'none', checks: ['child_table_orphans'], explicit_only: true,
