@@ -94,8 +94,16 @@ async function importHuge(engine: BrainEngine, f: Fixture, slug: string): Promis
 
 const revisionOf = async (engine: BrainEngine, f: Fixture, slug: string) => (await engine.readPageSnapshot(slug, { sourceId: f.sourceId, includeDeleted: true }))!.revision;
 
+/** One write to its settled outcome: a reply past the bounded wait is `write_pending`, and the same request is replayed, as a caller does. */
 async function submit(engine: BrainEngine, f: Fixture, operation: 'delete_page' | 'restore_page', slug: string, extra: Record<string, unknown> = {}) {
-  return submitPageMutation(f.ctx, { operation, params: { slug, expected_revision: await revisionOf(engine, f, slug), request_id: randomUUID(), ...extra } }) as Promise<Record<string, any>>;
+  const params = { slug, expected_revision: await revisionOf(engine, f, slug), request_id: randomUUID(), ...extra };
+  for (let replay = 0; ; replay++) {
+    try {
+      return await submitPageMutation(f.ctx, { operation, params }) as Record<string, any>;
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'write_pending' || replay >= 20) throw error;
+    }
+  }
 }
 
 async function refusal(p: Promise<unknown>): Promise<{ code?: string; message: string }> {
