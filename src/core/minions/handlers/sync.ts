@@ -154,12 +154,17 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
     const autoEmbed = job.data.auto_embed_backfill !== false;
     let embedJobId: number | null = null;
     let embedSkipReason: string | null = null;
+    let embedNotice: import('../../agent-output.ts').RenderedNotice | null = null;
     const { syncProducedEmbeddableContent } = await import('../../sync-embed-backfill.ts');
     if (autoEmbed && sourceId && result.status !== 'up_to_date' && result.status !== 'dry_run' && syncProducedEmbeddableContent(result)) {
       try {
         const { isFederatedV2Enabled } = await import('../../feature-flags.ts');
-        if (await isFederatedV2Enabled(engine)) {
-          const { submitEmbedBackfill } = await import('../../embed-backfill-submit.ts');
+        const { keylessEmbedBackfill, reportKeylessNotice, submitEmbedBackfill } = await import('../../embed-backfill-submit.ts');
+        const keyless = await keylessEmbedBackfill(engine);
+        if (keyless) {
+          embedSkipReason = 'embedding_disabled';
+          if (keyless.notice) embedNotice = reportKeylessNotice(keyless.notice);
+        } else if (await isFederatedV2Enabled(engine)) {
           const submission = await submitEmbedBackfill(engine, sourceId, {
             reason: typeof job.data.embed_reason === 'string'
               ? (job.data.embed_reason as string)
@@ -169,6 +174,9 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
             embedJobId = submission.jobId;
           } else if (submission.status === 'cooldown' || submission.status === 'spend_capped' || submission.status === 'no_worker_surface' || submission.status === 'stalled') {
             embedSkipReason = submission.status;
+          } else if (submission.status === 'embedding_disabled') {
+            embedSkipReason = submission.status;
+            if (submission.notice) embedNotice = reportKeylessNotice(submission.notice);
           } else {
             submission satisfies never;
           }
@@ -198,6 +206,6 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
       throw new UnrecoverableError(`Managed sync of source ${sourceId ?? 'default'} is ${result.status === 'blocked_by_failures' ? 'blocked' : 'stopped'}`
         + ` (${drain?.stop_reason ?? result.status}${drain?.remaining != null ? `, ${drain.remaining} entries left` : ''}). ${next?.why ?? ''}${next?.command ? ` Next: ${next.command}` : ''}`.trim());
     }
-    return { ...result, ...drained, embed_job_id: embedJobId, embed_skip_reason: embedSkipReason };
+    return { ...result, ...drained, embed_job_id: embedJobId, embed_skip_reason: embedSkipReason, ...(embedNotice ? { notice: embedNotice } : {}) };
   };
 }
