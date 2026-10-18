@@ -15,10 +15,20 @@ import type { BrainEngine } from '../engine.ts';
 import { sanitizeText } from '../batch-rows.ts';
 import { parseMarkdown, parseMarkdownHead } from '../markdown.ts';
 import { contentHash, contentHashFrontmatterAndTags } from '../utils.ts';
+import { stableJson } from '../persistence/digest.ts';
 
 export interface StoredBody {
   compiled_truth: string | null;
   timeline: string | null;
+}
+
+/** The diagnostic and repair choices for a held unmanaged file/body mirror. */
+export function fileDatabaseDriftToken(slug: string, sourceId: string, when: 'before' | 'during',
+  disposition = 'its rows stay unfenced, active and searchable until they agree'): string {
+  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : 'changed while the fence step ran'}, `
+    + `so neither was replaced and ${disposition}. If the file holds the newer edit, `
+    + `gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
+    + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
 }
 
 /** The file's body and timeline as the mirror would store them. */
@@ -81,7 +91,7 @@ function fileHeldBy(fileBytes: string, slug: string, state: StoredState): boolea
   if (JSON.stringify([...new Set(parsed.tags)].sort()) !== JSON.stringify([...new Set(storedTags)].sort())) return false;
   const file = contentHashFrontmatterAndTags({ frontmatter: parsed.frontmatter });
   const stored = contentHashFrontmatterAndTags({ frontmatter: state.frontmatter ?? {} });
-  return Object.entries(file.frontmatter).every(([key, value]) => JSON.stringify(value) === JSON.stringify(stored.frontmatter[key]));
+  return Object.entries(file.frontmatter).every(([key, value]) => stableJson(value) === stableJson(stored.frontmatter[key]));
 }
 
 /**

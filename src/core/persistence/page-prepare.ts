@@ -339,6 +339,10 @@ async function compareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 's
     // An inline page's file over the push-scan cap cannot hold its body (at most 24 MiB): drift, never read whole.
     const matches = bodyUnread(snapshot.page) ? await segmentedFileMatches(engine, row.slug, before, snapshot, importPath, options.activePack, options.between)
       : before.length <= PUSH_SCAN_MAX_FILE_BYTES && await fileMatchesSnapshot(engine, row.slug, (before instanceof FileBytes ? Buffer.from(before.subarray()) : before).toString('utf8'), snapshot, importPath, options.activePack);
+    // #6986: a declared db_only page or a never-filed derive-phase page (atoms/, ...) is canonical in the database; a
+    // differing file at its path is a cache or a stray export, never its canonical file, so the write publishes to the
+    // database only and leaves that file as it is.
+    if (!matches && publishesDatabaseOnly(root, row.slug, snapshot)) return undefined;
     if (!matches) {
       const held = await heldFileRefusal(engine, row, root, path, 'drift', options.remote === true);
       if (held) throw held;
