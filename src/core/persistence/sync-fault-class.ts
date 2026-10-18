@@ -92,6 +92,12 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // GBRA-130 A-7: the file is not a readable regular file inside the source root (a symlink, a non-regular file, a permission error).
   { code: 'file_unreadable', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a change to the checkout makes the file readable',
     human_reason: 'Sync cannot read this file as a regular file inside the source root (a symlink, a non-regular file or a permission error) and never follows it; make it a readable regular file in the checkout (or exclude it with sync.exclude) and commit, then run gbrain sources retry-held <source>.' },
+  // GBRA-133 S-39: the file's text holds NUL bytes (a UTF-16 save, a binary file, a padded file); only an edit or its removal clears it.
+  { code: 'content_null_bytes', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only an edit to the file or its removal clears it',
+    human_reason: 'The file holds NUL bytes, which page text cannot store; save a UTF-16 file as UTF-8, remove the NUL bytes, or remove a binary file (or exclude it with sync.exclude), and commit.' },
+  // GBRA-133 S-33: the commit names a Git object the checkout no longer has and the working-tree copy differs; only restoring the object clears it.
+  { code: 'git_object_missing', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only restoring the Git object clears it',
+    human_reason: 'The checkout lost the Git object of this committed file and its working-tree copy differs or is gone; run git fsck in the checkout, restore the object with git fetch or from a backup, then sync (every sync re-tests the hold).' },
   // #6948: several live pages record the file as their origin; the sync-time heal resolves verified duplicates, a person decides the rest.
   { code: 'origin_conflict', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the hold carries a reason (the pages differ, ids conflict or none is the page the path names), or the heal is off',
     human_reason: 'Several live pages record this file as their origin and sync cannot prove they are one document; a person keeps the page that is the file\'s and soft-deletes the others (gbrain repair origin-twins --source <source> lists them with the commands), then syncs.' },

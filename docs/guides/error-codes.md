@@ -748,6 +748,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/troubleshooting.md#consumers-without-heartbeat](../../docs/guides/troubleshooting.md#consumers-without-heartbeat)
 
+### content_null_bytes
+
+<a id="content_null_bytes"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A synced Markdown file holds NUL bytes (U+0000), so managed sync holds that file alone. | Page text is stored as UTF-8 without NUL bytes, so the file cannot be imported as it stands; NUL bytes usually mean a UTF-16 save (a Windows "Unicode" file), a binary file named .md or a crash-padded file. The rest of the source keeps syncing. | Save a UTF-16 file as UTF-8, remove the NUL bytes, or remove a binary file (or leave it out with sync.exclude), then commit and sync again. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#content_null_bytes](../../docs/guides/write-refusals.md#content_null_bytes)
+
 ### content_receipt_stale
 
 <a id="content_receipt_stale"></a>
@@ -1545,6 +1555,16 @@ More: [docs/guides/concurrent-writes.md#git-durability-at-activation](../../docs
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Git index stale. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### git_object_missing
+
+<a id="git_object_missing"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A committed file's Git object is missing from the checkout and its working-tree copy differs or is gone, so managed sync holds that file alone. | An interrupted gc, a partial clone without its promisor remote or disk corruption can drop an object a commit still names. Sync imports the working-tree bytes when they hash to the committed blob id; otherwise it imports nothing from a guess, and the rest of the source keeps syncing. | Run git fsck in the checkout to see what is missing, restore it with git fetch (a partial or shallow clone) or from a backup, then sync again; every sync re-tests the hold. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#git_object_missing](../../docs/guides/write-refusals.md#git_object_missing)
 
 ### git_operation_in_progress
 

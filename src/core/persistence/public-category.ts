@@ -50,6 +50,8 @@ export const PUBLIC_BY_CODE: Readonly<Record<string, PublicCategory>> = {
   permission_denied: 'permission',
   owner_unavailable: 'config', writer_coordinator_required: 'config', write_quota_exhausted: 'config', write_quota_insufficient: 'config', plan_stale: 'config',
   slug_root_mode_mismatch: 'config', invalid_params: 'config',
+  // GBRA-133 (#6712 PR 4b lane F): a file whose text holds NUL bytes, and a committed file whose Git object is gone.
+  content_null_bytes: 'content_refused', git_object_missing: 'storage',
 };
 
 /** A registry code's class, for a code neither table names. */

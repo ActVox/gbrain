@@ -188,6 +188,8 @@ export function assertSyncEntryOrigin(context: Pick<SyncDiscovery, 'root' | 'git
       return { mode, kind, object, name: row.slice(tab + 1) };
     }).filter(item => item.name === part || process.platform === 'win32' && item.name.toLowerCase() === part.toLowerCase());
     if (!matches.length) return;
+    // GBRA-133 S-22: a directory where the deleted file was (notes/a.md became notes/a.md/x.md) means the file origin is gone.
+    if (index === parts.length - 1 && matches.every(item => item.kind === 'tree')) return;
     if (matches.length !== 1 || index === parts.length - 1 || matches[0].kind !== 'tree') {
       throw new OperationError('page_identity_changed', 'The pinned Git target still contains or aliases the origin selected for deletion.',
         'Inspect the source identity, then explicitly retry failed sync discovery; the accepted request has not been rewritten.');

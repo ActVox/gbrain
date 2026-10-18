@@ -135,6 +135,8 @@ Every hold and error has three fields, from one table
 | `settle_mismatch` | page | none | yes | always: the pass cannot tell why the path does not settle |
 | `page_write_failed` | page | upgrade | yes | always: the writer cannot place the failure |
 | `file_unreadable` | page | none | yes | always: only a change to the checkout makes the file readable |
+| `content_null_bytes` | page | none | yes | always: only an edit to the file or its removal clears it |
+| `git_object_missing` | page | none | yes | always: only restoring the Git object clears it |
 | `origin_conflict` | page | repair | no | the hold carries a reason (the pages differ, ids conflict or none is the page the path names), or the heal is off |
 | `origin_conflict_decision` | page | none | yes | always: the pages differ, their ids conflict or none is the page the path names |
 | `page_identity_decision` | page | none | yes | always: only a person decides which page the file is |

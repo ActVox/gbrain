@@ -33,6 +33,7 @@ import { preserveProtectedTakes } from './protected-takes.ts';
 import { getWorktreeBinding } from './ownership.ts';
 import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { assertConfiguredSyncRoot, assertSyncEntryOrigin, readSyncFile, syncGit, syncRawHash, type SyncRename } from './sync-discovery.ts';
+import { directoryAt } from './sync-entry-fault.ts';
 import { assertSyncPageOrigin, sameSyncOrigin, syncOriginPath, syncOriginScope, type SyncOriginScope } from './sync-origin.ts';
 import { assertManagedSyncActive, validateSyncAuthority, type SyncAuthority, type SyncProcessingOptions } from './sync-authority.ts';
 import type { PreparedContentImport } from './prepared-import.ts';
@@ -717,7 +718,8 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
           `sync.admission is not normal, so the deletion of ${row.slug} in ${row.source_id} published nothing; the page stays live and the next pass re-reads the level.`);
       },
       async () => {
-        if (p.path !== null && !p.body_ref && syncRawHash(root, p.path) !== p.rawHash) throw syncPublicationRefusal('source_changed', 'The imported file changed after sync admission.', row, p,
+        // GBRA-133 S-22: a deletion whose name became a directory has no file to compare.
+        if (p.path !== null && !p.body_ref && (p.kind === 'managed_sync_delete' && directoryAt(root, p.path) ? null : syncRawHash(root, p.path)) !== p.rawHash) throw syncPublicationRefusal('source_changed', 'The imported file changed after sync admission.', row, p,
           `The file of ${row.slug} changed on disk after this sync was admitted; review the change and commit it.`);
       },
       async () => {

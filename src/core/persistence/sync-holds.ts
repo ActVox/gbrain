@@ -80,9 +80,15 @@ export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regre
   /** GBRA-130 A-17/B-3/B-4: a path whose page identity sync cannot decide (several tombstones, a spelling twin, a takeover whose ids differ). */
   | 'page_identity_changed'
   /** #6712 PR 4b (S-47): bytes an older gbrain imported and validated whose frontmatter aliases expand past #7018's bound; held alone, never a parser regression. */
-  | 'frontmatter_alias_limit';
+  | 'frontmatter_alias_limit'
+  /** GBRA-133 S-39: a Markdown file whose text holds a NUL byte (U+0000): a binary file, a padded file, a UTF-16 save. */
+  | 'content_null_bytes'
+  /** GBRA-133 S-33: a committed file whose Git blob the repository no longer has, and whose working-tree copy differs or is gone. */
+  | 'git_object_missing';
 /** GBRA-130 A-6: the fault a `page_write_failed` hold stands for (identifiers and classes only, never content). */
-export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null; request_id: string; attempts: number; gbrain_version: string }
+export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null;
+  /** The newest failed receipt; null for a GBRA-133 S-63 freeze fault (origin `freeze`), which threw before any request was admitted. */
+  request_id: string | null; attempts: number; gbrain_version: string }
 /**
  * Flip lane C: the holds of a write that ran out of attempts, its preparation never settling (`preparation_stalled`)
  * or its statements ended by the database every time (`write_interrupted`). The file is not the problem: they route to
@@ -551,10 +557,12 @@ export async function holdBasisMoved(engine: Pick<BrainEngine, 'executeRaw'>, so
  * `origin_conflict` hold, which rests on the twin pages the heal, the repair or a person removes. GBRA-130: and a `page_identity_changed`
  * hold, which rests on pages (tombstones, a page at the slug) or spellings a person changes. A `frontmatter_alias_limit` hold
  * rests on the file's bytes alone (the bound is intended, not transient), so like `invalid_frontmatter` it re-screens when
- * the file changes.
+ * the file changes. GBRA-133: a `git_object_missing` hold rests on the repository's objects (a fetch restores them
+ * under the same blob id), so it re-screens on every sync; a `page_write_failed` hold of a freeze fault (origin `freeze`,
+ * S-63) is re-tested by every sync until it has been held `HOLD_ATTEMPTS_NEEDS_HUMAN` times, so a transient fault clears.
  */
 export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, retried: boolean): boolean {
-  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict', 'origin_conflict', 'page_identity_changed'].includes(record.code)
+  return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict', 'origin_conflict', 'page_identity_changed', 'git_object_missing'].includes(record.code)
     // #6712: a transient hold (the write owner stalled, not the file) is retried by every sync until it has been held HOLD_ATTEMPTS_NEEDS_HUMAN times.
     || (outOfAttemptsHold(record.code) && (record.meta.attempts ?? 1) < HOLD_ATTEMPTS_NEEDS_HUMAN)
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
@@ -562,7 +570,8 @@ export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, re
     || (record.code === 'invalid_fence' && (record.meta.fence_version ?? 0) < FENCE_VERSION)
     || (outOfAttemptsHold(record.code) && record.meta.stall?.gbrain_version !== VERSION)
     // GBRA-130 A-6: an owner fault is the writer's, not the file's: an upgrade re-tests the path.
-    || (record.code === 'page_write_failed' && record.meta.write_failure?.gbrain_version !== VERSION);
+    || (record.code === 'page_write_failed' && record.meta.write_failure?.gbrain_version !== VERSION)
+    || (record.code === 'page_write_failed' && record.meta.write_failure?.origin === 'freeze' && (record.meta.attempts ?? 1) < HOLD_ATTEMPTS_NEEDS_HUMAN);
 }
 
 /**
@@ -692,6 +701,11 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
     case 'page_write_failed': {
       const failure = record.meta.write_failure;
       const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+      // GBRA-133 S-63: a freeze fault threw before any request was admitted, so there is no receipt; the hold names the error.
+      if (failure?.origin === 'freeze') return { argv: ['gbrain', 'sources', 'retry-held', source], consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#page_write_failed',
+        why: `Sync could not prepare ${record.path} (${failure.error_class ?? 'an unexpected error'}${failure.errno ? `, ${failure.errno}` : ''}; the hold message names it), so it held that file and the rest of the source kept syncing. `
+          + `The next syncs re-test it on their own; once it has been held ${HOLD_ATTEMPTS_NEEDS_HUMAN} times, fix the file when the error names it, or report it with the gbrain version, then schedule the re-test.`,
+        verify };
       return { argv: ['gbrain', 'write-request', '--', failure?.request_id ?? '<request_id>'], consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#page_write_failed',
         why: `The write of ${record.path} failed the same way ${failure?.attempts ?? 'several'} times (${failure?.origin ?? failure?.code ?? 'an unclassified failure'}${failure?.errno ? `, SQLSTATE ${failure.errno}` : ''}${failure?.error_class ? `, ${failure.error_class}` : ''}), so sync held it and the rest of the source kept syncing. `
           + 'The receipt (read-only) names the error; report it with the gbrain version, or fix the file when the error names its content. An upgrade re-tests the path on its own.',
@@ -804,6 +818,16 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
       return { argv: ['gbrain', 'sources', 'status', source, '--json'], consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code),
         user_message: `${record.path} nests YAML aliases in its frontmatter that expand past gbrain's size limit, so sync holds it and the rest of source ${source} keeps syncing. An older gbrain imported these bytes; this version refuses them on purpose. Reduce the alias nesting in its frontmatter (or write the values out), or remove the file, then commit and run gbrain sync --source ${source} --no-pull.`,
         why: 'The alias bound (#7018) stops a few hundred bytes of nested anchors from expanding into gigabytes; it is intended, so the page keeps its last imported version until the file changes.',
+        verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
+    case 'content_null_bytes':
+      return { argv: ['gbrain', 'sources', 'status', source, '--json'], consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code),
+        user_message: `${record.path} holds NUL bytes (U+0000${record.meta.line !== undefined ? `, first on line ${record.meta.line}` : ''}), so sync holds it and the rest of source ${source} keeps syncing. A UTF-16 file (a Windows "Unicode" save) looks like this: save it as UTF-8. Otherwise remove the NUL bytes, or remove a binary file (or leave it out with sync.exclude), then commit and run gbrain sync --source ${source} --no-pull.`,
+        why: 'Page text is stored as UTF-8 without NUL bytes, so these bytes cannot be imported as they stand; the hold re-screens when the file changes.',
+        verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
+    case 'git_object_missing':
+      return { argv: ['gbrain', 'sources', 'status', source, '--json'], consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code),
+        user_message: `The Git object of ${record.path}${record.meta.blob_oid ? ` (blob ${record.meta.blob_oid})` : ''} is missing from the checkout of source ${source}, and its working-tree copy differs or is gone, so sync holds it and the rest of the source keeps syncing. Run git fsck in the checkout to see what is missing, restore it with git fetch (a partial or shallow clone) or from a backup, then run gbrain sync --source ${source} --no-pull.`,
+        why: 'An interrupted gc, a partial clone without its promisor remote or disk corruption can drop an object a commit still names; nothing is imported from a guess, and every sync re-tests the hold.',
         verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
     case 'parser_regression':
       return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'user', requires_exclusive: false,

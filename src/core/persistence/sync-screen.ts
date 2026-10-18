@@ -35,6 +35,7 @@ import { listTrustAllowRules } from '../trust/allow-rules.ts';
 import { readSyncContent, readSyncFile, syncGitPath, UNREADABLE_SYNC_FILE, type SyncDiscovery, type SyncEntry } from './sync-discovery.ts';
 import { pinnedWindowBlock, readBlobBytes, readBlobContents, readPinnedBlob, readPinnedBytes, readPinnedContent, readTreeBlobs, SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
 import { screenSyncImport, type SyncImportScreenInput } from './sync-prepare.ts';
+import { committedContentOrMissing, nullBytesRefusal } from './sync-entry-fault.ts';
 import type { SyncProcessingOptions } from './sync-authority.ts';
 import { gitHoldItem, readSyncHoldPolicy, readSyncImportProvenance, type GitHoldCode, type GitHoldItem, type GitHoldRecord, type PreparationStallMeta, type SyncHoldPolicy } from './sync-holds.ts';
 import type { WriteRequest } from './model.ts';
@@ -91,7 +92,12 @@ export function driftBaselineContent(gitRoot: string, entry: Pick<SyncEntry, 'dr
 /** The frozen import content of one entry (`readSyncContent`); a committed entry's pinned blob is read with the entries after it. */
 export function pinnedContent(cursor: SyncDiscovery & { index: number }, entry: SyncEntry): string {
   const content = entry.working ? null : readPinnedContent(cursor.gitRoot, cursor.target, syncGitPath(cursor, entry.path), upcomingGitPaths(cursor));
-  return content ?? readSyncContent(cursor, entry);
+  if (content !== null) return content;
+  try { return readSyncContent(cursor, entry); } catch (error) {
+    // GBRA-133 S-33: a committed blob the repository lost reads from identical working-tree bytes, or is refused git_object_missing.
+    if (entry.working) throw error;
+    return committedContentOrMissing(cursor, entry, pinnedBlob(cursor, entry.path), error);
+  }
 }
 
 /**
@@ -328,6 +334,9 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
     return { ...held, meta: { ...held.meta, legacy_slugs: entry.legacySlugs } };
   }
   if (content === null) return null;
+  // GBRA-133 S-39: text holding NUL cannot be stored or carried in the write intent; only this file is held.
+  const nul = nullBytesRefusal(entry.path, content);
+  if (nul) return heldEntry(entry, slug, pageId, nul, content, blob);
   // #6188: a fence Tier 1 rewrites is admitted (publication writes the normalized file back); with fences.normalize=false it is held.
   const screen = await screenFrozenContent(await frozenImportScreenInput(engine, { ...input, content }, run), run);
   if (screen.status === 'importable' && screen.fences?.fixes.length) input.onNormalized?.(screen.fences.fixes);
