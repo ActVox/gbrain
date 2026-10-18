@@ -72,7 +72,13 @@ type Exec = Pick<BrainEngine, 'executeRaw'>;
 export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regression' | 'managed_image_sync_unsupported' | 'concurrent_write' | 'preparation_stalled' | 'worktree_dirty' | 'file_drift'
   | 'legacy_slug_conflict' | 'origin_conflict'
   /** #6712 PR 4b (design v3.2 §3.1): a path a live pass settled in three consecutive passes at one level that never classified settled. */
-  | 'settle_mismatch';
+  | 'settle_mismatch'
+  /** GBRA-130 A-6: the path's write failed the same unclassifiable way (an owner exception, an unplaced refusal) on repeated attempts. */
+  | 'page_write_failed'
+  /** GBRA-130 A-7: a file sync cannot read as a regular file inside its root (a symlink, a non-regular file, a permission error). */
+  | 'file_unreadable';
+/** GBRA-130 A-6: the fault a `page_write_failed` hold stands for (identifiers and classes only, never content). */
+export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null; request_id: string; attempts: number; gbrain_version: string }
 /** #6278: what the owner recorded about a preparation it gave up on (step names and vocabulary only, never content). */
 export interface PreparationStallMeta {
   request_id: string;
@@ -142,6 +148,8 @@ export interface GitHoldMeta {
   content_repair?: ContentHoldRepairState;
   /** #6278 `preparation_stalled`: the failed receipt's step, wait cause and attempt count. */
   stall?: PreparationStallMeta;
+  /** GBRA-130 A-6 `page_write_failed`: the repeated failure (code, origin, error class, SQLSTATE), its newest receipt and the gbrain that held it. */
+  write_failure?: PageWriteFailureMeta;
   /** #6278: the held entry is a deletion (the file is gone); discovery re-screens it on request or a gbrain change, not on its absence. */
   deleted?: true;
   /**
@@ -530,7 +538,9 @@ export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, re
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
     || record.meta.recovery_version < RECOVERY_VERSION
     || (record.code === 'invalid_fence' && (record.meta.fence_version ?? 0) < FENCE_VERSION)
-    || (record.code === 'preparation_stalled' && record.meta.stall?.gbrain_version !== VERSION);
+    || (record.code === 'preparation_stalled' && record.meta.stall?.gbrain_version !== VERSION)
+    // GBRA-130 A-6: an owner fault is the writer's, not the file's: an upgrade re-tests the path.
+    || (record.code === 'page_write_failed' && record.meta.write_failure?.gbrain_version !== VERSION);
 }
 
 /**
@@ -657,6 +667,23 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
   switch (record.code) {
     case 'invalid_fence':
       return fenceHoldFix(record, auto);
+    case 'page_write_failed': {
+      const failure = record.meta.write_failure;
+      const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+      return { argv: ['gbrain', 'write-request', '--', failure?.request_id ?? '<request_id>'], consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#page_write_failed',
+        why: `The write of ${record.path} failed the same way ${failure?.attempts ?? 'several'} times (${failure?.origin ?? failure?.code ?? 'an unclassified failure'}${failure?.errno ? `, SQLSTATE ${failure.errno}` : ''}${failure?.error_class ? `, ${failure.error_class}` : ''}), so sync held it and the rest of the source kept syncing. `
+          + 'The receipt (read-only) names the error; report it with the gbrain version, or fix the file when the error names its content. An upgrade re-tests the path on its own.',
+        then: { argv: ['gbrain', 'sources', 'retry-held', source], consent: [], actor: 'agent', requires_exclusive: false, verify,
+          why: `Schedules ${record.path} for a re-screen on the next sync once the cause is fixed.` },
+        verify };
+    }
+    case 'file_unreadable': {
+      const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
+      return { argv: ['gbrain', 'sources', 'retry-held', source], consent: [], actor: 'user', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#file_unreadable',
+        why: `${record.path} is not a readable regular file inside the source root (a symlink, a non-regular file or a permission error), so sync held it without reading or following it and the rest of the source kept syncing. `
+          + 'Make it a readable regular file in the checkout (or exclude it with sync.exclude) and commit; a commit that changes it re-screens the hold on its own, and this schedules the re-screen for a permission fix.',
+        verify };
+    }
     case 'worktree_dirty': {
       const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
       return { argv: ['gbrain', 'sync', 'unblock', '--source', source, '--apply', '--json'], consent: [], actor: 'agent', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#worktree_dirty',

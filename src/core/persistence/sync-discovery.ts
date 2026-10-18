@@ -121,23 +121,26 @@ export function syncFilePath(root: string, path: string, maxBytes = SYNC_READ_BO
   if (realpathSync(root) !== resolve(root)) throw syncTargetRefusal('source_changed', 'The registered source root was replaced by a symlink.',
     `The registered root holding ${path} is now a symlink.`);
   const absolute = resolve(root, path);
-  if (!isWriteTargetContained(absolute, root)) throw syncTargetRefusal('source_changed', 'Sync file escaped its registered root.',
-    `${path} resolves outside its registered source root.`);
+  if (!isWriteTargetContained(absolute, root)) throw unreadableSyncFile(syncTargetRefusal('source_changed', 'Sync file escaped its registered root.',
+    `${path} resolves outside its registered source root.`));
   try {
     // Reject symlink components, including ones targeting another path inside the root.
     let current = root;
     for (const part of relative(root, absolute).split(sep)) {
       current = join(current, part);
-      if (lstatSync(current).isSymbolicLink()) throw syncTargetRefusal('source_changed', 'Sync cannot publish through a symlink.',
-        `A component of ${path} is a symlink; sync reads and publishes only real files inside the root.`);
+      if (lstatSync(current).isSymbolicLink()) throw unreadableSyncFile(syncTargetRefusal('source_changed', 'Sync cannot publish through a symlink.',
+        `A component of ${path} is a symlink; sync reads and publishes only real files inside the root.`));
     }
-    if (!lstatSync(absolute).isFile()) throw syncTargetRefusal('source_changed', 'Sync target is not a regular file.',
-      `${path} is not a regular file.`);
+    if (!lstatSync(absolute).isFile()) throw unreadableSyncFile(syncTargetRefusal('source_changed', 'Sync target is not a regular file.',
+      `${path} is not a regular file.`));
     if (lstatSync(absolute).size > maxBytes) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
       `${path} is larger than the ${SYNC_READ_BOUND}-byte (24 MiB) page ceiling, so nothing was imported from it. Pages up to that size are chunked and searchable; above it, add the file to the sync.exclude config (or keep it outside the brain repo), then sync its source again. See docs/guides/memory-boundaries.md#large-pages.`);
     return absolute;
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
+/** GBRA-130 A-7: the per-file refusals of a path that is not a readable regular file inside its root (the freeze holds that file `file_unreadable`). */
+export const UNREADABLE_SYNC_FILE = 'unreadable_sync_file';
+const unreadableSyncFile = (error: OperationError): OperationError => Object.assign(error, { detail: UNREADABLE_SYNC_FILE });
 export function readSyncFile(root: string, path: string): Buffer | null {
   const absolute = syncFilePath(root, path);
   try { return absolute === null ? null : readFileSync(absolute); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }

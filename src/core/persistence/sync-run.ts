@@ -46,7 +46,7 @@ import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
 import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
-import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
+import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, unreadableFileHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
 import { frozenImageIntent, sameImageBytes } from './sync-image.ts';
 import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
 import { managedSyncWriteDiagnostic, writeWaitOf } from './sync-write-diagnostic.ts';
@@ -68,7 +68,7 @@ import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
 import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
-import { assertPassAdmission, isPassBatchKey, passBatchStep, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
+import { assertPassAdmission, isPassBatchKey, passBatchStep, passedOverBefore, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
 import type { PassStamp } from './sync-prepare.ts';
 import { runSyncPass } from './sync-pass-run.ts';
 import { serr } from '../console-prefix.ts';
@@ -366,7 +366,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     let bytes: Buffer | null = null;
     try { bytes = readSyncFile(cursor.root, entry.path); }
     catch (error) {
-      if (!isSyncReadBound(error)) throw error;
+      if (!isSyncReadBound(error)) { const held = holdsOn ? unreadableFileHold(entry, entry.slug!, entry.pageId ?? null, error, () => pinnedBlob(cursor, entry.path)) : null; if (held) return { hold: held }; throw error; } // GBRA-130 A-7
       // Wave B: with segmented storage on, a Markdown file over the read bound is frozen by reference and streamed by its owner.
       if (entry.action === 'import' && !cursor.companyPlan && !image) {
         bodyRef = await streamedSyncBodyRef(engine, { root: cursor.root, path: entry.path, target: cursor.target, working: entry.working,
@@ -593,7 +593,7 @@ async function holdUnderGate(engine: BrainEngine, input: { cursor: Cursor; key: 
   }
 }
 
-/** #6712: an entry is retried after the manifest end this many times when its file keeps changing after admission, then held `worktree_dirty`. */
+/** #6712: an entry is retried after the manifest end this many times when its file keeps changing after admission, then held `worktree_dirty` (a pass's at once: GBRA-130). */
 export const DEFER_PER_ENTRY = 3;
 /** #6712: the most deferrals one run makes; past it a changed file is held at once. */
 export const DEFER_PER_RUN = 200;
@@ -611,7 +611,7 @@ async function deferChangedEntry(engine: BrainEngine, input: { cursor: Cursor; k
   const { cursor, pending, base } = input;
   const index = indexOf(cursor, pending), entry = entryOf(cursor, pending)!;
   const attempts = (cursor.deferred?.find(deferred => deferred.index === index)?.attempts ?? 0) + 1;
-  if (attempts > DEFER_PER_ENTRY || (cursor.deferrals ?? 0) >= DEFER_PER_RUN) {
+  if (cursor.passId || attempts > DEFER_PER_ENTRY || (cursor.deferrals ?? 0) >= DEFER_PER_RUN) {
     let bytes: Buffer | null = null;
     try { bytes = readSyncFile(cursor.root, entry.path); } catch { /* the hold records no working hash */ }
     return holdUnderGate(engine, { ...input, hold: worktreeDirtyHold(entry, pending.slug, pending.pageId, { ...pending.intent, rawHash: bytes === null ? null : sha256(bytes) }) });
@@ -1527,9 +1527,9 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         }
         // #6712 PR 4b (design v3.2 §2): a pass's write refused because its file changed after admission is the level moving, not a
         // page failure: the entry is passed over and the next round classifies the new level (a level that never settles ends the
-        // pass not_converged). A pinned-worktree conflict is not: it settles as a worktree_dirty hold below. So is an import whose
+        // pass not_converged); its receipt read again (same level: an uncommitted edit) and a pinned-worktree conflict hold worktree_dirty below. So is an import whose
         // page identity another writer changed after the freeze (a repair created the page at its slug): its page moved.
-        if (cursor.passId && (fileChangedAfterAdmission(done) || (done.error_code === 'page_identity_changed'
+        if (cursor.passId && ((fileChangedAfterAdmission(done) && !passedOverBefore(cursor.passId, pending.requestId)) || (done.error_code === 'page_identity_changed'
           && await liveRevision(engine, context.sourceId, pending) !== (pending.intent.expected_revision == null ? null : String(pending.intent.expected_revision))))) {
           cursor = await saveCursor(engine, key, cursor, committedPast({ ...cursor, counts: { ...cursor.counts } }, pending));
           assertActive();

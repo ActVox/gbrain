@@ -1065,6 +1065,13 @@ const OPEN_SYNC_PASS_SQL = (r: string) => `${r}.intent ? 'passId' AND EXISTS (SE
 export const OPEN_SYNC_CURSOR_EXCLUSION = (r: string) => `AND NOT (${r}.intent ? 'runId' AND EXISTS (SELECT 1 FROM op_checkpoints c
       WHERE c.op='managed-sync' AND c.completed_keys->0->>'runId'=${r}.intent->>'runId' AND COALESCE(c.completed_keys->0->>'done','false')<>'true'))
     AND NOT (${OPEN_SYNC_PASS_SQL(r)})`;
+/**
+ * GBRA-130 A-14: `newestSyncReceipt` as a selection filter, so a compaction pass's window is never filled by receipts
+ * `compactReceipt` keeps (one per worktree, retired ones included); the per-row check still re-reads it under the lock.
+ */
+export const NEWEST_SYNC_RECEIPT_EXCLUSION = (r: string) => `AND NOT (${r}.state='committed' AND ${r}.worktree_id IS NOT NULL AND (${r}.intent ? 'runId' OR ${r}.intent ? 'passId')
+      AND COALESCE(${r}.intent->>'kind','') LIKE 'managed_sync_%' AND ${r}.id=(SELECT n.id FROM persistence_requests n WHERE n.worktree_id=${r}.worktree_id
+        AND n.state='committed' AND COALESCE(n.intent->>'kind','') LIKE 'managed_sync_%' ORDER BY n.completed_at DESC, n.sequence DESC LIMIT 1))`;
 export async function newestSyncReceipt(tx: SqlEngine, row: Pick<WriteRequest, 'id' | 'state' | 'intent' | 'worktree_id'>): Promise<boolean> {
   const intent = row.intent as { runId?: unknown; passId?: unknown; kind?: unknown } | null;
   if (row.state !== 'committed' || !row.worktree_id || (typeof intent?.runId !== 'string' && typeof intent?.passId !== 'string') || !String(intent?.kind ?? '').startsWith('managed_sync_')) return false;
@@ -1087,6 +1094,7 @@ export async function compactWriteReceiptsDetailed(engine: BrainEngine, retentio
     AND completed_at < now()-($1::double precision*interval '1 day')
     AND NOT EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.state<>'committed')
     ${OPEN_SYNC_CURSOR_EXCLUSION('r')}
+    ${NEWEST_SYNC_RECEIPT_EXCLUSION('r')}
     ORDER BY sequence LIMIT 100`, [retentionDays]);
   const result: ReceiptCompactionResult = { compacted: 0, freed_bytes: 0, skipped_by_reason: {} };
   for (const row of rows) {

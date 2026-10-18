@@ -108,13 +108,15 @@ const VOLATILE = new Set(['id', 'created_at', 'updated_at', 'snapshot_at', 'last
 async function dump(e: BrainEngine, root: string): Promise<Record<string, string[]>> {
   const pages = await e.executeRaw<{ id: number; slug: string }>('SELECT id,slug FROM pages WHERE source_id=$1', [SOURCE]);
   const slugOf = new Map(pages.map(p => [Number(p.id), p.slug]));
-  const norm = (value: unknown, key = ''): unknown => {
+  const norm = (value: unknown, key = '', path = ''): unknown => {
     if (value === null || value === undefined) return null;
     if (value instanceof Date) return '<time>';
-    if (Array.isArray(value)) return value.map(v => norm(v, key));
+    // #6712 PR 4b: a folded stamp records the Postgres snapshot xmin it read its base under, a transaction id as run-specific as a UUID.
+    if (path === '.intent.stamp.fold.base.xmin') return '<xmin>';
+    if (Array.isArray(value)) return value.map(v => norm(v, key, path));
     if (typeof value === 'object') {
       return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([k]) => !VOLATILE.has(k)).sort(([a], [b]) => a < b ? -1 : 1)
-        .map(([k, v]) => [k, /(^|_)page_id$|^pageId$/.test(k) && v != null ? `page(${slugOf.get(Number(v)) ?? 'other'})` : norm(v, k)]));
+        .map(([k, v]) => [k, /(^|_)page_id$|^pageId$/.test(k) && v != null ? `page(${slugOf.get(Number(v)) ?? 'other'})` : norm(v, k, `${path}.${k}`)]));
     }
     if (typeof value === 'string') {
       const text = value.replaceAll(root, '<root>');

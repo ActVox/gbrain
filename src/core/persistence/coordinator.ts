@@ -25,6 +25,7 @@ import type { WriteTrust } from '../trust/tier.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { mayReprepare } from './semantic.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
+import { readPreparationPolicy } from './switches.ts';
 import { queuePublicationEffects } from './effect-journal.ts';
 import { timePublicationStep } from './publication-timing.ts';
 import type { GitCommitNote } from './effect-model.ts';
@@ -252,9 +253,37 @@ export async function finishPreparationStalled(engine: BrainEngine, row: WriteRe
   return engine.transaction(tx => completeWrite(tx, row, 'failed', {}, failure));
 }
 
+/**
+ * GBRA-130 A-5: the statement timeout (57014) that cut off a publication transaction, else null. A lock timeout (55P03)
+ * waits on another holder and stays transient contention, uncounted (#5762), like a serialization failure or deadlock.
+ */
+function publicationTimeout(error: unknown): string | null {
+  return String((error as { code?: string } | null)?.code) === '57014' ? '57014' : null;
+}
+/**
+ * GBRA-130 A-5: a publication cut off by its timeout charges one attempt (`preparation_attempts`, the #6278 counter). Below
+ * `persistence.max_preparation_attempts` it is released and claimed again; at the limit this returns the terminal
+ * `publication_timeout` failure, so a write that times out every time stops holding every later write on its root (FIFO).
+ */
+async function chargePublicationTimeout(engine: BrainEngine, row: WriteRequest, sqlstate: string, stage: PublicationStage): Promise<PublicationFailure | null> {
+  const attempts = await chargePreparationAttempt(engine, row);
+  const { maxAttempts: limit } = await readPreparationPolicy(engine);
+  if (attempts < limit) return null;
+  return withAttempt({ code: 'publication_timeout',
+    message: `The publication transaction of this ${row.operation} write timed out (statement timeout) ${attempts} time(s), the limit of persistence.max_preparation_attempts (${limit}); nothing was committed and it is not claimed again. Report the request id with its size (${row.intent_bytes} intent bytes) and gbrain sources writer status --source ${row.source_id} --json; a smaller write needs a new request_id.`,
+    detail: { origin: 'publication_timeout', sqlstate, attempts, limit, intent_bytes: Number(row.intent_bytes) } as unknown as PublicationFailureDetail }, stage);
+}
+
 export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRequest, error: unknown,
   stage: PublicationStage = 'publication'): Promise<WriteRequest> {
   const failure = withAttempt(requestError(error), stage);
+  const timedOut = stage === 'publication' && !mayReprepare(row, failure) ? publicationTimeout(error) : null;
+  if (timedOut) {
+    const terminal = await chargePublicationTimeout(engine, row, timedOut, stage);
+    if (terminal) return engine.transaction(tx => completeWrite(tx, row, 'failed', {}, terminal));
+    await releaseUnpublishedClaim(engine, row, 'database_contention');
+    return (await getWriteRequestById(engine, row.id))!;
+  }
   if (mayReprepare(row, failure) || transientDatabaseFailure(error)) {
     await releaseUnpublishedClaim(engine, row, transientDatabaseFailure(error) ? 'database_contention' : 'revision_changed_repreparing');
     return (await getWriteRequestById(engine, row.id))!;
@@ -524,8 +553,10 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     if (recovery) {
       // Even a rejected prepare can retain a journal record; do not leave that
       // record unaccounted or let a sibling publication bypass its recovery.
-      const failure = !transactionBodyCompleted && !mayReprepare(row, requestError(error)) && !transientDatabaseFailure(error)
-        ? withAttempt(requestError(error), published ? 'after_file_publication' : 'publication') : undefined;
+      const stage = published ? 'after_file_publication' : 'publication';
+      const timedOut = !transactionBodyCompleted && !mayReprepare(row, requestError(error)) ? publicationTimeout(error) : null;
+      const failure = timedOut ? await chargePublicationTimeout(engine, row, timedOut, stage).catch(() => null) ?? undefined
+        : !transactionBodyCompleted && !mayReprepare(row, requestError(error)) && !transientDatabaseFailure(error) ? withAttempt(requestError(error), stage) : undefined;
       try { await markRecovering(engine, row, failure ? 'publication_failed' : published ? 'commit_outcome_uncertain' : 'publication_not_started', failure); }
       catch { /* database outage: durable recovery record remains discoverable */ }
       if (lock) {

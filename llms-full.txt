@@ -7536,6 +7536,8 @@ Every hold and error has three fields, from one table
 | `write_gate_rejected` | page | none | yes | always: write_gate.external_mode=reject is the user's setting |
 | `legacy_slug_conflict` | page | none | yes | always: only a person decides which legacy page the file takes over |
 | `settle_mismatch` | page | none | yes | always: the pass cannot tell why the path does not settle |
+| `page_write_failed` | page | upgrade | yes | always: the writer cannot place the failure |
+| `file_unreadable` | page | none | yes | always: only a change to the checkout makes the file readable |
 | `origin_conflict` | page | repair | no | the hold carries a reason (the pages differ, ids conflict or none is the page the path names), or the heal is off |
 | `origin_conflict_decision` | page | none | yes | always: the pages differ, their ids conflict or none is the page the path names |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |

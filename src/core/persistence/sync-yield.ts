@@ -14,6 +14,8 @@ const CHECK_EVERY = 64;
 export interface LoopYield {
   /** Whether the current stretch has run its budget; cheap enough to ask per entry (`entries`: how many this call stands for). */
   due(entries?: number): boolean;
+  /** Whether the current stretch already ran its budget, asked before work that cannot stop part-way (a chunk, a fetch result). */
+  over(): boolean;
   /** One timer turn; the next stretch starts after it. */
   pause(): Promise<void>;
 }
@@ -22,6 +24,33 @@ export function loopYield(): LoopYield {
   let since = performance.now(), n = 0;
   return {
     due: (entries = 1) => { n += entries; if (n < CHECK_EVERY) return false; n = 0; return performance.now() - since >= LOOP_BUDGET_MS; },
+    over: () => performance.now() - since >= LOOP_BUDGET_MS,
+    pause: async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); since = performance.now(); },
+  };
+}
+
+/** How often the shared budget's clock notes that timers ran, and for how many ticks it keeps going once nothing asks. */
+const TURN_TICK_MS = 4, TURN_QUIET_TICKS = 25;
+
+/**
+ * One budget for reads that overlap (a level's Git streams and its `I⋈P` cursor): its stretch starts when timers last ran,
+ * not at its own last pause, so the turn one read spent (a Git chunk, a fetch result the driver decoded in one go) counts
+ * against the other, and neither starts its work right after the other's in the same turn. A clock ticks while it is asked.
+ */
+export function turnYield(): LoopYield {
+  let since = performance.now(), n = 0, quiet = 0, clock: ReturnType<typeof setInterval> | undefined;
+  const over = () => {
+    quiet = 0;
+    if (!clock) {
+      since = performance.now();
+      clock = setInterval(() => { since = performance.now(); if (++quiet > TURN_QUIET_TICKS) { clearInterval(clock); clock = undefined; } }, TURN_TICK_MS);
+      (clock as { unref?: () => void }).unref?.();
+    }
+    return performance.now() - since >= LOOP_BUDGET_MS;
+  };
+  return {
+    due: (entries = 1) => { n += entries; if (n < CHECK_EVERY) return false; n = 0; return over(); },
+    over,
     pause: async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); since = performance.now(); },
   };
 }

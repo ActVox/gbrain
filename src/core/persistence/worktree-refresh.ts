@@ -553,7 +553,10 @@ export async function resumeWorktreeRefreshes(engine: BrainEngine, opts: { hostI
         if (after.state !== row.state) moved++;
       });
     } catch (error) {
-      if (!(error instanceof OperationError && ['write_pending', 'recovery_required', 'refresh_recovery_required', 'owner_unavailable'].includes(error.code))) throw error;
+      // GBRA-130 A-34: one refresh's unexpected failure leaves that row for the next owner start and never stops the others or the topology scan.
+      if (!(error instanceof OperationError && ['write_pending', 'recovery_required', 'refresh_recovery_required', 'owner_unavailable'].includes(error.code))) {
+        console.error(`[gbrain] worktree refresh ${row.id} (${row.source_ids.join(', ')}) did not converge at owner start (${String((error as { code?: unknown } | null)?.code ?? (error as Error)?.name ?? 'error')}); it stays ${row.state} and the next owner start retries it. Check it with gbrain sources writer status ${row.source_ids[0]}.`);
+      }
     } finally { await lock.release(); }
   }
   return moved;

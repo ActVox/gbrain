@@ -2820,6 +2820,16 @@ More: [docs/guides/repair.md#projection-owner-resident](../../docs/guides/repair
 |---|---|---|---|---|---|---|
 | The catalog adoption is accepted but not fully committed. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
+### publication_timeout
+
+<a id="publication_timeout"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed write's publication transaction hit its statement timeout persistence.max_preparation_attempts times (default 2), so the owner finished it failed instead of claiming it again; nothing was committed. | A publication that times out on every attempt (a very large page or fact batch, or a slow lookup inside the 5-second publication transaction) used to be released as database_contention without being counted and claimed again forever, holding every later write on its root. Each timeout now counts one attempt and the write is terminal at the limit, so the rest of the root keeps moving. | Report the request id, the size the receipt names and gbrain sources writer status --source <id> --json; a smaller write (split the page or batch) needs a new request_id. Run: gbrain sources writer status --source '{source_id}' --json | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#publication_timeout](../../docs/guides/write-refusals.md#publication_timeout)
+
 ### purge_blocked_pending_recovery
 
 <a id="purge_blocked_pending_recovery"></a>

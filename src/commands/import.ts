@@ -705,6 +705,15 @@ export async function runImport(
   // never plans against the empty tables it started with (O-CEO-17).
   const analyzeEvery = await importAnalyzeEveryPages(engine);
 
+  // GBRA-130 A-66: a throwing caller callback is that file's outcome, never a rejection of the whole import.
+  async function reportFileResult(...args: Parameters<NonNullable<typeof opts.onFileResult>>): Promise<'held' | undefined> {
+    try { return await opts.onFileResult?.(...args); }
+    catch (e) {
+      console.error(`  Warning: could not record the outcome of ${sanitizePathForDisplay(args[0])} (${e instanceof Error ? e.message : String(e)}); it is not held, the import continues.`);
+      return undefined;
+    }
+  }
+
   async function processFile(eng: BrainEngine, filePath: string, settled?: PromiseSettledResult<ImportResult>) {
     if (!settled && signal?.aborted) return;
     const relativePath = singleFile ? basename(filePath) : relative(dir, filePath);
@@ -736,7 +745,7 @@ export async function runImport(
       if (!settled && _fileMs > 5000) {
         console.error(`[gbrain phase] import.process_file slow ${_fileMs}ms ${relativePath}`);
       }
-      if (await opts.onFileResult?.(importRelPath, filePath, result) === 'held') {
+      if (await reportFileResult(importRelPath, filePath, result) === 'held') {
         skipped++;
         completed.add(relativePath);
       } else if (result.status === 'imported') {
@@ -781,7 +790,7 @@ export async function runImport(
       }
       // #5600: an accepted managed import still publishing is not a failure; the next run resumes its request.
       if (acceptedPendingReceipt(e)) { skipped++; console.error(`  Pending: ${relativePath} was accepted and is still publishing; rerun to confirm it.`); }
-      else if (await opts.onFileResult?.(importRelPath, filePath, { status: 'error', error: e instanceof Error ? e.message : String(e) }) === 'held') { skipped++; completed.add(relativePath); } else {
+      else if (await reportFileResult(importRelPath, filePath, { status: 'error', error: e instanceof Error ? e.message : String(e) }) === 'held') { skipped++; completed.add(relativePath); } else {
         const msg = e instanceof Error ? e.message : String(e);
         const { count, sample } = recordImportFailure(errorCounts, errorSamples, msg);
         if (count <= 5) {

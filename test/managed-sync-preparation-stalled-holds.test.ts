@@ -317,25 +317,47 @@ test('narrowed gate: an unfinished maintenance write on another page of the same
 
 test('bulk groups: a stalled first, middle or last member is held, the committed prefix stays, the rest is re-frozen and the run finishes in one invocation', () => each(async engine => {
   if (engine.kind !== 'postgres') return;
+  // #6712 PR 4b: a pass's last import carries its stamp (#6926 fold) and is never grouped, so an eighth file carries it
+  // here and n6 stays the last member of a bulk group (the stamp carrier's own case is the test after this one).
   for (const position of ['first', 'middle', 'last'] as const) {
     const files: Record<string, string> = {};
-    for (let i = 0; i < 7; i++) files[`notes/n${i}.md`] = note(`N${i}`);
+    for (let i = 0; i < 8; i++) files[`notes/n${i}.md`] = note(`N${i}`);
     const s = await source(engine, files);
     const target = position === 'first' ? 'notes/n0.md' : position === 'middle' ? 'notes/n3.md' : 'notes/n6.md';
     stallPaths(engine, s.id, new Set([target]), 'publication:before_commit');
     const head = git(s.root, 'rev-parse', 'HEAD');
     const result = await s.sync({ bulk: { enabled: true, reason: null, size: 8, maxTxnMs: 15_000 } });
-    expect(result).toMatchObject({ status: 'first_sync', added: 6, held_count: 1 });
+    expect(result).toMatchObject({ status: 'first_sync', added: 7, held_count: 1 });
     expect(result.held![0]).toMatchObject({ path: target, code: 'preparation_stalled' });
     expect(await s.lastCommit()).toBe(head);
     expect(await s.ledger()).toEqual([]);
     const [grouped] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'=$2 AND intent ? 'group'", [s.id, target]);
     expect(grouped!.n).toBeGreaterThan(0);
     // Every other member committed (cancelled followers were re-frozen under new requests) and the checkpoint found none incomplete.
-    for (let i = 0; i < 7; i++) expect(await engine.getPage(`notes/n${i}`, { sourceId: s.id }) === null).toBe(`notes/n${i}.md` === target);
+    for (let i = 0; i < 8; i++) expect(await engine.getPage(`notes/n${i}`, { sourceId: s.id }) === null).toBe(`notes/n${i}.md` === target);
     installFaultHook(undefined);
     await disposePersistenceConsumer(engine);
   }
+}), 300_000);
+
+test('bulk groups: a stalled stamp carrier (the pass batch\'s last import, admitted alone) is held, the committed prefix stays and the stamp is written', () => each(async engine => {
+  if (engine.kind !== 'postgres') return;
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 7; i++) files[`notes/n${i}.md`] = note(`N${i}`);
+  const s = await source(engine, files);
+  const target = 'notes/n6.md';
+  stallPaths(engine, s.id, new Set([target]), 'publication:before_commit');
+  const head = git(s.root, 'rev-parse', 'HEAD');
+  const result = await s.sync({ bulk: { enabled: true, reason: null, size: 8, maxTxnMs: 15_000 } });
+  expect(result).toMatchObject({ status: 'first_sync', added: 6, held_count: 1 });
+  expect(result.held![0]).toMatchObject({ path: target, code: 'preparation_stalled' });
+  expect(await s.lastCommit()).toBe(head);
+  expect(await s.ledger()).toEqual([]);
+  const [grouped] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'path'=$2 AND intent ? 'group'", [s.id, target]);
+  expect(grouped!.n).toBe(0);
+  for (let i = 0; i < 7; i++) expect(await engine.getPage(`notes/n${i}`, { sourceId: s.id }) === null).toBe(`notes/n${i}.md` === target);
+  installFaultHook(undefined);
+  await disposePersistenceConsumer(engine);
 }), 300_000);
 
 // ── #6278 (B7): retry-held against a backlog ──
