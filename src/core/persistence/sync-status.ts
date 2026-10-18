@@ -596,8 +596,14 @@ export async function unblockSync(engine: BrainEngine, sourceId: string, opts: U
     const kinds = CONTENT_REPAIR_KINDS.filter(kind => repairs.has(kind));
     const paths = [...repairs.values()].flat().map(hold => hold.path);
     const startedAt = Date.now();
-    const lane = await runContentLane(engine, await resolveRepairScope(engine, sourceId), { apply: true, kinds, only: paths, noLlm: opts.noLlm, maxLlmUsd: opts.maxLlmUsd,
-      deadline: Date.now() + UNBLOCK_REPAIR_BUDGET_MS, sourceFlag: sourceId, logger: quiet, ...(opts.registry ? { registry: opts.registry } : {}) });
+    // GBRA-130 A-28: a lane that throws skips its holds (repair_error) instead of aborting the unblock; the re-screens below still run.
+    const lane = await resolveRepairScope(engine, sourceId).then(scope => runContentLane(engine, scope, { apply: true, kinds, only: paths, noLlm: opts.noLlm, maxLlmUsd: opts.maxLlmUsd,
+      deadline: Date.now() + UNBLOCK_REPAIR_BUDGET_MS, sourceFlag: sourceId, logger: quiet, ...(opts.registry ? { registry: opts.registry } : {}) }))
+      .catch((error: unknown) => ({ results: [] as RepairResult[], stopped: kinds.map(kind => ({ kind, reason: 'repair_error',
+        message: `gbrain repair ${kind} failed (${String((error as { code?: unknown } | null)?.code ?? 'storage_error')}); run gbrain repair content --source ${sourceId} to see the error.` })) }));
+    const repairError = lane.results.length === 0 && lane.stopped.some(s => s.reason === 'repair_error');
+    const contentPreview: Action = { argv: ['gbrain', 'repair', 'content', '--source', sourceId], consent: [], actor: 'agent', requires_exclusive: false, verify,
+      why: 'The content-repair lane failed during this unblock; its preview (writes nothing) shows the error and the plan for each held file.' };
     const after = new Map((((await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds ?? [])).map(hold => [hold.path, hold]));
     const syncNext: Action = { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify, why: 'Re-imports the repaired file and clears or re-screens its hold.' };
     for (const [kind, records] of repairs) {
@@ -623,7 +629,7 @@ export async function unblockSync(engine: BrainEngine, sourceId: string, opts: U
           detail: outcome === 'repaired' ? `repaired by gbrain repair ${kind}${typeof detail?.tier === 'string' ? ` (${detail.tier})` : ''}; scheduled for a re-screen`
             : `${outcome} (${reason})${message ? `: ${message}` : !item && stop ? `: ${stop.message}` : ''}`,
           repair: { kind, outcome, ...(reason ? { reason } : {}), ...(typeof detail?.tier === 'string' ? { tier: detail.tier } : {}), ...(llmUsd !== undefined ? { llm_usd: llmUsd } : {}),
-            ...(receiptOf(detail) ? { receipt: receiptOf(detail) } : {}), next: outcome === 'repaired' ? syncNext : outcome === 'skipped' && (!item || stop) ? unblockApply : fix } });
+            ...(receiptOf(detail) ? { receipt: receiptOf(detail) } : {}), next: outcome === 'repaired' ? syncNext : repairError ? contentPreview : outcome === 'skipped' && (!item || stop) ? unblockApply : fix } });
       }
     }
   }
