@@ -976,7 +976,8 @@ async function materializePage(deps: GitHubSyncDeps, filePath: string, content: 
   if (databaseOnly) return { ...await importPage(deps, filePath, activePack, rel, content), created: !existing };
   const guard = await replaceableFile(deps.engine, deps.sourceId, slug, filePath);
   const drift = () => new OperationError('file_database_drift',
-    `${slug}: the checkout file has an edit not retained in the database, or changed during import. The file was not replaced. If the file is newer, run gbrain sync --source ${deps.sourceId}; if the database is newer, re-save its page with write-through on; if both changed, ask the user which version to keep before retrying.`);
+    `${slug}: the checkout file has an edit not retained in the database, or changed during import. The file was not replaced. If the file is newer, run gbrain sync --source ${deps.sourceId}; if the database is newer, re-save its page with write-through on; if both changed, ask the user which version to keep before retrying.`,
+    'Import the newer file with gbrain sync, or ask the user which version to keep; the item is held until then.');
   if (!guard.ok) throw drift();
   const created = guard.expectedFileBytes === null;
   mkdirSync(dirname(filePath), { recursive: true });

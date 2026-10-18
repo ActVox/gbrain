@@ -482,13 +482,13 @@ async function reconcileFullSyncDeletes(
         const { writePageThrough } = await import('../../core/write-through.ts');
         for (const slug of dbOnlySlugs) {
           try {
-            if (segmentedSlugs.has(slug)) throw new OperationError('page_body_segmented', 'Re-export cannot render a segmented page; read it with gbrain get --body auto.');
+            if (segmentedSlugs.has(slug)) throw new OperationError('page_body_segmented', 'Re-export cannot render a segmented page.', 'Read it with gbrain get --body auto; the page stays in the database.');
             const r = await writePageThrough(engine, slug, { sourceId: sid, expectedFileBytes: null });
             if (r.written) { reExported++; continue; }
             if (r.skipped === 'disabled_by_config' || r.skipped === 'url_clone') continue;
-            if (r.skipped === 'file_changed') throw new OperationError('file_database_drift', 'The checkout file exists; re-export only restores absent files.');
+            if (r.skipped === 'file_changed') throw new OperationError('file_database_drift', 'The checkout file exists; re-export only restores absent files.', `If the file holds the newer edit, run gbrain sync --source ${sid} to import it; otherwise ask the user which version to keep.`);
             if (r.error) throw new Error(r.error);
-            throw new OperationError('storage_error', `The page was not re-exported (${r.skipped}).`);
+            throw new OperationError('storage_error', `The page was not re-exported (${r.skipped}).`, 'Run gbrain doctor --json for the write-through target, then sync again.');
           } catch (error) {
             const failure = classifyItemFailure(error);
             if (failure.scope === 'run') throw error;
