@@ -21,6 +21,15 @@ export interface StoredBody {
   timeline: string | null;
 }
 
+/** The diagnostic and repair choices for a held unmanaged file/body mirror. */
+export function fileDatabaseDriftToken(slug: string, sourceId: string, when: 'before' | 'during',
+  disposition = 'its rows stay unfenced, active and searchable until they agree'): string {
+  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : 'changed while the fence step ran'}, `
+    + `so neither was replaced and ${disposition}. If the file holds the newer edit, `
+    + `gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
+    + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
+}
+
 /** The file's body and timeline as the mirror would store them. */
 export function mirroredBody(fileBytes: string, slug: string): { compiled_truth: string; timeline: string } {
   const parsed = parseMarkdown(fileBytes, `${slug}.md`);
