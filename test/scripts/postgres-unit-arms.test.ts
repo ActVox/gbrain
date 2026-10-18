@@ -11,7 +11,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ARM_CONCURRENCY_FACTOR, ARM_SHARD_BUDGET_MS, ARM_SHARDS, ARM_STEP_TIMEOUT_MS, ARM_TEST_COMMAND, ARM_WORKERS,
+  ARM_SHARD_BUDGET_MS, ARM_SHARDS, ARM_STEP_TIMEOUT_MS, ARM_TEST_COMMAND, ARM_WORKERS,
   armMakespan, armShards, armWeights, mineArmWeights, parseArmsList, readArmsList,
 } from '../../scripts/postgres-unit-arms.ts';
 import { computeQuantile } from '../../scripts/sharding.ts';
@@ -40,7 +40,7 @@ describe('postgres-unit-arms list', () => {
     const shards = Array.from({ length: ARM_SHARDS }, (_, i) => i + 1);
     expect(job).toContain(`shard: [${shards.join(', ')}]`);
     expect(job).toContain(`Unit-lane PostgreSQL arms \${{ matrix.shard }}/${ARM_SHARDS}`);
-    expect(job).toContain(`run: bun scripts/postgres-unit-arms.ts run \${{ matrix.shard }} ${ARM_SHARDS}\n`);
+    expect(job).toContain(`run: bun scripts/postgres-unit-arms.ts run \${{ matrix.shard }} ${ARM_SHARDS} \${{ matrix.bun == '1.4.3' && '--postgres-only' || '' }}\n`);
     expect(job).toMatch(new RegExp(`- name: Require PostgreSQL arms of unit-lane suites\\n\\s+timeout-minutes: ${ARM_STEP_TIMEOUT_MS / 60_000}\\n`));
     const ports = [...job.matchAll(/ports: \['(\d+):5432'\]/g)].map(m => m[1]);
     const urls = [...job.matchAll(/postgres:\/\/gbrain_test:gbrain_test@127\.0\.0\.1:(\d+)\/gbrain_test/g)].map(m => m[1]);
@@ -55,7 +55,7 @@ describe('postgres-unit-arms list', () => {
     for (const postgresOnly of [false, true]) {
       const weights = armWeights(REPO, postgresOnly);
       const p75 = computeQuantile(files.filter(f => weights.has(f)).map(f => weights.get(f)!), 0.75);
-      const makespans = armShards(REPO, files, ARM_SHARDS, postgresOnly).map(shard => armMakespan(shard, f => weights.get(f) ?? p75) * ARM_CONCURRENCY_FACTOR);
+      const makespans = armShards(REPO, files, ARM_SHARDS, postgresOnly).map(shard => armMakespan(shard, f => weights.get(f) ?? p75));
       expect({ postgresOnly, over: makespans.filter(ms => ms > ARM_SHARD_BUDGET_MS).map(Math.round) }).toEqual({ postgresOnly, over: [] });
     }
   });

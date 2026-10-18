@@ -23,14 +23,16 @@
  * in the unit and serial lanes, and files that read DATABASE_URL directly keep
  * both arms.
  *
- * Weights are milliseconds per file mined from the `ARM_FILE` lines (older
- * logs: each `::group::<file>` timestamp to the next group or endgroup); the
- * both-arms cell reads ARM_WEIGHTS, the PostgreSQL-only cell
- * ARM_WEIGHTS_POSTGRES_ONLY. A file without a weight gets the p75
- * (scripts/sharding.ts). test/scripts/postgres-unit-arms.test.ts fails when a
- * shard's two-worker makespan, scaled by ARM_CONCURRENCY_FACTOR, passes
- * ARM_SHARD_BUDGET_MS, and ci:ubicloud's pg-arms lane fails when a shard's
- * measured makespan passes the step timeout (scripts/ubicloud/README.md).
+ * Weights are milliseconds per file mined from the `ARM_FILE` lines, so they
+ * time each file beside another one, as the job runs it (a file ran 1.2-1.5x
+ * its solo time on a 4-vCPU runner); older logs time each `::group::<file>`
+ * timestamp to the next group or endgroup. The both-arms cell reads
+ * ARM_WEIGHTS, the PostgreSQL-only cell ARM_WEIGHTS_POSTGRES_ONLY. A file
+ * without a weight gets the p75 (scripts/sharding.ts).
+ * test/scripts/postgres-unit-arms.test.ts fails when a shard's two-worker
+ * makespan passes ARM_SHARD_BUDGET_MS, and ci:ubicloud's pg-arms lane fails
+ * when a shard's measured makespan passes the step timeout
+ * (scripts/ubicloud/README.md).
  * Docs: docs/TESTING.md#postgres-arm-lanes.
  */
 import { spawn } from 'node:child_process';
@@ -42,7 +44,7 @@ export const ARMS_LIST = 'test/postgres-unit-arms.txt';
 export const ARM_WEIGHTS = 'scripts/postgres-arm-weights.json';
 export const ARM_WEIGHTS_POSTGRES_ONLY = 'scripts/postgres-arm-weights-postgres-only.json';
 /** persistence-validation's unit-postgres-arms matrix size; test/scripts/postgres-unit-arms.test.ts pins the workflow to it. */
-export const ARM_SHARDS = 10;
+export const ARM_SHARDS = 11;
 /** Files run at once per job, each against its own PostgreSQL service; the workflow lists one URL per worker. */
 export const ARM_WORKERS = 2;
 /** The workflow step's `timeout-minutes: 20`: a shard whose files run longer is cut off mid-list. */
@@ -52,12 +54,6 @@ export const ARM_STEP_TIMEOUT_MS = 20 * 60 * 1000;
  * runners measured 1.3-2x) it still ends a minute inside the step timeout.
  */
 export const ARM_SHARD_BUDGET_MS = (ARM_STEP_TIMEOUT_MS - 60_000) / 2;
-/**
- * How much longer a file runs beside another file than alone, summed over a shard: two workers on a 4-vCPU
- * runner measured 1.04x (GBRA-135 pilot: 8,777 s against 8,465 s of file time). Weights mined from solo runs
- * are scaled by it before the budget check.
- */
-export const ARM_CONCURRENCY_FACTOR = 1.04;
 /** Each file's command; ci:ubicloud's pg-arms lane (scripts/ubicloud/ci-item.sh) runs the same one. */
 export const ARM_TEST_COMMAND = ['bun', '--no-env-file', 'test', '--timeout=120000'];
 const DOCS = 'docs/TESTING.md#postgres-arm-lanes';
