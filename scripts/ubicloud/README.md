@@ -114,7 +114,11 @@ that job's `ARM_SHARDS` partition (19 shards), and a shard over the step's 20-mi
 fails the run, since GitHub would cut that shard off mid-list. The committed
 weights must also fit each shard twice over with a minute to spare
 (`ARM_SHARD_BUDGET_MS`, 570 s), because a slow runner ran the files 1.3-2x
-their mined weights. Tests run natively as
+their mined weights. With the unit and slow lanes, the summary does the same
+for test.yml's unit shards: it sums measured durations over `test-shard.sh`'s
+`UNIT_SHARDS` partition and fails a shard over the 21 minutes left in the
+22-minute job after setup (`docs/TESTING.md#keeping-ci-partitions-balanced`);
+`evals/` files, which no ci:ubicloud lane runs, count as unmeasured. Tests run natively as
 a non-root user on Ubuntu 24.04, the same OS as the CI runners, instead of as
 root in the `oven/bun` container.
 
