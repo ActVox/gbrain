@@ -31,6 +31,7 @@ import {
 import { DEFAULT_SOURCE_ID, hasMalformedPathSegment, isCodeFilePath, resolveSlugForPath, sanitizePathForDisplay, slugifyPath } from '../../core/sync.ts';
 import type { SyncActivePack } from './sync-run.ts';
 import { isPathContained } from '../../core/path-confine.ts';
+import { bytePathHoldGone } from '../../core/sync-byte-paths.ts';
 import { bindOrigin } from '../../core/persistence/origin-guard.ts';
 import { CLASSIC_FILE_HOLD_CODES, classifyClassicFile, type ClassicFileHold } from '../../core/classic-file-holds.ts';
 
@@ -111,6 +112,13 @@ function currentVersion(filePath: string): string | null | undefined {
 export function planHoldRescreen(holds: LegacyHolds, input: { root: string; gitRoot?: string; touched: ReadonlySet<string>; selected: (path: string) => boolean | null }): void {
   for (const path of holds.retryPaths) if (!holds.existing.has(path)) holds.retryTaken.push(path);
   for (const [path, record] of holds.existing) {
+    // GBRA-133: an unsupported_path hold stays while its exact bytes name a file, and clears once they do not.
+    const byteGone = bytePathHoldGone(input.root, path);
+    if (byteGone !== null) {
+      if (byteGone) holds.gone.push(path);
+      if (holds.retryPaths.has(path)) holds.retryTaken.push(path);
+      continue;
+    }
     if (input.touched.has(path)) {
       if (holds.retryPaths.has(path)) holds.retryTaken.push(path);
       continue;
@@ -454,7 +462,7 @@ export async function settleFullSyncHolds(engine: BrainEngine, holds: LegacyHold
   if (!holds) return;
   for (const path of holds.existing.keys()) {
     if (input.failed.has(path)) continue;
-    if (input.walked.has(path) || !fileUnderRoot(input.root, path)) await clearLegacyHold(engine, holds, path);
+    if (bytePathHoldGone(input.root, path) ?? (input.walked.has(path) || !fileUnderRoot(input.root, path))) await clearLegacyHold(engine, holds, path);
   }
   holds.retryTaken.push(...holds.retryPaths);
   await settleLegacyHolds(engine, holds);

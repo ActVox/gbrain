@@ -1576,6 +1576,16 @@ More: [docs/guides/shared-checkout-git.md#stuck-rebase](../../docs/guides/shared
 |---|---|---|---|---|---|---|
 | A git command did not complete. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
+### gitlink_not_followed
+
+<a id="gitlink_not_followed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic sync range added a gitlink (a submodule or an embedded repository); sync does not follow it, so the linked repository's files are not indexed. | A gitlink records another repository's commit, not files, and that repository may be absent or uninitialized. The rest of the source syncs; the notice (`gitlinks_not_followed` in the result and one stderr line) comes once, in the run that passes the gitlink. | Nothing is blocked. To index the linked repository, check it out and add the checkout as its own source (gbrain sources add <name> --path <checkout>). | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#gitlink_not_followed](../../docs/guides/write-refusals.md#gitlink_not_followed)
+
 ### graduation_drain_timeout
 
 <a id="graduation_drain_timeout"></a>
@@ -3911,6 +3921,18 @@ More: [docs/guides/system-one.md#unpriced_model](../../docs/guides/system-one.md
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Prepared mutation does not match its accepted target. | A capability this request needs is not configured or not reachable on this brain. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. | agent | `gbrain doctor --json` | 1 | no |
+
+### unsupported_path
+
+<a id="unsupported_path"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Classic sync held a file whose name is not valid UTF-8 or contains a control character, so it cannot be a page path; the rest of the source synced. | Git stores a name as bytes and a page path is text, so importing a lossy decoding would store a path no file has. The hold key spells the exact bytes (`/gbrain-bytes/` plus %XX escapes), the message names an item id bound to them, and the hold re-screens on every sync and clears once the name leaves the tree. | Rename the file to a valid UTF-8 name without control characters (the hold's fix spells the old name with printf escapes, never raw bytes), commit, then run gbrain sync --source <source> --no-pull. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `not_utf8`, `control_character`.
+
+More: [docs/guides/write-refusals.md#unsupported_path](../../docs/guides/write-refusals.md#unsupported_path)
 
 ### upstream
 

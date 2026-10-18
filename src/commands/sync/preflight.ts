@@ -21,8 +21,8 @@ import {
   readChunkerVersion,
 } from '../../core/sync-anchor.ts';
 import type { SlugRootMode } from '../../core/sync-anchor.ts';
-import { buildDetachedWorkingTreeManifest, mergeSyncManifests } from '../../core/sync-delta.ts';
-import { confirmedSyncDelta, confirmRenameIdentities, redecideHeldRename, type ConfirmedManifest } from '../../core/sync-rename-identity.ts';
+import { buildLosslessWorkingTreeManifest, computeLosslessSyncDelta, mergeSyncManifests, type LosslessDelta } from '../../core/sync-delta.ts';
+import { confirmRenameIdentities, redecideHeldRename, type ConfirmedManifest } from '../../core/sync-rename-identity.ts';
 import {
   git,
   isWithinRoot,
@@ -52,6 +52,7 @@ import { performFullSync } from './full.ts';
 import { applyHoldsToManifest, holdUnreadableRenames, planHoldRescreen, redecideUnreadableRenames, wouldHoldFields, type LegacyHolds } from './holds.ts';
 import { sweepOrphanedRenameSentinels } from './rename-reconcile.ts';
 import type { SyncPlan, SyncActivePack } from './sync-run.ts';
+import { holdUnsupportedPaths, NO_BYTE_PATHS, selectBytePaths, type BytePaths } from './unsupported-paths.ts';
 import { formatUrlClonePullBlock, urlClonePullBlock } from '../../core/url-clone.ts';
 
 export type PreflightOutcome = { readonly done: SyncResult } | { readonly plan: SyncPlan };
@@ -131,7 +132,7 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
   const { ckpt, checkpointEvery, pin, completedPaths } = await resolveCheckpointPin(engine, opts, company, gitContextRoot, lastCommit, headCommit);
 
   const {
-    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest,
+    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest, workingTreeBytes,
     hasWorkingTreeChanges, uncommittedDrift, inScope, scopeRel, isSelectedForRun, excluded, syncOpts,
   } = await resolveWorkingTreeScope(engine, opts, { company, gitContextRoot, detachedHead, scoped, syncScopeRelPath, holdUnreadable: !!holds?.active });
 
@@ -223,10 +224,10 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
 
   const delta = await computeFilteredDelta(engine, opts, {
     company, gitContextRoot, syncScopeRoot, lastCommit, headCommit, pin, fullSyncRoots, importWorkingTree,
-    workingTreeManifest, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts, holds,
+    workingTreeManifest, workingTreeBytes, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts, holds,
   });
   if ('done' in delta) return delta;
-  const { manifest, filtered, malformedSkipped, syncImportRoot, modePath, heldRenames } = delta;
+  const { manifest, filtered, malformedSkipped, syncImportRoot, modePath, heldRenames, bytePaths } = delta;
   if (holds) {
     const touched = new Set([...filtered.added, ...filtered.modified, ...filtered.deleted, ...filtered.renamed.flatMap(r => [r.from, r.to])]);
     for (let i = holds.rescreen.length - 1; i >= 0; i--) if (touched.has(holds.rescreen[i]!)) holds.rescreen.splice(i, 1);
@@ -246,12 +247,13 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
     return { done: { ...dryRunResult({ lastCommit, headCommit, filtered, malformedSkipped, totalChanges }),
       ...(await wouldHoldFields(engine, holds, syncImportRoot, [...filtered.added, ...filtered.modified, ...filtered.renamed.map(r => r.to), ...(holds?.rescreen ?? [])], syncActivePack)) } };
   }
+  await holdUnsupportedPaths(engine, holds, bytePaths);
 
   return {
     plan: {
       opts, company, repoPath, gitContextRoot, anchorPath, syncImportRoot, syncActivePack, lastCommit, headCommit, pin,
       pullFailed, ckpt, completedPaths, checkpointEvery, manifest, filtered, malformedSkipped, totalChanges,
-      uncommittedDrift, inScope, isSelectedForRun, syncOpts, modePath, holds,
+      uncommittedDrift, inScope, isSelectedForRun, syncOpts, modePath, holds, gitlinks: bytePaths.gitlinks,
     },
   };
 }
@@ -881,8 +883,11 @@ async function resolveWorkingTreeScope(
   // import request fails closed with the reason (importing without the
   // manifest would silently skip the very files the caller asked for).
   let workingTreeManifest: ConfirmedManifest;
+  let workingTreeBytes: BytePaths = NO_BYTE_PATHS;
   try {
-    workingTreeManifest = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitContextRoot);
+    const tree: LosslessDelta = company ? { manifest: { added: [], modified: [], deleted: [], renamed: [] }, ...NO_BYTE_PATHS } : buildLosslessWorkingTreeManifest(gitContextRoot);
+    workingTreeManifest = tree.manifest;
+    workingTreeBytes = tree;
   } catch (e) {
     if (importWorkingTree) {
       throw new Error(
@@ -954,7 +959,7 @@ async function resolveWorkingTreeScope(
     );
   }
   return {
-    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest,
+    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest, workingTreeBytes,
     hasWorkingTreeChanges, uncommittedDrift, inScope, scopeRel, isSelectedForRun, excluded, syncOpts,
   };
 }
@@ -973,6 +978,7 @@ async function computeFilteredDelta(
     fullSyncRoots: { gitContextRoot: string; syncScopeRoot: string; anchorPath: string; slugRootMode: SlugRootMode };
     importWorkingTree: boolean;
     workingTreeManifest: ConfirmedManifest;
+    workingTreeBytes: BytePaths;
     detachedHead: boolean;
     scoped: boolean;
     slugRootMode: SlugRootMode;
@@ -986,11 +992,11 @@ async function computeFilteredDelta(
 ): Promise<
   | { done: SyncResult }
   | { manifest: SyncManifest; filtered: SyncManifest; malformedSkipped: string[]; syncImportRoot: string; modePath: (p: string) => string; totalChanges: number;
-      heldRenames: Array<{ from: string; to: string; gitTo: string; cause: unknown }> }
+      heldRenames: Array<{ from: string; to: string; gitTo: string; cause: unknown }>; bytePaths: BytePaths }
 > {
   const {
     company, gitContextRoot, syncScopeRoot, lastCommit, headCommit, pin, fullSyncRoots, importWorkingTree,
-    workingTreeManifest, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts, holds,
+    workingTreeManifest, workingTreeBytes, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts, holds,
   } = input;
   // Diff using git diff (net result, not per-commit). v0.42.x (#1794): diff
   // against the PINNED target, not live HEAD. With a fixed (lastCommit, pin)
@@ -1010,7 +1016,8 @@ async function computeFilteredDelta(
   // throwing — a slow correct reconcile beats a hard error or a silent walk.
   // #6729: inexact renames keep their page identity only when confirmed, before the company fold, the unsyncable fold
   // and the hold replay read the manifest; the already-confirmed working-tree manifest merges after.
-  const delta = await confirmedSyncDelta(engine, gitContextRoot, lastCommit, pin, { sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, sourcePathOf: scopeRel, holdUnreadable: !!holds?.active });
+  // GBRA-133: read as bytes (diff --raw -z), so a name is exactly Git's; names that are not page paths and gitlinks ride beside the manifest.
+  const delta = computeLosslessSyncDelta(gitContextRoot, lastCommit, pin);
   if (delta.status === 'unavailable') {
     serr(
       `[sync] delta ${lastCommit.slice(0, 8)}..${pin.slice(0, 8)} unavailable ` +
@@ -1018,7 +1025,8 @@ async function computeFilteredDelta(
     );
     return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts, holds) };
   }
-  const manifest = importWorkingTree ? mergeSyncManifests(delta.manifest, workingTreeManifest) : delta.manifest;
+  const confirmed = await confirmRenameIdentities(engine, gitContextRoot, lastCommit, pin, delta.manifest, { sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, sourcePathOf: scopeRel, holdUnreadable: !!holds?.active });
+  const manifest = importWorkingTree ? mergeSyncManifests(confirmed, workingTreeManifest) : confirmed;
   if (company) {
     manifest.added.push(...manifest.renamed.map(rename => rename.to));
     manifest.deleted.push(...manifest.renamed.map(rename => rename.from));
@@ -1137,10 +1145,14 @@ async function computeFilteredDelta(
   const totalChanges = filtered.added.length + filtered.modified.length +
     filtered.deleted.length + filtered.renamed.length;
   // GBRA-133 S-51: pairs the identity confirmation could not read, in this run's scope, by the mode's page paths.
-  const heldRenames = [...(delta.manifest.heldRenames ?? []), ...(importWorkingTree ? workingTreeManifest.heldRenames ?? [] : [])]
+  const heldRenames = [...(confirmed.heldRenames ?? []), ...(importWorkingTree ? workingTreeManifest.heldRenames ?? [] : [])]
     .filter(pair => inScope(pair.to) && !excluded(pair.to) && isSelectedForRun(pair.to, syncOpts))
     .map(pair => ({ from: modePath(pair.from), to: modePath(pair.to), gitTo: pair.to, cause: pair.cause }));
-  return { manifest, filtered, malformedSkipped, syncImportRoot, modePath, totalChanges, heldRenames };
+  const bytePaths = company ? NO_BYTE_PATHS : selectBytePaths({
+    unsupported: [...delta.unsupported, ...(importWorkingTree ? workingTreeBytes.unsupported : [])],
+    gone: [...delta.gone, ...(importWorkingTree ? workingTreeBytes.gone : [])], gitlinks: delta.gitlinks,
+  }, { inScope, excluded, selected: p => isSelectedForRun(p, syncOpts), modeRel: modePath });
+  return { manifest, filtered, malformedSkipped, syncImportRoot, modePath, totalChanges, heldRenames, bytePaths };
 }
 
 function dryRunResult(input: {
