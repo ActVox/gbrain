@@ -43,6 +43,7 @@ import { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP, type SyncSelection } from
 import { faultPoint } from './fault-points.ts';
 import { filterYielding, loopYield, sortYielding, turnYield, type LoopYield } from './sync-yield.ts';
 import { countsMatch, proveConfirm, readLevelMark, type ConfirmProof, type LevelMark } from './sync-pass-confirm.ts';
+import { domainCache, levelDomain, narrowedWalk, walkAttestations, type LevelDomainCache } from './sync-pass-narrow.ts';
 
 export { MANAGED_SYNC_PASS_OP, SYNC_ORIGIN_DELETED_OP };
 
@@ -93,6 +94,8 @@ export interface PassLevelCache {
   pages?: { key: string; mark: LevelMark; table: PageTable };
   /** The last committed-mode round's classified paths, keyed by every level-wide input the classifier reads (`classifiedKey`). */
   classified?: { key: string; treeKey: string; paths: ShadowPath[] };
+  /** The last committed-mode round's origin domain, which a taken confirm round at its tree patches (sync-pass-narrow.ts). */
+  domain?: LevelDomainCache;
 }
 
 /**
@@ -210,6 +213,15 @@ function matchedUnchanged(level: { pages: PageTable; tree: Map<string, GitTreeEn
   };
 }
 
+/**
+ * `matchedUnchanged`'s tests a narrowed round runs on every entry it keeps (sync-pass-narrow.ts `narrowedWalk`): the ones
+ * on the entry and the round's open work and markers. The rest are tests on paths, which the round classifies again.
+ */
+function keptUnread(open: { pageIds: Set<number>; origins: Set<string> }, markers: Map<string, unknown>, originOf: (path: string) => string): (entry: ShadowPath) => boolean {
+  return entry => entry instanceof MatchedPath && Object.isFrozen(entry.result) && entry.result.cls === 'matched' && entry.treeOid === entry.levelOid && !open.pageIds.has(entry.pageId!)
+    && ((!markers.size && !open.origins.size) || (!markers.has(originOf(entry.path)) && !open.origins.has(originOf(entry.path))));
+}
+
 /** The origins (`keyOf`) whose page a confirm round re-read: a rewritten page's previous and current one, and each new page's. */
 function confirmChangedPaths(pages: PageTable, changed: { rewritten: Array<{ slot: number; sourcePath: string; slug: string }>; from: number }, keyOf: (sourcePath: string, slug: string) => string): Set<string> {
   const paths = new Set<string>();
@@ -253,7 +265,9 @@ export interface ShadowLevel {
   timings_ms: Record<string, number>;
   statements: number;
   /** A round after a pass's first: whether it reused the previous round's `I⋈P` (`rows` re-read), or why it read it whole. */
-  confirm?: { taken: boolean; reason: string | null; rows: number };
+  confirm?: { taken: boolean; reason: string | null; rows: number;
+    /** A taken confirm round: `taken` when it patched the previous round's domain and classification, else why it built them whole. */
+    narrow?: string };
   /** A taken confirm round: the paths whose previous-round classification it kept (`reusableMatched`). */
   reused?: number;
 }
@@ -280,7 +294,7 @@ const PAGE_DELETED = 1, PAGE_RECORD = 2, PAGE_REVISION_NULL = 4, PAGE_PARSER_EXP
  * record field that differs from its usual value (origin = source_path, disk = blob, revision = the page's, the expected
  * parser) is kept only for the pages where it does; `row` rebuilds the `PageRow` the classifier reads.
  */
-class PageTable {
+export class PageTable {
   readonly id: Array<number | string> = []; readonly slug: string[] = []; readonly sourcePath: string[] = []; readonly revision: string[] = [];
   readonly requestId: Array<string | null> = []; readonly bits: number[] = []; readonly blobOid: Array<string | undefined> = []; readonly fullEpisode: Array<string | null> = [];
   readonly origin = new Map<number, string>(); readonly diskBlobOid = new Map<number, string | null>(); readonly recordRevision = new Map<number, string>();
@@ -594,7 +608,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const cache = input.pass?.cache;
   // The previous round's classification leaves the cache before anything can fail (only a complete round's is stored).
   let priorClassified = cache?.classified?.treeKey === treeKey ? cache.classified : undefined;
-  if (cache) cache.classified = undefined;
+  const priorDomain = cache?.domain;
+  if (cache) { cache.classified = undefined; cache.domain = undefined; }
   // The tree's ':' paths (#5032) are kept apart: they are refused, never part of the level.
   const eligibleTree = async (): Promise<{ tree: Map<string, GitTreeEntry>; colon: string[] }> => {
     if (cache?.tree?.key === treeKey) return cache.tree;
@@ -647,22 +662,15 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const moved = new Set(held.moved.map(toGit));
 
   t = timer();
-  const pages = snapshot.pages;
-  const { byOrigin, claimants } = await claimOrigins(pages, i => gitPathOf(pageOrigin(pages.sourcePath[i]!, pages.slug[i]!)), tree, step);
+  const pages = snapshot.pages, keyOf = (i: number) => gitPathOf(pageOrigin(pages.sourcePath[i]!, pages.slug[i]!));
+  // A taken confirm round at the cached tree patches the previous round's domain at the origins the pass wrote (sync-pass-narrow.ts).
+  const narrow = !snapshot.changed ? null : !priorDomain ? 'cache' : mode !== 'committed' || priorDomain.treeKey !== treeKey || priorDomain.table !== pages ? 'key' : process.platform === 'win32' ? 'platform'
+    : colonRefused.size ? 'colon' : input.pass?.bootstrap ? 'bootstrap' : await faultPoint('sync:level_narrow', { sourceId }).then(() => 'taken', () => 'forced');
+  const levelD = await levelDomain({ pages, tree, keyOf, inLevel, extra: [...untracked, ...(mode === 'working' ? [...index.keys()].filter(inLevel) : [])], markerPaths: [...markers.keys()].map(gitPathOf),
+    isFile: path => tree.has(path) || (mode === 'working' && (untracked.has(path) || index.has(path))), originOf, step,
+    ...(narrow === 'taken' ? { prior: { cache: priorDomain!, changed: snapshot.changed!, oldKey: (sourcePath: string, slug: string) => gitPathOf(pageOrigin(sourcePath, slug)) } } : {}) });
+  const { byOrigin, claimants, domain, twins, twinGroups } = levelD, reconcilable = byOrigin.size - levelD.unreconciled.size;
   const rowAt = (path: string): PageRow | undefined => { const i = byOrigin.get(path); return i === undefined ? undefined : pages.row(i); };
-  const domain = new Set<string>();
-  for (const path of tree.keys()) { domain.add(path); if (step.due()) await step.pause(); }
-  for (const path of untracked) domain.add(path);
-  if (mode === 'working') for (const path of index.keys()) if (inLevel(path)) domain.add(path);
-  let reconcilable = 0;
-  for (const [path, i] of byOrigin) {
-    if (!inLevel(path)) continue;
-    domain.add(path);
-    if (!pages.deleted(i)) reconcilable++;
-    if (step.due()) await step.pause();
-  }
-  for (const origin of markers.keys()) { const path = gitPathOf(origin); if (inLevel(path)) domain.add(path); }
-  const { twins, twinGroups } = await spellingTwins(domain, rowAt, path => tree.has(path) || (mode === 'working' && (untracked.has(path) || index.has(path))), originOf, step);
   timings.domain = t();
 
   // Working mode rehashes every path (the full round's unconditional rehash); committed mode probes candidates only.
@@ -675,15 +683,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   // `A` only matters where the file or the database moved (no row settles on `fileSame ∧ dbSame` with a proof): read it
   // for those pages alone, so a converged source reads none. The same walk finds whether any path needs the baseline tree.
   t = timer();
-  const unproven: number[] = [];
-  let wantBaseline = false;
-  for (const [path, i] of byOrigin) {
-    if (step.due()) await step.pause();
+  const { rows: unproven, wantBaseline } = await walkAttestations(levelD, (path, i) => {
     const level = levelOf(path, probes.get(path)), deleted = pages.deleted(i), revision = pages.recordRevisionOf(i), names = pages.names(i, level);
-    if (!deleted && revision == null && level !== null && !names && inLevel(path)) wantBaseline = true;
-    if (pages.requestId[i] === null) continue;
-    if (deleted || level === null || !names || revision == null || String(revision) !== pages.revision[i]) unproven.push(i);
-  }
+    return { baseline: !deleted && revision == null && level !== null && !names && inLevel(path),
+      unproven: pages.requestId[i] !== null && (deleted || level === null || !names || revision == null || String(revision) !== pages.revision[i]) };
+  }, step);
   const attestationStatements = unproven.length ? await readAttestations(engine, engineKind, sourceId, incarnation, pages, unproven) : 0;
   timings.A = t();
 
@@ -774,10 +778,16 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const candidates: string[] = [], candidateAt: number[] = [];
   const settledBeforeDirtiness = new Set(['held', 'spelling', 'untracked', 'kept', 'delete', 'delete_drift', 'gone', 'deleted_same', 'deleted_edited', 'legacy_same', 'matched']);
   const shared = { mode, fullObligation: input.pass ? !!input.pass.episodeFullId : input.full === true };
-  for (const path of await sortYielding([...domain], step)) {
+  // The cached claims stay whole for the next round. A narrowed round classifies again the paths whose entry `matchedUnchanged`
+  // can fail on (`again`, and the entries `keptUnread` refuses); every other entry of the previous round stays as it is.
+  const keepClaims = !!cache && mode === 'committed';
+  const walk = narrow === 'taken' && reuse ? narrowedWalk(priorClassified!.paths, domain, new Set([...levelD.touched!, ...claimants.keys(), ...holdByGitPath.keys(), ...indexDelta?.keys() ?? [],
+    ...twins, ...legacySpelling, ...[...pages.attested.keys()].map(keyOf)]), keptUnread(open, markers, originOf)) : await sortYielding([...domain], step);
+  for (const item of walk) {
     if (step.due()) await step.pause();
-    const kept = reuse?.(path);
-    if (kept) { byOrigin.delete(path); paths.push(kept); reused++; continue; }
+    if (typeof item !== 'string') { paths.push(item); reused++; continue; }
+    const path = item, kept = reuse?.(path);
+    if (kept) { if (!keepClaims) byOrigin.delete(path); paths.push(kept); reused++; continue; }
     const probe = probes.get(path);
     const { state, at, legacyPageless } = stateOf(path, mode === 'committed' && tree.has(path) ? 'clean' : null, probe);
     const result = sharedResult(classifySyncPath(state));
@@ -790,7 +800,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     if (mode === 'committed' && tree.has(path) && (!settledBeforeDirtiness.has(result.cls) || staged)) { candidates.push(path); candidateAt.push(paths.length); }
     else {
       // The row's fields the level keeps are copied onto the entry; only a candidate's row is read again (its dirtiness re-classifies it).
-      byOrigin.delete(path);
+      if (!keepClaims) byOrigin.delete(path);
       if (result.cls === 'matched' && !legacyPageless && !ambiguousOrigin && MatchedPath.fits(state, revision, shared)) {
         paths.push(new MatchedPath(path, pages.slug[at!]!, Number(pages.id[at!]), revision, result, state.tree, state.level!, state.dirty, state.record!.blobOids.length === 2, shared));
         continue;
@@ -835,11 +845,15 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     retryRow: retry.size > 0, notConvergedStreak: 0, mismatchStreak: 0, requestNewer: false, openAtStampFinished: false, workingChange: false,
     rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.has(hold.path))), full: input.full === true });
   timings.total = total();
-  if (cache && mode === 'committed') cache.classified = { key: classifiedKey, treeKey, paths };
+  if (cache && mode === 'committed') {
+    cache.classified = { key: classifiedKey, treeKey, paths };
+    if (!colonRefused.size) cache.domain = domainCache(levelD, treeKey);
+  }
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
     releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
-    paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3, ...(confirm ? { confirm } : {}), ...(reuse ? { reused } : {}), pack: pack?.identity ?? null,
+    paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
+    ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
 }
@@ -991,32 +1005,6 @@ async function readLevelHolds(engine: BrainEngine, sourceId: string, incarnation
   return { holds, retry: new Set(retryPaths.filter(path => !retryConsumed?.has(path))), moved: [...basisMoved, ...driftMoved] };
 }
 
-/**
- * Spellings of one origin that differ only by case or separator (the domain holds each path once). Files at L count
- * (`isFile`), and so does a live page's separator-spelled origin; a case-only respelling whose old file this sync removes
- * is no refusal (discovery's one exception). As discovery does, only spellings that name one page are twins: a live
- * origin's page slug, else the slug its path names.
- */
-/**
- * The page claiming each origin (keyed by `keyOf`): the live one first, else the newest tombstone; and every page recording
- * an origin that more than one page records (#6517), so the level can name an ambiguous origin. A record naming the tree's
- * blob keeps the tree's copy of its id: a converged 600k level holds one string per blob.
- */
-async function claimOrigins(pages: PageTable, keyOf: (row: number) => string, tree: Map<string, GitTreeEntry>, step: LoopYield) {
-  const byOrigin = new Map<string, number>(), claimants = new Map<string, number[]>();
-  for (let row = 0; row < pages.length; row++) {
-    if (step.due()) await step.pause();
-    if (isWindowsColonTarget(pages.sourcePath[row]!)) continue;
-    const key = keyOf(row);
-    const prior = byOrigin.get(key);
-    if (prior !== undefined) { const all = claimants.get(key); if (all) all.push(row); else claimants.set(key, [prior, row]); }
-    if (prior === undefined || (pages.deleted(prior) && !pages.deleted(row)) || (pages.deleted(prior) === pages.deleted(row) && Number(pages.id[row]) > Number(pages.id[prior]))) byOrigin.set(key, row);
-    const committed = pages.bits[row]! & PAGE_RECORD && tree.get(key);
-    if (committed && pages.blobOid[row] === committed.oid) pages.blobOid[row] = committed.oid;
-  }
-  return { byOrigin, claimants };
-}
-
 /** One parser per importer kind (`syncImportParserFor`) for a whole level, not one object per path. */
 function parserByKind(schemaPack: string | null): (path: string) => SyncImportParser {
   const parsers = new Map<string, SyncImportParser>();
@@ -1026,37 +1014,6 @@ function parserByKind(schemaPack: string | null): (path: string) => SyncImportPa
     if (!parser) parsers.set(kind, parser = syncImportParserFor(path, schemaPack));
     return parser;
   };
-}
-
-async function spellingTwins(domain: Set<string>, rowAt: (path: string) => PageRow | undefined, isFile: (path: string) => boolean, originOf: (gitPath: string) => string, step: LoopYield) {
-  const fold = (path: string) => path.replaceAll('\\', '/').toLowerCase();
-  const spelled = (path: string) => { const live = rowAt(path); return isFile(path) || !!(live && !live.deleted && live.source_path.includes('\\')); };
-  // Two spellings fold alike only when one is not its own fold, so the first walk keeps only those folds; the second
-  // groups, in the domain's order, the spellings of those folds (a level with none keeps no map of every path).
-  const folds = new Set<string>();
-  for (const path of domain) {
-    if (step.due()) await step.pause();
-    const folded = fold(path);
-    if (folded !== path && spelled(path)) folds.add(folded);
-  }
-  const twins = new Set<string>(), twinGroups: string[][] = [];
-  if (!folds.size) return { twins, twinGroups };
-  const spellings = new Map<string, string[]>();
-  for (const path of domain) {
-    if (step.due()) await step.pause();
-    const folded = fold(path);
-    if (!folds.has(folded) || !spelled(path)) continue;
-    const prior = spellings.get(folded);
-    if (prior) prior.push(path); else spellings.set(folded, [path]);
-  }
-  for (const paths of spellings.values()) {
-    if (paths.length < 2) continue;
-    const slugOf = (path: string) => { const live = rowAt(path); return live && !live.deleted ? live.slug : resolveSlugForPath(originOf(path)); };
-    const bySlug = new Map<string, string[]>();
-    for (const path of paths) bySlug.set(slugOf(path), [...bySlug.get(slugOf(path)) ?? [], path]);
-    for (const group of bySlug.values()) if (group.length > 1) { twinGroups.push(group); for (const path of group) twins.add(path); }
-  }
-  return { twins, twinGroups };
 }
 
 /**

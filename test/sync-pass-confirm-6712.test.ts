@@ -53,7 +53,7 @@ async function dbEdit(engine: BrainEngine, ctx: OperationContext, slug: string, 
     { timeoutMs: 30_000, label: `the database-only edit of ${slug} commits` });
   await engine.setConfig('sync.write_through', 'true');
 }
-type Verdict = { round: number; confirm: { taken: boolean; reason: string | null; rows: number } | null };
+type Verdict = { round: number; confirm: { taken: boolean; reason: string | null; rows: number; narrow?: string } | null };
 /** One sync with `between` run before round 2 reads its level; the rounds' confirm verdicts and the result. */
 async function pass(engine: BrainEngine, between: () => Promise<void> = async () => {}) {
   const verdicts: Verdict[] = [];
@@ -82,11 +82,11 @@ for (const backend of testBackends()) {
       const changed = await pass(engine);
       expect({ status: changed.status, held: changed.held }).toEqual({ status: 'synced', held: [] });
       expect(changed.verdicts[0]).toEqual({ round: 1, confirm: null });
-      expect(round2(changed)).toEqual({ taken: true, reason: null, rows: 1 });
+      expect(round2(changed)).toEqual({ taken: true, reason: null, rows: 1, narrow: 'taken' });
       expect(await bodyOf(engine, 'notes/a')).toContain('A committed change of notes/a.');
       edit(root, 'notes/d', 'A new file.'); commit(root, 'add d');
       const added = await pass(engine);
-      expect({ status: added.status, confirm: round2(added) }).toEqual({ status: 'synced', confirm: { taken: true, reason: null, rows: 1 } });
+      expect({ status: added.status, confirm: round2(added) }).toEqual({ status: 'synced', confirm: { taken: true, reason: null, rows: 1, narrow: 'taken' } });
       expect(await bodyOf(engine, 'notes/d')).toContain('A new file.');
       expect((await performManagedSync(engine, OPTS)).pass).toBeUndefined();
     }), 180_000);
@@ -133,7 +133,7 @@ for (const backend of testBackends()) {
       await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [SYNC_IMPORT_PROVENANCE_OP, `default:${await incarnationOf(engine)}:${page!.id}`]);
       edit(root, 'notes/a', 'A committed change of notes/a.'); edit(root, 'notes/b', 'The second committed body.'); commit(root, 'change a and b');
       const run = await pass(engine);
-      expect(round2(run)).toEqual({ taken: true, reason: null, rows: 1 });
+      expect(round2(run)).toEqual({ taken: true, reason: null, rows: 1, narrow: 'taken' });
       expect({ status: run.status, held: run.held }).toEqual({ status: 'synced', held: [['notes/b.md', 'file_drift']] });
       expect(await bodyOf(engine, 'notes/b')).toContain('DBONLYMARKER the agent edit.');
       expect(readFileSync(join(root, 'notes/b.md'), 'utf8')).toContain('The second committed body.');

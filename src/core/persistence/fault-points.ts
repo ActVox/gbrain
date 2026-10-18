@@ -43,7 +43,10 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 4b: the level's overlapping reads, which share one loop budget (sync-yield.ts `turnYield`): a Git chunk as its
   // records are visited (`read`: ls-tree or ls-files; a synchronous hook), an `I⋈P` result in hand before the shared budget
   // decides whether it waits a turn, and the same result right before its rows are taken.
-  | 'sync:level_chunk' | 'sync:level_result' | 'sync:level_take'
+  | 'sync:level_chunk' | 'sync:level_result' | 'sync:level_take' | 'sync:closure_walk'
+  // #6712 PR 4b: a taken confirm round about to patch the previous round's origin domain (sync-pass-narrow.ts); a hook that
+  // throws makes it build the domain whole (`confirm.narrow: 'forced'`).
+  | 'sync:level_narrow'
   // #6712 PR 4b (#6926): inside the round's last import's publication, before its folded stamp's checks (sync-pass-fold.ts); a hook
   // that throws models a failed check statement there: the stamp rolls back to its savepoint and the pass stamps by its checkpoint request.
   | 'sync:pass_fold'
@@ -63,7 +66,9 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
  */
 /** `writeId` is the write request row: rows of a caller-bound replay share one `requestId` (crash-robot per-request seams key on the row). */
 export interface FaultDetail { requestId?: string; writeId?: string; effectId?: string; sourceId?: string; operation?: string | null; signal?: AbortSignal; slug?: string; path?: string;
-  round?: number; read?: string; level?: { statements: number; confirm: { taken: boolean; reason: string | null; rows: number } | null; reused?: number } }
+  round?: number; read?: string; level?: { statements: number; confirm: { taken: boolean; reason: string | null; rows: number; narrow?: string } | null; reused?: number;
+    /** `sync:level_read`: the level and the input it was read with (sync-pass.ts `readShadowLevel`), for probes that read it again. */
+    shadow?: unknown; input?: unknown } }
 /** Postgres returns `persistence_effects.id` (bigserial) as a BigInt; `faultPoint` hands hooks its decimal string (#6584). */
 export type FaultDetailInput = Omit<FaultDetail, 'effectId'> & { effectId?: string | number | bigint };
 type FaultHook = (point: FaultPoint, detail: FaultDetail) => Promise<void> | void;

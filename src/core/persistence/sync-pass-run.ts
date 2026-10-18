@@ -56,7 +56,7 @@ import { originMarkerFingerprint } from './sync-markers.ts';
 import { SYNC_SLICE_OP } from './sync-slices.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { applyPassRound, finishPassApply, holdPassIdentities, newPassApplyState, passApplyCounts, remoteReconcile } from './sync-pass-apply.ts';
-import { passCostDecision, passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
+import { passClosureMemo, passCostDecision, type passEpisodeClosure, readReservedUsd, registerPassCost, unregisterPassCost } from './sync-pass-episode.ts';
 import { currentEmbeddingPricePerMTok } from '../embedding.ts';
 import { SIZE_STATE_SAMPLE, type SyncSizeStates } from '../page-embedding-budget.ts';
 import { massReconcileAllowed } from '../sync-reconcile.ts';
@@ -539,10 +539,11 @@ function addCounts(counts: Record<string, number>, add: Record<string, number | 
 /** The pass stamp (design v3.2 §3.3): what its converged checkpoint publishes; closing the open episode counts what it released. */
 async function passStampFor(engine: BrainEngine, input: { context: ManagedSyncContext; head: string; slugMode: Cursor['slugMode']; episode: PassEpisode | undefined; selection: SyncSelection;
   configured: boolean; mode: SyncSelection['mode']; leaseToken: string; retry: string[]; level: ShadowLevel; selectionFp: string; parserFp: string; pack: string | null; full: boolean;
-  counts: { added: number; modified: number; deleted: number; renamed: number; episodeReleased: number }; extract: boolean; since: string; rescreen: boolean }): Promise<PassStamp> {
+  counts: { added: number; modified: number; deleted: number; renamed: number; episodeReleased: number }; extract: boolean; since: string; rescreen: boolean;
+  closures: typeof passEpisodeClosure }): Promise<PassStamp> {
   const { context, episode, configured, counts } = input;
   // Design §6: an open episode closes by inclusion (a) or at the configured selection (b); chunker_version only by (b) over U_config.
-  const closure = episode ? await passEpisodeClosure({ gitRoot: context.gitRoot, root: context.root, head: input.head, slugMode: input.slugMode, episode, pass: input.selection, configured,
+  const closure = episode ? await input.closures({ gitRoot: context.gitRoot, root: context.root, head: input.head, slugMode: input.slugMode, episode, pass: input.selection, configured,
     configuredSelection: passSelection(await selectionPatterns(engine, { sourceId: context.sourceId } as SyncOpts), { sourceId: context.sourceId } as SyncOpts, context, input.mode) }) : null;
   const closesEpisode = closure?.closes === true;
   if (closure?.released) counts.episodeReleased = closure.released;
@@ -651,8 +652,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   // #6926, folded into 4b: the head a round's last import stamped, and what the pass had done by then.
   let folded: { head: string; done: string } | null = null, batchFolded = false;
   const doneKey = () => JSON.stringify([counts, passApplyCounts(applied)]);
+  const closures = passClosureMemo();
   const stampFor = (level: ShadowLevel) => passStampFor(engine, { context, head, slugMode: levelSlugMode, episode, selection, configured, mode, leaseToken: lease.token, retry, level, selectionFp, parserFp,
-    pack, full: kind === 'full', counts, extract: !processingOptions.noExtract, since: value.telemetry.started_at, rescreen: legacyWaived.size > 0 });
+    pack, full: kind === 'full', counts, extract: !processingOptions.noExtract, since: value.telemetry.started_at, rescreen: legacyWaived.size > 0, closures });
 
   const save = async (outcome: PassOutcome, stopReason: string | null, pin = false) => {
     const ended = outcome !== 'open';
@@ -752,10 +754,11 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       // The previous round's level is done with: dropped before the next one is read, so a large source holds one level, not two.
       lastLevel = null;
       await faultPoint('sync:round_start', { sourceId, round });
-      const level = await readShadowLevel(engine, { sourceId, context, workingTree: mode === 'working',
+      const levelInput = { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
-          slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } });
-      await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null, reused: level.reused ?? 0 } : undefined });
+          slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } };
+      const level = await readShadowLevel(engine, levelInput);
+      await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null, reused: level.reused ?? 0, shadow: level, input: levelInput } : undefined });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
       // Each round reads the level at the current HEAD, and its batches freeze that commit (a commit landing mid-pass is

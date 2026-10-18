@@ -22,6 +22,7 @@ import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { isSyncable, matchesAnyGlob } from '../sync.ts';
 import { parseUsdLimit } from '../spend-posture.ts';
 import { digest } from './digest.ts';
+import { faultPointNow } from './fault-points.ts';
 import { walkTreeLevel } from './sync-git-stream.ts';
 import { SYNC_PASS_COST_OP, type PassEpisode, type SyncSelection } from './sync-pass-row.ts';
 
@@ -85,6 +86,7 @@ export async function passEpisodeClosure(input: { gitRoot: string; root: string;
   const closure: ClosureInput = { episode: input.episode.selection, pass: input.pass, configuredSelection: input.configuredSelection, configured: input.configured, scope, slugMode: input.slugMode };
   const tally: ClosureTally = { included: true, covers: true, released: 0 };
   let stretch: string[] = [];
+  faultPointNow('sync:closure_walk', { path: input.head });
   await walkTreeLevel(input.gitRoot, input.head, '', path => {
     stretch.push(path);
     if (stretch.length === CLOSURE_STRETCH) { tallyClosure(closure, stretch, tally); stretch = []; }
@@ -93,6 +95,19 @@ export async function passEpisodeClosure(input: { gitRoot: string; root: string;
   return closureOf(input.configured, tally);
 }
 const CLOSURE_STRETCH = 2_048;
+
+/**
+ * One pass run's closures: a stamp whose closure inputs (the pinned head, the slug mode, the episode's and the pass's
+ * selections, `configured` and the configured selection) match the last one's reuses its walk; any difference walks again.
+ */
+export function passClosureMemo(): typeof passEpisodeClosure {
+  let last: { key: string; closure: Promise<EpisodeClosure> } | null = null;
+  return input => {
+    const key = JSON.stringify([input.gitRoot, input.root, input.head, input.slugMode, input.episode.selection, input.pass, input.configured, input.configuredSelection]);
+    if (last?.key !== key) last = { key, closure: passEpisodeClosure(input) };
+    return last.closure;
+  };
+}
 
 /** What a pass's admissions reserve under (registered at pin, dropped at the pass's end). */
 interface PassCostScope { sourceId: string; incarnation: string; scope: string; pricePerMTok: number }
