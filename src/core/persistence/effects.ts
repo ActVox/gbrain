@@ -198,7 +198,7 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
       await materializeAndAdvance(engine, effect, snapshot, opts.hostId);
       return;
     }
-    if (segmented) await assertSegmentedMirrorGate(engine, effect, snapshot.page.slug);
+    if (segmented) await assertSegmentedMirrorGate(engine, effect, snapshot.page.slug, opts.hostId);
     content = segmented ? await unreadPageFile(engine, snapshot, keep) : file.content as string;
   } catch (error) {
     // A segmented page whose fence a withdrawal cannot read whole (page_body_segmented) retries and parks like any failed

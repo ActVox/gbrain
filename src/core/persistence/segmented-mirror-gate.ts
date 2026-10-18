@@ -6,7 +6,8 @@
  * the worktree; it never deletes the record or its stage (recovery-version.ts refuses unknown versions from this release
  * on). That binary cannot be changed, so this one does not write such a record while the segmented-storage writer gate
  * (page-body/limits.ts `segmentedWriterBlockers`, the evidence that keeps `pages.segmented_storage` off, read at most
- * once per SEGMENTED_WRITER_GATE_TTL_MS) sees a writer that cannot read it in its window: the mirror refuses
+ * once per SEGMENTED_WRITER_GATE_TTL_MS) sees a live writer that cannot read it in its window (segmented-gate-hold.ts:
+ * not this host's own pre-upgrade writes that this build has since superseded, which doctor reports as information): the mirror refuses
  * `segmented_mirror_writer_gate` before it streams the file, retries and parks like any failed mirror (writer status and
  * doctor list it), and the file keeps the withdrawn row meanwhile. A version 1 record is no way out: it would hold the
  * whole file in memory and in the record, and v0.60.290.0's recovery of it publishes the file and then refuses forever
@@ -20,6 +21,7 @@ import { opError, type OperationError } from '../ops/contract.ts';
 import { SEGMENTED_WRITER_GATE_TTL_MS, SEGMENTED_WRITER_WINDOW_DAYS, segmentedWriterBlockers } from '../page-body/limits.ts';
 import type { PersistenceEffect } from './effect-model.ts';
 import type { SegmentedGateWriter } from './writer-versions.ts';
+import { liveSegmentedBlockers } from './segmented-gate-hold.ts';
 
 export const SEGMENTED_MIRROR_GATE_CODE = 'segmented_mirror_writer_gate';
 const SAMPLE = 5;
@@ -45,15 +47,32 @@ export function segmentedMirrorWriterGate(effect: Pick<PersistenceEffect, 'sourc
     { fix: gateFix([...hosts, ...(more ? [more.trim()] : [])]) });
 }
 
-/** Refuses the mirror of a segmented page while the writer gate sees a writer that cannot read its version 2 record. */
-export async function assertSegmentedMirrorGate(engine: BrainEngine, effect: PersistenceEffect, slug: string): Promise<void> {
+/** Live blockers per gate read: keyed on the TTL-cached blocker list, so a fresh gate read classifies again. */
+let liveByRead = new WeakMap<SegmentedGateWriter[], Map<string, SegmentedGateWriter[]>>();
+
+/**
+ * The gate blockers that hold the mirror: those doctor `segmented_storage` still warns about (segmented-gate-hold.ts).
+ * This host's own writes from before it upgraded, superseded by the same kind of write from this build, do not.
+ */
+export async function mirrorGateBlockers(engine: BrainEngine, hostId: string): Promise<SegmentedGateWriter[]> {
   const blockers = await segmentedWriterBlockers(engine);
+  if (!blockers.length) return blockers;
+  const byHost = liveByRead.get(blockers) ?? new Map<string, SegmentedGateWriter[]>();
+  liveByRead.set(blockers, byHost);
+  let live = byHost.get(hostId);
+  if (!live) byHost.set(hostId, live = await liveSegmentedBlockers(engine, blockers, hostId));
+  return live;
+}
+
+/** Refuses the mirror of a segmented page while a live writer that cannot read its version 2 record may claim it. */
+export async function assertSegmentedMirrorGate(engine: BrainEngine, effect: PersistenceEffect, slug: string, hostId: string): Promise<void> {
+  const blockers = await mirrorGateBlockers(engine, hostId);
   if (blockers.length) throw segmentedMirrorWriterGate(effect, slug, blockers);
 }
 
 let lastResume = new WeakMap<object, number>();
 /** Test seam: forget when parked gated mirrors were last looked for. */
-export function _resetGatedMirrorResumeForTests(): void { lastResume = new WeakMap(); }
+export function _resetGatedMirrorResumeForTests(): void { lastResume = new WeakMap(); liveByRead = new WeakMap(); }
 
 /**
  * Once the writer gate is clear, requeues (through `retryParkedEffects`, with its authority, claim and recovery checks)
@@ -74,7 +93,7 @@ export async function resumeGatedMirrors(engine: BrainEngine, hostId: string): P
        AND NOT EXISTS (SELECT 1 FROM persistence_effects o CROSS JOIN LATERAL jsonb_array_elements(COALESCE(o.data->'parked','[]'::jsonb)) AS p(target)
          WHERE o.request_id=e.request_id AND o.state<>'committed' AND COALESCE(p.target->>'error_code','')<>$3)
        LIMIT 100`, [hostId, JSON.stringify([{ error_code: SEGMENTED_MIRROR_GATE_CODE }]), SEGMENTED_MIRROR_GATE_CODE]);
-    if (!requests.length || (await segmentedWriterBlockers(engine)).length) return 0;
+    if (!requests.length || (await mirrorGateBlockers(engine, hostId)).length) return 0;
     const { retryParkedEffects } = await import('./effect-retry.ts');
     for (const request of requests) {
       try {
