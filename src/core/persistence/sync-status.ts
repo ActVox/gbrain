@@ -218,6 +218,7 @@ async function retiredCursorStands(engine: BrainEngine, sourceId: string, incarn
 export function holdVerdict(record: GitHoldRecord, auto: FenceAutoRepair | undefined, now = Date.now()): SyncFaultVerdict {
   const escalation = holdEscalation(record, now);
   const content = record.meta.content_repair ? { content_repair: { ...record.meta.content_repair, path: record.path, slug: record.slug } } : {};
+  if (record.code === 'origin_conflict' && record.meta.reason) return classifySyncFault({ code: record.code, detail: 'origin_conflict_decision', ...escalation });
   const disposition = contentHoldDisposition(record, auto);
   if (disposition.action !== 'listed' || disposition.state === 'owner') return classifySyncFault({ code: record.code, ...escalation, ...content });
   const verdict = classifySyncFault({ code: record.code, ...escalation, detail: disposition.reason, ...content });
