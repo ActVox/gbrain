@@ -1,7 +1,8 @@
 /**
- * GBRA-130 A-5 (#6712 PR 4b): a publication whose transaction always hits its statement timeout (57014) or lock timeout
- * (55P03) was released as `database_contention` without charging an attempt and claimed again without limit; as the
- * oldest unresolved row of its worktree it held every later write on that root (FIFO).
+ * GBRA-130 A-5 (#6712 PR 4b): a publication whose transaction always hits its statement timeout (57014) was released as
+ * `database_contention` without charging an attempt and claimed again without limit; as the oldest unresolved row of
+ * its worktree it held every later write on that root (FIFO). A lock timeout (55P03) waits on another holder and stays
+ * transient, uncounted (#5762): that arm pins it.
  *
  * Protects (red before: the timed-out write stays queued/running with `database_contention` and the write behind it
  * does not commit):
@@ -72,7 +73,19 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-130 A-5: a pub
   afterEach(async () => { installFaultHook(undefined); await disposePersistenceConsumer(engine); });
 
   for (const [arm, sourceId] of [['database-only page', 'default'], ['worktree-backed page', managed]] as const) {
-    for (const code of ['57014', '55P03'] as const) test(`${arm}: a ${code} at every publication ends failed/publication_timeout at the attempt limit, and the next write commits`, async () => {
+    test(`${arm}: a 55P03 lock timeout at publication stays transient contention, uncounted, and commits once the lock frees`, async () => {
+      const slug = `a5/lock-${randomUUID().slice(0, 8)}`;
+      const requestId = randomUUID();
+      let timedOut = 0;
+      installFaultHook(async (point, detail) => {
+        if (detail.requestId === requestId && point === 'publication:before_commit' && timedOut < 3) { timedOut++; throw timeout('55P03'); }
+      });
+      await put(sourceId, slug, requestId).catch(() => null);
+      const done = await settled(requestId);
+      expect(timedOut).toBe(3);
+      expect(done).toMatchObject({ state: 'committed', preparation_attempts: 0 });
+    }, 60_000);
+    for (const code of ['57014'] as const) test(`${arm}: a ${code} at every publication ends failed/publication_timeout at the attempt limit, and the next write commits`, async () => {
       const slug = `a5/t${code.toLowerCase()}-${randomUUID().slice(0, 8)}`;
       const requestId = randomUUID();
       let timedOut = 0;

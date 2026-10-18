@@ -472,7 +472,7 @@ export const CODES = {
     fix: { argv: ['gbrain', 'sources', 'status', '{source_id}', '--json'], consent: [], actor: 'host_admin', why: 'Read-only: lists the held files of the source with their repair route.', requires_exclusive: false } },
   preview_changed: { class: 'caller', summary: "The state changed since the approved preview." },
   publication_timeout: { class: 'server', retryable: false, actor: 'host_admin',
-    summary: "A managed write's publication transaction hit its statement or lock timeout persistence.max_preparation_attempts times (default 2), so the owner finished it failed instead of claiming it again; nothing was committed.",
+    summary: "A managed write's publication transaction hit its statement timeout persistence.max_preparation_attempts times (default 2), so the owner finished it failed instead of claiming it again; nothing was committed.",
     why: 'A publication that times out on every attempt (a very large page or fact batch, or a slow lookup inside the 5-second publication transaction) used to be released as database_contention without being counted and claimed again forever, holding every later write on its root. Each timeout now counts one attempt and the write is terminal at the limit, so the rest of the root keeps moving.',
     docs: 'docs/guides/write-refusals.md#publication_timeout',
     suggestion: 'Report the request id, the size the receipt names and gbrain sources writer status --source <id> --json; a smaller write (split the page or batch) needs a new request_id.',

@@ -253,10 +253,12 @@ export async function finishPreparationStalled(engine: BrainEngine, row: WriteRe
   return engine.transaction(tx => completeWrite(tx, row, 'failed', {}, failure));
 }
 
-/** GBRA-130 A-5: the statement (57014) or lock (55P03) timeout that cut off a publication transaction, else null. */
+/**
+ * GBRA-130 A-5: the statement timeout (57014) that cut off a publication transaction, else null. A lock timeout (55P03)
+ * waits on another holder and stays transient contention, uncounted (#5762), like a serialization failure or deadlock.
+ */
 function publicationTimeout(error: unknown): string | null {
-  const code = String((error as { code?: string } | null)?.code);
-  return code === '57014' || code === '55P03' ? code : null;
+  return String((error as { code?: string } | null)?.code) === '57014' ? '57014' : null;
 }
 /**
  * GBRA-130 A-5: a publication cut off by its timeout charges one attempt (`preparation_attempts`, the #6278 counter). Below
@@ -268,7 +270,7 @@ async function chargePublicationTimeout(engine: BrainEngine, row: WriteRequest, 
   const { maxAttempts: limit } = await readPreparationPolicy(engine);
   if (attempts < limit) return null;
   return withAttempt({ code: 'publication_timeout',
-    message: `The publication transaction of this ${row.operation} write timed out (${sqlstate === '57014' ? 'statement timeout' : 'lock timeout'}) ${attempts} time(s), the limit of persistence.max_preparation_attempts (${limit}); nothing was committed and it is not claimed again. Report the request id with its size (${row.intent_bytes} intent bytes) and gbrain sources writer status --source ${row.source_id} --json; a smaller write needs a new request_id.`,
+    message: `The publication transaction of this ${row.operation} write timed out (statement timeout) ${attempts} time(s), the limit of persistence.max_preparation_attempts (${limit}); nothing was committed and it is not claimed again. Report the request id with its size (${row.intent_bytes} intent bytes) and gbrain sources writer status --source ${row.source_id} --json; a smaller write needs a new request_id.`,
     detail: { origin: 'publication_timeout', sqlstate, attempts, limit, intent_bytes: Number(row.intent_bytes) } as unknown as PublicationFailureDetail }, stage);
 }
 
