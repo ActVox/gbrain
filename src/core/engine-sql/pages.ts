@@ -35,6 +35,7 @@ import { stagingNeedsTextSql } from '../page-body/schema.ts';
 import { createPageVersion } from '../page-state/versions.ts';
 import { renderFragment, sqlFragment, trustedSql } from './fragment.ts';
 import { quoteIdentifier, resolveWriteColumnFromConfigRows } from '../search/embedding-column.ts';
+import { pickCanonicalOrigin } from '../persistence/origin-guard.ts';
 
 /**
  * PGLite can return zero rows from `INSERT ... ON CONFLICT DO UPDATE ...
@@ -157,6 +158,7 @@ export async function putPage(
     const crSet = cr ? sqlFragment`
         contextual_retrieval_mode = EXCLUDED.contextual_retrieval_mode,
         corpus_generation     = EXCLUDED.corpus_generation,` : sqlFragment``;
+    // origin-guard-ok: both engines' putPage run assertOriginUnclaimed in this transaction first
     const { rows } = await exec.run(sqlFragment`
       INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at${crColumns})
       VALUES (${sourceId}, ${slug}, ${page.type}, ${pageKind}, ${sanitizeText(page.title)}, ${sanitizeText(page.compiled_truth)}, ${sanitizeText(page.timeline || '')}, ${jsonbParam(frontmatter)}, ${hash}, now(), ${effectiveDate}, ${effectiveDateSource}, ${importFilename}, ${chunkerVersion}::smallint, ${sourcePath}, ${sourceKind}, ${sourceUri}, ${ingestedVia}, ${ingestedAt}${crValues})
@@ -175,7 +177,7 @@ export async function putPage(
         import_filename       = COALESCE(EXCLUDED.import_filename,       pages.import_filename),
         chunker_version       = ${trustedSql(bodyWriteChunkVersion('EXCLUDED.compiled_truth', 'EXCLUDED.timeline'))},
         source_path           = COALESCE(EXCLUDED.source_path,           pages.source_path),
-        database_only_reason  = CASE WHEN EXCLUDED.source_path IS NOT NULL AND pages.database_only_reason = 'detached' THEN NULL ELSE pages.database_only_reason END,
+        database_only_reason  = CASE WHEN EXCLUDED.source_path IS NOT NULL AND pages.database_only_reason IN ('detached', 'origin_twin') THEN NULL ELSE pages.database_only_reason END,
         source_kind           = COALESCE(EXCLUDED.source_kind,           pages.source_kind),
         source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
         ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
@@ -219,7 +221,9 @@ export async function deletePages(exec: SqlExecutor, slugs: string[], opts: { so
 
 /**
  * v0.41.19.0 — batch path → slug resolution. See BrainEngine.resolveSlugsByPaths
- * JSDoc. Single SQL round-trip; folds rows into a Map.
+ * JSDoc. Single SQL round-trip. #6948: a path's live pages win over its tombstones;
+ * several pages resolve to the canonical one (`pickCanonicalOrigin`), and a path whose
+ * pages are ambiguous is left out (never an arbitrary twin).
  */
 export async function resolveSlugsByPaths(
   exec: LegacyUnscopedRead,
@@ -232,13 +236,19 @@ export async function resolveSlugsByPaths(
         `resolveSlugsByPaths: input size ${paths.length} exceeds DELETE_BATCH_SIZE=${DELETE_BATCH_SIZE}. Caller must chunk.`,
       );
     }
-    const { rows } = await exec.run<{ slug: string; source_path: string }>(sqlFragment`
-      SELECT slug, source_path
+    const { rows } = await exec.run<{ slug: string; source_path: string; live: boolean }>(sqlFragment`
+      SELECT slug, source_path, deleted_at IS NULL AS live
         FROM pages
        WHERE source_path = ANY(${paths}::text[]) AND source_id = ${opts.sourceId}
+       ORDER BY source_path, slug
     `);
     const m = new Map<string, string>();
-    for (const r of rows) m.set(r.source_path, r.slug);
+    for (const path of new Set(rows.map(r => r.source_path))) {
+      const claimants = rows.filter(r => r.source_path === path);
+      const live = claimants.filter(r => r.live);
+      const picked = pickCanonicalOrigin(live.length ? live : claimants, path);
+      if (picked && !('ambiguous' in picked)) m.set(path, picked.slug);
+    }
     return m;
   }
 
@@ -1027,6 +1037,7 @@ export async function revertToVersion(
 export async function updateSlug(exec: SqlExecutor, tx: BrainEngine, oldSlug: string, newSlug: string, sourceId: string): Promise<number> {
       const preimage = await tx.readPageSnapshot(oldSlug, { sourceId, includeDeleted: true });
       if (preimage) await createPageVersion(tx, oldSlug, sourceId, preimage);
+      // origin-guard-ok: the moved row keeps its own origin and liveness, so it adds no claimant (#6948); callers that record a new path bind it with bindOrigin
       const moved = await exec.executeRaw(
         `UPDATE pages SET slug = $1, updated_at = now() WHERE slug = $2 AND source_id = $3 RETURNING id`,
         [newSlug, oldSlug, sourceId],

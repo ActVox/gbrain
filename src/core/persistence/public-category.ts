@@ -34,7 +34,7 @@ export const PUBLIC_BY_TERMINAL: Readonly<Record<TerminalCategory, PublicCategor
 /** Fault codes (holds, run stops, receipts) by name; a test pins that every `SYNC_FAULT_TABLE` code is here. */
 export const PUBLIC_BY_CODE: Readonly<Record<string, PublicCategory>> = {
   worktree_dirty: 'drift', file_drift: 'drift', source_changed: 'drift', pinned_git_worktree_conflict: 'drift',
-  concurrent_write: 'conflict', revision_conflict: 'conflict', page_identity_changed: 'conflict', legacy_slug_conflict: 'conflict',
+  concurrent_write: 'conflict', revision_conflict: 'conflict', page_identity_changed: 'conflict', legacy_slug_conflict: 'conflict', origin_conflict: 'conflict', origin_conflict_decision: 'conflict',
   invalid_fence: 'content_refused', invalid_frontmatter: 'content_refused', frontmatter_slug_conflict: 'content_refused', rename_held: 'content_refused',
   file_too_large: 'content_refused', content_rejected: 'content_refused', managed_image_sync_unsupported: 'content_refused',
   purged_content: 'content_refused', write_gate_rejected: 'content_refused',

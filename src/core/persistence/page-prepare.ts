@@ -41,6 +41,7 @@ import type { PreparedContentImport } from './prepared-import.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { SqlEngine, WriteRequest } from './model.ts';
 import { isUnboundSourcePage } from './unbound-source.ts';
+import { isOriginTwinPage } from './origin-twins.ts';
 import { sealImportedPage, sealPageTextProjection } from '../page-state/projections.ts';
 import { materializedSnapshot, sealSegmentedPage } from './segmented-apply.ts';
 import { pipelined } from '../page-state/transactions.ts';
@@ -86,6 +87,7 @@ import { suppliedTrustMarkerView } from '../trust/channel.ts';
 import { gateField, gateInput } from '../trust/gate-outcomes.ts';
 import { PUSH_SCAN_MAX_FILE_BYTES } from '../page-size-policy.ts';
 import { fileContentHash, FileBytes, isStreamedContent, LARGE_FILE_MIN_BYTES, StreamedFileContent } from './large-file.ts';
+import { bindOrigin } from './origin-guard.ts';
 
 
 const ownerStatusFix = (sourceId: string): Action => readFix(`Shows source ${sourceId}'s canonical owner with its pending, failed and recovering requests, read-only.`,
@@ -269,6 +271,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   // every state (live, tombstone, restore, revert, delete, purge); any file at
   // its derived path is not its canonical file and is neither written nor removed.
   if (snapshot && !snapshot.page.source_path && await isUnboundSourcePage(engine, row.source_id, row.slug)) return undefined;
+  // #6948: a page that gave its file up to a duplicate it was merged into never writes or removes a file again (restore,
+  // edit, purge); any file at its slug path is another page's.
+  if (snapshot && !snapshot.page.source_path && await isOriginTwinPage(engine, row.source_id, row.slug)) return undefined;
   const binding = await getWorktreeBinding(engine, row.source_id, hostId);
   if (!binding?.local_path) throw opError('owner_unavailable', 'The canonical worktree is unavailable on this host.',
     `This host does not hold source ${row.source_id}'s canonical worktree (or it has no local path), so the file of ${row.slug} was not written. Inspect the owner before resubmitting; the write publishes on the host that owns the source.`,
@@ -390,7 +395,8 @@ async function heldFileRefusal(engine: BrainEngine, row: Pick<WriteRequest, 'sou
  * Receipt reason for a page write that publishes no file. Invariant: for a
  * bound row, prepareFileTarget returns no target only for a live declared
  * db_only page whose file is absent, a page of a read-only mirror source
- * (#5409), or a page written while its source was unbound (#5254) in any state; every other case returns a target or throws.
+ * (#5409), a page written while its source was unbound (#5254) in any state, or a page merged into its duplicate (#6948);
+ * every other case returns a target or throws.
  */
 export function databaseOnlyPublication(row: Pick<WriteRequest, 'worktree_id'>, file: PreparedMutation['file']): Pick<PreparedMutation, 'databaseOnlyReason'> {
   return row.worktree_id && !file ? { databaseOnlyReason: 'db_only' } : {};
@@ -400,6 +406,7 @@ async function pageDatabaseOnlyPublication(engine: SqlEngine, row: WriteRequest,
   if (reason.databaseOnlyReason && (await sourceMirrorReadOnly(engine, row.source_id) || await isMirrorOnlyPage(engine, row.source_id, row.slug))) {
     return { databaseOnlyReason: 'mirror_read_only' };
   }
+  if (reason.databaseOnlyReason && await isOriginTwinPage(engine, row.source_id, row.slug)) return { databaseOnlyReason: 'origin_twin' };
   return reason.databaseOnlyReason && await isUnboundSourcePage(engine, row.source_id, row.slug) ? { databaseOnlyReason: 'unbound_source' } : reason;
 }
 
@@ -478,6 +485,14 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
   }
   // #6511: the purge's journal sweep runs here, under the preparation budget, never inside the 5 s publication transaction.
   const preparedPurge: PreparedPagePurge | null = purge ? await preparePagePurge(engine, row, snapshot, clock) : null;
+  // #6948: a page merged into its duplicate holds that page's body, so an owner purge would tombstone the survivor's content.
+  if (preparedPurge && !preparedPurge.retention && await isOriginTwinPage(engine, row.source_id, row.slug)) {
+    const error = pageRefusal('source_changed', 'The page was merged into a duplicate that holds the same content, so a purge (which tombstones its content source-wide) was refused and nothing was removed, tombstoned or redacted. '
+      + 'The 72 h retention purge removes it database-only; to erase the content itself, purge the page it was merged into.', row,
+      `${row.slug} of source ${row.source_id} was merged into a duplicate page (gbrain repair origin-twins).`, pageFix(row.source_id, row.slug));
+    error.detail = 'origin_twin';
+    throw error;
+  }
   const prepared: PreparedMutation = { observedRevision, noop, file, ...await pageDatabaseOnlyPublication(engine, row, file),
     // W1: a purge bumps sources.purge_epoch, so it holds the source row exclusively from the start (retention bumps nothing, #26);
     // the derived rows' and cascaded links' streams are locked with the page.
@@ -864,8 +879,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
       // Mandatory metadata shares publication rollback; exact no-ops never heal it. These, and the
       // projections (facts, takes, timeline rows of the page the import just wrote live), are independent and sent together.
       const [, pinned] = await pipelined(tx, [
-        async () => { if (sourcePath && !snapshot?.page.source_path) await tx.executeRaw(`UPDATE pages SET source_path = $1
-          WHERE source_id=$2 AND slug=$3 AND source_path IS NULL`, [sourcePath, row.source_id, row.slug]); },
+        async () => { if (sourcePath && !snapshot?.page.source_path) await bindOrigin(tx, { sourceId: row.source_id, slug: row.slug, sourcePath, onlyIfUnset: true }); },
         async () => pinMode ? (await tx.executeRaw<{ mode: string | null }>(`UPDATE sources SET config=CASE WHEN config->>'slug_root_mode' IS NULL
           THEN jsonb_set(${SOURCE_CONFIG_OBJECT_SQL},'{slug_root_mode}',to_jsonb($2::text)) ELSE config END WHERE id=$1 RETURNING config->>'slug_root_mode' AS mode`,
         [row.source_id, pinMode]))[0] : undefined,

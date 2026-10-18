@@ -1026,6 +1026,50 @@ that page. Any other error, such as a storage fault, an unavailable owner or
 contention, still stops the apply; rerun the same apply command once it clears.
 
 <a id="rename-identity"></a>
+<a id="origin-twins"></a>
+### Origin twins
+
+`gbrain repair origin-twins --source <id>` (#6948) resolves duplicate-origin twins: several live pages of one source
+recording the same file as their origin, which managed sync holds [`origin_conflict`](write-refusals.md#origin_conflict)
+while the rest of the source syncs. It is explicit-only, preview-bound and destructive, runs only on the source's
+canonical owner host (`not_owner_host` elsewhere), and refuses a remote caller.
+
+The preview lists each group with its pages, ids, revisions and verdict, using the same rule as sync:
+
+- **Verified duplicates** (no reason): exactly one page is the page the path names, every page holds the same inline
+  body, the file is readable, no two explicit frontmatter `id`s differ, the pages share one visibility and one trust
+  tier, no other page has slug-keyed fact withdrawals or purges or a file at its own slug path, and no other page holds a
+  manual link, relationship date, timeline entry or raw payload that differs from the canonical page's. The apply
+  merges each other page into the canonical one. Links in every role, link transitions, timeline rows, raw data,
+  attachments, user-added tags, free-text aliases and facts other pages assert move to it; an exact duplicate, or a link
+  re-derived from the shared body, is dropped. The twin's slug becomes an alias. The twin forgets the file, is marked
+  `origin_twin` and is soft-deleted (the file is untouched), and the 72 h retention purge removes it database-only.
+  Its receipt (`origin_twin_resolved`) lists every frontmatter key of the twin the canonical page lacks or holds
+  differently, with the twin's value, plus the restore command. The canonical page's frontmatter comes from the file,
+  so add any key you want to keep to the file.
+- **A decision** (a reason): listed with the commands to decide it, never resolved by a plain apply. With
+  `--slug <kept-slug>` the preview offers only to *detach* the other pages: they forget the file, are marked
+  `origin_twin` and stay live as database-only pages. Nothing is deleted.
+
+A page marked `origin_twin` never writes or removes a file again: `gbrain restore` brings back its own text as a
+database-only page, an edit publishes database-only, and an owner `--purge` is refused because its content is the
+canonical page's (the retention purge still removes it). A later file at its own slug path, imported by sync, clears the
+marker.
+
+The apply refuses [`origin_twin_mass_merge_refused`](error-codes.md#origin_twin_mass_merge_refused) when its merges
+would soft-delete more than half of the source's file-backed pages, unless `GBRAIN_ALLOW_MASS_RECONCILE=1`.
+
+**Sync-time heal.** After each successful managed sync, held files whose pages are still verified duplicates are merged
+the same way, at most 200 files per run and 1,000 twin pages per source per 24 h, and never on a dry run, under a remote
+job, with an unfinished sync cursor, or above the mass valve. `gbrain sync --json` reports it as
+`origin_twins_resolved`. Opt out with `gbrain config set sync.origin_twins.auto_resolve false` (default on, like
+`sync.slug_conflicts.auto_remove`).
+
+**The index.** Migration v257 builds the partial unique index `pages_live_origin_key` (one live page per recorded
+origin; `CREATE UNIQUE INDEX CONCURRENTLY` on Postgres) only when the brain has no twins. With twins the migration
+changes nothing and succeeds, and doctor's `origin_twins` check reports "Index pending". Once the last group is
+resolved, the repair's apply builds the index.
+
 ### Rename identity
 
 When sync cannot confirm an inexact Git rename (#6729), it imports the pair as a

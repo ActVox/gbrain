@@ -38,6 +38,7 @@ import { bodyStagingGoneError, LIVE_STAGING_STATES } from '../engine-sql/page-bo
 import { segmentedPageSearchable } from './searchable.ts';
 import { stableJson } from './digest.ts';
 import { pageBodyOverCeilingError } from '../page-body/page-shape.ts';
+import { assertOriginUnclaimed } from './origin-guard.ts';
 
 const BODY_KEYS = new Set(['compiled_truth', 'timeline', 'content']);
 
@@ -160,6 +161,7 @@ export async function sealSegmentedPage(tx: Pick<BrainEngine, 'executeRaw'>, pag
 export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyInput): Promise<SegmentedApplied> {
   const { prepared } = input;
   let pageId = input.pageId;
+  await assertOriginUnclaimed(tx, { sourceId: input.sourceId, slug: input.slug, pageId, sourcePath: input.meta.source_path ?? null, revive: true });
   if (prepared.createRows) {
     // A create inserts its manifest rows before the flip checks its staging: a staging a fact purge aborted (and whose
     // claim-bearing texts it deleted) refuses here, not on the manifest's text foreign key.
