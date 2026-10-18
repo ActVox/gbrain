@@ -13,7 +13,7 @@
  */
 import { afterEach, expect, test } from 'bun:test';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, closeSync } from 'node:fs';
+import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { commitGitTargets, gitStepTimeoutMs, INDEX_LOCK_GRACE_FOR_TESTS } from '../src/core/persistence/effect-git.ts';
@@ -57,6 +57,18 @@ const until = async (done: () => boolean, ms = 20_000) => {
   for (const deadline = Date.now() + ms; !done() && Date.now() < deadline;) await Bun.sleep(10);
   expect(done()).toBe(true);
 };
+/** Another user's git on this host (a CI agent, a system service) cannot be inspected, so it blocks every proof while it runs. */
+const foreignGit = () => process.platform === 'linux' && readdirSync('/proc').some(pid => {
+  if (!/^\d+$/.test(pid)) return false;
+  try { if (!readFileSync(`/proc/${pid}/comm`, 'utf8').startsWith('git')) return false; } catch { return false; }
+  try { readdirSync(`/proc/${pid}/fd`); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EACCES'; }
+});
+/** Whether a reclaim can be proven here now: the process table is visible and no uninspectable git runs (waited out up to 30 s). */
+async function canProve(): Promise<boolean> {
+  if (blind) return false;
+  for (const deadline = Date.now() + 30_000; foreignGit() && Date.now() < deadline;) await Bun.sleep(100);
+  return !foreignGit();
+}
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 async function writerLock(home: string) {
@@ -103,7 +115,7 @@ test('probe: a git SIGKILLed while it holds the index lock leaves a 0-byte lock,
     await expect(commitGitTargets(root, ['a.md'], undefined, undefined, owner)).rejects.toMatchObject({ code: 'git_index_locked' });
     expect(existsSync(lock)).toBe(true);
     age(lock, RECLAIM_MIN_AGE_MS + 1_000);
-    if (blind) {
+    if (!(await canProve())) {
       await expect(commitGitTargets(root, ['a.md'], undefined, undefined, owner)).rejects.toMatchObject({ code: 'git_index_locked' });
       expect(existsSync(lock)).toBe(true);
       expect(reclaims).toEqual([]);
@@ -179,7 +191,7 @@ test('probe: a live git running in the checkout, or pointed at it through GIT_DI
       live.kill('SIGKILL');
       await until(() => !alive(live.pid!));
     }
-    if (!blind) {
+    if (await canProve()) {
       expect((await commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: writer })).get('a.md')).toEqual({ git: 'committed' });
       expect(existsSync(lock)).toBe(false);
     }
@@ -210,7 +222,7 @@ test('probe: a git SIGKILLed mid-commit (holding index.lock in its pre-commit ho
     await expect(commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: writer })).rejects.toMatchObject({ code: 'git_index_locked' });
     expect(existsSync(lock)).toBe(true);
     age(lock, INDEX_LOCK_GRACE_FOR_TESTS + 60_000);
-    if (blind) {
+    if (!(await canProve())) {
       await expect(commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: writer })).rejects.toMatchObject({ code: 'git_index_stale' });
       expect(existsSync(lock)).toBe(true);
     } else {
@@ -230,7 +242,7 @@ test('a lock replaced between the proof and the reclaim (a new git took it) is p
   age(lock, RECLAIM_MIN_AGE_MS + 1_000);
   await withEnv({ GBRAIN_HOME: home }, async () => {
     const proof = proveIndexLockAbandoned(lock, root, INDEX_LOCK_GRACE_FOR_TESTS);
-    if (blind) { expect(proof).toMatchObject({ abandoned: false, reason: blind }); return; }
+    if (!(await canProve())) { expect(proof).toMatchObject({ abandoned: false }); return; }
     expect(proof).toMatchObject({ abandoned: true, size: 0 });
     // A new git removes nothing of ours: the old lock goes and a new one takes its name (a new inode).
     rmSync(lock);
@@ -263,7 +275,7 @@ test('without the writer lock, or with a lock that holds content and is not stal
     const held = await writerLock(home);
     await expect(commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: held })).rejects.toMatchObject({ code: 'git_index_locked' });
     expect(readFileSync(lock, 'utf8')).toBe('partial index');
-    if (!blind) {
+    if (await canProve()) {
       age(lock, INDEX_LOCK_GRACE_FOR_TESTS + 60_000);
       expect((await commitGitTargets(root, ['a.md'], undefined, undefined, { writerLock: held })).get('a.md')).toEqual({ git: 'committed' });
       expect(existsSync(lock)).toBe(false);
@@ -319,7 +331,7 @@ test('probe: the writer recovers on its own: a Git effect parked by a held lock 
     await put(ctx, 'notes/second');
     const second = await gitEffect(engine, 'notes/second');
     await runOnly(engine, ctx, second.id);
-    if (blind) {
+    if (!(await canProve())) {
       expect(existsSync(lock)).toBe(true);
       expect(await gitEffect(engine, 'notes/first')).toMatchObject({ state: 'failed', error_code: 'targets_parked' });
       return;

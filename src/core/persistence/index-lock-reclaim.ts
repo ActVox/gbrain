@@ -88,8 +88,14 @@ export function processTableBlind(): string | null {
 /** The git environment variables that place a process's repository or index. */
 const GIT_LOCATION_VARIABLES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'];
 
-/** A process that holds the lock or runs git in the checkout, or a git process this process cannot inspect. */
+/**
+ * A process that holds the lock or runs git in the checkout, or a git process this process cannot inspect.
+ * A process that has the lock open is named first, then a git in the checkout, then a git that cannot be
+ * inspected, so a refusal names the actual holder when there is one.
+ */
 function liveHolder(lock: { dev: number; ino: number }, roots: string[]): string | null {
+  const opaque: string[] = [];
+  const inRepository: string[] = [];
   for (const pid of readdirSync('/proc')) {
     if (!/^\d+$/.test(pid)) continue;
     let comm: string;
@@ -102,25 +108,28 @@ function liveHolder(lock: { dev: number; ino: number }, roots: string[]): string
       if (opened.dev === lock.dev && opened.ino === lock.ino) return `process ${pid} (${comm}) has the lock open`;
     }
     if (!comm.startsWith('git')) continue;
-    if (fds === null) return `git process ${pid} (${comm}) belongs to another user, so its open files cannot be checked`;
+    if (fds === null) { opaque.push(`git process ${pid} (${comm}) belongs to another user, so its open files cannot be checked`); continue; }
     let cwd: string;
     let environ: string;
     try {
       cwd = readlinkSync(`/proc/${pid}/cwd`).replace(/ \(deleted\)$/, '');
       environ = readFileSync(`/proc/${pid}/environ`, 'utf8');
     } catch (error) {
-      if (gone(error)) continue;
-      return `git process ${pid} (${comm}) could not be inspected`;
+      if (!gone(error)) opaque.push(`git process ${pid} (${comm}) could not be inspected`);
+      continue;
     }
-    if (inside(cwd, roots)) return `git process ${pid} (${comm}) is running in the checkout`;
+    if (inside(cwd, roots)) { inRepository.push(`git process ${pid} (${comm}) is running in the checkout`); continue; }
     for (const entry of environ.split('\0')) {
       const at = entry.indexOf('=');
       if (at < 0 || !GIT_LOCATION_VARIABLES.includes(entry.slice(0, at))) continue;
       const value = entry.slice(at + 1);
-      if (value && inside(canonical(isAbsolute(value) ? value : resolve(cwd, value)), roots)) return `git process ${pid} (${comm}) uses this repository through ${entry.slice(0, at)}`;
+      if (value && inside(canonical(isAbsolute(value) ? value : resolve(cwd, value)), roots)) {
+        inRepository.push(`git process ${pid} (${comm}) uses this repository through ${entry.slice(0, at)}`);
+        break;
+      }
     }
   }
-  return null;
+  return inRepository[0] ?? opaque[0] ?? null;
 }
 
 /**
