@@ -10,15 +10,20 @@
  * classifier), and no file is created or changed. A file-backed page whose
  * file is missing is still skipped (`mirror_unavailable`) before any
  * classifier call, and a file-backed page with its file still gets the claim
- * md-first in both copies (an unbound source: a claimed one fences the legacy
- * md-first writer). On Postgres the database-side cases bind the source first
+ * md-first in both copies on an unbound source. On a source with a canonical
+ * owner (bound before the run, or bound by the run's own first put_page, as
+ * PGLite does automatically) a file-backed page gets the claim through
+ * put_page too, so a mixed batch never reaches the fenced md-first writer.
+ * On Postgres the database-side cases bind the source first
  * (`claimWorktree`, the claim PGLite makes on its first coordinated write); on
  * Postgres a database-only page of an unbound source is skipped
  * (`owner_unavailable`) while the run's file-backed pages still get claims.
  * Fails when: the bootstrap requires a physical file before choosing the
  * database or file branch (the pre-fix path): every db_only page is skipped
  * as `mirror_unavailable`, and with write-through off the claim is appended
- * to the checkout file.
+ * to the checkout file; or a file-backed page of a bound source takes the
+ * md-first branch, whose file write is refused (writer_coordinator_required)
+ * and aborts the batch.
  * Seams: `__setChatTransportForTests` (stub classifier, no paid call).
  * PGLite always, Postgres when DATABASE_URL is set.
  */
@@ -163,6 +168,41 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect({ extracted: r.claims_extracted, file: fenceClaims(b.file()!), fileKept: b.file()!.includes('DB-BODY-MARKER'), takes: await b.takes() })
           .toEqual({ extracted: 1, file: [CLAIM], fileKept: true, takes: [CLAIM] });
       }, { bound: false });
+    }, 180_000);
+
+    const ESSAY = 'writing/acme-example-essay';
+    const essayPath = (b: Brain) => join(b.root, `${ESSAY}.md`);
+    const essayTakes = async (b: Brain) => (await b.engine.executeRaw<{ claim: string }>(
+      "SELECT t.claim FROM takes t JOIN pages p ON p.id = t.page_id WHERE p.source_id = 'default' AND p.slug = $1 ORDER BY t.row_num", [ESSAY])).map(r => r.claim);
+
+    if (backend === 'pglite') test('D-19 mixed order, unbound PGLite: after the database-only put_page binds the source, a file-backed page is routed through put_page and the batch finishes', async () => {
+      await withBrain(databaseUrl, async b => {
+        writeFileSync(join(b.root, 'gbrain.yml'), 'storage:\n  db_only:\n    - concepts/\n');
+        await b.engine.putPage(ESSAY, { type: 'writing', title: 'Acme Example essay', compiled_truth: BODY });
+        await b.engine.executeRaw("UPDATE pages SET source_path = $1, updated_at = now() - interval '1 hour' WHERE source_id = 'default' AND slug = $2", [`${ESSAY}.md`, ESSAY]);
+        const snapshot = (await b.engine.readPageSnapshot(ESSAY, { sourceId: 'default' }))!;
+        const essay = serializePageToMarkdown(snapshot.page, snapshot.tags);
+        mkdirSync(dirname(essayPath(b)), { recursive: true });
+        writeFileSync(essayPath(b), essay);
+        const r = await expectUnitNotAborted(() => b.run());
+        const body = await b.body();
+        expect({ extracted: r.claims_extracted, skipped: r.skipped, file: b.file(), fence: fenceClaims(body),
+          essayFile: readFileSync(essayPath(b), 'utf8') === essay, essayTakes: await essayTakes(b) })
+          .toEqual({ extracted: 1, skipped: [{ slug: ESSAY, reason: 'source_changed' }], file: null, fence: [CLAIM], essayFile: true, essayTakes: [] });
+      }, { bound: false });
+    }, 180_000);
+
+    test('D-19 bound source: a coordinated file-backed page gets the claim through put_page in both copies', async () => {
+      await withBrain(databaseUrl, async b => {
+        const { operations } = await import('../../src/core/operations.ts');
+        const putPage = operations.find(operation => operation.name === 'put_page')!;
+        await putPage.handler({ engine: b.engine, config: { engine: b.engine.kind }, logger: { info() {}, warn() {}, error() {} }, dryRun: false, remote: false, sourceId: 'default' } as never,
+          { slug: ESSAY, content: `---\ntype: writing\ntitle: Acme Example essay\n---\n\n${BODY}\n` });
+        const r = await expectUnitNotAborted(() => b.run());
+        const essay = readFileSync(essayPath(b), 'utf8');
+        expect({ extracted: r.claims_extracted, skipped: r.skipped, essayFile: fenceClaims(essay), essayKept: essay.includes('DB-BODY-MARKER'), essayTakes: await essayTakes(b) })
+          .toEqual({ extracted: 1, skipped: [{ slug: SLUG, reason: 'mirror_unavailable' }], essayFile: [CLAIM], essayKept: true, essayTakes: [CLAIM] });
+      }, { bound: true });
     }, 180_000);
   });
 }

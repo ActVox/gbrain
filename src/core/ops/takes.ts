@@ -358,7 +358,7 @@ const think: Operation = {
 
     // #2556: `take` was gated (safeTake) but never EXECUTED — runThink ignores
     // opts.take, so a local `take: true` silently persisted nothing. Persist
-    // through the coordinated takes_add mutation; refusals surface as
+    // md-first through the canonical takes write-through; refusals surface as
     // loud machine-stable warnings + take_row:null. Remote stays blocked above.
     let takeRow: number | null = null;
     if (safeTake) {
@@ -369,6 +369,7 @@ const think: Operation = {
         const persisted = await persistTakeFromSynthesis(ctx.engine, result, {
           anchor: String(p.anchor),
           sourceId: ctx.sourceId,
+          lockTimeoutMs: 2000,
         });
         takeRow = persisted.take_row;
         for (const w of persisted.warnings) result.warnings.push(w);

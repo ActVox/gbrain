@@ -28,7 +28,7 @@ import {
   resolveTakesWritePath,
   TakesWriteError,
 } from './takes-write.ts';
-import { managedPersistenceEnabled } from './persistence/ownership.ts';
+import { getWorktreeBinding, managedPersistenceEnabled } from './persistence/ownership.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from './write-through.ts';
 import { isDbOnly, loadStorageConfig } from './storage-config.ts';
 import { serializePageToMarkdown } from './markdown.ts';
@@ -282,14 +282,19 @@ export async function extractTakesFromPages(
     // The database is the page's copy of record on a managed brain, and on an
     // unmanaged one when write-through is off or the page sits in a declared
     // storage.db_only directory: its takes are composed from the database
-    // snapshot and published through put_page, never from a file.
-    const fromDatabase = managedJournalWrites || (!dryRun && await databaseOnlyPage(engine, page.slug, page.source_id));
+    // snapshot and published through put_page, never from a file. A source
+    // with a canonical owner (bound before the run, or by this run's first
+    // put_page) fences the md-first writer, so its file-backed pages publish
+    // through put_page too.
+    const databaseOnly = !dryRun && await databaseOnlyPage(engine, page.slug, page.source_id);
+    const ownedFileBacked = !dryRun && !managedJournalWrites && !databaseOnly && await getWorktreeBinding(engine, page.source_id) !== null;
+    const fromDatabase = managedJournalWrites || databaseOnly || ownedFileBacked;
 
     // #4473: locate a file-backed page's markdown home BEFORE the LLM call — a
     // page the fence writer would refuse must not burn classifier budget
     // (skipped pages hold no takes, so every future run would re-classify them).
     let mdPath: string | null = null;
-    if (!dryRun && !fromDatabase) {
+    if (!dryRun && (!fromDatabase || ownedFileBacked)) {
       try {
         const { path } = await resolveTakesWritePath(engine, repoDir, page.slug, page.source_id);
         if (existsSync(path)) mdPath = path;
