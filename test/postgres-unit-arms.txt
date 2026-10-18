@@ -271,7 +271,6 @@ test/pathological/c2-url-clone-fences.test.ts
 test/pathological/c4-bundle-stuck-recovery.test.ts
 test/pathological/c5-writer-transfer-cancel.test.ts
 test/pathological/c7-content-receipt-root.test.ts
-test/pathological/d-7013-conversation-facts-zero-yield.test.ts
 test/pathological/d1-unfenced-facts-overwrite.test.ts
 test/pathological/d10-derived-atom-file-overwrite.test.ts
 test/pathological/d11-derived-retired-atom-unlink.test.ts
@@ -298,6 +297,7 @@ test/pathological/facts-mirror-failures.test.ts
 test/pathological/h1-zero-yield-atom-reextract.test.ts
 test/pathological/h2-git-effect-moved-remote.test.ts
 test/pathological/h3-chronicle-partial-generation.test.ts
+test/pathological/h4-conversation-facts-zero-yield.test.ts
 test/pathological/w1-write-through-staging-window.serial.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
