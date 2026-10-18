@@ -38,6 +38,7 @@ export const ISOLATE_SITES = {
   'maintain.cycle_sources': 'A-41',
   'patterns.ground_pages': 'A-23',
   'patterns.ground_timeline_appends': 'A-23',
+  'links.extract_stale': 'A-1',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
@@ -85,11 +86,14 @@ function sqlstateFailure(state: string): { code: string; scope: 'run' | 'item'; 
 const RUN_ERRNOS = new Set(['ENOSPC', 'EMFILE', 'ENFILE', 'EROFS', 'EDQUOT']);
 const ITEM_ERRNOS = new Set(['EACCES', 'EPERM', 'ENOENT', 'ELOOP', 'EISDIR', 'ENOTDIR', 'ENAMETOOLONG', 'EILSEQ']);
 const RUN_ERROR_NAMES: Record<string, string> = { AbortError: 'aborted', LockStolenError: 'lock_stolen', BudgetExhausted: 'budget_exhausted' };
+/** Typed refusals of one item raised as plain errors: content, because the item fails the same way until it or its source changes. */
+const ITEM_ERROR_NAMES: Record<string, string> = { PageSourceMissingError: 'unknown_source' };
 
 function classifyOne(error: unknown): ClassifiedItemFailure | null {
   const message = error instanceof Error ? error.message : String(error);
   const name = (error as { name?: unknown } | null)?.name;
   if (typeof name === 'string' && RUN_ERROR_NAMES[name]) return { code: RUN_ERROR_NAMES[name]!, scope: 'run', class: 'transient', message, requestId: null };
+  if (typeof name === 'string' && ITEM_ERROR_NAMES[name]) return { code: ITEM_ERROR_NAMES[name]!, scope: 'item', class: 'content', message, requestId: null };
   const pending = acceptedPendingReceipt(error);
   if (pending) return { code: 'write_pending', scope: 'pending', class: 'transient', message, requestId: pending.request_id };
   if (error instanceof OperationError) {

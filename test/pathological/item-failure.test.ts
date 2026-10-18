@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import { CODES } from '../../src/core/error-registry.ts';
 import { classifyItemFailure, CONTENT_ITEM_CODES, ItemRun, RUN_SCOPED_CODES } from '../../src/core/item-failure.ts';
 import { OperationError } from '../../src/core/ops/contract.ts';
+import { PageSourceMissingError } from '../../src/core/page-state/guards.ts';
 import { runScopedErrors } from './harness.ts';
 
 const op = (code: string, extra: Partial<OperationError> = {}) => Object.assign(new OperationError(code as never, `refused: ${code}`), extra);
@@ -32,6 +33,11 @@ describe('classifyItemFailure', () => {
 
   test('an unknown error is an item failure that never counts as content', () => {
     expect(classifyItemFailure(new TypeError('x is undefined'))).toMatchObject({ scope: 'item', class: 'transient', code: 'internal' });
+  });
+
+  test('a missing page source (#6808, PageSourceMissingError) is a content failure of the item; an untyped error with its text is not', () => {
+    expect(classifyItemFailure(new PageSourceMissingError('ghost-example'))).toMatchObject({ scope: 'item', class: 'content', code: 'unknown_source' });
+    expect(classifyItemFailure(new Error('Page source does not exist: ghost-example'))).toMatchObject({ scope: 'item', class: 'transient', code: 'internal' });
   });
 
   test('the cause chain is walked', () => {

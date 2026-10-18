@@ -3038,7 +3038,8 @@
           "49 segmenter_version integer/int4 NULL",
           "50 body_flags jsonb/jsonb NULL",
           "51 truth_lead text/text NULL",
-          "52 timeline_lead text/text NULL"
+          "52 timeline_lead text/text NULL",
+          "53 links_extract_failure jsonb/jsonb NULL"
         ],
         "flags": "relkind=r rls=true force_rls=false"
       },

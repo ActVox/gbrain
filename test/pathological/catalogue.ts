@@ -57,4 +57,6 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'patterns.ground_timeline_appends': { file: 'test/pathological/a23-patterns-grounding.test.ts',
     item: 'a refused timeline-append page is recorded and the other page still grounds',
     run: 'a run-scoped error while grounding timeline appends still stops grounding' },
+  'links.extract_stale': { file: 'test/pathological/a1-links-extract.test.ts',
+    item: 'A-1 item: a page whose derive throws is reported', run: 'A-1 run: a run-scoped error at one page stops the unit' },
 };
