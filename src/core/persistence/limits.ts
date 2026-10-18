@@ -25,14 +25,17 @@ export function parseJournalConfigValue(key:string,value:string):number {
 }
 /**
  * Database configuration applies to every server sharing this brain. An unset `worktree_recovery_bytes` defaults to
- * room for the largest page `pages.max_bytes` admits (page-body/limits.ts `pageRecoveryBytes`, never below 256 MiB); an
+ * room for the largest page `pages.max_bytes` admits and the largest page stored in segments (page-body/limits.ts
+ * `pageRecoveryBytes`, never below 256 MiB; the stored maximum is one probe of pages_segmented_body_bytes_idx, v258); an
  * engine that is not PGLite (or a stub without a `kind`) counts as Postgres, the larger ceiling.
  */
 export async function readJournalLimits(engine:SqlEngine & { kind?: string },overrides?:Partial<JournalLimits>):Promise<JournalLimits> {
-  const rows=await engine.executeRaw<{key:string;value:string}>(`SELECT key,value FROM config WHERE key LIKE 'persistence.limits.%' OR key IN ('${PAGE_BODY_CONFIG_KEYS.segmentedStorage}','${PAGE_BODY_CONFIG_KEYS.maxBytes}')`);
-  const configured=new Map(rows.map(row=>[row.key,row.value]));
+  const rows=await engine.executeRaw<{key:string|null;value:string|null}>(`SELECT key,value FROM config WHERE key LIKE 'persistence.limits.%' OR key IN ('${PAGE_BODY_CONFIG_KEYS.segmentedStorage}','${PAGE_BODY_CONFIG_KEYS.maxBytes}')
+    UNION ALL SELECT NULL,max(body_bytes)::text FROM pages WHERE body_storage='segmented'`);
+  const configured=new Map(rows.filter(row=>row.key!==null && row.value!==null).map(row=>[row.key!,row.value!]));
+  const storedSegmented=Number(rows.find(row=>row.key===null)?.value ?? 0);
   const limits={...DEFAULT_JOURNAL_LIMITS,worktreeRecoveryBytes:pageRecoveryBytes(engine.kind === 'pglite' ? 'pglite' : 'postgres',configured.get(PAGE_BODY_CONFIG_KEYS.segmentedStorage) ?? null,
-    configured.get(PAGE_BODY_CONFIG_KEYS.maxBytes) ?? null,DEFAULT_JOURNAL_LIMITS.worktreeRecoveryBytes)};
+    configured.get(PAGE_BODY_CONFIG_KEYS.maxBytes) ?? null,DEFAULT_JOURNAL_LIMITS.worktreeRecoveryBytes,storedSegmented)};
   for(const key of Object.keys(limits) as Array<keyof JournalLimits>) {
     const value=configured.get(journalLimitKey(key));
     if(value!==undefined) limits[key]=parseJournalConfigValue(journalLimitKey(key),value);

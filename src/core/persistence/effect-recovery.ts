@@ -7,7 +7,7 @@ import type { Action } from '../agent-output.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { materializePageSnapshot } from '../page-state/materialize.ts';
 import type { JournalLimits } from './model.ts';
-import { readJournalLimits } from './limits.ts';
+import { journalLimitKey, readJournalLimits } from './limits.ts';
 import { lockCounters } from './journal.ts';
 import { digest, sha256 } from './digest.ts';
 import { getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
@@ -67,7 +67,7 @@ export async function reserveEffectRecovery(engine: BrainEngine, effect: Persist
     { fix: effectStatusFix(effect) });
   if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > limits.brainRecoveryBytes || bytes > limits.worktreeRecoveryBytes) {
     throw opError('request_too_large', 'The physical mirror exceeds recovery capacity; the withdrawal remains committed.',
-      `Mirroring this withdrawal into its file in source ${effect.source_id} needs ${bytes} bytes of recovery space, more than the brain or worktree recovery limit (${Math.min(limits.brainRecoveryBytes, limits.worktreeRecoveryBytes)} bytes), so the file was not touched. Inspect the owner's effects and tell the user; the canonical file still holds the withdrawn text until it is mirrored.`,
+      `Mirroring this withdrawal into its file in source ${effect.source_id} needs ${bytes} bytes of recovery space, more than the recovery budget (${journalLimitKey('worktreeRecoveryBytes')} ${limits.worktreeRecoveryBytes}, ${journalLimitKey('brainRecoveryBytes')} ${limits.brainRecoveryBytes}), so the file was not touched. Inspect the owner's effects and tell the user: a configured budget is theirs to raise (an unset worktree budget holds the largest page stored in segments); the canonical file still holds the withdrawn text until it is mirrored.`,
       { fix: effectStatusFix(effect) });
   }
   await engine.transaction(async tx => {
