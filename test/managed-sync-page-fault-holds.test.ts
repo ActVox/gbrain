@@ -37,6 +37,7 @@ import { readGitHold, readGitSourceHolds, requestGitHoldRetry } from '../src/cor
 import { readManagedSyncFailures } from '../src/core/persistence/sync-failures.ts';
 import { headCommittedBytes, HOLD_ATTEMPTS_NEEDS_HUMAN, pinnedWorktreeConflict } from '../src/core/persistence/sync-page-fault.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { rebuildPendingPageProjections } from '../src/core/page-state/projections.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -280,6 +281,12 @@ test('a page edited in the database after an interrupted pass, whose file change
     const parsed = parseMarkdown(note('c two.'), 'c.md');
     const page = { type: parsed.type, title: parsed.title, compiled_truth: parsed.compiled_truth, timeline: parsed.timeline ?? '', frontmatter: parsed.frontmatter };
     await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.putPage('c', { ...page, content_hash: contentHash(page) }, { sourceId: f.id }), TEST_WRITE_ATTRIBUTION));
+    // GBRA-130 (4b Postgres sweep): a raw putPage leaves the text projection a revision behind until the owner's resident
+    // rebuild seals it; on Postgres that rebuild races this sync, and an unsealed c is admitted for projection_work instead
+    // of waived. Seal it first, so c holds exactly what the file would import as the scenario states.
+    await rebuildPendingPageProjections(engine);
+    const [cProjection] = await engine.executeRaw<{ sealed: boolean }>("SELECT text_projection_revision=knowledge_revision AS sealed FROM pages WHERE source_id=$1 AND slug='c'", [f.id]);
+    expect(cProjection!.sealed).toBe(true);
     const resumed = await performManagedSync(engine, f.opts);
     expect(resumed).toMatchObject({ status: 'synced', toCommit: pin, held_count: 1, held: [{ path: 'b.md', code: 'file_drift' }], modified: 1, waived: { imports: 1 } });
     expect(resumed.managedWrite).toBeUndefined();
