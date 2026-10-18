@@ -30,6 +30,8 @@ export const ISOLATE_SITES = {
   'consolidate.buckets': 'A-22',
   'extract_facts.expire_deleted': 'A-21',
   'maintain.cycle_sources': 'A-41',
+  'patterns.ground_pages': 'A-23',
+  'patterns.ground_timeline_appends': 'A-23',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;

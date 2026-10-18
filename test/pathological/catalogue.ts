@@ -27,4 +27,10 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'maintain.cycle_sources': { file: 'test/pathological/a41-maintain-sources.test.ts',
     item: 'a source whose cycle throws is blocked with its code and the next source still cycles',
     run: "a run-scoped error in one source's cycle still stops maintain" },
+  'patterns.ground_pages': { file: 'test/pathological/a23-patterns-grounding.test.ts',
+    item: 'a refused leftover pattern page is reported, the new page grounds and the watermark is stamped',
+    run: 'a run-scoped error while grounding a page still fails the phase' },
+  'patterns.ground_timeline_appends': { file: 'test/pathological/a23-patterns-grounding.test.ts',
+    item: 'a refused timeline-append page is recorded and the other page still grounds',
+    run: 'a run-scoped error while grounding timeline appends still stops grounding' },
 };
