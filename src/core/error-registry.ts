@@ -28,6 +28,11 @@ export interface CodeEntry {
    * still carry one, so it stays explained here, and it never returns to `reasons`.
    */
   retired_reasons?: Readonly<Record<string, string>>;
+  /**
+   * A reason whose next step differs in kind from the code's (a lock that waiting never frees needs the user, not a retry):
+   * its class and exit replace the code's on the envelope and the CLI exit. Every key is also in `reasons`.
+   */
+  reason_overrides?: Readonly<Record<string, { class: ErrorClass; exit?: number }>>;
   /** Repo-relative anchor; default `docs/guides/error-codes.md#<code>`. */
   docs?: string;
   /** Default prose suggestion when a site supplies none. */
