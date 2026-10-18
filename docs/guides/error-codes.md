@@ -1354,7 +1354,7 @@ More: [docs/guides/write-refusals.md#fetch_failed](../../docs/guides/write-refus
 |---|---|---|---|---|---|---|
 | A page's checkout file and its database copy differ, so the writer left both as they are instead of replacing one with the other; the item is held and the rest of the batch continues. | Replacing the file with the database copy (or the database copy with the file) would destroy an edit only the replaced copy holds: a hand edit sync has not imported, an unindexed file at the page's path, or a database edit the file never received (#6982). The file is replaceable only when it equals the live page or one of its recent page_versions rows. | If the file holds the newer edit, run gbrain sync --source <source> to import it; if the database copy is newer, re-save the page with write-through on; when both changed, ask the user which version to keep before retrying. | agent | `repeat the read that failed` | 1 | no |
 
-More: [docs/guides/write-refusals.md](../../docs/guides/write-refusals.md)
+More: [docs/guides/write-refusals.md#file_database_drift](../../docs/guides/write-refusals.md#file_database_drift)
 
 ### file_drift
 
