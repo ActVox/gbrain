@@ -21,4 +21,10 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'transcripts.ingest_session': { file: 'test/pathological/a2-transcripts-ingest.test.ts',
     item: 'item: a session the coordinator refuses is reported with its code and the other sessions land',
     run: 'run: a run-scoped failure inside a session stops the ingest' },
+  'google.contact': { file: 'test/pathological/a3-google-items.test.ts',
+    item: 'a failing contact and a failing event are counted, then held',
+    run: 'run: a run-scoped failure inside a contact stops the sweep and records no hold' },
+  'google.calendar_event': { file: 'test/pathological/a3-google-items.test.ts',
+    item: 'a failing contact and a failing event are counted, then held',
+    run: 'run: a run-scoped failure inside an event stops the sweep and records no hold' },
 };

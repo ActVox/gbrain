@@ -28,6 +28,8 @@ import { acceptedPendingReceipt } from './persistence/accepted-pending.ts';
 /** Every per-item loop that isolates its items, with the inventory row it fixes (reports/GBRA-130-inventory.md). */
 export const ISOLATE_SITES = {
   'transcripts.ingest_session': 'A-2',
+  'google.contact': 'A-3',
+  'google.calendar_event': 'A-3',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
