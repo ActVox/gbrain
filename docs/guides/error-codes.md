@@ -2066,6 +2066,18 @@ More: [docs/guides/repair.md#legacy-job-selection-invalid](../../docs/guides/rep
 
 More: [docs/guides/repair.md#legacy-jobs-active](../../docs/guides/repair.md#legacy-jobs-active)
 
+### legacy_lock_removal_refused
+
+<a id="legacy_lock_removal_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `gbrain pglite-repair --legacy-lock` refused to move a legacy PGLite lock aside: a process on this host still uses the data dir, or the data dir is on a network or shared filesystem. | The evidence the repair reads (kill -0, the process command, an open-file scan) covers only this host and PID namespace. A process that still holds the data dir, or a filesystem other hosts can mount, means the old owner may still be writing, and removing its lock would let two writers corrupt the brain. | Stop the process the message names (on a shared filesystem: every gbrain on every host that mounts it), then preview again with gbrain pglite-repair --legacy-lock --dry-run. | host_admin | `gbrain doctor --json` | 1 | no |
+
+Reasons: `live_holder`, `network_filesystem`.
+
+More: [docs/ENGINES.md#legacy-pglite-lock](../../docs/ENGINES.md#legacy-pglite-lock)
+
 ### local_conflict
 
 <a id="local_conflict"></a>
@@ -2636,9 +2648,13 @@ More: [docs/ENGINES.md#pg-statement-build-failed](../../docs/ENGINES.md#pg-state
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Another gbrain process holds this PGLite brain's single-writer lock. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait for the current command or server to close, then retry. Do not remove a live lock. | agent | `repeat the read that failed` | 1 | yes |
+| Another gbrain process holds this PGLite brain's single-writer lock. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait for the current command or server to close, then retry. Do not remove a live lock. Reason legacy_owner_unverified is different: a lock folder from an older gbrain whose owner cannot be proven dead never frees itself, so ask the user and run the read-only preview in fix (gbrain pglite-repair --legacy-lock --dry-run). | agent | `repeat the read that failed` | 1 | yes |
 
-Reasons: `timeout`, `live_serve`.
+Reasons: `timeout`, `live_serve`, `legacy_owner_unverified`.
+
+Override: reason `legacy_owner_unverified`: consent, exit 3, not retryable.
+
+More: [docs/ENGINES.md#legacy-pglite-lock](../../docs/ENGINES.md#legacy-pglite-lock)
 
 ### pglite_vector_index_too_large
 
