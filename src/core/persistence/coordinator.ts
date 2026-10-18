@@ -234,8 +234,7 @@ const TRANSIENT_RETRIES_KEY = PREPARATION_BUDGET_KEYS.transientRetries;
  * persistence.max_transient_retries. Null when the failure is not one, the `preparation_deadlines` switch is off
  * (nothing is counted and no backoff applies, as before), or the database cannot be read (released uncounted).
  */
-async function interruptionCharge(engine: BrainEngine, error: unknown): Promise<{ interruption: TransientInterruption; limit: number } | null> {
-  const interruption = transientInterruption(error);
+async function interruptionCharge(engine: BrainEngine, error: unknown, interruption = transientInterruption(error)): Promise<{ interruption: TransientInterruption; limit: number } | null> {
   if (!interruption) return null;
   if (isSharedReadFailure(error)) {
     if (chargedSharedReads.has(error as object)) return null;
@@ -252,7 +251,7 @@ async function interruptionCharge(engine: BrainEngine, error: unknown): Promise<
  * own statement before `markRecovering`: the request already holds its recovery record, which the expired-owner sweep
  * never takes, so a crash in between leaves the one charge for the owner's recovery to finish. Null when not charged.
  */
-async function chargedInterruption(engine: BrainEngine, row: WriteRequest, error: unknown): Promise<{ failure: PublicationFailure | null } | null> {
+export async function chargedInterruption(engine: BrainEngine, row: WriteRequest, error: unknown): Promise<{ failure: PublicationFailure | null } | null> {
   const charge = await interruptionCharge(engine, error);
   if (!charge) return null;
   try {
@@ -309,24 +308,33 @@ export async function finishPreparationStalled(engine: BrainEngine, row: WriteRe
   return engine.transaction(tx => completeWrite(tx, row, 'failed', {}, failure));
 }
 
+/**
+ * Flip lane C: releases a held claim whose work a transient interruption ended, charged in the transaction that releases
+ * or finishes it. A crash before it commits leaves the claim uncharged (the expired-owner sweep charges a preparing claim
+ * once), after it the charged outcome; never both. The release carries the backoff the charge scheduled
+ * (`next_attempt_at`), so no claim waits it out; past the limit the claim ends `failed`/`write_interrupted`. Null when
+ * nothing was charged (not an interruption, the switch off, or the database refused). `interruption` is the
+ * classification when the caller made it inside the cancelled publication (a lane group's release runs after it).
+ */
+export async function releaseChargedInterruption(engine: BrainEngine, row: WriteRequest, error: unknown, stage: PublicationStage,
+  reason = 'database_contention', interruption = transientInterruption(error)): Promise<WriteRequest | null> {
+  const charge = await interruptionCharge(engine, error, interruption);
+  if (!charge) return null;
+  const done = await engine.transaction(async tx => {
+    const attempts = await chargeTransientInterruption(tx, row);
+    if (attempts > charge.limit) return completeWrite(tx, row, 'failed', {}, withAttempt(writeInterruptedFailure(row, charge.interruption, attempts, charge.limit), stage));
+    await releaseUnpublishedClaim(tx, row, reason);
+    return null;
+  }).then(outcome => ({ outcome }), () => null);
+  if (!done) return null;
+  await faultPoint('persistence:interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
+  return done.outcome ?? (await getWriteRequestById(engine, row.id))!;
+}
+
 export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRequest, error: unknown,
   stage: PublicationStage = 'publication'): Promise<WriteRequest> {
-  const charge = await interruptionCharge(engine, error);
-  if (charge) {
-    // Flip lane C: charged in the transaction that releases or finishes the claim. A crash before it commits leaves the claim
-    // uncharged (the expired-owner sweep charges a preparing claim once), after it the charged outcome; never both. The
-    // release carries the backoff the charge scheduled (`next_attempt_at`), so no claim waits it out.
-    const done = await engine.transaction(async tx => {
-      const attempts = await chargeTransientInterruption(tx, row);
-      if (attempts > charge.limit) return completeWrite(tx, row, 'failed', {}, withAttempt(writeInterruptedFailure(row, charge.interruption, attempts, charge.limit), stage));
-      await releaseUnpublishedClaim(tx, row, 'database_contention');
-      return null;
-    }).then(outcome => ({ outcome }), () => null);
-    if (done) {
-      await faultPoint('persistence:interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
-      return done.outcome ?? (await getWriteRequestById(engine, row.id))!;
-    }
-  }
+  const charged = await releaseChargedInterruption(engine, row, error, stage);
+  if (charged) return charged;
   const failure = withAttempt(requestError(error), stage);
   if (mayReprepare(row, failure) || transientDatabaseFailure(error)) {
     await releaseUnpublishedClaim(engine, row, transientDatabaseFailure(error) ? 'database_contention' : 'revision_changed_repreparing');

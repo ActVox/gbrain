@@ -12,13 +12,15 @@ import type { Migration } from './types.ts';
 // a claim skips a queued row until then. Column-only, no backfill: existing rows
 // start at 0 and NULL (claimable now). Like v217 and v220 the columns are
 // migration-created (the `persistence_requests` CREATE TABLE of src/schema.sql
-// carries only the original columns) and no index references them.
+// carries only the original columns) and no index references them. No CHECK on
+// the counter: on Postgres an inline CHECK validates every existing row under the
+// ACCESS EXCLUSIVE lock the ALTER takes, and only an increment ever writes it.
 export const v261: Migration = {
   version: 261,
   name: 'persistence_request_transient_retries',
   idempotent: true,
   sql: `
-    ALTER TABLE persistence_requests ADD COLUMN IF NOT EXISTS transient_interruptions integer NOT NULL DEFAULT 0 CHECK (transient_interruptions >= 0);
+    ALTER TABLE persistence_requests ADD COLUMN IF NOT EXISTS transient_interruptions integer NOT NULL DEFAULT 0;
     ALTER TABLE persistence_requests ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz;
   `,
 };

@@ -324,7 +324,6 @@
       "persistence_requests.persistence_requests_sequence_key": "u UNIQUE (sequence)",
       "persistence_requests.persistence_requests_state_check": "c CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'recovering'::text, 'committed'::text, 'conflict'::text, 'failed'::text, 'cancelled'::text])))",
       "persistence_requests.persistence_requests_target_kind_check": "c CHECK ((target_kind = ANY (ARRAY['page'::text, 'skill_bundle'::text])))",
-      "persistence_requests.persistence_requests_transient_interruptions_check": "c CHECK ((transient_interruptions >= 0))",
       "persistence_requests.persistence_requests_worktree_id_fkey": "f FOREIGN KEY (worktree_id) REFERENCES persistence_worktrees(id)",
       "persistence_source_bindings.persistence_source_bindings_pkey": "p PRIMARY KEY (source_id)",
       "persistence_source_bindings.persistence_source_bindings_worktree_id_fkey": "f FOREIGN KEY (worktree_id) REFERENCES persistence_worktrees(id)",
