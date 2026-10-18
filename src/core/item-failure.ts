@@ -27,6 +27,7 @@ import { acceptedPendingReceipt } from './persistence/accepted-pending.ts';
 
 /** Every per-item loop that isolates its items, with the inventory row it fixes (reports/GBRA-130-inventory.md). */
 export const ISOLATE_SITES = {
+  'extract_facts.expire_deleted': 'A-21',
   'maintain.cycle_sources': 'A-41',
 } as const satisfies Record<string, string>;
 

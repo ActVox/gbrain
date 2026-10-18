@@ -18,6 +18,9 @@ export interface SiteCases {
 }
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
+  'extract_facts.expire_deleted': { file: 'test/pathological/a21-facts-expire-deleted.test.ts',
+    item: 'a refused deleted-page expiry is reported and the other pages still expire and reconcile',
+    run: 'a run-scoped error during a deleted-page expiry still stops extract_facts' },
   'maintain.cycle_sources': { file: 'test/pathological/a41-maintain-sources.test.ts',
     item: 'a source whose cycle throws is blocked with its code and the next source still cycles',
     run: "a run-scoped error in one source's cycle still stops maintain" },
