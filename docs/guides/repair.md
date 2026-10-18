@@ -1248,7 +1248,10 @@ gbrain doctor
 | `excluded:legitimate_duplicate` | The same claim and entity also has an active fact from another lane or an unsuspected session, so the claim is legitimate. | Never |
 
 Sessions that cannot be classified on this host (the harness transcript was
-pruned, the corpus file is gone) are counted as `unclassifiable` and kept.
+pruned, the corpus file is gone, or a corpus file or directory it could not
+read) are counted as `unclassifiable` and kept. Each unreadable corpus file or
+directory is listed as `unreadable_corpus_file` and counted in the
+`unreadable_corpus_files` residual; fix its permissions and preview again.
 `captured_facts_active` counts facts; the `self_capture` check counts corpus
 files. Clear both: quarantine the files with the commands `self_capture`
 prints, then expire the facts here.
