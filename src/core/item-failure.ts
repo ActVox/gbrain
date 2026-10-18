@@ -24,6 +24,7 @@
 import { OperationError, opError } from './ops/contract.ts';
 import { CODES } from './error-registry.ts';
 import { acceptedPendingReceipt } from './persistence/accepted-pending.ts';
+import { providerItemRefusal } from './ai/errors.ts';
 
 /** Every per-item loop that isolates its items, with the inventory row it fixes (reports/GBRA-130-inventory.md). */
 export const ISOLATE_SITES = {
@@ -46,6 +47,11 @@ export const ISOLATE_SITES = {
   'transcripts.ingest_session': 'A-2',
   'google.contact': 'A-3',
   'google.calendar_event': 'A-3',
+  'migrate_engine.loop_rows': 'A-31',
+  'effects.derived_retry_budget': 'A-11',
+  'propose_takes.pages': 'A-25',
+  'sync.import_files': 'A-18',
+  'extract_facts.phantom_redirect': 'A-24',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
@@ -97,6 +103,8 @@ function sqlstateFailure(state: string): { code: string; scope: 'run' | 'item'; 
 const RUN_ERRNOS = new Set(['ENOSPC', 'EMFILE', 'ENFILE', 'EROFS', 'EDQUOT']);
 const ITEM_ERRNOS = new Set(['EACCES', 'EPERM', 'ENOENT', 'ELOOP', 'EISDIR', 'ENOTDIR', 'ENAMETOOLONG', 'EILSEQ']);
 const RUN_ERROR_NAMES: Record<string, string> = { AbortError: 'aborted', LockStolenError: 'lock_stolen', BudgetExhausted: 'budget_exhausted' };
+/** A model or embedding provider's own failure (the gateway's error classes, an HTTP fetch that failed): never the database connection; a provider outage trips the breaker. */
+const AI_ERROR_NAMES = new Set(['AIServiceError', 'AITransientError', 'AIConfigError']);
 /** Typed refusals of one item raised as plain errors: content, because the item fails the same way until it or its source changes. */
 const ITEM_ERROR_NAMES: Record<string, string> = { PageSourceMissingError: 'unknown_source' };
 
@@ -123,6 +131,11 @@ function classifyOne(error: unknown): ClassifiedItemFailure | null {
   }
   if (typeof raw === 'string' && RUN_ERRNOS.has(raw)) return { code: 'disk_full', scope: 'run', class: 'transient', message, requestId: null };
   if (typeof raw === 'string' && ITEM_ERRNOS.has(raw)) return { code: 'unreadable_item', scope: 'item', class: 'content', message, requestId: null };
+  const refusal = providerItemRefusal(error);
+  if (refusal) return { code: refusal, scope: 'item', class: 'content', message, requestId: null };
+  if ((typeof name === 'string' && AI_ERROR_NAMES.has(name)) || /^fetch failed\b/i.test(message)) {
+    return { code: 'provider_error', scope: 'item', class: 'transient', message, requestId: null };
+  }
   if (/ECONNRESET|ECONNREFUSED|connection (terminated|ended|closed)|Connection terminated|socket hang up/i.test(message)) {
     return { code: 'connection_lost', scope: 'run', class: 'transient', message, requestId: null };
   }
@@ -132,7 +145,8 @@ function classifyOne(error: unknown): ClassifiedItemFailure | null {
 /**
  * Classifies one failure raised while processing a single item. The `cause`
  * chain is walked (at most 5 deep): a run-scoped stop anywhere in it wins, so a
- * wrapped abort or authorization failure is never one item's; otherwise the
+ * wrapped abort or authorization failure is never one item's (a model provider's
+ * own socket failure under a provider error stays the provider's); otherwise the
  * outermost recognized error decides.
  */
 export function classifyItemFailure(error: unknown): ClassifiedItemFailure {
@@ -141,7 +155,8 @@ export function classifyItemFailure(error: unknown): ClassifiedItemFailure {
   let current: unknown = error;
   for (let depth = 0; depth < 5 && current != null; depth++) {
     const classified = classifyOne(current);
-    if (classified?.scope === 'run') return depth === 0 ? classified : { ...classified, message };
+    const providerTransport = first?.code === 'provider_error' && classified?.code === 'connection_lost';
+    if (classified?.scope === 'run' && !providerTransport) return depth === 0 ? classified : { ...classified, message };
     if (classified && !first) first = depth === 0 ? classified : { ...classified, message };
     current = (current as { cause?: unknown }).cause;
   }
