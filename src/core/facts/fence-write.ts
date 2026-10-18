@@ -63,7 +63,7 @@ import type { TaintInput, WriteTrust } from '../trust/tier.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { urlCloneReadOnly } from '../url-clone.ts';
 import { bodyUnread } from '../page-body/page-shape.ts';
-import { fileBodyMatchesStored, fileDatabaseDriftToken, mirrorFileBody, readStoredBody } from './file-body-guard.ts';
+import { bestEffortStoredBodyMirror, fileBodyMatchesStored, fileDatabaseDriftToken, mirrorFileBody, readStoredBody } from './file-body-guard.ts';
 
 /** Resolved source binding for the entity page. */
 export interface FenceTarget {
@@ -580,7 +580,9 @@ export async function writeFactsToFence(
 
       const result = await maintenanceTransaction(engine, async tx => {
         if (fileBefore === null ? existsSync(filePath) : !existsSync(filePath) || readFileSync(filePath, 'utf-8') !== fileBefore) return null;
-        if (stored && !await withPageTierKept(tx, target, () => mirrorFileBody(tx, target.sourceId, target.slug, tmpBody, stored))) return null;
+        if (stored && !await bestEffortStoredBodyMirror(tx, target.sourceId, target.slug, stored,
+          savepoint => withPageTierKept(savepoint, target, () => mirrorFileBody(savepoint, target.sourceId, target.slug, tmpBody, stored)),
+          err => console.warn(`[facts.fence] FACTS_PAGE_MIRROR_FAILED: ${target.slug} (source ${target.sourceId}): ${err instanceof Error ? err.message : String(err)}; page cache stale until gbrain sync --source ${target.sourceId}`))) return null;
         if (!stored && await readStoredBody(tx, target.sourceId, target.slug, true)) return null;
         const inserted = await insertFenceRows(tx, target.sourceId, enriched, facts, derivation);
         if (fileBefore === null ? existsSync(filePath) : !existsSync(filePath) || readFileSync(filePath, 'utf-8') !== fileBefore) {

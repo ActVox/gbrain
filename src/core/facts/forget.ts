@@ -27,7 +27,7 @@ import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { markBeliefCommits } from '../belief/append.ts';
 import { classifyItemFailure } from '../item-failure.ts';
 import { withdrawnFact } from './withdrawal-overlay.ts';
-import { fileBodyMatchesStored, fileDatabaseDriftToken, mirrorFileBody, readStoredBody } from './file-body-guard.ts';
+import { bestEffortStoredBodyMirror, fileBodyMatchesStored, fileDatabaseDriftToken, mirrorFileBody, readStoredBody } from './file-body-guard.ts';
 
 export interface ForgetFactResult {
   /** True iff the row was found AND a forget was applied (fence or DB). */
@@ -310,7 +310,11 @@ export async function forgetFactInFence(
       if (!segmented) {
         const written = await maintenanceTransaction(engine, async tx => {
           if (!existsSync(filePath) || readFileSync(filePath, 'utf-8') !== body) return false;
-          if (stored ? !await mirrorFileBody(tx, row.source_id, slug, tmpBody, stored) : await readStoredBody(tx, row.source_id, slug, true)) return false;
+          if (stored ? !await bestEffortStoredBodyMirror(tx, row.source_id, slug, stored,
+            savepoint => mirrorFileBody(savepoint, row.source_id, slug, tmpBody, stored), err => {
+              mirrorWarning = `FACTS_PAGE_MIRROR_FAILED: ${slug} (source ${row.source_id}): ${err instanceof Error ? err.message : String(err)}; page cache stale until gbrain sync --source ${row.source_id}`;
+              console.warn(`[facts.forget] ${mirrorWarning}`);
+            }) : await readStoredBody(tx, row.source_id, slug, true)) return false;
           if (!existsSync(filePath) || readFileSync(filePath, 'utf-8') !== body) throw new WithdrawalFileChanged();
           assertSourceFilesystemActive();
           renameSync(tmpPath, filePath);
@@ -323,7 +327,7 @@ export async function forgetFactInFence(
           rmSync(tmpPath, { force: true });
           return held('during');
         }
-        return { ok: true, path: 'fence', reason };
+        return { ok: true, path: 'fence', reason, ...(mirrorWarning ? { warning: mirrorWarning } : {}) };
       }
       renameSync(tmpPath, filePath);
 
