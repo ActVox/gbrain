@@ -17,7 +17,7 @@
 import { realpathSync } from 'node:fs';
 import { relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
-import { hardenedGitStream, hardenedGitSync, hardenedStreamComplete, NulRecordSplitter } from '../hardened-git.ts';
+import { hardenedGitStream, hardenedStreamComplete, NulRecordSplitter } from '../hardened-git.ts';
 import { matchesAnyGlob, isSyncable } from '../sync.ts';
 import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
@@ -28,7 +28,7 @@ import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../company-brain/profile.ts';
 import { sha256 } from './digest.ts';
 import { sourceMirrorReadOnly } from './mirror-read-only.ts';
-import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGit, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
+import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGitAsync, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
 import { confirmedSyncDelta } from '../sync-rename-identity.ts';
 import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
@@ -523,9 +523,20 @@ async function readPassRow(exec: Exec, sourceId: string, incarnation: string): P
   return row?.value ?? null;
 }
 
-function revParse(gitRoot: string, rev: string): string | null {
-  const out = hardenedGitSync(gitRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`], { timeoutMs: 10_000, maxBytes: 4096 });
-  return out.ok ? out.stdout.toString('utf8').trim() || null : null;
+/** HEAD's commit and whether HEAD is detached (master's rule, sync-discovery.ts: a detached HEAD forces working mode). */
+async function readLevelHead(gitRoot: string, sourceId: string): Promise<{ head: string; detached: boolean }> {
+  const abbrev = syncGitAsync(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  abbrev.catch(() => undefined);
+  const head = await revParse(gitRoot, 'HEAD');
+  if (!head) throw new Error(`source ${sourceId}: HEAD does not name a commit, so there is no level to read`);
+  return { head, detached: (await abbrev).trim() === 'HEAD' };
+}
+
+/** A commit id, through a child process the event loop keeps running beside (a synchronous spawn held timers for 200+ ms on a loaded host). */
+async function revParse(gitRoot: string, rev: string): Promise<string | null> {
+  const chunks: Buffer[] = [];
+  const out = await hardenedGitStream(gitRoot, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`], { timeoutMs: 10_000, maxBytes: 4096, onChunk: chunk => { chunks.push(chunk); } });
+  return out.ok ? Buffer.concat(chunks).toString('utf8').trim() || null : null;
 }
 
 /**
@@ -595,10 +606,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const step = turnYield();
 
   t = timer();
-  const head = revParse(gitRoot, 'HEAD');
-  if (!head) throw new Error(`source ${sourceId}: HEAD does not name a commit, so there is no level to read`);
-  // Master's rule (sync-discovery.ts): a detached HEAD forces working mode.
-  const detached = syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
+  const { head, detached } = await readLevelHead(gitRoot, sourceId);
   const working = detached || (input.workingTree ?? workingConfig === 'true');
   const mode: 'committed' | 'working' = working ? 'working' : 'committed';
   timings.rev_parse = t();
@@ -691,7 +699,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   const attestationStatements = unproven.length ? await readAttestations(engine, engineKind, sourceId, incarnation, pages, unproven) : 0;
   timings.A = t();
 
-  const baselineCommit = (context.source.last_commit && revParse(gitRoot, context.source.last_commit)) || null;
+  const baselineCommit = (context.source.last_commit && await revParse(gitRoot, context.source.last_commit)) || null;
   // The baseline tree, read once when a page needs it (no record revision; design §2.3) or the bootstrap's legacy walk does,
   // so the classification itself never waits.
   let baselineTree: Map<string, GitTreeEntry> | null | undefined;
@@ -812,8 +820,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   if (candidates.length) {
     t = timer();
     const candidateIndex = new Map<string, GitIndexEntry>();
-    for (const path of candidates) { const entry = indexed(path); if (entry) candidateIndex.set(path, entry); }
-    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex);
+    for (const path of candidates) { if (step.due()) await step.pause(); const entry = indexed(path); if (entry) candidateIndex.set(path, entry); }
+    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex, { step });
     timings.Dp = (timings.Dp ?? 0) + t();
     t = timer();
     for (const [k, path] of candidates.entries()) {
@@ -1108,7 +1116,7 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
   const context = input.context ?? await resolveManagedSyncContext(engine, { sourceId: input.sourceId, noPull: true, dryRun: true });
   timings.context = t();
   t = timer();
-  const head = revParse(context.gitRoot, 'HEAD');
+  const head = await revParse(context.gitRoot, 'HEAD');
   timings.rev_parse = t();
   // The pass row, the request probe above its watermark and the open-set probe are one statement (one round trip).
   t = timer();
