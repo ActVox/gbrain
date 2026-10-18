@@ -9,6 +9,13 @@
  * trace), with whitespace collapsed and the per-call statement timeout masked. A hook that adds, drops or reorders a
  * statement for any other write fails here.
  *
+ * PGLite runs `pipelined` branches one after another, so its sequence is compared exactly. Postgres sends them together
+ * (page-state/transactions.ts `pipelined`): a branch's later statement goes out when its earlier one returns, so where
+ * two branches interleave varies run to run (put_page's origin claim probe beside the takes projection). There the
+ * publication is compared as its exact statement multiset plus its exact ordered tail from the effects insert (the
+ * canonical import queues none: from its fold's `RELEASE SAVEPOINT`, the end of its apply) to the commit, the stretch the
+ * hook runs in, which no pipelined call reaches.
+ *
  * PGLite here; Postgres through test/e2e/fold-hook-noop-6712-postgres.test.ts.
  * CAPTURE_FOLD_NOOP=1 rewrites the fixture for the engine under test (only ever from the pre-hook commit).
  */
@@ -105,7 +112,11 @@ for (const backend of testBackends()) {
         if (process.env.CAPTURE_FOLD_NOOP === '1') { mkdirSync(join(import.meta.dir, 'fixtures'), { recursive: true }); writeFileSync(FIXTURE, `${JSON.stringify({ ...golden, [backend]: got }, null, 1)}\n`); }
         expect(got.put_page!.length).toBeGreaterThan(5);
         expect(got.canonical_import!.length).toBeGreaterThan(5);
-        expect(got).toEqual(process.env.CAPTURE_FOLD_NOOP === '1' ? got : golden[backend]!);
+        const want = process.env.CAPTURE_FOLD_NOOP === '1' ? got : golden[backend]!;
+        const tailFrom = (sequence: string[]) => { const at = sequence.findLastIndex(sql => sql.startsWith('INSERT INTO persistence_effects (') || sql === 'RELEASE SAVEPOINT gbrain_pass_stamp_fold'); expect(at).toBeGreaterThan(0); return at; };
+        const shape = (sequences: Record<string, string[]>) => backend === 'pglite' ? sequences : Object.fromEntries(Object.entries(sequences).map(([write, sequence]) =>
+          [write, { statements: [...sequence].sort(), tail: sequence.slice(tailFrom(sequence)) }]));
+        expect(shape(got)).toEqual(shape(want));
       } finally { rmSync(home, { recursive: true, force: true }); }
     }, 180_000);
   });

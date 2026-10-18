@@ -89,14 +89,16 @@ export function episodeClosure(input: ClosureInput & { treePaths: Iterable<strin
  * every path answers alike on both sides, so the closure is known without the walk.
  */
 export async function passEpisodeClosure(input: { gitRoot: string; root: string; head: string; slugMode: 'git-root' | 'source-root'; episode: PassEpisode; pass: SyncSelection;
-  configuredSelection: SyncSelection; configured: boolean }): Promise<EpisodeClosure> {
+  configuredSelection: SyncSelection; configured: boolean;
+  /** The walk of `head`'s tree (default `walkTreeLevel`); a test replays one recorded listing instead of a `git` process per call. */
+  walk?: (visit: (path: string) => void) => Promise<void> }): Promise<EpisodeClosure> {
   const scope = relative(realpathSync.native(input.gitRoot), realpathSync.native(input.root)).split(sep).join('/');
   const closure: ClosureInput = { episode: input.episode.selection, pass: input.pass, configuredSelection: input.configuredSelection, configured: input.configured, scope, slugMode: input.slugMode };
   const tally: ClosureTally = { included: true, covers: true, released: 0 };
   if (sameUniverse(closure.episode, input.configured ? closure.configuredSelection : closure.pass, scope)) return closureOf(input.configured, tally);
   let stretch: string[] = [];
   faultPointNow('sync:closure_walk', { path: input.head });
-  await walkTreeLevel(input.gitRoot, input.head, '', path => {
+  await (input.walk ?? (visit => walkTreeLevel(input.gitRoot, input.head, '', visit)))(path => {
     stretch.push(path);
     if (stretch.length === CLOSURE_STRETCH) { tallyClosure(closure, stretch, tally); stretch = []; }
   });
