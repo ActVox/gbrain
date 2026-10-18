@@ -271,7 +271,7 @@ export async function runBackfill<TRow = Record<string, unknown>>(
   let updated = 0;
   let errors = 0;
   let batchNum = 0;
-  const startLedger = opts.dryRun ? null : await readSkipLedgerRaw(engine, spec.name).catch(() => null);
+  const startLedger = opts.dryRun ? null : await readSkipLedgerRaw(engine, spec.name);
   const ledger = parseSkipLedger(opts.fresh === true ? null : startLedger);
   const items = new ItemRun('backfill.rows');
   const { VERSION: producer } = await import('../version.ts');

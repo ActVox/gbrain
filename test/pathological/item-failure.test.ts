@@ -45,6 +45,23 @@ describe('classifyItemFailure', () => {
     expect(classifyItemFailure(wrapped)).toMatchObject({ scope: 'run', code: 'database_contention', message: 'wrapper' });
   });
 
+  test('authorization and security refusals stop the unit, from SQL or as canonical codes', () => {
+    expect(classifyItemFailure(sql('42501'))).toMatchObject({ scope: 'run', code: 'permission_denied' });
+    expect(classifyItemFailure(sql('28P01'))).toMatchObject({ scope: 'run', code: 'auth' });
+    expect(classifyItemFailure(sql('28000'))).toMatchObject({ scope: 'run', code: 'auth' });
+    for (const code of ['invalid_token', 'insufficient_scope', 'trusted_local_only', 'recovery_required', 'cancelled']) {
+      expect({ code, scope: classifyItemFailure(op(code)).scope }).toEqual({ code, scope: 'run' });
+    }
+  });
+
+  test('a run-scoped stop wrapped under a recognized item error still stops the unit', () => {
+    const abort = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    const wrapped = Object.assign(op('invalid_params'), { cause: abort });
+    expect(classifyItemFailure(wrapped)).toMatchObject({ scope: 'run', code: 'aborted', message: 'refused: invalid_params' });
+    expect(classifyItemFailure(new Error('outer', { cause: Object.assign(op('invalid_fence'), { cause: sql('42501') }) }))).toMatchObject({ scope: 'run', code: 'permission_denied' });
+    expect(classifyItemFailure(Object.assign(op('invalid_fence'), { cause: sql('23505') }))).toMatchObject({ scope: 'item', code: 'invalid_fence', class: 'content' });
+  });
+
   test('an accepted pending write is progress, not a failure', () => {
     const pending = op('write_pending', { writeRequest: { request_id: 'req-1', state: 'queued' } as never });
     expect(classifyItemFailure(pending)).toMatchObject({ scope: 'pending', requestId: 'req-1' });

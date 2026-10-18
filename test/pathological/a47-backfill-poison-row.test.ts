@@ -179,6 +179,68 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       expect(await skipLedger(engine, spec.name)).toEqual({ version: 1, items: {} });
     });
 
+    test('ledger: a failed skip-ledger read stops the run before any row, so older retry records are never overwritten', async () => {
+      const { sourceId, rows } = await seed(engine, titles([1, 6]));
+      const spec = probeSpec(sourceId);
+      await expectUnitNotAborted(() => runBackfill(engine, spec, { batchSize: 4 }));
+      const ledgerBefore = await skipLedger(engine, spec.name);
+      expect(Object.keys(ledgerBefore!.items)).toEqual([String(rows[1]!.id), String(rows[6]!.id)]);
+      const checkpointBefore = await checkpoint(engine, spec.name);
+      const before = await snapshotItems(engine, sourceId);
+      const readFailure = sqlError('57014', 'canceling statement due to statement timeout');
+      const flaky = new Proxy(engine, {
+        get(target, prop) {
+          if (prop === 'executeRaw') {
+            return (sql: string, params?: unknown[]) => String(params?.[0] ?? '').endsWith('.skipped') && sql.includes('SELECT value FROM config')
+              ? Promise.reject(readFailure) : target.executeRaw(sql, params as never);
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as BrainEngine;
+      expect(await runBackfill(flaky, spec, { batchSize: 4, fresh: true }).catch(e => e)).toBe(readFailure);
+      expect(await skipLedger(engine, spec.name)).toEqual(ledgerBefore);
+      expect(await checkpoint(engine, spec.name)).toBe(checkpointBefore);
+      expectOthersUnchanged(before, await snapshotItems(engine, sourceId));
+    });
+
+    test('run: a role without UPDATE privilege (a real 42501) stops the backfill at its first write and records nothing', async () => {
+      const { sourceId } = await seed(engine, titles([]));
+      const spec = probeSpec(sourceId);
+      const role = `gbra130_ro_${randomUUID().slice(0, 8)}`;
+      await engine.executeRaw(`CREATE ROLE ${role}`);
+      await engine.executeRaw(`GRANT USAGE ON SCHEMA public TO ${role}`);
+      await engine.executeRaw(`GRANT SELECT ON pages TO ${role}`);
+      try {
+        const readOnly = new Proxy(engine, {
+          get(target, prop) {
+            if (prop === 'withReservedConnection') {
+              const reserve = target.withReservedConnection.bind(target) as unknown as (fn: (conn: RawConn) => Promise<unknown>, opts?: unknown) => Promise<unknown>;
+              return (fn: (conn: RawConn) => Promise<unknown>, opts?: unknown) => reserve(conn => fn({
+                executeRaw: async (sql, params) => {
+                  const out = await conn.executeRaw(sql, params);
+                  if (/^\s*BEGIN/i.test(sql)) await conn.executeRaw(`SET LOCAL ROLE ${role}`);
+                  return out;
+                },
+              }), opts);
+            }
+            const value = Reflect.get(target, prop, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }) as BrainEngine;
+        const before = await snapshotItems(engine, sourceId);
+        const thrown = await runBackfill(readOnly, spec, { batchSize: 100 }).catch(e => e);
+        expect(String((thrown as { code?: unknown })?.code)).toBe('42501');
+        expect(await skipLedger(engine, spec.name)).toBeNull();
+        expect(await checkpoint(engine, spec.name)).toBeNull();
+        expectOthersUnchanged(before, await snapshotItems(engine, sourceId));
+      } finally {
+        await engine.executeRaw(`REVOKE ALL ON pages FROM ${role}`);
+        await engine.executeRaw(`REVOKE ALL ON SCHEMA public FROM ${role}`);
+        await engine.executeRaw(`DROP ROLE ${role}`);
+      }
+    });
+
     test('breaker: when most rows fail the run stops item_failures_systemic and records no skip', async () => {
       const { sourceId } = await seed(engine, titles([0, 1, 2, 3, 4, 5, 6, 7]));
       const spec = probeSpec(sourceId);

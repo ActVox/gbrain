@@ -151,7 +151,9 @@ export interface RepairHandler {
  * with the reason, message and fix the result reports.
  */
 export interface RepairItemOutcome { applied: boolean; outcome: string; reason?: string; detail?: Record<string, unknown>; llm_usd?: number;
-  stop?: { reason: string; message: string; fix?: Action } }
+  stop?: { reason: string; message: string; fix?: Action };
+  /** The item-scoped error behind a held outcome: counted by the run's breaker like a thrown item failure. */
+  failure?: unknown }
 
 /**
  * Refusal codes a kind may treat as one item's verdict inside its own apply (ghost-pages extends them). The core records
@@ -448,13 +450,20 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
             ...(applied.detail ? { detail: applied.detail } : {}), ...(applied.llm_usd ? { llm_usd: applied.llm_usd } : {}) });
         }
       }
-      items.succeed();
+      if (typeof applied === 'object' && applied.failure !== undefined) {
+        const { systemic: heldStop } = items.record(`${item.source_id}:${item.slug}`, applied.failure);
+        if (heldStop) {
+          return stopAfterSettle({ reason: heldStop.code, message: redactConnectionInfo(`${heldStop.message} Fix the shared cause, then rerun \`${result.apply_command}\` to resume.`),
+            fix: readFix(`Previews ${handler.kind} again (read-only) to show whether the shared cause is gone.`, { argv: ['gbrain', 'repair', handler.kind, ...(opts.sourceFlag ? ['--source', opts.sourceFlag] : []), '--json'] }) });
+        }
+      } else items.succeed();
       if (typeof applied === 'object' ? applied.applied : applied) result.applied++;
       else result.skipped++;
       if (typeof applied === 'object' && applied.stop) {
         await advance(item.cursor);
         return stopAfterSettle(applied.stop);
       }
+      if (typeof applied === 'object' && applied.failure !== undefined) continue;
     } catch (error) {
       // A page edited since planning is left for the next full scan.
       if (error instanceof OperationError && error.code === 'revision_conflict') { result.skipped++; continue; }
