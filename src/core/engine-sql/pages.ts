@@ -729,12 +729,22 @@ const WANTED_ORIGIN_IS_STALE = sqlFragment`id IN (SELECT w.origin_page_id FROM w
       WHERE w.ref_kind = 'name' AND t.updated_at > w.checked_at)`;
 
 /**
+ * GBRA-130 A-1: a page whose link extraction is held: its failure record is `held` at the page's current knowledge
+ * revision and at the extractor generation `versionTs`. An edit or a generation change releases it.
+ */
+function linkExtractionHeld(versionTs?: string) {
+  const generation = versionTs ? sqlFragment` AND links_extract_failure->>'generation' = ${versionTs}` : sqlFragment``;
+  return sqlFragment`COALESCE(links_extract_failure->>'state' = 'held' AND links_extract_failure->>'revision' = knowledge_revision::text${generation}, false)`;
+}
+
+/**
  * Shared stale-for-extraction predicate. `attendance` narrows it by the #5761
  * marker: a page is attendance-blocked while its marker equals its current
  * knowledge revision. Extraction itself never passes it, so it keeps
- * reconsidering blocked pages.
+ * reconsidering blocked pages. `held` (GBRA-130 A-1) excludes or selects pages
+ * whose link extraction is held (linkExtractionHeld); managed extraction excludes them.
  */
-function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }) {
+function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; held?: 'exclude' | 'only' }) {
   const version = opts?.versionTs
     ? sqlFragment`(links_extracted_at IS NULL OR links_extracted_at < ${opts.versionTs}::timestamptz OR updated_at > links_extracted_at OR ${WANTED_ORIGIN_IS_STALE})`
     : sqlFragment`(links_extracted_at IS NULL OR updated_at > links_extracted_at OR ${WANTED_ORIGIN_IS_STALE})`;
@@ -742,24 +752,34 @@ function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attenda
   const attendance = opts?.attendance === 'exclude'
     ? sqlFragment` AND links_attendance_blocked_revision IS DISTINCT FROM knowledge_revision`
     : opts?.attendance === 'blocked' ? sqlFragment` AND links_attendance_blocked_revision = knowledge_revision` : sqlFragment``;
+  const held = opts?.held === 'exclude' ? sqlFragment` AND NOT ${linkExtractionHeld(opts.versionTs)}`
+    : opts?.held === 'only' ? sqlFragment` AND ${linkExtractionHeld(opts.versionTs)}` : sqlFragment``;
   // A quarantined page is hidden from search; it is neither re-extracted nor counted as stale.
-  return sqlFragment`deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))} AND ${version}${source}${attendance}`;
+  return sqlFragment`deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))} AND ${version}${source}${attendance}${held}`;
 }
 
 /**
  * #6803 (D1): the live page count, the stale count without attendance-blocked pages and the attendance-blocked count
  * in one statement, so doctor's `links_extraction_lag` and the sync nudge share one predicate and one threshold input.
- * `attendance: false` is the pre-v180 shape (no marker column: nothing is attendance-blocked).
+ * `attendance: false` is the pre-v180 shape (no marker column: nothing is attendance-blocked). `held` (GBRA-130 A-1) also
+ * excludes held pages from the stale count and counts them (`held: false` is the pre-v257 shape: nothing is held).
  */
-export function extractionLagStatement(opts: { sourceId?: string; versionTs: string; attendance: boolean }): { text: string; params: unknown[] } {
+export function extractionLagStatement(opts: { sourceId?: string; versionTs: string; attendance: boolean; held?: boolean }): { text: string; params: unknown[] } {
   const source = opts.sourceId ? sqlFragment` AND source_id = ${opts.sourceId}` : sqlFragment``;
-  const stale = stalePagesWhere({ versionTs: opts.versionTs, ...(opts.attendance ? { attendance: 'exclude' as const } : {}) });
+  const stale = stalePagesWhere({ versionTs: opts.versionTs, ...(opts.attendance ? { attendance: 'exclude' as const } : {}), ...(opts.held ? { held: 'exclude' as const } : {}) });
   const blocked = opts.attendance ? sqlFragment`count(*) FILTER (WHERE ${stalePagesWhere({ versionTs: opts.versionTs, attendance: 'blocked' })})::int` : sqlFragment`0`;
-  return renderFragment(sqlFragment`SELECT count(*)::int AS total, count(*) FILTER (WHERE ${stale})::int AS stale, ${blocked} AS attendance_blocked
+  const held = opts.held ? sqlFragment`count(*) FILTER (WHERE ${stalePagesWhere({ versionTs: opts.versionTs, held: 'only' })})::int` : sqlFragment`0`;
+  return renderFragment(sqlFragment`SELECT count(*)::int AS total, count(*) FILTER (WHERE ${stale})::int AS stale, ${blocked} AS attendance_blocked, ${held} AS held
     FROM pages WHERE deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))}${source}`);
 }
 
-export async function countStalePagesForExtraction(exec: ScopedRead, opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }): Promise<number> {
+/** GBRA-130 A-1: up to `limit` held pages with their failure code, oldest page first, for doctor's message. */
+export function heldLinkExtractionStatement(opts: { sourceId?: string; versionTs: string; limit: number }): { text: string; params: unknown[] } {
+  return renderFragment(sqlFragment`SELECT slug, source_id, links_extract_failure->>'code' AS code FROM pages
+    WHERE ${stalePagesWhere({ sourceId: opts.sourceId, versionTs: opts.versionTs, held: 'only' })} ORDER BY id LIMIT ${opts.limit}`);
+}
+
+export async function countStalePagesForExtraction(exec: ScopedRead, opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; held?: 'exclude' | 'only' }): Promise<number> {
     const { text, params } = renderFragment(sqlFragment`SELECT count(*)::int AS count FROM pages WHERE ${stalePagesWhere(opts)}`);
     const { rows } = await exec.unsafe<{ count?: number }>(text, params);
     return Number(rows[0]?.count ?? 0);
@@ -770,6 +790,7 @@ export async function listStalePagesForExtraction(exec: ScopedRead, opts: {
   afterPageId?: number;
   sourceId?: string;
   versionTs?: string;
+  held?: 'exclude';
 }): Promise<StalePageRow[]> {
     const afterClause = opts.afterPageId != null ? sqlFragment` AND id > ${opts.afterPageId}` : sqlFragment``;
     // #1768: project a deterministic full-µs UTC string alongside updated_at.
@@ -802,10 +823,10 @@ export async function markPagesExtractedBatch(
     // #3957: the stamped-row count is observable so callers (stampExtracted)
     // can surface a wrong-source shortfall instead of claiming success while
     // every ref missed.
-    // #5761: a stamped page's links were published, so its attendance marker clears with the watermark.
+    // #5761: a stamped page's links were published, so its attendance marker (and GBRA-130's failure record) clears with the watermark.
     const result = await exec.run(sqlFragment`
       UPDATE pages p SET links_extracted_at = v.ts::timestamptz,
-        links_attendance_blocked_revision = NULL, links_attendance_blocked_at = NULL
+        links_attendance_blocked_revision = NULL, links_attendance_blocked_at = NULL, links_extract_failure = NULL
       FROM unnest(${slugs}::text[], ${srcs}::text[], ${tss}::text[]) AS v(slug, source_id, ts)
       WHERE p.slug = v.slug AND p.source_id = v.source_id
     `);
