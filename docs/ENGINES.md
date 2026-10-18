@@ -999,6 +999,25 @@ checkpoint did not advance. The message names both errors (redacted, at most
 200 characters each). Fix the cause they name, then run
 `gbrain backfill <kind> --resume`.
 
+<a id="backfill-commit-indeterminate"></a>**`backfill_commit_indeterminate`** (error).
+A `gbrain backfill` batch sent its `COMMIT` and got no verdict from the
+server (for example the connection dropped), so the batch may or may not have
+committed. The run stops without bisecting or skipping anything, and the
+checkpoint stays before the batch. Run `gbrain backfill <kind> --resume`:
+rows that did commit no longer match the backfill and are not redone.
+
+<a id="backfill-skipped-rows"></a>**Skipped backfill rows.** A row whose compute
+or UPDATE fails on its own (a CHECK or type violation, a compute error) is
+isolated by splitting its batch, each part in its own transaction, and recorded
+in the config key `backfill.<kind>.skipped`; the checkpoint moves past it and
+the other rows land. `gbrain backfill <kind>` prints each recorded row with
+its code and the retry command, and every later run retries it first. A row
+that fails with the same content error on 3 consecutive runs (same row, same
+gbrain version) is held: it is reported but not retried until the row or the
+gbrain version changes; `gbrain backfill <kind> --fresh` retries it now. When
+most rows of a run fail, the run stops with `item_failures_systemic` and keeps
+the skip record and checkpoint it began with.
+
 <a id="persistence-consumer-log"></a>**`[persistence] phase=<phase> reason=<code>`**
 (stderr). The resident write consumer could not finish a phase. `reason` is
 the SQLSTATE (for example `53300` when a pooler's client limit is reached),

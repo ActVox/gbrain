@@ -27,6 +27,7 @@ import { acceptedPendingReceipt } from './persistence/accepted-pending.ts';
 
 /** Every per-item loop that isolates its items, with the inventory row it fixes (reports/GBRA-130-inventory.md). */
 export const ISOLATE_SITES = {
+  'backfill.rows': 'A-47',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;

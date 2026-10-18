@@ -18,4 +18,7 @@ export interface SiteCases {
 }
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
+  'backfill.rows': { file: 'test/pathological/a47-backfill-poison-row.test.ts',
+    item: 'item: a row whose UPDATE violates a CHECK is skipped, recorded and passed; its siblings land',
+    run: 'run: a run-scoped failure (' },
 };
