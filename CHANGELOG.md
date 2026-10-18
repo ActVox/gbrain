@@ -20,6 +20,7 @@ identifiers and attribution are available in the pre-removal Git revision
 |---|---|---|
 | A PR changes a widely imported type (any new error code) | master's next typecheck was effectively cold (121 s) inside verify's 120 s per-check cap, and it timed out; a timed-out tsc saves no state, so a rerun restored the same stale cache | tsc runs in test.yml's `typecheck` job, in parallel with verify, under a 6-minute step timeout (3x the worst cold CI time); the job saves its tsbuildinfo on every outcome; `test-status`, and with it the release gate, requires the job |
 | A crash-robot count role sees the git effect of `finish`'s probe write | the run role could exit before that effect ran, so a fault planned there went unreached (`authority_change_pending_effects` seed 5105, `effect:git:mid#4`) | `finish` drains the probe's effects, so every seam the count role sees comes again in the run; a probe whose effects do not drain is a `wedge` violation |
+| `test/minions-shell-process-tree.test.ts` reads a pid file the shell has created but not yet written | the empty read became pid 0, which counted as a live process, and the cleanup sent SIGKILL to pid 0, the test's own process group (the shard died with exit 137) | the test waits until each file holds a positive pid |
 
 ### What you need to do
 
