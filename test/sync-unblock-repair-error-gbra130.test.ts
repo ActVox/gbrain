@@ -1,12 +1,14 @@
 /**
  * GBRA-130 A-28 (#6712 PR 4b): `sync unblock --apply` ran the content-repair lane for its repair-class holds with no catch,
  * so one unexpected throw from a repair kind aborted the whole unblock: no outcome was returned and the re-screens of the
- * other holds (`requestGitHoldRetry`) never ran.
+ * other holds (`requestGitHoldRetry`) never ran. The lane's per-kind catch (GBRA-130 A-46, master #6964,
+ * test/pathological/a46-content-lane-kinds.test.ts) now stops the throwing kind with reason `error`; this probe covers
+ * what that suite does not: the unblock outcome built on top of it.
  *
  * Protects (red before: unblock --apply rejects with the kind's error and schedules nothing): with the fences kind
- * stubbed to throw `OperationError('storage_error')`, the fence hold is reported `skipped` with reason `repair_error`
- * and `gbrain repair content --source <id>` as its next step, and the other hold (a `preparation_stalled` retry) is
- * still scheduled for its re-screen. Runs on PGLite and, with DATABASE_URL, on Postgres.
+ * stubbed to throw `OperationError('storage_error')`, the fence hold is reported `skipped` with reason `error` and
+ * `gbrain sync unblock --source <id> --apply --json` as its next step, and the other hold (a `preparation_stalled`
+ * retry) is still scheduled for its re-screen. Runs on PGLite and, with DATABASE_URL, on Postgres.
  */
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -37,7 +39,7 @@ const throwingRegistry = REPAIR_REGISTRY.map(spec => spec.kind !== 'fences' ? sp
 
 for (const backend of testBackends()) describe(`[${backend}] GBRA-130 A-28: a repair kind that throws during sync unblock --apply`, () => {
   const databaseUrl = backend === 'postgres' ? process.env.DATABASE_URL : undefined;
-  test('the fence hold is skipped repair_error with the content-lane preview as next, and the other hold is still scheduled', () => managedBrain(async ({ engine, root }) => {
+  test('the fence hold is skipped error with the unblock apply as next, and the other hold is still scheduled', () => managedBrain(async ({ engine, root }) => {
     await withEnv({ OPENAI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined, VOYAGE_API_KEY: undefined }, async () => {
       expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
       mkdirSync(join(root, 'people'), { recursive: true });
@@ -51,7 +53,7 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-130 A-28: a re
         observed_at: new Date().toISOString(), run_id: null, mode: 'managed', meta: { recovery_version: 1 } });
       const outcome = await unblockSync(engine, 'default', { apply: true, noLlm: true, registry: throwingRegistry });
       const fence = outcome.applied.find(entry => entry.path === 'people/model.md');
-      expect(fence).toMatchObject({ action: 'repair', repair: { kind: 'fences', outcome: 'skipped', reason: 'repair_error', next: { argv: ['gbrain', 'repair', 'content', '--source', 'default'] } } });
+      expect(fence).toMatchObject({ action: 'repair', repair: { kind: 'fences', outcome: 'skipped', reason: 'error', next: { argv: ['gbrain', 'sync', 'unblock', '--source', 'default', '--apply', '--json'] } } });
       expect(outcome.applied.find(entry => entry.path === 'notes/stalled.md')).toMatchObject({ action: 'retry' });
       expect(await readGitHoldRetryPaths(engine, 'default', incarnation)).toEqual(['notes/stalled.md']);
     });

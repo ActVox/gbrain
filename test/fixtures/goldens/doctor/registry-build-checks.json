@@ -679,6 +679,10 @@
       },
       {
         "category": "ops",
+        "name": "global_maintenance_stalled"
+      },
+      {
+        "category": "ops",
         "name": "embed_backfill_stalled"
       },
       {
