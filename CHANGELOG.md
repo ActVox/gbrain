@@ -12,21 +12,24 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.305.0] - 2026-10-18
 
-**A pull request now runs a cheap CI tier on each push, and the full suite runs once on the head before merge. A master push whose tree already passed the full suite doesn't run it again, and leaked gate VMs now expire.** A pull-request push cost about $1.77 in Test and E2E; it now costs about $0.03–0.23 (Test only, more when the diff touches persistence or native code). The full run happens once, at handoff, and the push to master reuses it.
+**A few hundred bytes of crafted frontmatter can no longer take down your brain.** YAML lets a value refer back to another value, and nesting those references multiplies them: a 432-byte page sent through `put_page` used to expand into gigabytes in memory and crash a PGLite brain, and a committed file like it could kill `gbrain sync`. Any caller with write access could do it, including a remote agent over MCP. gbrain now measures how far a frontmatter block would expand before it uses it, and refuses one that would grow far past its own size.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| A push to a pull request | the full Test matrix (18 unit shards, serial, slow, both PostgreSQL arms) and diff-selected E2E | the cheap tier: `verify`, `typecheck`, `gitleaks`, security regressions, dependency audit, the stress gate on changed tests, and the crash robot, convergence and native cells when the diff selects them; `cheap-tier (full suite not run)` says so; no E2E |
-| Running the full suite on a pull request | every push | the maintainer-only `full-ci` label (`full-ci.yml`) or a hand dispatch runs Test and E2E on the head, with the same shape as a push to master, and again on every later push while the label stays |
-| What merge reads | `test-status` / `e2e-status` from the pull-request run | `full-suite` and `e2e-full-suite`, which succeed only when their run's aggregate did; a pull-request run can never produce either |
-| A push to master whose tree equals a passed full-suite run's | ran everything again | reuses that run (`scripts/ci-reuse.ts`), records it, and the release gate checks the record; any doubt runs in full |
-| A `ci:ubicloud` gate VM a sleeping machine never tore down | lived for days | is named to expire after 2 hours; `scripts/ubicloud/reap-expired.ts` (dry run by default) lists and, with `--apply`, destroys expired gate VMs across owners, never legacy or untagged names |
-| The gstack pregate remote stage | a full `ci:ubicloud` | `ci:ubicloud:diff`; one full gate per PR, at handoff |
-| Watching CI spend | by hand | `scripts/ci-cost-ledger.ts` prices each week's Actions runs against `scripts/ci-cost-baseline.json` in the CI health report |
+| `put_page` / `edit_page` with frontmatter whose YAML aliases expand past the limit | stored the expanded value (681 KB from 324 bytes, 6.1 MB from 378 bytes) or ran the database out of memory (432 bytes) | refused `invalid_frontmatter`; nothing is written |
+| `gbrain sync` reaches such a file (classic or managed) | stored it whole, or the process was killed for running out of memory | the file is held `invalid_frontmatter` with a message naming the alias limit and its line; every other file keeps syncing |
+| Ordinary anchors and merge keys (`<<: *defaults`) | read | still read: a block may expand up to its own length plus 64 KiB |
 
-Docs: `docs/ci-event-parity.md#full-ci-on-pull-requests` and `#master-push-reuse`, `docs/RELEASING.md#release-ci-gate`, `scripts/ubicloud/README.md`.
+### What you need to do
+
+Nothing. Real frontmatter stays far below the limit. If a file is held for it, replace its anchors and aliases with plain values, commit, and run `gbrain sync --source <id> --no-pull`.
+
+### Itemized changes
+
+- `loadBoundedYaml` in `src/core/data-frontmatter.ts` is the only js-yaml `load` in `src/`. Every frontmatter, skill and manifest parse goes through it: `data-frontmatter`, `markdown`, `brain-writer`, `frontmatter-recovery`, `skill-frontmatter`, `shared-skills/manifest`, `skill-catalog` and `sync-rename-identity`. After loading, it sizes the value as if every alias were copied out (a shared node is measured once, a cycle counts as unbounded) and throws `YamlAliasBoundError`, shaped like a js-yaml parse error, past the text length plus 65,536 characters, before anything serializes the value.
+- Tests: `test/pathological/s-47-yaml-alias-bomb.test.ts` (remote `put_page` and `edit_page` through MCP dispatch, classic and managed sync, and a 9-level parse-time guard) and its Postgres arm `test/e2e/s-47-yaml-alias-bomb-postgres.test.ts`.
 
 ## [0.60.304.0] - 2026-10-18
 
