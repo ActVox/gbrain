@@ -284,15 +284,15 @@
     "purgeDeletedPages#dryRun": {},
     "putContradictionCacheEntry#default": {},
     "putPage#blankBody": {
-      "raw": 4,
+      "raw": 5,
       "tx": 1
     },
     "putPage#default": {
-      "raw": 4,
+      "raw": 5,
       "tx": 1
     },
     "putPage#expectedRevision": {
-      "raw": 4,
+      "raw": 5,
       "tx": 1
     },
     "readEmbeddingStateCounts#full": {
@@ -337,8 +337,14 @@
     "resolveSlugs#sourceIds": {},
     "resolveSlugsByPaths#default": {},
     "resolveTake#default": {},
-    "restorePage#default": {},
-    "restorePage#sourceId": {},
+    "restorePage#default": {
+      "raw": 1,
+      "tx": 1
+    },
+    "restorePage#sourceId": {
+      "raw": 1,
+      "tx": 1
+    },
     "revertToVersion#default": {},
     "revertToVersion#sourceId": {},
     "searchKeyword#cjk": {

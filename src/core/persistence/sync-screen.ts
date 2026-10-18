@@ -186,6 +186,22 @@ export function managedImageHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 
     message: `${entry.path} is an image, and managed sync imports images only with GBRAIN_EMBEDDING_MULTIMODAL=true (multimodal embedding is off on this install); the rest of the source synced.` }, content, blob);
 }
 
+/**
+ * #6948: the hold of a file (an import or a deletion) several live pages record as their origin. Only this file waits:
+ * the rest of the source syncs. With no `reason` the pages are verified duplicates and the sync-time heal resolves them;
+ * a reason is a decision for a person. Re-screened on every sync, so the file imports once one page records it.
+ */
+export function originConflictHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'working' | 'renameFrom' | 'renameHeld' | 'action' | 'originConflict'>): HeldEntry {
+  const conflict = entry.originConflict!;
+  const named = conflict.claimants.map(page => page.slug).join(', ');
+  const why = conflict.reason ? `sync cannot prove they are one document (${conflict.reason}), so a person decides which page keeps it`
+    : `they hold the same body and ${conflict.canonical} is the page its path names, so the sync-time heal keeps ${conflict.canonical} and soft-deletes the others (the file stays)`;
+  const held = heldEntry(entry, conflict.canonical, null, { code: 'origin_conflict', ...(conflict.reason ? { reason: conflict.reason } : {}),
+    message: `Pages ${named} all record ${entry.path} as their origin; ${why}. Only this file is held; the rest of the source synced.` }, null, null);
+  return { ...held, meta: { ...held.meta, origin_claimants: conflict.claimants.map(({ id, slug, revision }) => ({ id, slug, revision })), canonical_slug: conflict.canonical,
+    ...(entry.action === 'delete' ? { deleted: true as const } : {}) } };
+}
+
 /** #5988: the hold of a file over the sync read bound, whose content is never read (#6529: shared with the image freeze). */
 /** Wave B: the hold for a file its streamed preparation refused, by the receipt's content-refusal code and message. */
 export function streamedRefusalHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'working' | 'renameFrom' | 'renameHeld'>, slug: string, pageId: number | null,
