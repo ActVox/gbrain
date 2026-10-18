@@ -9,12 +9,13 @@
  * canonical data dir plus the legacy dir's inode, every entry's bytes and the
  * marker bytes) and ADVISORY evidence: kill -0 and the command of the recorded
  * PID, an open-file scan of /proc (Linux), and the filesystem type (Linux
- * statfs). That evidence covers only this host and PID namespace; it cannot
+ * statfs; macOS `df -P` plus `mount`, local only with the `local` flag). That evidence covers only this host and PID namespace; it cannot
  * see other containers, PID namespaces or hosts sharing the folder, so it is
  * never stated as proof. A live holder (an open file under the data dir, a
  * live recorded PID whose command could be gbrain, or a comparable live PID),
  * a network/shared filesystem, or a filesystem whose locality cannot be read
- * (not Linux, statfs failed, an unrecognised type: fail closed) makes the lock
+ * (neither Linux nor macOS, a failed probe, an unrecognised type, a macOS
+ * mount without the `local` flag: fail closed) makes the lock
  * not removable.
  *
  * `applyLegacyLockRemoval` runs only under the stable sibling kernel lock and
@@ -30,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, statfsSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { shellQuote } from './agent-output.ts';
+import { execFileSync } from './spawn.ts';
 import { computePlanHash, type PlanSelection } from './consent.ts';
 import { isProcessAlive, legacyOwnerUnverified, pgliteLockDirFor, readMetadata, readProcessArgs, PGLITE_LOCK_PROTOCOL, type LegacyUnverifiedReason } from './pglite-lock.ts';
 
@@ -44,6 +46,8 @@ const LOCAL_FILESYSTEMS: Readonly<Record<number, string>> = {
   0xca451a4e: 'bcachefs', 0x4d44: 'vfat', 0x2011bab0: 'exfat', 0x5346544e: 'ntfs', 0x7366746e: 'ntfs3', 0x482b: 'hfsplus', 0x858458f6: 'ramfs',
   0x52654973: 'reiserfs', 0x3153464a: 'jfs', 0x3434: 'nilfs',
 };
+/** macOS `mount` types that are local disks; a mount counts as local only with one of these AND the `local` flag. */
+const DARWIN_LOCAL_FILESYSTEMS: ReadonlySet<string> = new Set(['apfs', 'hfs', 'exfat', 'msdos']);
 export function networkFilesystemName(magic: number): string | null {
   return NETWORK_FILESYSTEMS[magic >>> 0] ?? null;
 }
@@ -58,7 +62,7 @@ export interface LegacyLockEvidence {
   pid_alive: boolean | null;
   pid_command: string | null;
   fd_scan: { method: 'proc' | 'unavailable'; holders: Array<{ pid: number; command: string | null; paths: string[] }>; uninspectable: number };
-  /** `network: null` means locality is unknown (not Linux, statfs failed, or an unrecognised type) and refuses like a network filesystem. */
+  /** `network: null` means locality is unknown (neither Linux nor macOS, a failed probe, an unrecognised type, or a macOS mount that is not local) and refuses `filesystem_unverified`. */
   filesystem: { type: string | null; magic: number | null; network: boolean | null };
 }
 
@@ -87,7 +91,11 @@ const markerPathOf = (dataDir: string) => `${dataDir}.gbrain-owner.json`;
 export interface LegacyLockProbe {
   platform?: NodeJS.Platform;
   statfs?: (path: string) => { type: number };
+  /** Runs an absolute-path command without a shell and returns its stdout (macOS `df` and `mount`). */
+  exec?: (file: string, args: readonly string[]) => string;
 }
+const execNoShell = (file: string, args: readonly string[]): string =>
+  String(execFileSync(file, [...args], { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, LC_ALL: 'C' } }));
 
 function scanOpenFiles(dataDir: string, platform: NodeJS.Platform): LegacyLockEvidence['fd_scan'] {
   if (platform !== 'linux' || !existsSync('/proc/self/fd')) return { method: 'unavailable', holders: [], uninspectable: 0 };
@@ -112,8 +120,33 @@ function scanOpenFiles(dataDir: string, platform: NodeJS.Platform): LegacyLockEv
   return { method: 'proc', holders, uninspectable };
 }
 
+/**
+ * macOS: the data dir's mount point from `df -P` (everything after the
+ * capacity column, so spaces survive), then that mount point's one line in
+ * `mount` (`<dev> on <mountpoint> (<type>, <flags...>)`). Local only with the
+ * `local` flag and a known-local type; anything else, including a network
+ * type, a missing or duplicated line and any parse or command failure, is
+ * unknown (`network: null`).
+ */
+function darwinFilesystemOf(dataDir: string, exec: NonNullable<LegacyLockProbe['exec']>): LegacyLockEvidence['filesystem'] {
+  const unknown = (type: string | null = null) => ({ type, magic: null, network: null });
+  try {
+    const df = exec('/bin/df', ['-P', dataDir]).split('\n').filter(line => line.trim() !== '');
+    const mountPoint = df.length === 2 ? /^.+?\s+\d+\s+\d+\s+\d+\s+\d+%\s+(.+)$/.exec(df[1]!)?.[1] : undefined;
+    if (!mountPoint) return unknown();
+    const marker = ` on ${mountPoint} (`;
+    const lines = exec('/sbin/mount', []).split('\n').filter(line => line.endsWith(')') && line.includes(marker));
+    if (lines.length !== 1) return unknown();
+    const [type, ...flags] = lines[0]!.slice(lines[0]!.indexOf(marker) + marker.length, -1).split(',').map(part => part.trim());
+    if (!type) return unknown();
+    return flags.includes('local') && DARWIN_LOCAL_FILESYSTEMS.has(type) ? { type, magic: null, network: false } : unknown(type);
+  } catch { return unknown(); }
+}
+
 function filesystemOf(dataDir: string, probe: LegacyLockProbe): LegacyLockEvidence['filesystem'] {
-  if ((probe.platform ?? process.platform) !== 'linux') return { type: null, magic: null, network: null };
+  const platform = probe.platform ?? process.platform;
+  if (platform === 'darwin') return darwinFilesystemOf(dataDir, probe.exec ?? execNoShell);
+  if (platform !== 'linux') return { type: null, magic: null, network: null };
   try {
     const magic = (probe.statfs ?? statfsSync)(dataDir).type >>> 0;
     const network = networkFilesystemName(magic);
@@ -160,8 +193,9 @@ function evidenceFor(dataDir: string, pid: number | null, recordedCommand: strin
     return { evidence, refusal: { reason: 'network_filesystem', message: `The data dir is on a ${fs.type} filesystem that other hosts can mount; this host cannot see their processes.` } };
   }
   if (fs.network === null) {
-    const why = platform !== 'linux' ? `gbrain reads filesystem locality only on Linux and this host runs ${platform}`
-      : fs.type === null ? 'reading its filesystem type (statfs) failed' : `its filesystem type ${fs.type} is not one gbrain knows to be local`;
+    const why = platform !== 'linux' && platform !== 'darwin' ? `gbrain reads filesystem locality only on Linux and macOS and this host runs ${platform}`
+      : fs.type === null ? `reading its filesystem type (${platform === 'darwin' ? 'df and mount' : 'statfs'}) failed`
+      : `its filesystem ${fs.type} is not one gbrain can confirm is a local disk`;
     return { evidence, refusal: { reason: 'filesystem_unverified', message: `gbrain could not confirm that the data dir is on a local filesystem (${why}), so another host sharing this folder could still hold the lock.` } };
   }
   return { evidence, refusal: null };

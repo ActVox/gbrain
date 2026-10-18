@@ -68,7 +68,7 @@ function printPreview(i: LegacyLockInspection, json: boolean): number {
 function refuse(i: LegacyLockInspection, json: boolean): number {
   const refusal = i.refusal!;
   const hint = refusal.reason === 'filesystem_unverified'
-    ? 'Run the preview and the repair on a Linux host where this folder is on a local disk. Where gbrain cannot check locality (macOS, an unrecognised filesystem), only the user can confirm that no gbrain on any computer reaches this folder and move the lock folder aside themselves.'
+    ? 'If the folder is on a network or shared mount, stop every gbrain on every host that mounts it. Otherwise run the preview and the repair on a Linux or macOS host where this folder is on a local disk. Where gbrain cannot check locality (another system, an unrecognised filesystem), only the user can confirm that no gbrain on any computer reaches this folder and move the lock folder aside themselves.'
     : 'Stop the process named in the message (on a shared filesystem: every gbrain on every host that mounts it), then run the preview again.';
   const e = opError('legacy_lock_removal_refused', `${refusal.message} The legacy lock at ${i.legacy_lock.dir} was left in place.`, hint,
     { reason: refusal.reason, fix: previewFix(i.data_dir) });

@@ -5832,7 +5832,7 @@ the same reason and fix on its `connection` check.
    never opens the engine and never creates anything. It names the recorded
    PID, whether `kill -0` says it is running and its command, the processes
    an open-file scan of `/proc` (Linux) saw holding files under the data dir,
-   and the filesystem type (Linux `statfs`), and prints the `plan_hash` and
+   and the filesystem type (Linux `statfs`, macOS `df -P` and `mount`), and prints the `plan_hash` and
    the apply command. This evidence is advisory: it covers only this host and
    PID namespace and cannot see other containers or other hosts that share the
    folder.
@@ -5844,9 +5844,11 @@ the same reason and fix on its `connection` check.
    could be gbrain (`live_holder`), or when the data dir is on a network or
    shared filesystem such as NFS, SMB, 9p, virtiofs or FUSE
    (`network_filesystem`), or when it cannot confirm the filesystem is local
-   (`filesystem_unverified`: locality is read only on Linux, so macOS and
-   other systems, a failing `statfs` and an unrecognised filesystem type all
-   refuse). A lock that changed since the preview refuses `preview_changed`.
+   (`filesystem_unverified`: Linux reads `statfs`; macOS reads the mount
+   point from `df -P` and its `mount` line, and counts it local only with
+   the `local` flag and a local type such as apfs or hfs. Other systems, a
+   failed probe, an unrecognised type, a macOS network mount such as smbfs or
+   nfs, and a macOS mount without the `local` flag all refuse). A lock that changed since the preview refuses `preview_changed`.
    It inspects again after consent, so a holder or change that appears while
    the prompt waits refuses the same way. Otherwise it moves the folder into
    `<data-dir>.legacy-lock-removed-<timestamp>/` (nothing is deleted) with a

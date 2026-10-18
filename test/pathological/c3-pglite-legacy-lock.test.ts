@@ -96,6 +96,26 @@ function repairWith(dataDir: string, opts: { dryRun?: boolean; expect?: string; 
 }
 const removedDirs = (root: string) => readdirSync(root).filter(n => n.includes('.legacy-lock-removed-'));
 
+/** Real `/sbin/mount` output from a macOS 15 arm64 host, plus synthetic network lines. */
+const MAC_MOUNT = [
+  '/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)',
+  'devfs on /dev (devfs, local, nobrowse)',
+  '/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)',
+  'map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)',
+  '/dev/disk4s1 on /Volumes/Capy 0.4.4-arm64 (hfs, local, nodev, nosuid, read-only, noowners, quarantine, mounted by garrytan)',
+].join('\n');
+const SMB_LINE = '//alice-example@nas/share on /Volumes/share (smbfs, nodev, nosuid, mounted by alice-example)';
+const NFS_LINE = 'nas-example:/export/brain on /Volumes/brain (nfs, nodev, nosuid, mounted by alice-example)';
+/** A darwin probe whose `df -P` puts the data dir on `mountPoint` and whose `mount` adds `extraLine`. */
+function macProbe(mountPoint: string, extraLine: string | null): LegacyLockProbe {
+  const df = `Filesystem   512-blocks       Used  Available Capacity  Mounted on\n/dev/disk3s5 3896910480 1518591512 2313784664    40%    ${mountPoint}\n`;
+  return { platform: 'darwin', exec: (file: string) => {
+    if (file === '/bin/df') return df;
+    if (file === '/sbin/mount') return `${MAC_MOUNT}${extraLine ? `\n${extraLine}` : ''}\n`;
+    throw new Error(`unexpected command ${file}`);
+  } };
+}
+
 /** A child that keeps a file inside the data dir open, as a live pre-kernel gbrain would. */
 async function liveHolder(dataDir: string): Promise<Bun.Subprocess> {
   writeFileSync(join(dataDir, 'PG_VERSION'), '17\n');
@@ -326,7 +346,15 @@ describe('C-3 pglite-repair --legacy-lock: review fixes F4-F6', () => {
   }
 
   const UNKNOWN_LOCALITY: Array<[string, LegacyLockProbe]> = [
-    ['a non-Linux platform', { platform: 'darwin' }],
+    ['a platform gbrain cannot probe', { platform: 'win32' }],
+    ['a macOS smbfs mount', macProbe('/Volumes/share', SMB_LINE)],
+    ['a macOS nfs mount', macProbe('/Volumes/brain', NFS_LINE)],
+    ['a macOS autofs home', macProbe('/System/Volumes/Data/home', 'map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)')],
+    ['a macOS apfs mount without the local flag', macProbe('/Volumes/remote', '/dev/disk9s1 on /Volumes/remote (apfs, nodev, nosuid)')],
+    ['a macOS local mount of a type gbrain does not know', macProbe('/dev', 'devfs on /dev (devfs, local, nobrowse)')],
+    ['a macOS mount point with no mount line', macProbe('/Volumes/gone', null)],
+    ['a macOS df output that does not parse', { platform: 'darwin', exec: (file: string) => file === '/bin/df' ? 'df: unexpected\n' : MAC_MOUNT }],
+    ['a macOS probe command that fails', { platform: 'darwin', exec: () => { throw new Error('spawn /bin/df ETIMEDOUT'); } }],
     ['a statfs probe that fails', { platform: 'linux', statfs: () => { throw Object.assign(new Error('EIO: i/o error, statfs'), { code: 'EIO' }); } }],
     ['an unrecognised filesystem type', { platform: 'linux', statfs: () => ({ type: 0x12345678 }) }],
   ];
@@ -346,6 +374,29 @@ describe('C-3 pglite-repair --legacy-lock: review fixes F4-F6', () => {
       expect(readFileSync(join(dir, 'lock'), 'utf8')).toBe('{corrupt');
       expect(existsSync(`${dataDir}.gbrain-owner.json`)).toBe(false);
       expect(removedDirs(root)).toEqual([]);
+    });
+  }
+
+  const MAC_LOCAL: Array<[string, string, string]> = [
+    ['the apfs data volume', '/System/Volumes/Data', 'apfs'],
+    ['an hfs volume whose mount point has spaces', '/Volumes/Capy 0.4.4-arm64', 'hfs'],
+  ];
+  for (const [label, mountPoint, type] of MAC_LOCAL) {
+    test(`F6 macOS: ${label} mounted local is removable, and the approved apply moves the lock`, async () => {
+      const root = temporary(), dataDir = join(root, 'store');
+      const dir = plantLegacyLock(dataDir, 'corrupt');
+      const calls: Array<[string, string[]]> = [];
+      const base = macProbe(mountPoint, null);
+      const probe: LegacyLockProbe = { platform: 'darwin', exec: (file, args) => { calls.push([file, [...args]]); return base.exec!(file, args); } };
+      await withEnv({ GBRAIN_HOME: join(root, 'home') }, async () => {
+        const shown = await repairWith(dataDir, { dryRun: true, probe });
+        expect({ type: shown.json.evidence?.filesystem?.type, network: shown.json.evidence?.filesystem?.network, removable: shown.json.removable, refusal: shown.json.refusal })
+          .toEqual({ type, network: false, removable: true, refusal: null });
+        expect(calls.slice(0, 2)).toEqual([['/bin/df', ['-P', dataDir]], ['/sbin/mount', []]]);
+        const done = await repairWith(dataDir, { expect: shown.json.plan_hash, probe });
+        expect({ code: done.code, action: done.json.action }).toEqual({ code: 0, action: 'removed' });
+      });
+      expect(existsSync(dir)).toBe(false);
     });
   }
 
