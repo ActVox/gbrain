@@ -470,6 +470,12 @@ export const CODES = {
     suggestion: 'Inspect the owner with gbrain sources writer status --source <id> --json (the step and its wait cause), fix or report the cause, then gbrain sources retry-held <id> and the same gbrain sync with the same options; a foreground write needs a new request_id.',
     fix: { argv: ['gbrain', 'sources', 'status', '{source_id}', '--json'], consent: [], actor: 'host_admin', why: 'Read-only: lists the held files of the source with their repair route.', requires_exclusive: false } },
   preview_changed: { class: 'caller', summary: "The state changed since the approved preview." },
+  publication_timeout: { class: 'server', retryable: false, actor: 'host_admin',
+    summary: "A managed write's publication transaction hit its statement or lock timeout persistence.max_preparation_attempts times (default 2), so the owner finished it failed instead of claiming it again; nothing was committed.",
+    why: 'A publication that times out on every attempt (a very large page or fact batch, or a slow lookup inside the 5-second publication transaction) used to be released as database_contention without being counted and claimed again forever, holding every later write on its root. Each timeout now counts one attempt and the write is terminal at the limit, so the rest of the root keeps moving.',
+    docs: 'docs/guides/write-refusals.md#publication_timeout',
+    suggestion: 'Report the request id, the size the receipt names and gbrain sources writer status --source <id> --json; a smaller write (split the page or batch) needs a new request_id.',
+    fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', '{source_id}', '--json'], consent: [], actor: 'host_admin', why: 'Read-only: names the failed request and its root.', requires_exclusive: false } },
   profile_incompatible: { class: 'caller', summary: "The stored profile is incompatible with this operation." },
   projection_owner_resident: { class: 'host_only', summary: "A resident owner holds the projection." },
   // #6643, retired by #6712 (one page, one fate): no page waits on another page's fate any more, so nothing re-freezes knock-ons.
