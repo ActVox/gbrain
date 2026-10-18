@@ -10,6 +10,54 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.302.0] - 2026-10-18
+
+**No gbrain writer replaces a newer file or database copy of a page without checking it first.** Before this release the unfenced-facts step in `extract_facts` could copy a stale checkout file over a newer database body with no history (#6982). An audit found the same unchecked overwrite in 21 more writers. Each one now compares both copies, keeps both on a mismatch, holds the page with `file_database_drift` and the next step, and keeps going with the rest of the batch. A `storage.db_only` cache that only lags the database no longer blocks writes to that page (#6986), and `response_too_large` now returns the write's `request_id` (#6989).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `extract_facts` / `dream` meets a checkout file older than the database body (#6982) | the file replaced the database body, and no `page_versions` row recorded the old one | the page is held with `file_database_drift`, nothing is overwritten, and the batch continues |
+| Fence writes, `forget`, decide-proposal accept/undo, phantom redirects, synthesize/patterns reverse-writes, the dream summary, atom/concept/brainstorm write-through, full-sync re-export, Google and GitHub connectors, takes bootstrap, the v0.32.2 migration verifier, legacy-hash refresh | each replaced one copy with the other without checking that the replaced copy had nothing new | each replaces a copy only when it equals the live page or one of its recent versions, re-checks under the row lock or right before the rename, and writes a `page_versions` row first |
+| A file edit landing while `writePageThrough` was staging | overwritten | detected after staging, and the write is refused |
+| A failed page-cache mirror after a fence write or `forget` | the error was swallowed | the fence and facts are kept, and `FACTS_PAGE_MIRROR_FAILED` is reported |
+| A `storage.db_only` page whose cache file holds an earlier database state (#6986) | every write was refused as an uncoordinated local edit | the cache is refreshed, while a cache with content the database never had still refuses |
+| `response_too_large` on a committed mutation (#6989) | no `request_id`, so the write could not be looked up | carries the `request_id` and receipt |
+| `think --take` on a database-only page | wrote the database and skipped the file | refuses with `mirror_unavailable` (use `gbrain takes add`) |
+
+### What you need to do
+
+Nothing. Held pages appear in the phase's `details.file_holds` and in `FACTS_FENCE_FAILED` warnings, together with the step that clears them. Nothing rewrites data on upgrade. Edits lost to this bug before this release were never in `page_versions`, so no GBrain repair can restore them. Recover them from git history or backups.
+
+### For contributors
+
+- `src/core/facts/file-body-guard.ts` is the shared guard (`replaceableFile`, `replaceStoredBody`, `mirrorFileBody`, `fileHeldBy`). `file_database_drift` is a registered error code.
+- Each fix has a forced probe under `test/pathological/` (`d1`–`d23`, `w1`, `facts-mirror-failures`) that runs on PGLite and Postgres.
+- `unit-postgres-arms` now runs 19 shards, with weights re-mined from this branch's own green run. The required checks are named `Unit-lane PostgreSQL arms N/19`.
+
+## [0.60.301.0] - 2026-10-18
+
+**CI only: the unit tests run in 18 shards, sized from fresh master timings, and a budget test now fails before a unit shard can outgrow its job timeout.** Nothing changes for gbrain users.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Measured runtime of the 3,761 unit-matrix files | weights from an older run (about 9,400 s), with 73 newer files, including 54 pathological-input tests, packed at the p75 guess; 10 shards carried about 950 s each and shard 5 was cancelled at the 22-minute timeout with no failing test | re-mined from master's own green run (10,199 s in total, every file measured): 18 shards of at most 567 s |
+| A unit shard growing past its timeout | found only when a master run was cancelled | `test/scripts/unit-shard-budget.test.ts` fails when any shard's mined weight passes 600 s, so twice that plus a minute of setup still ends a minute inside the 22-minute job |
+| `ci:ubicloud` with the unit and slow lanes | measured unit files without checking test.yml's shards | sums its measured durations over the same 18-shard partition and fails a shard that would not fit the job |
+
+### What you need to do
+
+Nothing.
+
+### For contributors
+
+- `test.yml` `test` and e2e.yml `coverage-full-unit` are now 18-shard matrices (`UNIT_SHARDS` in `scripts/sharding.ts`). Required checks are named `test (1)` to `test (18)`, and the coverage manifests expect `shard-1` to `shard-18`.
+- The 22-minute job timeout is unchanged. When the budget test fails, re-mine with `bun run weights:mine --lane unit --run <green master Test run>`, then raise `UNIT_SHARDS` and both matrices to the smallest count that leaves room for new files.
+- Serial weights were re-mined from the same run; the serial lane's four shards keep their 25-minute timeout, which they use a third of.
+
 ## [0.60.300.0] - 2026-10-18
 
 **Every stuck state the #6948 sweep found now has an exit: a withdrawal mirror stuck on edited bytes, a crashed pre-kernel PGLite lock, fence rows an older release left in a managed clone, and stuck bundle, transfer and effect recoveries each get a preview-first repair command, and a failed withdrawal mirror no longer blocks the Git and embedding work of its request.** This is GBRA-130 PR 2, the second half of the #6948 bug-class sweep; every row ships with a probe that fails on master and passes here, on PGLite and Postgres. Nothing runs on upgrade.
