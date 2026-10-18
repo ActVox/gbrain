@@ -52,6 +52,7 @@ export const INTERNAL_CONFIG_STATE: readonly InternalConfigState[] = [
   { key: 'shared_skills.export.v1.', prefix: true, reason: 'shared-skills migration export receipts' },
   { key: 'shared_skills.content.v1.', prefix: true, reason: 'shared-skills content setup state per source incarnation' },
   { key: 'shared_skills.migration.v1.', prefix: true, reason: 'shared-skills migration checkpoints per source incarnation' },
+  { key: 'shared_skills.migration.v1', reason: 'the shared-skills migration report the 0.53.0 migration writes and apply-migrations --list / doctor read for host work (#6796)' },
   { key: 'shared_skills.bridge_owner.v1.', prefix: true, reason: 'shared-brain bridge ownership claims' },
 ];
 
