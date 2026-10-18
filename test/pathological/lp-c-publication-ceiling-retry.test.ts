@@ -69,7 +69,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
 
   /** Every publication of claims `overruns(k)` parks past the ceiling and then fails as a discarded connection. */
   function overrun(requestId: string, overruns: (claim: number) => boolean) {
-    const seen = { claims: 0, transient: [] as number[], preparation: [] as number[] };
+    const seen = { claims: 0, publications: 0, transient: [] as number[], preparation: [] as number[] };
     installFaultHook(async (point, detail) => {
       if (detail.requestId !== requestId) return;
       if (point === 'consumer:preparing') {
@@ -80,10 +80,13 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
         return;
       }
       if (point === 'persistence:interruption_charged' || point === 'persistence:recovery_interruption_charged') {
-        await engine.executeRaw('UPDATE persistence_requests SET next_attempt_at=now() WHERE request_id=$1::uuid', [requestId]).catch(() => undefined);
+        // Only a released row: one still held (the recovery route charges before it requeues) keeps its backoff, which the
+        // owner's reclaim of a row it released itself must honour.
+        await engine.executeRaw("UPDATE persistence_requests SET next_attempt_at=now() WHERE request_id=$1::uuid AND state='queued'", [requestId]).catch(() => undefined);
         return;
       }
       if (point === 'publication:before_commit' && seen.claims <= GUARD && overruns(seen.claims)) {
+        seen.publications++;
         await new Promise(resolve => setTimeout(resolve, PARK_MS));
         throw discarded();
       }
@@ -115,6 +118,8 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
     const outcome = await call({ slug, content: page(`Overrun ${n}`), request_id: requestId }).catch(error => error as { code?: string });
     installFaultHook(undefined);
     expect(seen.claims).toBe(6);
+    // One publication per claim: on Postgres a cancelled group of one is never published again under the same claim.
+    expect(seen.publications).toBe(6);
     expect((outcome as { code?: string }).code).toBe('write_interrupted');
     expect(seen.transient).toEqual([0, 1, 2, 3, 4, 5]);
     expect(seen.preparation).toEqual([0, 0, 0, 0, 0, 0]);

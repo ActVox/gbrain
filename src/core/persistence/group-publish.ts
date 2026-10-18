@@ -412,6 +412,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
     for (const { row } of recorded.values()) {
       try {
         const charged = await chargedInterruption(engine, row, error);
+        if (charged) await faultPoint('persistence:recovery_interruption_charged', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
         const failure = charged?.failure ? withAttempt(charged.failure, 'publication') : undefined;
         await markRecovering(engine, row, failure ? 'publication_failed' : 'publication_not_started', failure);
         const recovered = await recoverPublication(engine, row.id, hostId, true, failure, true);
