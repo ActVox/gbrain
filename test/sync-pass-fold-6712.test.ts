@@ -6,6 +6,9 @@
  * - fold engages: a one-file commit whose file is already canonical (no writeback) publishes exactly one request carrying
  *   the stamp, its import, which folds it (`pass_stamp: folded`); no separate checkpoint request. A fold that quietly
  *   stops engaging costs this shape a second level and a checkpoint publication per commit (#6858 at 57 ms: 17.7 s -> 21.8 s).
+ * - fold declines a writeback: a one-file commit whose file is not canonical is rewritten by its import (`file_written`), so
+ *   `foldPassCheckpoint` keeps the stamp path (sync-pass-fold.ts `prepared.file`): the import carries the fold offer and
+ *   publishes alone, and its own checkpoint request follows.
  * - fold probe 1: the last import's publication fails after its folded stamp ran (`publication:before_commit`): the stamp
  *   rolls back with it, so the checkpoint and the pass row stay where they were, and later runs converge.
  * - fold probe 2: a hold at the target when the last import publishes: the import publishes alone (`pass_stamp_skipped`),
@@ -91,6 +94,19 @@ for (const backend of testBackends()) {
       const head = git(root, 'rev-parse', 'HEAD');
       expect(await checkpoint(engine)).toEqual({ last_commit: head, converged: head });
       expect(await bodyOf(engine, 'notes/a')).toContain('A committed change of notes/a.');
+    }), 120_000);
+
+    test('fold declines a writeback: a one-file commit whose import rewrites its file keeps the checkpoint request', () => brain(async ({ engine, root }) => {
+      expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+      const after = await lastSequence(engine);
+      writeFileSync(join(root, 'notes/a.md'), '---\ntitle: notes/a\n---\nA committed change of notes/a.\n'); commit(root, 'change a, not canonical');
+      expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+      const stamped = await engine.executeRaw<Record<string, unknown>>(
+        "SELECT intent->>'kind' AS kind, slug, state, intent->'stamp' ? 'fold' AS offered, outcome->>'pass_stamp' AS stamp, outcome->>'pass_stamp_skipped' AS skipped, outcome FROM persistence_requests WHERE sequence > $1 AND intent ? 'stamp' ORDER BY sequence", [after]);
+      expect((stamped[0]?.outcome as { persistence?: { file_written?: boolean } } | undefined)?.persistence?.file_written).toBe(true);
+      expect(stamped.map(({ outcome, ...row }) => row)).toEqual([
+        { kind: 'managed_sync_import', slug: 'notes/a', state: 'committed', offered: true, stamp: null, skipped: null },
+        { kind: 'managed_sync_checkpoint', slug: '__managed_sync_checkpoint__', state: 'committed', offered: false, stamp: null, skipped: null }]);
     }), 120_000);
 
     test('fold probe 1: a failed publication of the last import rolls its folded stamp back; later runs converge', () => brain(async ({ engine, root }) => {
