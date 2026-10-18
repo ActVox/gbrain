@@ -1438,6 +1438,14 @@ More: [docs/guides/shared-brain-skills.md#approve-publication-following-and-edit
 |---|---|---|---|---|---|---|
 | A caller asked to forget a fact (remote forget) or remove a take (takes_remove) more trusted than its own writes, so nothing was removed and the owner was asked instead. | Lower-trust writers cannot overwrite, supersede or forget what the owner confirmed or curated (#5575 guarded supersession). The request became a trust proposal the owner can accept on the brain host; forget's frozen expired meaning is unchanged because nothing expired. | Do not retry. Tell the user the fact or take needs their decision and give them the command in fix (gbrain trust confirm <proposal_ref> on the brain host). | user | `repeat the read that failed` | 3 | no |
 
+### frontmatter_alias_limit
+
+<a id="frontmatter_alias_limit"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A file an older gbrain imported nests YAML aliases in its frontmatter that expand past the size limit, so sync holds it alone. | #7018 bounds YAML alias expansion on purpose (a few hundred bytes of nested anchors expand into gigabytes), so refusing bytes an older gbrain imported is intended, not a parser regression: the page keeps its last imported version and the rest of the source syncs. | Reduce the alias nesting in the frontmatter (or write the values out), or remove the file, then commit and sync again. | agent | `repeat the read that failed` | 1 | no |
+
 ### frontmatter_slug_conflict
 
 <a id="frontmatter_slug_conflict"></a>
@@ -2576,7 +2584,7 @@ More: [docs/guides/windowed-reads.md#page_too_large_for_inline](../../docs/guide
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A file whose exact bytes imported before is now refused by gbrain's frontmatter reader. | The same bytes imported under an earlier gbrain version, so only gbrain changed; with `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, such a file is held and the rest of the sync continues. | Report it as a gbrain bug with the gbrain version, the file and the code; upgrade or pin the last good version, then sync again. | host_admin | `gbrain doctor --json` | 1 | no |
+| A file whose exact bytes imported before is now refused by gbrain's frontmatter reader. | The same bytes imported under an earlier gbrain version, so only gbrain changed; with `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, such a file is held and the rest of the sync continues. | Report it as a gbrain bug with the gbrain version, the file and the code; upgrade, or keep `GBRAIN_SYNC_PARSER_REGRESSION=hold` set for the process that syncs, and never pin a release older than 0.60.305.0; then sync again. | host_admin | `gbrain doctor --json` | 1 | no |
 
 ### pasted_wrong_url
 
@@ -3696,7 +3704,7 @@ Reasons: `content_directory`.
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Sync stopped because gbrain would hold a file whose exact bytes imported before; this is a gbrain bug. | The upgrade invariant says a newer reader never refuses bytes an older one imported, so the run stops without advancing rather than hide a regression. | Report it with the gbrain version, the file and the code; upgrade or pin the last good version, then run gbrain sync --source <id> --no-pull. | host_admin | `gbrain doctor --json` | 1 | no |
+| Sync stopped because gbrain would hold a file whose exact bytes imported before; this is a gbrain bug. | The upgrade invariant says a newer reader never refuses bytes an older one imported, so the run stops without advancing rather than hide a regression. | Report it with the gbrain version, the file and the code; upgrade, or set `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, and never pin a release older than 0.60.305.0; then run gbrain sync --source <id> --no-pull. | host_admin | `gbrain doctor --json` | 1 | no |
 
 ### tail_exposure_approval
 

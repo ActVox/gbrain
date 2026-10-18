@@ -1192,6 +1192,8 @@ async function runFederate(engine: BrainEngine, args: string[], value: boolean):
       console.log(`  → embed-backfill not queued (${sub.engineKind} has no recognized persistent worker); run: gbrain embed --stale --source ${id}`);
     } else if (sub.status === 'stalled') {
       console.log(`  → embed-backfill not queued: the last ${sub.failures} runs failed on the same blocked pages with nothing embedded. See: gbrain doctor --only embed_backfill_stalled`);
+    } else if (sub.status === 'embedding_disabled') {
+      console.log('  → embed-backfill not queued: embedding is disabled on this brain (keyless by choice; keyword search works).');
     } else { sub satisfies never; }
   } catch (err) {
     // Federation flip already succeeded; embed-backfill is a follow-up nicety.

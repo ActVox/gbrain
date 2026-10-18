@@ -70,7 +70,10 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   { code: 'rename_held', class: 'page', safe_actions: ['repair'], needs_human: false, escalate: 'the repair preview needs an interpretation', human_reason: 'Approve re-binding the rename to the current page.' },
   { code: 'file_too_large', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always', human_reason: 'The file is over the page size limit; exclude it with sync.exclude, or split it into files under the limit.' },
   { code: 'content_rejected', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always', human_reason: 'The content-sanity gate rejected the file; remove the junk or change junk_disposition.' },
-  { code: 'parser_regression', class: 'page', safe_actions: ['upgrade'], needs_human: true, escalate: 'always: a gbrain bug', human_reason: 'Report the file and gbrain version, then upgrade or pin the last good release.' },
+  { code: 'parser_regression', class: 'page', safe_actions: ['upgrade'], needs_human: true, escalate: 'always: a gbrain bug', human_reason: 'Report the file and gbrain version, then upgrade, or keep GBRAIN_SYNC_PARSER_REGRESSION=hold set for the process that syncs; never pin a release older than 0.60.305.0.' },
+  // #6712 PR 4b (S-47): bytes an older gbrain imported whose frontmatter aliases expand past #7018's intended bound; only an edit clears it.
+  { code: 'frontmatter_alias_limit', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only an edit to the file or its removal clears it',
+    human_reason: 'The file\'s frontmatter nests YAML aliases past the size limit; reduce the alias nesting (or write the values out), or remove the file, and commit.' },
   { code: 'managed_image_sync_unsupported', class: 'page', safe_actions: ['none'], needs_human: false, escalate: 'never: images stay held while multimodal embedding is off', human_reason: 'Leave images held, exclude them with sync.exclude, or set GBRAIN_EMBEDDING_MULTIMODAL=true so the next sync imports them.' },
   // #6712 PR 2 (L4): two content refusals that hold the file; only the owner or the user changes the outcome.
   { code: 'purged_content', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only the owner clears a purge tombstone',
