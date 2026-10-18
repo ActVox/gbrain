@@ -254,6 +254,8 @@ test/pathological/b-9-enrich-retired-alias.test.ts
 test/pathological/b6-triage-verdict-surrogate.test.ts
 test/pathological/c-23-override-and-doctor-fixes.test.ts
 test/pathological/c-9-facts-absorb-dead.test.ts
+test/pathological/lp-f-split-fence-withdrawal-capacity.test.ts
+test/pathological/lp-g-file-digest-fence-bound.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts
