@@ -22,6 +22,7 @@ import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { replayPurges, type PurgeMirrorLine } from '../src/core/belief/purge-mirror.ts';
 import { SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
+import { dropOriginIndex } from './helpers/origin-index.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -105,8 +106,12 @@ describe('#6712 PR 4b deletion markers (pglite)', () => {
     expect((await purge(ctx, engine, 'notes/eta')).state).toBe('committed');
     expect((await markers(engine)).has('notes/eta.md')).toBe(true);
     // A live twin records delta's file; delta is soft-deleted (shared_origin) and purged: the twin owns the origin.
-    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.putPage('notes/delta-twin', { type: 'note', title: 'Twin', compiled_truth: 'A twin recording delta.',
-      timeline: '', frontmatter: {}, content_hash: 'twin-delta', source_path: 'notes/delta.md' }, { sourceId: 'default' }), TEST_WRITE_ATTRIBUTION));
+    // #6948: no writer records a held origin on a second page any more, so the twin's origin is set as legacy data left it.
+    await dropOriginIndex(engine);
+    await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], async () => {
+      await tx.putPage('notes/delta-twin', { type: 'note', title: 'Twin', compiled_truth: 'A twin recording delta.', timeline: '', frontmatter: {}, content_hash: 'twin-delta' }, { sourceId: 'default' });
+      await tx.executeRaw("UPDATE pages SET source_path='notes/delta.md' WHERE source_id='default' AND slug='notes/delta-twin'");
+    }, TEST_WRITE_ATTRIBUTION));
     expect((await mutate(ctx, engine, 'notes/delta')).state).toBe('committed');
     expect((await purge(ctx, engine, 'notes/delta')).state).toBe('committed');
     expect(await pageRow(engine, 'notes/delta')).toBeNull();

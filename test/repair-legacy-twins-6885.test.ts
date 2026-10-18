@@ -218,6 +218,19 @@ for (const backend of testBackends()) describe(`#6885 repair legacy-twins (${bac
     expect((await pageRow(f.sourceId, f.ids.legacy))!.source_path).toBeNull();
   }, { legacyBody: 'An edited legacy body that the file never had.\n' }), 180_000);
 
+  test('#6948 merge: a twin link the legacy page holds with other words is a decision twin_evidence_conflicts, never merged or dropped', () => fixture(async f => {
+    await raw(() => engine.executeRaw("INSERT INTO links(from_page_id, to_page_id, link_type, link_source, context) VALUES ($1,$3,'cites','manual','the twin says this'), ($2,$3,'cites','manual','the legacy page says that')",
+      [f.ids.twin, f.ids.legacy, f.ids.second]));
+    const preview = await repair(f.sourceId);
+    expect(preview.affected).toBe(0);
+    expect(preview.listing).toEqual([{ item: `${f.sourceId}:${TWIN}`, class: 'decision:twin_evidence_conflicts', detail: expect.stringContaining(`legacy ${LEGACY}`) }]);
+    const applied = await repair(f.sourceId, { apply: true, expect: preview.preview_hash });
+    expect(applied).toMatchObject({ applied: 0, failed: [] });
+    expect(await pageRow(f.sourceId, f.ids.twin)).toMatchObject({ deleted: false, source_path: FILE });
+    expect((await engine.executeRaw<{ context: string }>("SELECT context FROM links WHERE link_type='cites' AND to_page_id=$1 ORDER BY context", [f.ids.second])).map(row => row.context))
+      .toEqual(['the legacy page says that', 'the twin says this']);
+  }), 180_000);
+
   test('a page that moved after the preview is skipped changed_since_preview; nothing changes', () => fixture(async f => {
     const preview = await repair(f.sourceId);
     expect(preview.affected).toBe(1);

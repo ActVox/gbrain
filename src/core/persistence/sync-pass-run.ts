@@ -764,8 +764,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         await writeLegacyMarkers(engine, level);
         value.obligations.legacy_markers_at = new Date().toISOString();
       }
-      // #6517, as discovery refuses a claim: several pages record the origin of a path this pass would act on (before any hold).
-      const ambiguous = level.paths.find(entry => entry.ambiguousOrigin && !entry.result.settled && !entry.result.inFlight && entry.result.cls !== 'spelling');
+      // #6517, as discovery refuses a claim: several tombstones record the origin of a path this pass would act on (before any
+      // hold). Several live pages hold that path alone (#6948 `origin_conflict`, sync-pass-apply.ts) and the rest syncs.
+      const ambiguous = level.paths.find(entry => entry.ambiguousOrigin?.kind === 'several_tombstones' && !entry.result.settled && !entry.result.inFlight && entry.result.cls !== 'spelling');
       if (ambiguous) {
         await save('blocked', 'page_identity_changed');
         throw ambiguousOriginRefusal(sourceId, entryPaths(level, ambiguous.path).sourcePath, ambiguous.ambiguousOrigin!.slugs.map(slug => ({ slug })), ambiguous.ambiguousOrigin!.kind);
