@@ -10,6 +10,7 @@ import { readPageSnapshot as readCanonicalPageSnapshot } from './page-state/snap
 import { readPageSnapshotsBatch } from './page-snapshot-batch.ts';
 import { createPageVersion } from './page-state/versions.ts';
 import { moveSlugBindings, recordRenameAlias } from './page-state/rename-alias.ts';
+import { dropRekeyDuplicates } from './facts/ontology-rekey.ts';
 import { composablePostgresTransaction, transactionMemo } from './page-state/transactions.ts';
 import type { PageReadScope } from './types.ts';
 import type { PageReadPolicy } from './types.ts';
@@ -910,6 +911,9 @@ export class PostgresEngine implements BrainEngine {
     // expiry stay where they are — soft-deleting the phantom page is
     // sufficient to make them invisible without rewriting their slug
     // (and rewriting would break the audit trail in listSupersessions).
+    // B-10: an observation the canonical page already holds would collide on idx_facts_ontology_stint_dedup; drop it first.
+    await dropRekeyDuplicates(this, sourceId, { where: 'f.source_markdown_slug = $3 AND f.expired_at IS NULL', entity: '$2::text', sms: '$2::text',
+      params: [canonicalSlug, phantomSlug] });
     const result = await sql`
       UPDATE facts
       SET entity_slug = ${canonicalSlug},

@@ -66,6 +66,21 @@ for (const backend of backends) {
       expect(after.filter(r => r.entity_slug === 'people/a')).toEqual([]);
     });
 
+    test('the active observation survives when the target only holds an expired copy, and supersession links follow it', async () => {
+      await importFromContent(engine(), 'people/e', md('E Example', 'person'), { noEmbed: true });
+      await observe(engine(), 'people/e', 'meetings/m-example');
+      await observe(engine(), 'people/e-x', 'meetings/m-example');
+      const [moving, target] = (await rows(engine())).map(r => Number(r.id));
+      await engine().executeRaw(`UPDATE facts SET expired_at = now() WHERE id = $1`, [target]);
+      await observe(engine(), 'people/f', 'meetings/m-example');
+      await engine().executeRaw(`UPDATE facts SET superseded_by = $1 WHERE entity_slug = 'people/f'`, [target]);
+      await engine().updateSlug('people/e', 'people/e-x');
+      const after = await rows(engine());
+      expect(after.filter(r => r.entity_slug === 'people/e-x').map(r => [Number(r.id), r.expired_at])).toEqual([[moving, null]]);
+      const [{ superseded_by }] = await engine().executeRaw<{ superseded_by: number | string }>(`SELECT superseded_by FROM facts WHERE entity_slug = 'people/f'`);
+      expect(Number(superseded_by)).toBe(moving);
+    });
+
     test('renaming the source page of two identical observations keeps one', async () => {
       await importFromContent(engine(), 'meetings/m-old', md('Meeting Example', 'meeting'), { noEmbed: true });
       await observe(engine(), 'people/b', 'meetings/m-old');
