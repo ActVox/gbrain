@@ -46,6 +46,7 @@ export const ISOLATE_SITES = {
   'transcripts.ingest_session': 'A-2',
   'google.contact': 'A-3',
   'google.calendar_event': 'A-3',
+  'migrate_engine.loop_rows': 'A-31',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;

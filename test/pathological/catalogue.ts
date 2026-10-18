@@ -72,4 +72,6 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'google.calendar_event': { file: 'test/pathological/a3-google-items.test.ts',
     item: 'a failing contact and a failing event are counted, then held',
     run: 'run: a run-scoped failure inside an event stops the sweep and records no hold' },
+  'migrate_engine.loop_rows': { file: 'test/pathological/a31-migrate-loop-rows.serial.test.ts',
+    item: 'A-31 item: a refused open_loops row is printed with its id and code and blocks the switch', run: 'A-31 run: a run-scoped error' },
 };
