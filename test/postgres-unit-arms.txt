@@ -286,7 +286,6 @@ test/pathological/d2-fence-write-overwrite.test.ts
 test/pathological/d21-migration-verifier-record.test.ts
 test/pathological/d22-legacy-hash-body-history.test.ts
 test/pathological/d23-extract-atoms-db-only.test.ts
-test/pathological/d24-atoms-restore.test.ts
 test/pathological/d3-forget-overwrite.test.ts
 test/pathological/d4-proposal-overwrite.test.ts
 test/pathological/d5-phantom-canonical-overwrite.test.ts
@@ -299,6 +298,7 @@ test/pathological/h1-zero-yield-atom-reextract.test.ts
 test/pathological/h2-git-effect-moved-remote.test.ts
 test/pathological/h3-chronicle-partial-generation.test.ts
 test/pathological/h4-conversation-facts-zero-yield.test.ts
+test/pathological/h5-atoms-restore.test.ts
 test/pathological/w1-write-through-staging-window.serial.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
