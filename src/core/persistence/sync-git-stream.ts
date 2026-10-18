@@ -309,7 +309,7 @@ interface ReadFile { path: string; sha256: string; localOid: string; foldedOid: 
  * disk probe exactly as the same disk does with a pristine index.
  */
 export async function probeDirtiness(root: string, gitRoot: string, paths: string[], tree: Map<string, GitTreeEntry>,
-  index: Map<string, GitIndexEntry>, opts: { batch?: number; working?: boolean } = {}): Promise<Map<string, DirtinessProbe>> {
+  index: Map<string, GitIndexEntry>, opts: { batch?: number; working?: boolean; step?: LoopYield } = {}): Promise<Map<string, DirtinessProbe>> {
   const batch = Math.max(1, opts.batch ?? 2000);
   const results = new Map<string, DirtinessProbe>();
   const firstOid = tree.values().next().value?.oid ?? index.values().next().value?.oid ?? '';
@@ -317,7 +317,7 @@ export async function probeDirtiness(root: string, gitRoot: string, paths: strin
   let realRoot: string | null = null;
   let realGitRoot: string | null = null;
   try { realRoot = realpathSync.native(root); realGitRoot = realpathSync.native(gitRoot); } catch {}
-  const step = loopYield();
+  const step = opts.step ?? loopYield();
   for (let start = 0; start < paths.length; start += batch) {
     const decided = new Map<string, Dp | null>();
     const read: ReadFile[] = [];
@@ -347,6 +347,7 @@ export async function probeDirtiness(root: string, gitRoot: string, paths: strin
     const [rawOids, attrs] = await Promise.all([hashRaw(gitRoot, read.map(file => file.path)), readAttributes(gitRoot, undecided)]);
     const lfs: Array<{ file: ReadFile; treeOid: string; executableMatches: boolean }> = [];
     for (const [i, file] of read.entries()) {
+      if (step.due()) await step.pause();
       const rawOid = rawOids?.[i] === file.localOid ? file.localOid : null;
       const settle = (dp: Dp) => { results.set(file.path, { dp, rawOid, rawSha256: file.sha256 }); };
       const prior = decided.get(file.path);
