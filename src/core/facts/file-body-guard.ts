@@ -15,6 +15,7 @@ import type { BrainEngine } from '../engine.ts';
 import { sanitizeText } from '../batch-rows.ts';
 import { parseMarkdown } from '../markdown.ts';
 import { contentHash, contentHashFrontmatterAndTags } from '../utils.ts';
+import { stableJson } from '../persistence/digest.ts';
 
 export interface StoredBody {
   compiled_truth: string | null;
@@ -67,7 +68,7 @@ function fileHeldBy(fileBytes: string, slug: string, state: StoredState): boolea
   if (!fileBodyMatchesStored(fileBytes, slug, state)) return false;
   const file = contentHashFrontmatterAndTags({ frontmatter: parseMarkdown(fileBytes, `${slug}.md`).frontmatter });
   const stored = contentHashFrontmatterAndTags({ frontmatter: state.frontmatter ?? {} });
-  return Object.entries(file.frontmatter).every(([key, value]) => JSON.stringify(value) === JSON.stringify(stored.frontmatter[key]));
+  return Object.entries(file.frontmatter).every(([key, value]) => stableJson(value) === stableJson(stored.frontmatter[key]));
 }
 
 /**
