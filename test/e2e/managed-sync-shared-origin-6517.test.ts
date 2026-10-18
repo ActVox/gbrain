@@ -68,8 +68,11 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 managed sync 
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
     const opts = { sourceId: id, noPull: true, noEmbed: true, noExtract: true };
     expect((await sync(opts)).status).toBe('first_sync');
-    await engine.transaction(tx => withCoordinatedWrite(tx, [id], () => tx.putPage('alpha-twin', { type: 'note', title: 'Twin', compiled_truth: 'A twin recording alpha.',
-      timeline: '', frontmatter: {}, content_hash: 'twin', source_path: 'alpha.md' }, { sourceId: id }), TEST_WRITE_ATTRIBUTION));
+    // #6948: no writer records a held origin on a second page any more, so the twin's origin is set as legacy data left it.
+    await engine.transaction(tx => withCoordinatedWrite(tx, [id], async () => {
+      await tx.putPage('alpha-twin', { type: 'note', title: 'Twin', compiled_truth: 'A twin recording alpha.', timeline: '', frontmatter: {}, content_hash: 'twin' }, { sourceId: id });
+      await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2', [id, 'alpha-twin', 'alpha.md']);
+    }, TEST_WRITE_ATTRIBUTION));
     return { id, root, file, opts };
   }
 

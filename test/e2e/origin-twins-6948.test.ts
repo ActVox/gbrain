@@ -84,7 +84,9 @@ for (const backend of testBackends()) describe(`[${backend}] #6948 duplicate-ori
       await write(id, async tx => {
         await tx.executeRaw("SELECT set_config('gbrain.write_trust_tier', $1, true)", [alpha.trust_tier]);
         await tx.putPage(twin.slug, { type: 'note', title: 'Example', compiled_truth: twin.same === false ? 'A different body.' : alpha.compiled_truth,
-          timeline: alpha.timeline ?? '', frontmatter: twin.frontmatter ?? {}, content_hash: randomUUID(), source_path: 'alpha.md' }, { sourceId: id });
+          timeline: alpha.timeline ?? '', frontmatter: twin.frontmatter ?? {}, content_hash: randomUUID() }, { sourceId: id });
+        // Legacy data: no writer records a held origin on a second page any more, so the twin's origin is set directly.
+        await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2', [id, twin.slug, 'alpha.md']);
       });
     }
     return { id, root, opts };
@@ -258,10 +260,14 @@ for (const backend of testBackends()) describe(`[${backend}] #6948 duplicate-ori
     }
     expect(await originIndexState(engine)).toBe('present');
     expect(((await originTwinsEntry.run({ engine } as never)) as Array<{ status: string }>)[0]).toMatchObject({ status: 'ok' });
-    // With the index present, a second live claim on an origin is refused by the database.
+    // With the index present, a second live claim on an origin is refused: by the writer guard, and by the database
+    // for a statement that skips the guard.
     const refused = await write(f.id, tx => tx.putPage('alpha-third', { type: 'note', title: 'x', compiled_truth: 'x', timeline: '', frontmatter: {}, content_hash: 'x', source_path: 'alpha.md' }, { sourceId: f.id }))
       .then(() => 'written', () => 'refused');
     expect(refused).toBe('refused');
+    const unguarded = await engine.executeRaw("UPDATE pages SET source_path='alpha.md' WHERE source_id=$1 AND slug='beta'", [f.id])
+      .then(() => 'written', (error: { code?: unknown }) => String(error.code));
+    expect(unguarded).toBe('23505');
     // The migration on a clean brain builds it (and is idempotent).
     await v257.handler!(engine);
     expect(await originIndexState(engine)).toBe('present');

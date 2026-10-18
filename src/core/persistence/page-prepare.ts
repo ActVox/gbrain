@@ -86,6 +86,7 @@ import { suppliedTrustMarkerView } from '../trust/channel.ts';
 import { gateField, gateInput } from '../trust/gate-outcomes.ts';
 import { PUSH_SCAN_MAX_FILE_BYTES } from '../page-size-policy.ts';
 import { fileContentHash, FileBytes, isStreamedContent, LARGE_FILE_MIN_BYTES, StreamedFileContent } from './large-file.ts';
+import { bindOrigin } from './origin-guard.ts';
 
 
 const ownerStatusFix = (sourceId: string): Action => readFix(`Shows source ${sourceId}'s canonical owner with its pending, failed and recovering requests, read-only.`,
@@ -868,8 +869,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
       // Mandatory metadata shares publication rollback; exact no-ops never heal it. These, and the
       // projections (facts, takes, timeline rows of the page the import just wrote live), are independent and sent together.
       const [, pinned] = await pipelined(tx, [
-        async () => { if (sourcePath && !snapshot?.page.source_path) await tx.executeRaw(`UPDATE pages SET source_path = $1
-          WHERE source_id=$2 AND slug=$3 AND source_path IS NULL`, [sourcePath, row.source_id, row.slug]); },
+        async () => { if (sourcePath && !snapshot?.page.source_path) await bindOrigin(tx, { sourceId: row.source_id, slug: row.slug, sourcePath, onlyIfUnset: true }); },
         async () => pinMode ? (await tx.executeRaw<{ mode: string | null }>(`UPDATE sources SET config=CASE WHEN config->>'slug_root_mode' IS NULL
           THEN jsonb_set(${SOURCE_CONFIG_OBJECT_SQL},'{slug_root_mode}',to_jsonb($2::text)) ELSE config END WHERE id=$1 RETURNING config->>'slug_root_mode' AS mode`,
         [row.source_id, pinMode]))[0] : undefined,

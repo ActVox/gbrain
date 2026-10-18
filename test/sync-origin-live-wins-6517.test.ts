@@ -56,7 +56,9 @@ for (const backend of testBackends()) describe(`[${backend}] #6517 assertSyncPag
     for (const state of states) {
       const slug = `origin-rule/${++n}`;
       await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
-        await tx.putPage(slug, { type: 'note', title: slug, compiled_truth: `Page ${n}.`, timeline: '', frontmatter: {}, content_hash: `h-${n}`, source_path: origin }, { sourceId });
+        await tx.putPage(slug, { type: 'note', title: slug, compiled_truth: `Page ${n}.`, timeline: '', frontmatter: {}, content_hash: `h-${n}` }, { sourceId });
+        // #6948: a second live claimant only exists as legacy data now, so the origin is set directly.
+        await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2', [sourceId, slug, origin]);
         if (state === 'gone') await tx.executeRaw('UPDATE pages SET deleted_at=now() WHERE source_id=$1 AND slug=$2', [sourceId, slug]);
       }, TEST_WRITE_ATTRIBUTION));
       ids.push(Number((await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]))[0]!.id));

@@ -82,8 +82,12 @@ for (const backend of testBackends()) describe(`[${backend}] #6948 mergeTwinInto
   const write = <T>(fn: (tx: BrainEngine) => Promise<T>) => engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => fn(tx), TEST_WRITE_ATTRIBUTION));
   const id = async (slug: string) => Number((await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]))[0]!.id);
   async function put(slug: string, opts: { body?: string; sourcePath?: string | null; frontmatter?: Record<string, unknown> } = {}) {
-    await write(tx => tx.putPage(slug, { type: 'note', title: slug, compiled_truth: opts.body ?? 'One shared body.', timeline: '', frontmatter: opts.frontmatter ?? {},
-      content_hash: randomUUID(), ...(opts.sourcePath ? { source_path: opts.sourcePath } : {}) }, { sourceId }));
+    // Twins are legacy data: no writer records a held origin on a second page (#6948), so the origin is set directly.
+    await write(async tx => {
+      await tx.putPage(slug, { type: 'note', title: slug, compiled_truth: opts.body ?? 'One shared body.', timeline: '', frontmatter: opts.frontmatter ?? {},
+        content_hash: randomUUID() }, { sourceId });
+      if (opts.sourcePath) await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2', [sourceId, slug, opts.sourcePath]);
+    });
     return id(slug);
   }
   /** A survivor and a twin recording one origin with one body, and a third page. */
