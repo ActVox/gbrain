@@ -241,8 +241,11 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
     await engine.setConfig('sync.write_through', 'false');
     expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
     writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
-    let late: string | null = null;
+    let late: string | null = null, release = () => {};
+    const ended = new Promise<void>(resolve => { release = resolve; });
     installFaultHook(async (point, detail) => {
+      // The late write publishes once the pass has ended: a round that saw it commit would stamp again, past it.
+      if (point === 'consumer:prepared' && late && detail.requestId === late) { await ended; return; }
       if (point !== 'consumer:prepared' || late || detail.operation !== 'submit_job') return;
       // The request that carries the pass stamp: its checkpoint, or the last import it folded into (#6926).
       const [row] = await engine.executeRaw<{ stamp: boolean }>("SELECT intent ? 'stamp' AS stamp FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
@@ -251,7 +254,8 @@ describe('#6712 PR 4b live pass fences (pglite)', () => {
       const prepared = await preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/c', request_id: randomUUID(), expected_revision: current.revision, content: note('notes/c', 'A late agent edit.') } });
       late = (await admitWrite(engine, prepared.admission!)).request_id;
     });
-    expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+    const stamped = await performManagedSync(engine, OPTS).finally(release);
+    expect(stamped.status).toBe('synced');
     installFaultHook(undefined);
     expect(late).not.toBeNull();
     expect((await passRow(engine))!.obligations.converged!.open_at_stamp).toContain(`r:${late}`);

@@ -88,6 +88,8 @@ export interface ManagedSyncPassValue {
      * (`gbrain repair managed-sync-orphans`, `slug_mode_refused`).
      */
     slug_mode?: 'git-root' | 'source-root';
+    /** #6712 PR 4b: the page requests (row ids) passes left open when they stopped; the next pass reports each that commits as its import (sync-pass-carried.ts). */
+    pending_requests?: string[];
     /** #6712 PR 3 (L7) on the pass: the page request a blocked pass stopped on, which the next pass replays while what refused it is unchanged. */
     blocked?: { request_id: string; pass_id: string };
   };
