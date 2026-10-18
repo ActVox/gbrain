@@ -49,7 +49,7 @@ import { RECEIPT_RESERVATION_FLOOR } from '../persistence/receipt-bytes.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { ItemRun, type ItemFailure } from '../item-failure.ts';
 
-export const REPAIR_KINDS = ['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints', 'request-indexes', 'connector-fences', 'take-supersession', 'accepted-takes', 'orphan-bindings', 'embedding-effects', 'attribution-backfill', 'planner-stats', 'google-file-modes', 'stale-atoms', 'extractor-facts', 'conversation-labels', 'captured-facts', 'loop-facts', 'ontology-facts', 'facts-rehome', 'orphan-children', 'failed-writes', 'split-facts', 'frontmatter', 'fences', 'slug-conflicts', 'timeline-comments', 'managed-sync-orphans', 'frontmatter-keys', 'file-drift', 'stuck-recovery', 'ghost-pages', 'origin-twins', 'receipt-compaction', 'aliases', 'rename-identity', 'overwritten-edits', 'missing-tables'] as const;
+export const REPAIR_KINDS = ['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints', 'request-indexes', 'connector-fences', 'take-supersession', 'accepted-takes', 'orphan-bindings', 'embedding-effects', 'attribution-backfill', 'planner-stats', 'google-file-modes', 'stale-atoms', 'extractor-facts', 'conversation-labels', 'captured-facts', 'loop-facts', 'ontology-facts', 'facts-rehome', 'orphan-children', 'failed-writes', 'split-facts', 'frontmatter', 'fences', 'slug-conflicts', 'timeline-comments', 'managed-sync-orphans', 'content-receipt-root', 'frontmatter-keys', 'file-drift', 'stuck-recovery', 'ghost-pages', 'origin-twins', 'receipt-compaction', 'aliases', 'rename-identity', 'overwritten-edits', 'missing-tables', 'url-clone-fences', 'segmented-mirror'] as const;
 export type RepairKind = typeof REPAIR_KINDS[number];
 
 export interface RepairScope { brain_id: string; source_ids: string[] }
@@ -106,7 +106,7 @@ export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmb
   /** #6712 PR 2 `file-drift`: only pages whose newest drift conflict is at or after this concrete instant (ISO; `--since`, parsed by `since.ts`). */
   since?: string;
   /** `stuck-recovery`: the version an apply keeps, and the one request a run selects. */
-  keep?: 'prior' | 'disk'; requestId?: string;
+  keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string;
   /** `receipt-compaction` (#6696 A9): the age (`72h`, `30d`), failures too, and compaction inside the retention window. */
   olderThan?: string; includeFailures?: boolean; force?: boolean;
   /** `rename-identity` (#6729): the old slug that disambiguates a pair (`--from`), and the close disposition (`--close`). */
@@ -306,7 +306,7 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
   opts: { apply: boolean; limit?: number; embeddingModel?: string; sourceFlag?: string; embed?: boolean; applyArgs?: string[];
     explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[]; slugs?: string[]; noLlm?: boolean;
     prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string;
-    keep?: 'prior' | 'disk'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean;
+    keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean;
     spec?: Pick<RepairKindSpec, 'explicit_only' | 'consent' | 'spends'>; maxLlmUsd?: number; deadline?: number; now?: () => number;
     /** Test seam: who publishes this run's admissions (default: this process's consumer, else a live full one on this host). */
     publicationOwner?: () => Promise<{ alive: boolean; owner: string }> }): Promise<RepairResult> {

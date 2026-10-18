@@ -46,6 +46,7 @@ import { takeSupersessionRepair } from './take-supersession.ts';
 import { acceptedTakesRepair } from './accepted-takes.ts';
 import { orphanBindingsRepair } from './orphan-bindings.ts';
 import { managedSyncOrphansRepair } from './managed-sync-orphans.ts';
+import { contentReceiptRootRepair } from './content-receipt-root.ts';
 import { embeddingEffectsRepair } from './embedding-effects.ts';
 import { googleFileModesRepair } from './google-file-modes.ts';
 import { staleAtomsRepair } from './stale-atoms.ts';
@@ -73,6 +74,8 @@ import { aliasesRepair } from './aliases.ts';
 import { renameIdentityRepair, RENAME_IDENTITY_CONSENT_TEXT } from './rename-identity.ts';
 import { overwrittenEditsRepair } from './overwritten-edits.ts';
 import { missingTablesRepair } from './missing-tables.ts';
+import { urlCloneFencesRepair } from './url-clone-fences.ts';
+import { segmentedMirrorRepair } from './segmented-mirror.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
 
@@ -302,6 +305,13 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'Bookkeeping only (op_checkpoints); no journal admission. The preview prints a hash; --apply --expect <hash> retires exactly that set. '
       + 'A cursor with a live pending request, or one the live writer can still resume, is kept and counted.',
   },
+  'content-receipt-root': {
+    handler: contentReceiptRootRepair, embeds: 'none', checks: ['sync_freshness'], explicit_only: true, preview_bound: true,
+    summary: 'Rebind a gbrain-owned content source\'s shared-skills content receipt that still names an old root after a writer transfer or relocation (#6892), '
+      + 'so doctor sync_freshness exempts the source again. Owner host only; rebinds only when the owner\'s tree still hashes to the recorded worktree manifest, '
+      + 'and otherwise lists why (source_path_mismatch: run sources set-path; tree_mismatch: a self-transfer re-verifies). The receipt row only; the previous '
+      + 'value is kept under <key>.backup. Preview-bound: --apply --expect <hash> rebinds exactly the previewed set.',
+  },
   'frontmatter-keys': {
     handler: frontmatterKeysRepair, embeds: 'none', checks: ['stale_frontmatter_keys'], explicit_only: true, preview_bound: true,
     summary: 'Strip the parser\'s reserved keys (type, title, tags, slug) that older imports stored inside pages.frontmatter (#6454). Since this release '
@@ -405,6 +415,36 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'recreated. DDL only (IF NOT EXISTS), no journal admission. The preview prints a hash; --apply --expect <hash> recreates exactly that set. '
       + 'Runs only when named; never on upgrade. Brain-wide.',
   },
+  'url-clone-fences': {
+    handler: urlCloneFencesRepair, embeds: 'none', checks: [], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: 'Restore the previewed files of a clone gbrain owns from HEAD after keeping their gbrain fence rows database-only',
+      why: 'An older release appended ## Facts fence rows to these clone files, and the local change blocks every git pull --ff-only that touches them; the preview proved each file differs from HEAD by those rows alone.',
+      risk: 'Each file is backed up under ~/.gbrain/backups/url-clone-fences/ before it changes, and its fact rows stay active and recallable in the database. A file that changed since the preview is skipped. Copy the backup back to undo.',
+      user_message: 'Restore the previewed clone files from the last pulled commit? Their facts stay in the database and each file is backed up first',
+    },
+    summary: 'Clear the local changes an older release left in a gbrain-owned clone (sources add --url), which make every sync stop at the pull with '
+      + 'pull_blocked_local_changes (#6946). The preview lists each tracked file that differs from HEAD and proves the difference is only ## Facts fence '
+      + 'rows gbrain appended; any other difference (a user edit, a staged change, a deleted file) is named and left untouched. --apply --expect <hash> --yes, '
+      + 'per previewed file: back it up, keep its appended rows database-only in one transaction, import HEAD\'s bytes as the page, then restore the file '
+      + 'from HEAD. Unmanaged brains only (a managed brain uses gbrain sources mirror-readonly). Runs only when named.',
+  },
+  'segmented-mirror': {
+    handler: segmentedMirrorRepair, embeds: 'none', checks: [], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: 'Rewrite the previewed canonical files of pages stored in segments without their withdrawn or purged rows',
+      why: 'The preview listed each file an older binary left holding a row a withdrawal or purge removed from the database; the apply rewrites each one to the page\'s canonical render through the withdrawal mirror.',
+      risk: 'Each listed file is replaced by the bytes gbrain export writes for its page (other formatting differences in it are normalized the same way). A file that changed since the preview refuses the apply (preview_changed), and one that differs from the database for any other reason is never rewritten. The Git effect commits the change; the old bytes stay in earlier commits.',
+      user_message: 'Rewrite the previewed page files without their withdrawn rows? Each becomes the page\'s canonical render',
+    },
+    summary: 'Re-mirror the canonical files of pages stored in segments whose withdrawal mirror an older binary (before v0.60.299.0) passed by '
+      + '(skipped page_body_segmented), so the file still holds a row forget, forget_fact or purge_fact removed from the database. The preview, '
+      + 'on the source\'s owner host and in bounded memory, lists each file-backed segmented page whose file is an older render: it passes the '
+      + 'mirror\'s own file/database check and still holds a withdrawn or purged row; it prints the path, the file\'s SHA-256 and size and those '
+      + 'of the canonical render (gbrain export\'s bytes). A file that differs from the database for another reason is listed held '
+      + '(file_database_drift) and never rewritten. Preview-bound and destructive: --apply --expect <hash> --yes re-checks each page and commits, per '
+      + 'page, one receipted request whose withdrawal-mirror and Git effects rewrite and commit the file. Runs only when named; never on upgrade.',
+  },
 };
 
 export const REPAIR_REGISTRY: readonly RepairKindSpec[] = REPAIR_KINDS.map(kind => ({ kind, ...SPECS[kind] }));
@@ -489,7 +529,7 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
     async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[];
       slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number;
       prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string;
-      keep?: 'prior' | 'disk'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean } = {}): Promise<RepairResult> {
+      keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean } = {}): Promise<RepairResult> {
       const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0], writeWaitMs } as OperationContext;
       const spec = repairSpec(kind, opts.registry);
       return runRepair(ctx, spec.handler, scope, { apply: opts.apply, limit: run.limit, embeddingModel, sourceFlag: run.sourceFlag, spec,

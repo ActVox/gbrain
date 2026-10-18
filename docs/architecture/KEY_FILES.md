@@ -32,8 +32,8 @@ link it here rather than raising the cap.
 | [Commands (2/6, continued)](key-files/commands-2-continued.md) | `doctor/checks/routing-federation.ts`, `git-convergence.ts`, `keyword-plan.ts`, `dream-retriage.ts` to `embed.ts` |
 | [Commands (3/6)](key-files/commands-3.md) | `src/commands/engine-status.ts` through `src/commands/extract.ts` |
 | [Commands (3/6, continued)](key-files/commands-3-continued.md) | `src/commands/extract-timeline-db.ts` through `src/commands/frontmatter-install-hook.ts` |
-| [Commands (4/6)](key-files/commands-4.md) | `src/commands/frontmatter.ts` through `persistence-delegate.ts` |
-| [Commands (4/6, continued)](key-files/commands-4-continued.md) | `pglite-repair.ts` to `reindex-search-vector.ts`, `init-mode-picker.ts`, `src/core/embedding-migration-cli.ts` |
+| [Commands (4/6)](key-files/commands-4.md) | `src/commands/frontmatter.ts` through `persistence-admin.ts` |
+| [Commands (4/6, continued)](key-files/commands-4-continued.md) | `persistence-delegate.ts` to `reindex-search-vector.ts`, `init-mode-picker.ts`, `core/embedding-migration-cli.ts` |
 | [Commands (5/6)](key-files/commands-5.md) | `src/commands/reindex.ts` through `src/commands/storage.ts` |
 | [Commands (6/6)](key-files/commands-6.md) | `src/commands/sync.ts` through `src/commands/whoknows.ts` |
 | [Core Ai](key-files/core-ai.md) | `src/core/ai/` gateway, embedding, dims, errors, fallbacks |
@@ -45,10 +45,10 @@ link it here rather than raising the cap.
 | [Core Cycle (patterns)](key-files/core-cycle-patterns.md) | patterns, drift, synthesis |
 | [Core Minions (1/2)](key-files/core-minions-1.md) | `src/core/minions/` through `src/core/minions/protected-names.ts` |
 | [Core Minions (2/2)](key-files/core-minions-2.md) | `src/core/minions/queue.ts` through `src/core/minions/worker.ts` |
-| [Core Persistence](key-files/core-persistence.md) | `src/core/persistence/` write journal, coordinator, effects, canonical projections and managed sync |
+| [Core Persistence](key-files/core-persistence.md) | `src/core/persistence/` journal, coordinator, effects, managed sync |
 | [Core Persistence (continued)](key-files/core-persistence-continued.md) | `worktree-refresh*.ts`, `persistence/connector-*.ts`, `connectors/item-holds*.ts`, receipts |
 | [Persistence capacity](key-files/core-persistence-capacity.md) | write caps, true-up |
-| [Core Persistence (request indexes, fault seams)](key-files/core-persistence-request-indexes.md) | `checkpoint-validation.ts`, `fault-points.ts` |
+| [Core Persistence (seams)](key-files/core-persistence-request-indexes.md) | `checkpoint-validation`, `fault-points`, `native-file-target`, `admission-retry`, `unbound-source` |
 | [Core Persistence (managed facts)](key-files/core-persistence-facts.md) | `facts-maintenance.ts`, `facts-prepare.ts`, `derived-facts.ts`, `same-page-shadow.ts` |
 | [Core Persistence (engine graduation)](key-files/core-persistence-graduation.md) | `engine-graduation*.ts`, `graduation-*.ts`, `commands/migrate-graduation.ts` |
 | [Managed sync and persistence stalls](key-files/persistence-stalls.md) | preparation budgets, `claim-phase.ts`, `consumer.ts`, `group-publish.ts`, `diagnostics.ts`, `worktree-manifest.ts` |
@@ -66,8 +66,8 @@ link it here rather than raising the cap.
 | [Engines (2/2)](key-files/engines-2.md) | `src/core/pglite-resetwal.ts` through `src/core/worker-pool.ts` |
 | [Entrypoints And Docs](key-files/entrypoints-and-docs.md) | `.agents/gbrain-launcher` through `templates/` |
 | [Evaluation](key-files/evaluation.md) | `evals/brainbench/` through `src/eval/shared/judge-runner.ts` |
-| [Files And Sync (1/2)](key-files/files-and-sync-1.md) | `src/core/audit-week-file.ts` through `src/core/sync-git.ts:resolveSlugByPathOrSourcePath` |
-| [Files And Sync (2/2)](key-files/files-and-sync-2.md) | `src/core/sync-policy.ts` through `src/core/write-through.ts` |
+| [Files And Sync (1/2)](key-files/files-and-sync-1.md) | `src/core/audit-week-file.ts` through `src/core/sync-embed-backfill.ts` |
+| [Files And Sync (2/2)](key-files/files-and-sync-2.md) | `src/core/sync-failure-ledger.ts` through `src/core/write-through.ts` |
 | [Graph And Facts](key-files/graph-and-facts.md) | `src/core/check-resolvable.ts` through `src/core/trajectory-format.ts` |
 | [Entity recall](key-files/entity-recall.md) | `src/core/mentions/*`, `src/core/ops/backlinks-paged.ts`, `extract mentions --explain`, migration v206 |
 | [Mcp](key-files/mcp.md) | `src/mcp/dispatch.ts` through `src/mcp/validate-params.ts` |

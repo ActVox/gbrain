@@ -5810,6 +5810,54 @@ to connect: it diagnoses the dir from disk, names the repair command, reports
 retained repair backups, and escalates when repairs keep recurring (that
 means the unclean-shutdown genesis is still active — see the ladder's rung 4).
 
+<a id="legacy-pglite-lock"></a>
+### Legacy PGLite lock (`pglite_busy` reason `legacy_owner_unverified`)
+
+A PGLite brain is owned through the stable sibling kernel lock
+`<data-dir>.gbrain-owner.lock`. Brains last opened by an older gbrain may
+still hold that release's lock folder, `<data-dir>/.gbrain-lock/`. The first
+open by a current gbrain removes it automatically only when it can prove the
+old owner is dead: readable metadata with a PID that `kill -0` reports gone
+and, on Linux, the same PID namespace and boot id as this process. A live
+owner keeps the ordinary `pglite_busy` refusal.
+
+When the folder's metadata is torn or missing, records no PID, or (Linux) does
+not prove the PID ran in this namespace since the last boot, waiting never
+helps, so the open refuses `pglite_busy` with reason
+`legacy_owner_unverified` (class consent, exit 3, not retryable). Its fix
+asks the user and starts with the read-only preview; `gbrain doctor` shows
+the same reason and fix on its `connection` check.
+
+1. **Preview.** `gbrain pglite-repair --legacy-lock --dry-run --json [--path <dir>]`
+   never opens the engine and never creates anything. It names the recorded
+   PID, whether `kill -0` says it is running and its command, the processes
+   an open-file scan of `/proc` (Linux) saw holding files under the data dir,
+   and the filesystem type (Linux `statfs`, macOS `df -P` and `mount`), and prints the `plan_hash` and
+   the apply command. This evidence is advisory: it covers only this host and
+   PID namespace and cannot see other containers or other hosts that share the
+   folder.
+2. **Apply, after the user agrees.**
+   `gbrain pglite-repair --legacy-lock --path <dir> --yes --expect <plan_hash>`
+   takes the kernel lock (so no current gbrain can be running), inspects
+   again under it and refuses `legacy_lock_removal_refused` while a process
+   on this host holds the data dir or the recorded PID runs a command that
+   could be gbrain (`live_holder`), or when the data dir is on a network or
+   shared filesystem such as NFS, SMB, 9p, virtiofs or FUSE
+   (`network_filesystem`), or when it cannot confirm the filesystem is local
+   (`filesystem_unverified`: Linux reads `statfs`; macOS reads the mount
+   point from `df -P` and its `mount` line, and counts it local only with
+   the `local` flag and a local type such as apfs or hfs. Other systems, a
+   failed probe, an unrecognised type, a macOS network mount such as smbfs or
+   nfs, and a macOS mount without the `local` flag all refuse). A lock that changed since the preview refuses `preview_changed`.
+   It inspects again after consent, so a holder or change that appears while
+   the prompt waits refuses the same way. Otherwise it moves the folder into
+   `<data-dir>.legacy-lock-removed-<timestamp>/` (nothing is deleted) with a
+   `receipt.json` and the exact restore command (it also puts back the prior
+   `<data-dir>.gbrain-owner.json` bytes, kept as `prior-owner-marker.json`,
+   or removes the new marker when there was none), writes the kernel-v1 marker
+   `<data-dir>.gbrain-owner.json`, and starts the 10-minute WAL-repair
+   quarantine (`<data-dir>.lock-reap.json`). The next ordinary open succeeds.
+
 ## Canonical schema sources
 
 Schema DDL text has one hand-edited copy. `bun run build:schema`
@@ -7945,6 +7993,13 @@ per-transcript synthesis subagents. The dials:
   There is no per-page force flag: the tombstone is keyed by a hash of the
   page body, so any edit to the body re-extracts the page on the next cycle,
   and that is the only way to send one tombstoned page again.
+  A page the model refuses the same way in 3 cycles (a prompt too long for
+  the model, a content block) gets a separate failure tombstone and is
+  skipped while its body and the prompt version are unchanged; pages that
+  failed before are retried after the fresh ones, so they never block the
+  rest. `gbrain takes propose --failed` lists held pages and
+  `gbrain takes propose --retry-failed [--slug <slug>]` releases them.
+  Timeouts, rate limits and other transient errors are never held.
 - `dream.synthesize.attribution_rules` and `dream.propose_takes.attribution_rules`
   (default off) — extra prompt rules from #5425: keep who proposed what and
   later corrections explicit; an assistant-authored judgment is not the
@@ -10646,6 +10701,7 @@ Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/tro
 
 | Symptom | Next step | Who acts | Consent | Verify |
 |---|---|---|---|---|
+| A withdrawal committed but a large page's file still shows the withdrawn row; writer status lists its mirror parked with [`segmented_mirror_writer_gate`](write-refusals.md#segmented_mirror_writer_gate), or an effect retrying with [`recovery_version_unsupported`](write-refusals.md#recovery_version_unsupported) (or `effect_unavailable` on v0.60.290.0) holds every write on the worktree | `gbrain upgrade` on the hosts the refusal or a doctor `segmented_storage` warning names (for `recovery_version_unsupported`, the owner host; doctor's information case, this host's own superseded pre-upgrade writes, does not hold the mirror), then restart their serve, sync and worker processes. A gated mirror resumes by itself once the older writes are 7 days old; never delete a recovery record or its staging file | brain host | none | `gbrain sources writer status --source <source> --json` shows no parked or retrying mirror |
 | The dream cycle's purge phase fails every night with `managed_purge_failed` (`42P01`, relation `query_cache` does not exist), or doctor `schema_missing_tables` warns | upgrade (#6911: the purge skips a missing rebuildable cache), then preview recreating it: `gbrain repair missing-tables` ([missing tables](repair.md#missing-tables)); apply the printed `--apply --expect <hash>` command. Pages parked by the earlier failures: `gbrain pages purge-deleted --retry-parked --dry-run`, then without `--dry-run` | agent, after the user agrees | `destructive` (the parked-page retry purges them) | `gbrain doctor --only schema_missing_tables --json` reports ok |
 | A managed source's autopilot freshness `sync` jobs each land about one page, or `sources status` says `parked` while a sync job runs | upgrade (#6706: sync jobs drain to their deadline and count as the source's live drain), then restart `gbrain jobs work` / the supervisor so the worker loads the handler; a job result with `incomplete: true` names its follow-up (`continuation_job_id`) or the next step in `next` | agent | none | `gbrain sync status --source <id> --json` shows `live_job_id` or a cursor at `done`; `gbrain jobs get <id> --json` shows `outcome` |
 | Doctor `sync_freshness` says a source has "no successful sync recorded" or "first sync running" | follow the check's `fix`: `first sync running` (code `sync_first_run_in_progress`, warn) means wait; `no successful sync recorded` (code `sync_no_successful_sync`, fail) names the last attempt and its `reason`: wait for a queued job, inspect holds (`gbrain sync status --source <id> --json`), or retry (`gbrain sync --source <id>`) ([details](#sync-freshness-no-successful-sync)) | agent | none | `gbrain doctor --only sync_freshness --json` |
@@ -10883,7 +10939,7 @@ Refused writes a caller never saw land (`lost_caller_writes`) have their own rep
 | `reason` | What it means | Next |
 |---|---|---|
 | `host_mismatch` | Another host id owns the checkout. The message prints both ids' first 8 characters and, to a local caller, the `host.json` this process read (`<GBRAIN_HOME>/.gbrain/persistence/host.json`). A maintenance worker (launchd, cron, autopilot) started with a different `GBRAIN_HOME` or user than the shell that ran the sync reads a different identity file and is, to the brain, a different host. `retryable: false`: a retry from the same environment cannot change the answer. | Run the step on the owner host writer status names, or make both environments use one `GBRAIN_HOME`. Never copy or regenerate `host.json`: a new identity orphans the ownership and pending writes recorded for the old one. |
-| `transfer_in_progress` | The worktree is `draining`: a writer transfer was prepared and not yet accepted or cancelled. | `fix.next` is `wait`: retry after 30 s; the status read shows the state. |
+| `transfer_in_progress` | The worktree is `draining`: a writer transfer was prepared and not yet accepted or cancelled. | `fix.next` is `wait`: retry after 30 s; the status read shows the state. A transfer prepared more than 30 minutes ago never ends on its own, so its refusal reads `ask_user` and names both exits: `gbrain sources writer transfer accept` on the successor, or `gbrain sources writer transfer cancel <source> --expected-epoch <n>` on the owner host (`--dry-run` previews; the worktree returns to active at the same epoch and the prepared manifest is cleared). A drain an older release prepared records no time and keeps the wait, whose `why` names the cancel. |
 | `clone_in_progress` | The worktree is `recovering`: a topology clone or reclone is in progress. | `wait`: retry after 30 s; it is `active` when the clone finishes. |
 | `binding_missing` | The source has no canonical worktree binding at all. | Claiming a checkout is the host administrator's decision. |
 | `incarnation_changed` | The binding belongs to an earlier incarnation of the source (removed and re-added, or restored). | Re-bind the checkout on the brain host. |

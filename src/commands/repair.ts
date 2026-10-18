@@ -72,8 +72,9 @@ export const REPAIR_HELP = `Usage: gbrain repair [<kind>] [--apply] [--source <i
        gbrain repair file-drift --source <id> (--slug <slug>... | --request <id>... | --all-drifted [--class <name>] [--since <ISO-8601|7d>])
                                 [--only <glob>]... [--skip <glob>]... --prefer file|database [--apply --expect <preview-hash>] [--json]
        gbrain repair stuck-recovery [--source <id>] [--request-id <uuid>]
-                                    [--keep prior|disk --apply --expect <preview-hash> --yes] [--json]
+                                    [--keep prior|disk|withdrawn --apply --expect <preview-hash> --yes] [--json]
        gbrain repair ghost-pages --source <id> [--apply --expect <preview-hash> --yes] [--json]
+       gbrain repair url-clone-fences [--source <id>] [--apply --expect <preview-hash> --yes] [--json]
        gbrain repair rename-identity --source <id> [--slug <new-slug> [--from <old-slug>] [--close]
                                      [--apply --expect <preview-hash> --yes]] [--json]
 ${REPAIR_CONTENT_HELP}
@@ -119,11 +120,12 @@ Options:
                  model-tier items stay held with llm_disabled.
   --max-usd <n>  Kinds that may call a paid model (${llmKinds}) and the content lane: spend at most n USD on the
                  model in this run. It only lowers the cap (the daily fences.repair cap still applies); never raises it.
-  --keep prior|disk
-                 stuck-recovery --apply: the version of each blocked file to keep (the user's choice from the preview).
+  --keep prior|disk|withdrawn
+                 stuck-recovery --apply: the version of each blocked file to keep (the user's choice from the preview;
+                 withdrawn is a withdrawal-mirror effect's only choice).
   --request-id <uuid>
                  stuck-recovery: resolve only this request's recovery (default: every blocked record of the source).
-  --yes          frontmatter, conversation-labels, stuck-recovery, ghost-pages, rename-identity --apply: the user agreed to the previewed changes (destructive
+  --yes          frontmatter, conversation-labels, stuck-recovery, ghost-pages, rename-identity, url-clone-fences --apply: the user agreed to the previewed changes (destructive
                  consent; without it a terminal asks, and a non-interactive run exits 3 with the consent payload).
   --json         Machine-readable output with a stable shape (frontmatter: every per-file diff).
 
@@ -135,13 +137,14 @@ Held files (the content lane, then the two-pass frontmatter repair): docs/guides
 Malformed facts/takes fences (preview, apply, undo): docs/guides/repair.md#fences.
 A write recovery blocked on unexpected_file_bytes: docs/guides/repair.md#stuck-recovery.
 Live pages whose canonical file is missing (ghost pages): docs/guides/repair.md#ghost-pages.
+A sources add --url clone whose pull stops at pull_blocked_local_changes: docs/guides/repair.md#url-clone-fences.
 Renames whose identity sync did not keep (rename-identity): docs/guides/live-sync.md#renaming-a-page.`;
 
 const BOOLEAN_FLAGS = new Set(['--apply', '--all', '--json', '--no-embed', '--include-ambiguous', '--diff', '--yes', '--no-llm', '--all-drifted', '--include-failures', '--force', '--close']);
 const VALUE_FLAGS = new Set(['--source', '--limit', '--expect', '--only', '--skip', '--slug', '--max-usd', '--prefer', '--request', '--class', '--since', '--keep', '--request-id', '--older-than', '--from']);
 /** Flags only some kinds accept, with the kinds that do. */
 const KIND_FLAGS: Record<string, readonly string[]> = {
-  '--only': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--skip': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--diff': ['frontmatter', 'fences', 'slug-conflicts', CONTENT_LANE], '--yes': ['frontmatter', 'conversation-labels', 'stuck-recovery', 'ghost-pages', 'rename-identity'],
+  '--only': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--skip': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--diff': ['frontmatter', 'fences', 'slug-conflicts', CONTENT_LANE], '--yes': ['frontmatter', 'conversation-labels', 'stuck-recovery', 'ghost-pages', 'rename-identity', 'url-clone-fences'],
   '--slug': ['fences', 'file-drift', 'rename-identity', 'overwritten-edits', 'origin-twins'], '--from': ['rename-identity'], '--close': ['rename-identity'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift'], '--since': ['file-drift'],
   '--keep': ['stuck-recovery'], '--request-id': ['stuck-recovery'],
   '--older-than': ['receipt-compaction'], '--include-failures': ['receipt-compaction'], '--force': ['receipt-compaction'],
@@ -156,7 +159,7 @@ const invalid = (message: string, suggestion: string, preview: string[] = ['gbra
 interface RepairArgs { kind?: string; apply: boolean; all: boolean; json: boolean; noEmbed: boolean; includeAmbiguous: boolean; diff: boolean; yes: boolean;
   noLlm: boolean; source?: string; limit?: string; expect?: string; maxUsd?: number; only: string[]; skip: string[]; slugs: string[];
   allDrifted: boolean; prefer?: 'file' | 'database'; requests: string[]; driftClass?: string; since?: string;
-  keep?: 'prior' | 'disk'; requestId?: string; olderThan?: string; includeFailures: boolean; force: boolean; from?: string; close: boolean }
+  keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures: boolean; force: boolean; from?: string; close: boolean }
 
 /** `--max-usd` on a kind that never calls a paid model: the cap belongs to the doctor remediation run. */
 function maxUsdRefusal(flag: string, cap: string | undefined, kind: string | undefined): OperationError {
@@ -271,8 +274,8 @@ export function parseRepairArgs(args: string[]): RepairArgs {
       `Preview it by name: gbrain repair ${kinds[kinds.length - 1]}${parsed.source ? ` --source ${parsed.source}` : ''}`);
   }
   if (keepText !== undefined) {
-    if (keepText !== 'prior' && keepText !== 'disk') throw invalid(`--keep must be prior or disk (got "${keepText}").`,
-      'Pass --keep prior to write the recorded prior bytes back, or --keep disk to keep the bytes on disk; the preview lists which are available.', ['gbrain', 'repair', 'stuck-recovery', '--json']);
+    if (keepText !== 'prior' && keepText !== 'disk' && keepText !== 'withdrawn') throw invalid(`--keep must be prior, disk or withdrawn (got "${keepText}").`,
+      'Pass --keep prior to write the recorded prior bytes back, --keep disk to keep the bytes on disk, or --keep withdrawn to write a withdrawal mirror\'s withdrawn bytes; the preview lists which are available.', ['gbrain', 'repair', 'stuck-recovery', '--json']);
     parsed.keep = keepText;
   }
   const llmKind = LLM_REPAIR_REGISTRY.some(spec => spec.kind === parsed.kind) || parsed.kind === CONTENT_LANE;

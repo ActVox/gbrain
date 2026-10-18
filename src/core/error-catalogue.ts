@@ -56,6 +56,9 @@ export const ERROR_CATALOGUE = {
   recovery_choice_refused: { code: 'recovery_choice_refused', docs: 'docs/guides/repair.md#recovery-choice-refused' },
   // #6650: a withdrawal-mirror effect recovery only finishes forward, so stuck-recovery lists it as refused.
   recovery_effect_unsupported: { code: 'recovery_effect_unsupported', docs: 'docs/guides/repair.md#recovery-effect-unsupported' },
+  // LPH (d): a recovery record a newer gbrain wrote is refused unread; a segmented mirror waits for older writers.
+  recovery_version_unsupported: { code: 'recovery_version_unsupported', docs: 'docs/guides/write-refusals.md#recovery_version_unsupported' },
+  segmented_mirror_writer_gate: { code: 'segmented_mirror_writer_gate', docs: 'docs/guides/write-refusals.md#segmented_mirror_writer_gate' },
   colon_slug_windows_write_through: { code: 'colon_slug_windows_write_through', docs: 'docs/guides/write-refusals.md#colon_slug_windows_write_through' },
   embedding_auth_failed: { code: 'embedding_auth_failed', docs: 'docs/guides/write-refusals.md#embedding_auth_failed' },
   activation_source_path_missing: { code: 'source_changed', docs: 'docs/guides/write-refusals.md#activation_source_path_missing' },
@@ -168,19 +171,27 @@ export function canonicalCodeFor(wire: string): string {
   return CANONICAL_BY_LEGACY.get(wire) ?? wire;
 }
 
-/** An unregistered code is a server fault by construction (the AST test keeps that set empty). */
-export function codeClass(code: string): ErrorClass {
-  return isRegistryCode(code) ? (CODES[code] as CodeEntry).class : 'server';
+function reasonOverride(code: string, reason: string | undefined): { class: ErrorClass; exit?: number } | undefined {
+  return reason === undefined || !isRegistryCode(code) ? undefined : (CODES[code] as CodeEntry).reason_overrides?.[reason];
 }
 
-export function codeRetryable(code: string): boolean {
+/** An unregistered code is a server fault by construction (the AST test keeps that set empty). A reason override replaces the code's class. */
+export function codeClass(code: string, reason?: string): ErrorClass {
+  return reasonOverride(code, reason)?.class ?? (isRegistryCode(code) ? (CODES[code] as CodeEntry).class : 'server');
+}
+
+export function codeRetryable(code: string, reason?: string): boolean {
   if (!isRegistryCode(code)) return false;
+  const override = reasonOverride(code, reason);
+  if (override) return override.class === 'retryable';
   const e = CODES[code] as CodeEntry;
   return e.retryable ?? e.class === 'retryable';
 }
 
-/** CLI exit code for an error code (A3 table): entry override, else 1. */
-export function exitCodeForCode(code: string): number {
+/** CLI exit code for an error code (A3 table): reason override, then entry override, else 1. */
+export function exitCodeForCode(code: string, reason?: string): number {
+  const override = reasonOverride(code, reason);
+  if (override) return override.exit ?? 1;
   return isRegistryCode(code) ? (CODES[code] as CodeEntry).exit ?? 1 : 1;
 }
 

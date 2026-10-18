@@ -30,7 +30,9 @@ export function contentRepairCommit(path: string, receipt: Pick<ContentRepairRec
 }
 export interface ParkedTarget { slug?: string; error_code: string }
 /** `page_body_segmented`: a segmented page an older binary's mirror or Git scan passed by; this one mirrors and commits it. */
-export interface SkippedTarget { slug: string; reason: 'metafile' | 'file_database_drift' | 'page_body_segmented' }
+export interface SkippedTarget { slug: string; reason: 'metafile' | 'file_database_drift' | 'page_body_segmented' | 'withdrawal_not_mirrored' }
+/** The code a page behind a failed withdrawal mirror is parked with: its file may still hold the withdrawn text. */
+export const WITHHELD_BY_MIRROR = 'withdrawal_mirror_failed';
 /** A Git or withdrawal target parks after this many consecutive execution failures. */
 export const PARK_AFTER_FAILURES = 5;
 /**
@@ -80,7 +82,11 @@ export interface PersistenceEffect {
     /** Explicit retry authorizations granted to this effect's parked targets. */
     retried?: number;
     /** #5396: scan targets passed without a file publication (a sync-skip metafile, or a file with an uncoordinated local edit). */
-    skipped?: SkippedTarget[] };
+    skipped?: SkippedTarget[];
+    /** GBRA-130 A-12: pages whose file this withdrawal mirror rewrote, recorded by its recovery with the cursor step. */
+    published?: string[];
+    /** The SHA-256 of the bytes this mirror wrote to each published page's file, at the page revision it rendered. */
+    published_files?: Record<string, { hash: string; revision: string }> };
   state: 'queued' | 'running' | 'committed' | 'failed';
   execution_token: string | null;
   claim_expires_at: string | Date | null;
