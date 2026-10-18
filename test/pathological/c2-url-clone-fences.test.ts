@@ -130,11 +130,17 @@ async function withClone(databaseUrl: string | undefined, run: (c: Clone) => Pro
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
-const repair = async (engine: BrainEngine, opts: { apply: boolean; expect?: string }): Promise<RepairResult> => {
-  const scope = await resolveRepairScope(engine, SOURCE);
+const repair = async (engine: BrainEngine, opts: { apply: boolean; expect?: string; source?: string }): Promise<RepairResult> => {
+  const source = opts.source ?? SOURCE;
+  const scope = await resolveRepairScope(engine, source);
   return (await repairRunner(engine, { apply: opts.apply, logger: { info() {}, warn() {}, error() {} } as never }))
-    .run(KIND, scope, { explicit: true, sourceFlag: SOURCE, ...(opts.expect ? { expect: opts.expect } : {}) });
+    .run(KIND, scope, { explicit: true, sourceFlag: source, ...(opts.expect ? { expect: opts.expect } : {}) });
 };
+/** A stale approval's apply: the run's restored count and outcomes, or the refusal code it threw. */
+const staleApply = (engine: BrainEngine, expectHash: string | undefined, source?: string) =>
+  repair(engine, { apply: true, expect: expectHash, source }).then(
+    result => ({ applied: result.applied, outcomes: result.outcomes as Record<string, number> | undefined, code: null as string | null }),
+    (error: { code?: string }) => ({ applied: 0, outcomes: undefined as Record<string, number> | undefined, code: error.code ?? String(error) }));
 const head = (c: Clone, rel: string) => git(c.root, ['show', `HEAD:${rel}`]);
 const pageBody = async (engine: BrainEngine, slug: string) =>
   (await engine.executeRaw<{ compiled_truth: string }>('SELECT compiled_truth FROM pages WHERE source_id = $1 AND slug = $2', [SOURCE, slug]))[0]?.compiled_truth ?? '';
@@ -260,6 +266,85 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect({ dirty: c.dirty(), rows: (await c.facts(BOB)).map(f => [f.row_num, f.expired]) }).toEqual({ dirty: '', rows: [[null, false]] });
       });
     }, 240_000);
+
+    test('C-2 binding: an approval for clone A applied after the source moved to clone B (sources set-path) refuses preview_changed and changes nothing', async () => {
+      await withClone(databaseUrl, async c => {
+        await c.legacyFence(ALICE, ALICE_FACT);
+        const aliceFile = join(c.root, `${ALICE}.md`);
+        const dirtyBytes = readFileSync(aliceFile, 'utf8');
+        const preview = await repair(c.engine, { apply: false });
+        expect(preview.listing!.map(l => l.class)).toEqual(['fence_rows_only']);
+        c.push(`${ALICE}.md`, personMd('Alice Example', 'Alice Example works at Acme Example. CLONE-B-HEAD.'));
+        const cloneB = join(c.root, '..', `${SOURCE}-b`);
+        execFileSync('git', ['clone', '-q', git(c.root, ['remote', 'get-url', 'origin']).trim(), cloneB], { stdio: 'pipe' });
+        const { runSetPath } = await import('../../src/commands/sources-set-path.ts');
+        await runSetPath(c.engine, [SOURCE, cloneB]);
+        expect((await c.engine.executeRaw<{ local_path: string }>('SELECT local_path FROM sources WHERE id = $1', [SOURCE]))[0]!.local_path).toBe(cloneB);
+        const rows = await c.facts(ALICE);
+        const before = await snapshotItems(c.engine, SOURCE);
+        expect(await staleApply(c.engine, preview.preview_hash)).toEqual({ applied: 0, outcomes: undefined, code: 'preview_changed' });
+        expect({ file: readFileSync(aliceFile, 'utf8') === dirtyBytes, dirty: c.dirty(), facts: await c.facts(ALICE) })
+          .toEqual({ file: true, dirty: `M ${ALICE}.md`, facts: rows });
+        expect(await pageBody(c.engine, ALICE)).not.toContain('CLONE-B-HEAD');
+        expectOthersUnchanged(before, await snapshotItems(c.engine, SOURCE));
+      });
+    }, 180_000);
+
+    test('C-2 binding: an approval applied after the source was replaced under the same id (new incarnation) refuses preview_changed and changes nothing', async () => {
+      await withClone(databaseUrl, async c => {
+        await c.legacyFence(ALICE, ALICE_FACT);
+        const aliceFile = join(c.root, `${ALICE}.md`);
+        const dirtyBytes = readFileSync(aliceFile, 'utf8');
+        const preview = await repair(c.engine, { apply: false });
+        expect(preview.listing!.map(l => l.class)).toEqual(['fence_rows_only']);
+        const [row] = await c.engine.executeRaw<{ incarnation: string; config: unknown }>('SELECT incarnation::text AS incarnation, config FROM sources WHERE id = $1', [SOURCE]);
+        await c.engine.executeRaw('DELETE FROM sources WHERE id = $1', [SOURCE]);
+        await c.engine.executeRaw('INSERT INTO sources (id, name, local_path, config) VALUES ($1, $1, $2, $3::text::jsonb)',
+          [SOURCE, c.root, typeof row!.config === 'string' ? row!.config : JSON.stringify(row!.config)]);
+        const [replaced] = await c.engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id = $1', [SOURCE]);
+        expect(replaced!.incarnation).not.toBe(row!.incarnation);
+        const before = await snapshotItems(c.engine, SOURCE);
+        expect(await staleApply(c.engine, preview.preview_hash)).toEqual({ applied: 0, outcomes: undefined, code: 'preview_changed' });
+        expect({ file: readFileSync(aliceFile, 'utf8') === dirtyBytes, dirty: c.dirty(), facts: await c.facts(ALICE), page: await pageBody(c.engine, ALICE) })
+          .toEqual({ file: true, dirty: `M ${ALICE}.md`, facts: [], page: '' });
+        expectOthersUnchanged(before, await snapshotItems(c.engine, SOURCE));
+      });
+    }, 180_000);
+
+    test('C-2 binding: a saved approval applied with a different --source refuses preview_changed and changes nothing', async () => {
+      await withClone(databaseUrl, async c => {
+        await c.legacyFence(ALICE, ALICE_FACT);
+        const aliceFile = join(c.root, `${ALICE}.md`);
+        const dirtyBytes = readFileSync(aliceFile, 'utf8');
+        await c.engine.executeRaw("INSERT INTO sources (id, name, config) VALUES ('other-example', 'other-example', '{}'::jsonb)");
+        const preview = await repair(c.engine, { apply: false });
+        expect(preview.listing!.map(l => l.class)).toEqual(['fence_rows_only']);
+        const rows = await c.facts(ALICE);
+        const before = await snapshotItems(c.engine, SOURCE);
+        expect(await staleApply(c.engine, preview.preview_hash, 'other-example')).toEqual({ applied: 0, outcomes: undefined, code: 'preview_changed' });
+        expect({ file: readFileSync(aliceFile, 'utf8') === dirtyBytes, dirty: c.dirty(), facts: await c.facts(ALICE) })
+          .toEqual({ file: true, dirty: `M ${ALICE}.md`, facts: rows });
+        expectOthersUnchanged(before, await snapshotItems(c.engine, SOURCE));
+      });
+    }, 180_000);
+
+    test('C-2 binding: a fence-only change staged after the preview refuses preview_changed and leaves the index, file and rows as they were', async () => {
+      await withClone(databaseUrl, async c => {
+        await c.legacyFence(ALICE, ALICE_FACT);
+        const aliceFile = join(c.root, `${ALICE}.md`);
+        const dirtyBytes = readFileSync(aliceFile, 'utf8');
+        const preview = await repair(c.engine, { apply: false });
+        expect(preview.listing!.map(l => l.class)).toEqual(['fence_rows_only']);
+        git(c.root, ['add', '--', `${ALICE}.md`]);
+        expect(c.dirty()).toBe(`M  ${ALICE}.md`);
+        const rows = await c.facts(ALICE);
+        const before = await snapshotItems(c.engine, SOURCE);
+        expect(await staleApply(c.engine, preview.preview_hash)).toEqual({ applied: 0, outcomes: { preview_changed: 1 }, code: null });
+        expect({ file: readFileSync(aliceFile, 'utf8') === dirtyBytes, dirty: c.dirty(), facts: await c.facts(ALICE) })
+          .toEqual({ file: true, dirty: `M  ${ALICE}.md`, facts: rows });
+        expectOthersUnchanged(before, await snapshotItems(c.engine, SOURCE));
+      });
+    }, 180_000);
 
     for (const { name, error } of runScopedErrors()) {
       test(`C-2 run: a run-scoped failure (${name}) in the database step stops the repair and restores nothing`, async () => {

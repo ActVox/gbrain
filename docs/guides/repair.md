@@ -1636,7 +1636,12 @@ again. Each restored file is first backed up under
 database-only facts, HEAD's bytes are imported as the page (as sync would
 import them), and only then is the file restored; each step is idempotent, so
 a stopped run previews the same file again. A file that changed since the preview
-reports `changed_since_preview` and is kept. Undo by copying the backup over
+reports `changed_since_preview` and is kept. The hash is bound to the `--source`
+selection, each source's incarnation and clone root, and each file's page: an
+apply with another `--source`, or after `gbrain sources set-path` moved the
+source or it was removed and added again under the same id, refuses
+`preview_changed` and writes nothing, and so does a file with a change staged
+since the preview. Preview again and approve the new hash. Undo by copying the backup over
 the file. It is explicit-only and never runs from `--all`, doctor's
 remediation plan, the maintenance cycle or an upgrade.
 
