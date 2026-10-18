@@ -19,6 +19,7 @@ import { OperationError } from './ops/contract.ts';
 import { waitForCapacity } from './backoff.ts';
 import { quarantineMarkers } from './extraction-review.ts';
 import { SLUG_WORD_CHARS, SLUG_VARIATION_SELECTORS_RE } from './cjk.ts';
+import { portableSegment } from './portable-slug.ts';
 // #3994: created stubs route through serializeMarkdown + importFromContent
 // (the same parse→chunk→embed pipeline put_page uses) instead of a bare
 // engine.putPage, so fresh entity pages land in the retrieval surface
@@ -101,7 +102,12 @@ const SLUGIFY_ENTITY_KEEP_RE = new RegExp(`[^${SLUG_WORD_CHARS}]`, 'gu');
  * '-', producing empty or colliding people/companies slugs. Now mirrors
  * sync.ts:slugifySegment's Unicode-aware keep-set: strip Latin accents to
  * their base letter (fold, don't drop), keep every script's own letters
- * as-is (Cyrillic, CJK, Devanagari, …).
+ * as-is (Cyrillic, CJK, Devanagari, …). A name that slugifies to a Windows
+ * reserved device name gets the entity type as a suffix (`Con` →
+ * `people/con-person`) and an over-long one is cut to the file-name budget
+ * (portable-slug.ts), so a stub is always a page export and write-through can
+ * store; a page an older brain created as `people/con` is still found through
+ * the legacy-slug lookup in enrichEntity.
  */
 export function slugifyEntity(name: string, type: 'person' | 'company'): string {
   const slug = name
@@ -116,7 +122,7 @@ export function slugifyEntity(name: string, type: 'person' | 'company'): string 
     .replace(/^-+|-+$/g, '');
 
   const prefix = type === 'person' ? 'people' : 'companies';
-  return `${prefix}/${slug}`;
+  return `${prefix}/${portableSegment(slug, true, type)}`;
 }
 
 /**
