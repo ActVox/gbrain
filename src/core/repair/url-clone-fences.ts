@@ -14,9 +14,14 @@
  * file, names it in the preview with why, and leaves it untouched.
  *
  * Explicit-only, preview-bound and destructive: `--apply --expect <hash> --yes`
- * applies exactly the previewed files. Per file, under the source filesystem
- * lock and the page lock, the apply rechecks the file and HEAD against the
- * preview (`changed_since_preview` otherwise), backs the working copy up under
+ * applies exactly the previewed files. The hash binds the source selection
+ * (`--source`), each source's incarnation and canonical clone root and each
+ * file's page, so an apply with another selection, or after the source was
+ * relocated (`sources set-path`) or replaced under its id, refuses
+ * `preview_changed` before anything is written. Per file, under the source
+ * filesystem lock and the page lock, the apply rechecks that binding and the
+ * index (a change staged since the preview: `preview_changed`), then the file
+ * and HEAD against the preview (`changed_since_preview` otherwise), backs the working copy up under
  * ~/.gbrain/backups/url-clone-fences/, keeps the appended rows database-only in
  * one transaction (`row_num` and `source_markdown_slug` cleared, the shape every
  * database-only fact has; a fence row the database lost is inserted
@@ -26,7 +31,7 @@
  * undo, copy the backup over the file. Unmanaged brains only.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { execFileSync } from '../spawn.ts';
@@ -42,7 +47,7 @@ import { OperationError } from '../ops/contract.ts';
 import { withPageLock } from '../page-lock.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
-import { clearApprovedSet, loadApprovedSet, previewHash, saveApprovedSet, type ApprovedSetKey } from '../persistence/preview-approval.ts';
+import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet, type ApprovedSetKey } from '../persistence/preview-approval.ts';
 import { resolveSlugForPath } from '../sync.ts';
 import { isOwnedClone, trackedChanges, urlCloneReadOnly, urlCloneRepairPreviewArgv } from '../url-clone.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan } from './core.ts';
@@ -51,8 +56,12 @@ const DOCS = 'docs/guides/repair.md#url-clone-fences';
 /** preview-approval's command union predates this kind; the store keys on the string alone. */
 const APPROVAL = { command: 'url-clone-fences' as ApprovedSetKey['command'] };
 
-/** One previewed file whose difference from HEAD is only appended fence rows. */
-interface ClonedFile { source_id: string; root: string; path: string; slug: string; head_sha256: string; work_sha256: string; rows: number[] }
+/**
+ * One previewed file whose difference from HEAD is only appended fence rows, bound to the source incarnation, the
+ * canonical clone root and the page the preview read, and to the preview's source selection.
+ */
+interface ClonedFile { source_id: string; incarnation: string; root: string; path: string; slug: string; page_id: number | null;
+  head_sha256: string; work_sha256: string; rows: number[]; selection: string[] }
 type FileItem = RepairItem & { file: ClonedFile; hash?: string; last?: boolean };
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -83,21 +92,34 @@ export function proveFenceRowsOnly(head: string | null, work: string | null): Pr
   return { ok: true, added: after.facts.slice(before.facts.length) };
 }
 
-async function pageSlug(engine: BrainEngine, sourceId: string, path: string): Promise<string> {
-  const [row] = await engine.executeRaw<{ slug: string }>(
-    'SELECT slug FROM pages WHERE source_id = $1 AND source_path = $2 AND deleted_at IS NULL ORDER BY id LIMIT 1', [sourceId, path]);
-  return row?.slug ?? resolveSlugForPath(path);
+async function pageOf(engine: BrainEngine, sourceId: string, path: string): Promise<{ slug: string; page_id: number | null }> {
+  const [row] = await engine.executeRaw<{ id: number; slug: string }>(
+    'SELECT id, slug FROM pages WHERE source_id = $1 AND source_path = $2 AND deleted_at IS NULL ORDER BY id LIMIT 1', [sourceId, path]);
+  return row ? { slug: row.slug, page_id: Number(row.id) } : { slug: resolveSlugForPath(path), page_id: null };
+}
+
+const canonicalRoot = (path: string | null): string | null => path && existsSync(path) ? realpathSync(path) : null;
+
+/** Why the source or page of a previewed file is no longer the one its preview read, or null when it still is. */
+async function identityChange(engine: BrainEngine, file: ClonedFile): Promise<string | null> {
+  const [source] = await engine.executeRaw<{ incarnation: string; local_path: string | null }>(
+    'SELECT incarnation::text AS incarnation, local_path FROM sources WHERE id = $1', [file.source_id]);
+  if (!source || source.incarnation !== file.incarnation) return `source ${file.source_id} was removed or replaced since the preview`;
+  if (canonicalRoot(source.local_path) !== file.root) return `source ${file.source_id} now points at ${source.local_path ?? 'no checkout'}, not the clone the preview read (${file.root})`;
+  const page = await pageOf(engine, file.source_id, file.path);
+  if (page.slug !== file.slug || page.page_id !== file.page_id) return `${file.path} now belongs to another page than the preview read`;
+  return null;
 }
 
 /** Every changed file of every owned clone in scope, proven or refused. */
 async function survey(engine: BrainEngine, sourceIds: string[]): Promise<{ files: ClonedFile[]; listing: RepairListing[] }> {
   const files: ClonedFile[] = [];
   const listing: RepairListing[] = [];
-  const sources = await engine.executeRaw<{ id: string; local_path: string | null; config: unknown }>(
-    'SELECT id, local_path, config FROM sources WHERE id = ANY($1::text[]) ORDER BY id', [sourceIds]);
+  const sources = await engine.executeRaw<{ id: string; incarnation: string; local_path: string | null; config: unknown }>(
+    'SELECT id, incarnation::text AS incarnation, local_path, config FROM sources WHERE id = ANY($1::text[]) ORDER BY id', [sourceIds]);
   for (const source of sources) {
-    if (!source.local_path || !isOwnedClone(source) || !existsSync(source.local_path)) continue;
-    const root = source.local_path;
+    const root = canonicalRoot(source.local_path);
+    if (!root || !isOwnedClone(source)) continue;
     let paths: string[];
     let staged: Set<string>;
     try {
@@ -116,8 +138,9 @@ async function survey(engine: BrainEngine, sourceIds: string[]): Promise<{ files
         listing.push({ item, class: proof.class, detail: `${proof.reason}, so it is left as it is. Keep or remove that change yourself (git -C ${root} diff HEAD -- ${path} shows it), then preview again: ${preview(source.id)}` });
         continue;
       }
-      const slug = await pageSlug(engine, source.id, path);
-      files.push({ source_id: source.id, root, path, slug, head_sha256: sha256(head!), work_sha256: sha256(work!), rows: proof.added.map(row => row.rowNum) });
+      const { slug, page_id } = await pageOf(engine, source.id, path);
+      files.push({ source_id: source.id, incarnation: source.incarnation, root, path, slug, page_id, head_sha256: sha256(head!), work_sha256: sha256(work!),
+        rows: proof.added.map(row => row.rowNum), selection: sourceIds });
       listing.push({ item, class: 'fence_rows_only', detail: `${proof.added.length} fence row(s) gbrain appended to ${slug}: kept database-only, then the file is restored from HEAD` });
     }
   }
@@ -150,7 +173,12 @@ async function keepRowsDatabaseOnly(engine: BrainEngine, file: ClonedFile, added
 }
 
 async function restoreFile(engine: BrainEngine, file: ClonedFile, runId: string): Promise<RepairItemOutcome> {
+  const changed = await identityChange(engine, file);
+  if (changed) return { applied: false, outcome: 'preview_changed', reason: changed, detail: { path: file.path } };
   if (!await urlCloneReadOnly(engine, file.source_id)) return { applied: false, outcome: 'refused', reason: 'not_url_clone', detail: { path: file.path } };
+  if (git(file.root, ['diff', '--cached', '--name-only', '-z', 'HEAD', '--', file.path])) {
+    return { applied: false, outcome: 'preview_changed', reason: `${file.path} has a staged change since the preview, which gbrain never makes`, detail: { path: file.path } };
+  }
   const abs = join(file.root, file.path);
   const head = headBytes(file.root, file.path);
   const work = existsSync(abs) ? readFileSync(abs, 'utf8') : null;
@@ -179,6 +207,9 @@ export const urlCloneFencesRepair: RepairHandler = {
       if (!opts.expect) throw new OperationError('invalid_params', 'gbrain repair url-clone-fences --apply needs the preview hash.',
         `Preview first: ${preview(source)} — then run the apply command it prints (--apply --expect <preview-hash> --yes).`, DOCS);
       const { items: files } = await loadApprovedSet<ClonedFile>(engine, { ...APPROVAL, hash: opts.expect, previewCommand: preview(source) });
+      for (const file of files) {
+        if (JSON.stringify(file.selection) !== JSON.stringify(scope.source_ids) || await identityChange(engine, file)) throw previewChangedError(opts.expect, preview(source));
+      }
       const items = files.map((file, index) => toItem(file, index, opts.expect, index === files.length - 1)).filter(item => afterCursor(item.cursor, after));
       if (!items.length) await clearApprovedSet(engine, { ...APPROVAL, hash: opts.expect });
       return { items, preview_hash: opts.expect, residuals: {} };
@@ -186,7 +217,8 @@ export const urlCloneFencesRepair: RepairHandler = {
     const { files, listing } = await survey(engine, scope.source_ids);
     const residuals: Record<string, number> = {};
     for (const entry of listing) if (entry.class !== 'fence_rows_only') residuals[entry.class] = (residuals[entry.class] ?? 0) + 1;
-    const hash = previewHash({ kind: 'url-clone-fences-v1', brain_id: scope.brain_id, files: files.map(f => [f.source_id, f.path, f.head_sha256, f.work_sha256, f.rows]) });
+    const hash = previewHash({ kind: 'url-clone-fences-v2', brain_id: scope.brain_id, selection: scope.source_ids,
+      files: files.map(f => [f.source_id, f.incarnation, f.root, f.path, f.slug, f.page_id, f.head_sha256, f.work_sha256, f.rows]) });
     if (files.length) await saveApprovedSet<ClonedFile>(engine, { ...APPROVAL, hash }, files);
     return { items: files.map((file, index) => toItem(file, index)), residuals, listing, ...(files.length ? { preview_hash: hash } : {}), details: { listing } };
   },
