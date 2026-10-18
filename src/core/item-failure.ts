@@ -43,6 +43,7 @@ export const ISOLATE_SITES = {
   'repair.all_kinds': 'A-45',
   'repair.content_lane_kinds': 'A-46',
   'migration.credential_reseal': 'A-27',
+  'effects.derived_retry_budget': 'A-11',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;

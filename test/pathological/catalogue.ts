@@ -63,4 +63,6 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'repair.all_kinds': { file: 'test/pathological/a45-repair-all-kinds.test.ts', item: 'item case: a kind whose plan throws', run: 'run case: a run-scoped' },
   'repair.content_lane_kinds': { file: 'test/pathological/a46-content-lane-kinds.test.ts', item: 'item case: fences throwing is recorded', run: 'run case: a run-scoped' },
   'migration.credential_reseal': { file: 'test/pathological/a27-credential-reseal.test.ts', item: 'item case: the unbuildable page is held', run: 'run case: a run-scoped' },
+  'effects.derived_retry_budget': { file: 'test/pathological/a11-effect-retry-budget.test.ts',
+    item: 'A-11 item: a links and a facts-backstop effect failing every attempt', run: 'A-11 run: a run-scoped failure (' },
 };
