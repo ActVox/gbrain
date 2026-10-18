@@ -47,6 +47,9 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 4b: a taken confirm round about to patch the previous round's origin domain (sync-pass-narrow.ts); a hook that
   // throws makes it build the domain whole (`confirm.narrow: 'forced'`).
   | 'sync:level_narrow'
+  // #6712 PR 4b: before a confirm round's proof sets its parallel scans (sync-pass-confirm.ts `parallelProof`); a hook that
+  // throws makes the server refuse the setting, as a restricted role or a managed host does.
+  | 'sync:confirm_parallel'
   // #6712 PR 4b (#6926): inside the round's last import's publication, before its folded stamp's checks (sync-pass-fold.ts); a hook
   // that throws models a failed check statement there: the stamp rolls back to its savepoint and the pass stamps by its checkpoint request.
   | 'sync:pass_fold'

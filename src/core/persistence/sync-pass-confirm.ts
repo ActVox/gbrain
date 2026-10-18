@@ -35,6 +35,7 @@
 import { GIT_HOLD_OP, GIT_HOLD_RETRY_OP, GIT_HOLD_SUMMARY_OP, SYNC_IMPORT_PROVENANCE_OP } from './sync-holds.ts';
 import { MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, SYNC_ORIGIN_DELETED_OP } from './sync-pass-row.ts';
 import type { BrainEngine } from '../engine.ts';
+import { faultPoint } from './fault-points.ts';
 
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 
@@ -79,6 +80,31 @@ const PROOF = `WITH x AS MATERIALIZED (SELECT txid_snapshot_xmin(txid_current_sn
     (SELECT COALESCE(jsonb_agg(fingerprint), '[]'::jsonb) FROM op_checkpoints WHERE op='${GIT_HOLD_OP}' AND starts_with(fingerprint, $3 || ':')) AS holds
   FROM x, pg`;
 
+type ProofRow = { xmin: string; span: number; ops: Record<string, number> | null; holds: string[]; pages: number;
+  pages_changed: Array<[string, boolean, string]>; ops_changed: Array<[string, string, string | null, string | null]> };
+
+/**
+ * Parallel workers for the proof's two scans (about 420 ms against 820 ms at 600k). A server that refuses a setting (a
+ * restricted role, a managed host) raises inside the block, whose handler drops the settings and keeps the transaction.
+ */
+const parallelSettings = (cost: string) => `DO $$ BEGIN PERFORM set_config('parallel_setup_cost', '${cost}', true), set_config('parallel_tuple_cost', '0', true),
+  set_config('min_parallel_table_scan_size', '0', true); EXCEPTION WHEN OTHERS THEN NULL; END $$`;
+
+/**
+ * The proof with parallel scans, for the proof alone: the settings are made inside a savepoint the proof then rolls back
+ * to, so the statements after it (the round's other reads) run with the transaction's own settings; refused, the proof
+ * runs without them. Its statements are issued together, so nothing the caller pipelines lands inside the savepoint. The
+ * `sync:confirm_parallel` seam (a hook that throws) sends a value the server refuses.
+ */
+async function parallelProof(exec: Exec, sourceId: string, params: unknown[]): Promise<ProofRow[]> {
+  const refused = await faultPoint('sync:confirm_parallel', { sourceId }).then(() => false, () => true);
+  const steps = [exec.executeRaw('SAVEPOINT gbrain_confirm_proof'), exec.executeRaw(parallelSettings(refused ? 'refused' : '0')), exec.executeRaw<ProofRow>(PROOF, params),
+    exec.executeRaw('ROLLBACK TO SAVEPOINT gbrain_confirm_proof'), exec.executeRaw('RELEASE SAVEPOINT gbrain_confirm_proof')];
+  for (const step of steps) step.catch(() => undefined);
+  const [, , proof] = await Promise.all(steps);
+  return proof as ProofRow[];
+}
+
 /**
  * What the pass may reuse: the pages it wrote since S1 (`pages`, by id), which of them changed their import record
  * (`records`), the source's count of pages with an origin, and S2's mark for the next round; or why the full read.
@@ -89,14 +115,14 @@ export type ConfirmProof = { ok: true; mark: LevelMark; pages: string[]; records
  * Proves, in S2 (the round's snapshot), that every change since `base` (S1) to what the level read consumes is the pass's
  * own write (see the header). The counts still need the reused rows: `countsMatch` checks them after the delta read.
  */
-export async function proveConfirm(exec: Exec, input: { sourceId: string; incarnation: string; passId: string; base: LevelMark; recorded?: ReadonlySet<number>; postgres: boolean; self?: string }): Promise<ConfirmProof> {
+export async function proveConfirm(exec: Exec, input: { sourceId: string; incarnation: string; passId: string; base: LevelMark; recorded?: ReadonlySet<number>; postgres: boolean;
+  parallel?: boolean; self?: string }): Promise<ConfirmProof> {
   const scope = `${input.sourceId}:${input.incarnation}`;
+  const params = [input.sourceId, CONFIRM_OPS, scope, input.base.xmin, input.passId, input.self ?? null];
   // Two plain scans: compiling them (JIT, which the planner's cost picks at 600k) cost more than running them (about 200 ms).
   const jit = input.postgres ? exec.executeRaw('SET LOCAL jit = off') : Promise.resolve([]);
   jit.catch(() => undefined);
-  const [row] = await exec.executeRaw<{ xmin: string; span: number; ops: Record<string, number> | null; holds: string[]; pages: number;
-    pages_changed: Array<[string, boolean, string]>; ops_changed: Array<[string, string, string | null, string | null]> }>(
-    PROOF, [input.sourceId, CONFIRM_OPS, scope, input.base.xmin, input.passId, input.self ?? null]);
+  const [row] = input.postgres && input.parallel ? await parallelProof(exec, input.sourceId, params) : await exec.executeRaw<ProofRow>(PROOF, params);
   await jit;
   const mark: LevelMark = { xmin: row!.xmin, ops: row!.ops ?? {}, holds: row!.holds };
   if (!(Number(row!.span) >= 0 && Number(row!.span) < 2 ** 31)) return { ok: false, reason: 'xid_span', mark };

@@ -899,7 +899,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
   if (reuse) reuse.cache.pages = undefined;
   const round = (marking: boolean) => withRoundSnapshot(engine, async exec => {
     const base = marking ? prior?.mark : undefined;
-    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres' }))) : null;
+    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres', parallel: true }))) : null;
     const marked = marking && !base ? confirmGuard(readLevelMark(exec, sourceId, incarnation)) : null;
     // PGLite has no snapshot: the mark (or the proof, the next round's mark) runs before the reads it vouches for.
     if (kind === 'pglite') await (proof ?? marked)?.catch(() => undefined);
@@ -915,7 +915,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
     const [work, markers, passRow] = await others;
     if (reuse && mark) reuse.cache.pages = { key, mark, table: read!.pages };
     const confirm = confirmed?.confirm ?? unkeyed;
-    return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (marked ? 1 : proof ? (kind === 'postgres' ? 2 : 1) : 0), ...(confirm ? { confirm } : {}),
+    return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (marked ? 1 : proof ? (kind === 'postgres' ? 6 : 1) : 0), ...(confirm ? { confirm } : {}),
       ...(confirmed?.read ? { changed: confirmed.changed } : {}) };
   });
   if (!reuse || reuse.working) return round(false);
