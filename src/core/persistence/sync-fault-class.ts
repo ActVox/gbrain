@@ -100,6 +100,9 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   // GBRA-133: a committed file missing from the working tree (a sparse checkout, a deletion not committed); classic sync holds it.
   { code: 'absent_from_worktree', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a person decides whether the file comes back or its deletion is committed',
     human_reason: 'The file is committed but missing from the checkout; a person restores it (git restore, or widens the sparse checkout) so the next sync imports it, or commits the deletion with gbrain git commit-push, which clears the hold.' },
+  // GBRA-133: a committed file name that is not valid UTF-8 or holds a control character cannot be a page path; classic sync holds it.
+  { code: 'unsupported_path', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a rename makes the name a page path',
+    human_reason: 'The file name is not valid UTF-8 or contains a control character, so it cannot be a page path; a person renames the file to a valid name and commits, and the next sync imports it and clears the hold.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
   { code: 'revision_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'page_identity_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },

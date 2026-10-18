@@ -94,6 +94,15 @@ describe('unsupported_path key, display and fix (no engine)', () => {
       }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  test('sync status classes the hold as one page waiting on a rename, not an unknown systemic fault', async () => {
+    const { classifySyncFault } = await import('../../src/core/persistence/sync-fault-class.ts');
+    const { publicCategory } = await import('../../src/core/persistence/public-category.ts');
+    const verdict = classifySyncFault({ code: 'unsupported_path', detail: 'not_utf8' });
+    expect({ class: verdict.class, safe_actions: verdict.safe_actions, needs_human: verdict.needs_human }).toEqual({ class: 'page', safe_actions: ['none'], needs_human: true });
+    expect(verdict.human_reason).toContain('renames the file');
+    expect(publicCategory({ code: 'unsupported_path' })).toBe('content_refused');
+  });
 });
 
 describe('sync Git reads take no optional lock (GIT_OPTIONAL_LOCKS=0)', () => {
