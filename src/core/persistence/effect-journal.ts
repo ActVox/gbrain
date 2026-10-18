@@ -188,12 +188,20 @@ export async function mirrorGates(engine: SqlEngine, requestIds: readonly string
  * calls this in its own transaction; each effect pass calls it again for the
  * requests it touched, for a park that settled after a concurrent mirror commit.
  */
-export async function rearmWithheldTargets(engine: SqlEngine, requestIds: readonly string[]): Promise<number> {
-  if (!requestIds.length) return 0;
-  const rows = await engine.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e WHERE e.request_id=ANY($1::uuid[])
+const REARMABLE = `e.request_id=ANY($1::uuid[])
     AND e.kind IN ('git','embedding') AND e.state IN ('queued','failed') AND e.execution_token IS NULL AND e.recovery IS NULL
     AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(e.data->'parked','[]'::jsonb)) AS p(target) WHERE p.target->>'error_code'=$2)
-    AND EXISTS (SELECT 1 FROM persistence_effects m WHERE m.request_id=e.request_id AND m.kind='withdrawal-mirror' AND m.state='committed')
+    AND EXISTS (SELECT 1 FROM persistence_effects m WHERE m.request_id=e.request_id AND m.kind='withdrawal-mirror' AND m.state='committed')`;
+
+/** Whether any of these requests has a target rearmWithheldTargets would re-arm; a pass opens its re-arm transaction only then. */
+export async function hasRearmableTargets(engine: SqlEngine, requestIds: readonly string[]): Promise<boolean> {
+  if (!requestIds.length) return false;
+  return (await engine.executeRaw(`SELECT 1 FROM persistence_effects e WHERE ${REARMABLE} LIMIT 1`, [[...new Set(requestIds)], WITHHELD_BY_MIRROR])).length > 0;
+}
+
+export async function rearmWithheldTargets(engine: SqlEngine, requestIds: readonly string[]): Promise<number> {
+  if (!requestIds.length) return 0;
+  const rows = await engine.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e WHERE ${REARMABLE}
     ORDER BY e.id FOR UPDATE OF e SKIP LOCKED`, [[...new Set(requestIds)], WITHHELD_BY_MIRROR]);
   for (const effect of rows) {
     const { parked = [], ...data } = effect.data;

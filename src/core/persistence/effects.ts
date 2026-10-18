@@ -34,7 +34,7 @@ import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts'
 import { sha256 } from './digest.ts';
 import { prepareFileTarget } from './page-prepare.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
-import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, mirrorGates, parkEffect, rearmWithheldTargets, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
+import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, failEffect, hasRearmableTargets, mirrorGates, parkEffect, rearmWithheldTargets, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
 import { guardEffectSource, mirrorContent, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
 import { commitGitTargets, DURABILITY_NOT_ENABLED, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
 import { retryIndexLockParks } from './effect-retry.ts';
@@ -705,7 +705,8 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
   try { return await runEffectPass(engine, config, opts, touched, derived); }
   finally {
     await settleDerivedFailures(engine, derived).catch(() => { /* an unsettled claim expires and the effect is claimed again */ });
-    await engine.transaction(tx => rearmWithheldTargets(tx, [...touched])).catch(() => { /* idempotent; the next pass touching the request retries it */ });
+    await (async () => { if (await hasRearmableTargets(engine, [...touched])) await engine.transaction(tx => rearmWithheldTargets(tx, [...touched])); })()
+      .catch(() => { /* idempotent; the next pass touching the request retries it */ });
     await trueUpRequests(engine, touched).catch(() => { /* idempotent; the next settlement of the request retries it */ });
   }
 }
