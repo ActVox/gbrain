@@ -533,10 +533,14 @@ const HOLD_GUIDANCE: Record<InvalidFrontmatterReason, string> = {
   ambiguous_protected_key: 'gbrain never guesses who may read a page or where it came from. Write that key on its own line with one quoted value, then import it again.',
 };
 
+/** S-47: the alias-bound refusal (data-frontmatter.ts YamlAliasBoundError) needs its own advice; quoting a value does not shrink an alias. */
+const ALIAS_BOUND_GUIDANCE = 'Replace the anchors (&name) and aliases (*name) in that block with plain values, then import it again.';
+const ALIAS_BOUND_CAUSE = /aliases expand past the frontmatter size limit/;
+
 const HOLD_MESSAGE = new RegExp(`^Invalid YAML frontmatter: (?:ambiguous (?:protected|identity) key(?: "[\\w-]{1,100}")? at line \\d+`
   + `|key(?: "[\\w-]{1,100}")? at line \\d+ (?:continues on unquoted lines|appears more than once|opens \\[ or \\{ without closing it)`
   + `|[a-z ;,'-]{1,200}(?: at line \\d+(?:, column \\d+)?)?(?: \\(key "[\\w-]{1,100}"\\))?)\\. `
-  + `(?:${Object.values(HOLD_GUIDANCE).map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`);
+  + `(?:${[...Object.values(HOLD_GUIDANCE), ALIAS_BOUND_GUIDANCE].map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`);
 
 /** True for a frontmatter hold message exactly as `classifyImportHold` builds it: key, line and cause only, safe to show. */
 export function isFrontmatterHoldMessage(message: string | null | undefined): boolean {
@@ -579,7 +583,7 @@ export function classifyImportHold(parsed: ParsedMarkdown, ctx: {
       : reason === 'needs_interpretation' ? `key "${key}"${where} ${step!.kind === 'dup' ? 'appears more than once' : step!.kind === 'fold' ? 'continues on unquoted lines' : 'opens [ or { without closing it'}`
       : `${(yaml?.message ?? '').replace(/^YAML parse failed:\s*/, '') || 'malformed YAML'}${key ? ` (key "${key}")` : ''}`;
     return { code: 'invalid_frontmatter', reason, ...(key ? { key } : {}), ...(line !== undefined ? { line } : {}),
-      message: `Invalid YAML frontmatter: ${detail}. ${HOLD_GUIDANCE[reason]}` };
+      message: `Invalid YAML frontmatter: ${detail}. ${reason === 'yaml_parse' && ALIAS_BOUND_CAUSE.test(yaml?.message ?? '') ? ALIAS_BOUND_GUIDANCE : HOLD_GUIDANCE[reason]}` };
   }
   const expected = ctx.expectedSlug;
   if (expected && parsed.slug !== expected && slugifyPath(parsed.slug) !== expected && !ctx.slugExempt?.(parsed.slug)) {
