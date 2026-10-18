@@ -10,6 +10,32 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.300.0] - 2026-10-18
+
+**Every stuck state the #6948 sweep found now has an exit: a withdrawal mirror stuck on edited bytes, a crashed pre-kernel PGLite lock, fence rows an older release left in a managed clone, and stuck bundle, transfer and effect recoveries each get a preview-first repair command, and a failed withdrawal mirror no longer blocks the Git and embedding work of its request.** This is GBRA-130 PR 2, the second half of the #6948 bug-class sweep; every row ships with a probe that fails on master and passes here, on PGLite and Postgres. Nothing runs on upgrade.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A withdrawal-mirror effect stuck on edited file bytes | cleared only by hand | `gbrain repair stuck-recovery --keep withdrawn` previews it, backs up the edited bytes, writes the post-withdrawal bytes and finishes the effect; a record older than a later withdrawal on the same page is rebased first, so a forgotten fact never returns to disk |
+| A legacy `.gbrain-lock/` left by a crashed pre-kernel gbrain | blocked the PGLite brain for good | `gbrain pglite-repair --legacy-lock` previews it and, after consent, moves it aside under the kernel lock; it refuses a live holder, a changed plan and a filesystem it can't confirm is local (`filesystem_unverified`), and prints an undo |
+| Fence rows an older release appended to a clone gbrain owns (`sources add --url`) | blocked every pull | `gbrain repair url-clone-fences` keeps the rows in the database and restores the clone file to HEAD |
+| A stuck bundle recovery, transfer or effect variant | no operator exit | each has a previewed resolution, a receipt and a retry path |
+| A failed withdrawal mirror | blocked every Git and embedding sibling of its request | siblings run on the pages the mirror published; Git commits a page only when its bytes match the mirror rendering, skips one the mirror did not rewrite (`withdrawal_not_mirrored`), and waits while the mirror is requeued (`withdrawal_mirror_pending`); parked siblings re-arm when the mirror commits |
+| A worker or entity slug the exporter refuses | the page could not be exported | slugs stay portable; a long or reserved name keeps its identity with a hash tag, and enrichment skips with `entity_slug_taken` when both forms belong to other entities |
+| A run failure carrying an errno, SQLSTATE or typed error whose message also matches provider text | could be recorded as one bad item | structured failures are classified first, so `ENOSPC` stops the run |
+| A session-start or prompt hook whose pack the serve backstop cut short | reported `ok` with an empty block | the pack assembled before the backstop is returned, and the hook records `degraded` with reason `server_budget` |
+
+### What you need to do
+
+Nothing. Each repair previews first and runs only with `--apply --expect <hash>` and your consent.
+
+### For contributors
+
+- The nightly watch reads job pages 50 at a time and retries a GET on a 5xx or a dropped connection (1 s, 3 s, 9 s); a 4xx still fails at once.
+- The crash robot waits for the consumer's claim pass before finishing, the entity-resolve perf guard times its two query shapes alternately, and `eval_drift` refreshes a racy Git index after a timed-out diff.
+
 ## [0.60.299.0] - 2026-10-18
 
 **Big pages now just work: `pages.segmented_storage` is on by default, so a page over 1 MiB is stored in segments and reading a piece of it costs the size of that piece, not the whole page.** A 200 MiB transcript, export or log file used to be stuck at the 24 MiB inline limit, and every read or rewrite of a large page moved all of it. Now a page can be up to 256 MiB on Postgres and 128 MiB on PGLite, a window, outline or chunk context reads only its segments, and a rewrite re-indexes only the segments that changed. Pages at or under 1 MiB are stored exactly as before. Forgetting or purging a fact on a large page now rewrites its file too, so the withdrawn text leaves the checkout and its Git history moves on, as it already did for small pages.
