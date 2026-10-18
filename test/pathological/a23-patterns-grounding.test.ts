@@ -19,7 +19,7 @@
  * trigger on pages, and the child is the spied inline drain.
  */
 import { describe, expect, spyOn, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -28,6 +28,10 @@ import * as synthesize from '../../src/core/cycle/synthesize.ts';
 import * as wait from '../../src/core/minions/wait-for-completion.ts';
 import { groundTimelineAppends, runPhasePatterns, type TimelineAppend } from '../../src/core/cycle/patterns.ts';
 import { renderTimelineEntry } from '../../src/core/timeline-write-through.ts';
+import type { GBrainConfig } from '../../src/core/config.ts';
+import { buildBrainTools } from '../../src/core/minions/tools/brain-allowlist.ts';
+import { retainToolWriteRequestId } from '../../src/core/minions/tool-write-identity.ts';
+import { persistToolExecComplete, persistToolExecPending } from '../../src/core/minions/handlers/subagent-persistence.ts';
 import { isolatedSharedSkillsEngine } from '../helpers/shared-skills-engine.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { expectItemFailure, expectOthersUnchanged, expectUnitNotAborted, pathologicalArms, runScopedErrors, snapshotItems } from './harness.ts';
@@ -203,7 +207,7 @@ async function appendedPages(engine: BrainEngine): Promise<TimelineAppend[]> {
   return out;
 }
 const REFLECTIONS = [1, 2, 3].map(i => ({ slug: 'wiki/personal/reflections/r' + i })) as never;
-const groundingRun = () => ({ sourceId: 'default', holds: {}, failed: [] as Array<{ key: string; code: string }>, grounded: new Set<string>() });
+const groundingRun = () => ({ sourceId: 'default', holds: {}, pending: {}, failed: [] as Array<{ key: string; code: string }>, grounded: new Set<string>(), appendsResolved: new Map<string, Set<string>>() });
 
 describe('A-23 timeline-append grounding isolates one page whose write-back is refused', () => {
   for (const { backend, databaseUrl } of pathologicalArms()) {
@@ -236,5 +240,98 @@ describe('A-23 timeline-append grounding isolates one page whose write-back is r
         });
       }, 120_000);
     }
+  }
+});
+
+const APPENDED = PREFIX + '/a-theme';
+const APPENDS_KEY = 'dream.patterns.grounding_appends.default';
+
+/** A pattern page an earlier run verified; a later child appends a timeline entry to it. */
+const verifiedPage = (engine: BrainEngine, body = 'A theme.') => importFromContent(engine, APPENDED,
+  '---\ntype: note\ntitle: A theme\ndream_generated: true\nquote_verified_at: \'2026-10-01\'\n---\n' + body + '\n', { noEmbed: true, sourceId: 'default' });
+
+/**
+ * A completed patterns child that appends one entry quoting text the reflections never said, through the real
+ * brain tool and the subagent tool-execution ledger (production request ids and receipts); `afterChild` runs
+ * once the child is done and before grounding.
+ */
+async function withAppendingChild<T>(engine: BrainEngine, databaseUrl: string | undefined, run: () => Promise<T>, afterChild?: () => Promise<unknown>): Promise<{ result: T; children: number }> {
+  let children = 0;
+  const drain = spyOn(synthesize, 'runSubagentsInline').mockImplementation((async (e: BrainEngine, _queue: unknown, queueName: string) => {
+    children++;
+    const [job] = await e.executeRaw<{ id: number }>('SELECT id FROM minion_jobs WHERE queue = $1 ORDER BY id DESC LIMIT 1', [queueName]);
+    const jobId = Number(job!.id);
+    const tool = buildBrainTools({ subagentId: jobId, engine: e, config: { engine: databaseUrl ? 'postgres' : 'pglite' } as GBrainConfig,
+      allowedSlugPrefixes: [PREFIX + '/*'], sourceId: 'default' }).find(t => t.name === 'brain_add_timeline_entry')!;
+    const input: Record<string, unknown> = { slug: APPENDED, date: '2026-10-1' + children, summary: 'You wrote "always test on staging" again (run ' + children + ')', source: 'wiki/personal/reflections/r3' };
+    retainToolWriteRequestId(input, jobId, 1, 0, 'toolu_0', tool.name);
+    await persistToolExecPending(e, jobId, 1, 0, 'toolu_0', tool.name, input);
+    await persistToolExecComplete(e, jobId, 1, 0, 'toolu_0', await tool.execute(input, { engine: e, jobId, remote: true }));
+    await afterChild?.();
+  }) as never);
+  const completed = spyOn(wait, 'waitForCompletionRenewing').mockImplementation((async (_q: unknown, jobId: number) => ({ id: jobId, status: 'completed', error_text: null })) as never);
+  try { return { result: await run(), children }; } finally { drain.mockRestore(); completed.mockRestore(); }
+}
+const pendingAppends = async (engine: BrainEngine) => JSON.parse((await engine.getConfig(APPENDS_KEY)) ?? '{}') as { items?: Record<string, { attempts: number; held_at: string | null; appends: unknown[] }> };
+
+describe('A-23 a timeline append whose grounding write-back failed is retried on a later run', () => {
+  for (const { backend, databaseUrl } of pathologicalArms()) {
+    test('[' + backend + '] the failed append is recorded durably and the next run grounds it without a new child', async () => {
+      await withPatternsBrain(databaseUrl, async (engine, brainDir) => {
+        await verifiedPage(engine);
+        const first = await withAppendingChild(engine, databaseUrl, () => patterns(engine, brainDir), () => refuseWrites(engine, [APPENDED]));
+        expect(first.result.status).toBe('warn');
+        expectItemFailure((first.result.details.grounding_failed as GroundingRow[])[0], { key: APPENDED, code: 'invalid_data' });
+        expect((await engine.getPage(APPENDED))!.timeline).toContain('always test on staging');
+        expect(readFileSync(join(brainDir, APPENDED + '.md'), 'utf8')).toContain('always test on staging');
+        expect(await engine.getConfig(EVIDENCE_KEY)).not.toBeNull();
+        expect((await pendingAppends(engine)).items?.[APPENDED]).toMatchObject({ attempts: 1, held_at: null });
+
+        await allowWrites(engine);
+        const before = await snapshotItems(engine, 'default');
+        const again = await withAppendingChild(engine, databaseUrl, () => expectUnitNotAborted(() => patterns(engine, brainDir, false)));
+        expect(again.children).toBe(0);
+        expect(again.result.details.reason).toBe('no_new_evidence');
+        expect(again.result.details.grounding_failed).toEqual([]);
+        expect(again.result.details.timeline_append_retry).toMatchObject({ pages: 1, entries: 1, quarantined: 1 });
+        const page = (await engine.getPage(APPENDED))!;
+        expect(page.timeline).not.toContain('always test on staging');
+        expect((page.frontmatter.unverified_claims as Array<{ text: string }>).map(c => c.text).join('\n')).toContain('always test on staging');
+        expect((await engine.getTimeline(APPENDED, { sourceId: 'default' })).map(r => r.summary).join('\n')).not.toContain('always test on staging');
+        expect(readFileSync(join(brainDir, APPENDED + '.md'), 'utf8').split('\n---\n').slice(1).join('\n---\n')).not.toContain('always test on staging');
+        expect(await engine.getConfig(APPENDS_KEY)).toBe(JSON.stringify({ version: 1, items: {} }));
+        expectOthersUnchanged(before, await snapshotItems(engine, 'default'), { expectProgress: [APPENDED], progressFields: ['content_hash'] });
+      });
+    }, 180_000);
+
+    test('[' + backend + '] an append refused on 3 runs at one content hash is held with a typed warning until the page changes', async () => {
+      await withPatternsBrain(databaseUrl, async (engine, brainDir) => {
+        await verifiedPage(engine);
+        await withAppendingChild(engine, databaseUrl, () => patterns(engine, brainDir), () => refuseWrites(engine, [APPENDED]));
+        for (let run = 2; run <= 3; run++) {
+          const { result } = await withAppendingChild(engine, databaseUrl, () => patterns(engine, brainDir, false));
+          expect({ run, status: result.status, failed: (result.details.grounding_failed as GroundingRow[]).map(f => f.slug) }).toEqual({ run, status: 'warn', failed: [APPENDED] });
+        }
+        expect((await pendingAppends(engine)).items?.[APPENDED]).toMatchObject({ attempts: 3 });
+        expect((await pendingAppends(engine)).items?.[APPENDED]?.held_at).not.toBeNull();
+        const held = await withAppendingChild(engine, databaseUrl, () => patterns(engine, brainDir, false));
+        expect(held.children).toBe(0);
+        expect(held.result.status).toBe('warn');
+        expect(held.result.details.grounding_failed).toEqual([]);
+        const rows = held.result.details.grounding_held as Array<GroundingRow & { timeline_appends?: number }>;
+        expect(rows.map(r => ({ slug: r.slug, code: r.code, timeline_appends: r.timeline_appends }))).toEqual([{ slug: APPENDED, code: 'invalid_data', timeline_appends: 1 }]);
+        expectItemFailure({ key: rows[0]!.slug, code: rows[0]!.code, fix: rows[0]!.fix }, { key: APPENDED, code: 'invalid_data', fix: /^gbrain get --source default -- wiki\/personal\/patterns\/a-theme$/ });
+        expect((await pendingAppends(engine)).items?.[APPENDED]).toMatchObject({ attempts: 3 });
+
+        await allowWrites(engine);
+        const timeline = (await engine.getPage(APPENDED))!.timeline;
+        await importFromContent(engine, APPENDED, '---\ntype: note\ntitle: A theme\ndream_generated: true\nquote_verified_at: \'2026-10-01\'\n---\nA theme, edited.\n\n<!-- timeline -->\n## Timeline\n\n' + timeline.replace(/^[\s\S]*?## Timeline\n+/, '') + '\n', { noEmbed: true, sourceId: 'default' });
+        const released = await withAppendingChild(engine, databaseUrl, () => patterns(engine, brainDir, false));
+        expect(released.result.details.grounding_held).toEqual([]);
+        expect(released.result.status).toBe('skipped');
+        expect((await engine.getPage(APPENDED))!.timeline).not.toContain('always test on staging');
+        expect((await pendingAppends(engine)).items?.[APPENDED]).toBeUndefined();
+      });
+    }, 240_000);
   }
 });

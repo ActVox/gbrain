@@ -30,6 +30,7 @@ import { isAvailable } from './ai/gateway.ts';
 // #4222: shared generic-token reject list — same list gates the by-mention
 // gazetteer and drives the junk_entity_hubs doctor check.
 import { isJunkEntityName } from './entity-name-quality.ts';
+import { followRetirement } from './entities/resolve.ts';
 import { maintenanceTransaction } from './persistence/attribution.ts';
 import { managedPersistenceEnabled } from './persistence/ownership.ts';
 import { deriveTrust, derivedMaintenanceTransaction, lowerDerivedPage, lowerDerivedPageIn } from './trust/taint.ts';
@@ -76,6 +77,8 @@ export interface EnrichmentResult {
   action: 'created' | 'updated' | 'skipped';
   /** True when the created stub landed in the quarantine lane (issue #160). */
   quarantined?: boolean;
+  /** Why nothing was written: the page is retired and its superseded_by / merged_into chain has no live target (B-9). */
+  skipped_reason?: 'retired_page_unfollowable';
   tier: 1 | 2 | 3;
   backlinkCreated: boolean;
   timelineAdded: boolean;
@@ -195,6 +198,15 @@ export async function enrichEntity(
       const same = (t: string) => t.normalize('NFC').trim().toLowerCase();
       if (legacyPage && same(legacyPage.title ?? '') === same(request.entityName)) { slug = legacySlug; existingPage = legacyPage; }
     }
+  }
+  // B-9: a retired page (canonical: false, superseded_by) answers through its canonical page, as fact resolution does (#6898).
+  if (existingPage) {
+    const live = await followRetirement(engine, sourceId, slug);
+    if (!live) {
+      return { slug, action: 'skipped', skipped_reason: 'retired_page_unfollowable', tier, backlinkCreated: false, timelineAdded: false,
+        mentionCount, mentionSources, suggestedTier, tierEscalated };
+    }
+    if (live.slug !== slug) { slug = live.slug; existingPage = await engine.getPage(slug, { sourceId }); }
   }
   let action: 'created' | 'updated' | 'skipped';
 
