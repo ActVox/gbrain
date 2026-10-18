@@ -24,6 +24,7 @@ import { join, relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { OperationError, opError } from '../ops/contract.ts';
+import { readFix } from '../ops/op-fix.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
@@ -175,7 +176,8 @@ async function admitRemirror(ctx: OperationContext, stale: StaleMirror, hash: st
         CROSS JOIN (VALUES ('withdrawal-mirror'),('git')) AS k(kind)
         WHERE s.id=$2 ON CONFLICT(request_id,kind) DO NOTHING`, [row.id, stale.source_id, JSON.stringify({ version: 2,
         commit_subject: `gbrain: re-mirror segmented page ${stale.slug}`, commit_line: `re-mirror ${stale.slug} without withdrawn rows`,
-        targets: [{ slug: stale.slug, page_id: stale.page_id, revision: stale.revision }] })]);
+        targets: [{ slug: stale.slug, page_id: stale.page_id, revision: stale.revision }],
+        approved_file: { slug: stale.slug, file_sha256: stale.file_sha256, expected_sha256: stale.expected_sha256 } })]);
       return completeWrite(tx, row, 'committed', { segmented_mirror: { ...callerIntent, revision: stale.revision, path: stale.path, effects: ['withdrawal-mirror', 'git'] } });
     }, requestAttribution(row));
   }), undefined, error => engine.reconnect({ error }));
@@ -204,9 +206,16 @@ async function awaitEffects(ctx: OperationContext, requestRowId: string, waitMs:
 function outcomeOf(stale: StaleMirror, row: WriteRequest, effects: EffectState[], replayed: boolean): RepairItemOutcome {
   const detail = { request_id: row.request_id, path: stale.path, file_sha256_before: stale.file_sha256, expected_sha256: stale.expected_sha256,
     effects: effects.map(effect => ({ kind: effect.kind, state: effect.state, ...(effect.error_code ? { error: effect.error_code } : {}) })) };
-  if (replayed) return { applied: false, outcome: 'replayed', detail };
   const mirror = effects.find(effect => effect.kind === 'withdrawal-mirror');
   const skip = mirror?.skipped.find(entry => entry.slug === stale.slug);
+  if (skip?.reason === 'preview_changed') {
+    const preview = ['gbrain', 'repair', 'segmented-mirror', '--source', stale.source_id, '--json'];
+    const failure = opError('preview_changed', `The file of ${stale.slug} or its canonical render changed after the preview, so the withdrawal mirror did not rewrite it.`,
+      `Run ${preview.slice(0, -1).join(' ')} again, show the user the new listing, and apply its new hash.`,
+      { fix: readFix(`Previews the segmented-mirror repair of source ${stale.source_id} again, read-only; it lists ${stale.slug} with its current file hash.`, { argv: preview }) });
+    return { applied: false, outcome: 'refused', reason: 'preview_changed', failure, detail: { ...detail, fix: failure.fix } };
+  }
+  if (replayed) return { applied: false, outcome: 'replayed', detail };
   if (skip) return { applied: false, outcome: 'held', reason: skip.reason ?? 'skipped', detail };
   if (mirror?.state === 'committed' && !mirror.recovering) return { applied: true, outcome: 'mirrored', detail };
   if (mirror && (mirror.state === 'failed' || mirror.parked)) return { applied: false, outcome: 'failed', reason: mirror.error_code ?? 'mirror_failed', detail };

@@ -235,8 +235,11 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
       await materializeAndAdvance(engine, effect, snapshot, opts.hostId);
       return;
     }
+    const approved = effect.data.approved_file?.slug === snapshot.page.slug ? effect.data.approved_file : undefined;
+    if (approved && file.expectedBeforeHash !== approved.file_sha256) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId, 'preview_changed'); return; }
     if (segmented) await assertSegmentedMirrorGate(engine, effect, snapshot.page.slug, opts.hostId);
     content = segmented ? await unreadPageFile(engine, snapshot, keep) : file.content as string;
+    if (approved && fileContentHash(content) !== approved.expected_sha256) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId, 'preview_changed'); return; }
   } catch (error) {
     // A segmented page whose fence a withdrawal cannot read whole (page_body_segmented) retries and parks like any failed
     // target, so writer status and doctor list it; only a file that differs from the database is passed by.
@@ -347,6 +350,11 @@ async function publishGitPage(engine: BrainEngine, effect: PersistenceEffect, bi
     { fix: effectStatusFix(effect) });
   const path = file.path;
   if (!existsSync(path)) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId); return; }
+  // A repair's Git target commits only the render its preview approved (the mirror refused anything else).
+  if (effect.data.approved_file?.slug === snapshot.page.slug && persistenceFileHash(path) !== effect.data.approved_file.expected_sha256) {
+    await skipTarget(engine, effect, snapshot, 'preview_changed');
+    return;
+  }
   if (snapshot.page.deleted_at && existsSync(path)) { await finishPage(engine, effect, snapshot, { reason: 'deleted_page_file_present' }); return; }
   if (!isWriteTargetContained(path, join(root, binding.relative_path))) throw gitTargetEscaped(effect);
   if (isSourceDbOnlySlug(join(root, binding.relative_path), snapshot.page.slug, 'not_db_only')) {

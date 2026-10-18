@@ -365,11 +365,17 @@ from the hash). That request is the page's receipt; read it with
 `gbrain write-request <request id>`. It commits a withdrawal-mirror effect and
 a Git effect for the page, and the existing mirror does the rewrite. The mirror
 keeps its recovery record, streamed staging file, owner and lock checks, and its
-own file/database check. The Git effect commits the file. Outcomes are
-`mirrored`, `mirror_queued` (the owner's consumer has not run it yet; preview
-again later), `held` (the mirror's own check refused the file) or `failed`
+own file/database check. The effect carries the file and render SHA-256 the
+preview approved: if the file or the render changed after the preview, even a
+formatting-only edit made while the mirror waited, the mirror leaves the file
+as it is (`skipped` reason `preview_changed`) and the Git effect commits
+nothing for it. The Git effect commits the file. Outcomes are `mirrored`,
+`mirror_queued` (the owner's consumer has not run it yet; preview again later),
+`held` (the mirror's own check refused the file), `refused` with
+`preview_changed` (its fix re-runs the preview; apply the new hash) or `failed`
 (the mirror's error code). Replaying an apply with the same hash finds each
-receipt and writes nothing (`replayed`).
+receipt and writes nothing (`replayed`), except that a page the mirror refused
+reports `refused` again.
 
 The rewrite replaces the file with the page's canonical render, so any other
 formatting differences in it are normalized as well. The old bytes stay in
