@@ -153,8 +153,11 @@ describe('filesDriftedSince refreshes a racy index after a slow diff', () => {
 
   test('a diff that runs out of time still rewrites the racy index, so the next probe answers', () => {
     const repo = committedRepoWithRacyIndex();
+    // A racy entry is re-hashed through its clean filter, so a slow filter makes the diff outlast its limit on any machine.
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=slow\n');
+    execSync('git config filter.slow.clean "sleep 2; cat"', { cwd: repo, stdio: 'pipe' });
     const before = indexMtime(repo);
-    expect(filesDriftedSince(repo, undefined, 60_000, 1)).toBeNull();
+    expect(filesDriftedSince(repo, undefined, 60_000, 500)).toBeNull();
     expect(indexMtime(repo)).toBeGreaterThan(before);
     expect(filesDriftedSince(repo)).toEqual([]);
   });
