@@ -542,9 +542,12 @@ const PART_ATTEMPT_PAGE = 8;
  * One part's write keeps one request identity across runs. The id is derived
  * from the source, slug, expected revision and content, so a rerun while that
  * write is still queued or publishing gets it back (`prior`) and waits on it;
- * a committed one is replayed. A write that ended without committing
- * (conflict, failed, cancelled) is retried under the next attempt's id, so a
- * cleared cause re-queues the part instead of replaying its old refusal.
+ * a committed one is replayed only while the live page is still the one it
+ * produced (same source incarnation, same revision). A committed write whose
+ * page has since been deleted and purged, or rewritten, is passed over like a
+ * write that ended without committing (conflict, failed, cancelled): the part
+ * is submitted under the next attempt's id, so a cleared cause or an absent
+ * page gets a fresh, normally admitted write instead of an old receipt.
  */
 async function transcriptPartRequest(ctx: OperationContext, sourceId: string, slug: string, params: Record<string, unknown>):
   Promise<{ requestId: string; prior: WriteRequest | null }> {
@@ -559,7 +562,10 @@ async function transcriptPartRequest(ctx: OperationContext, sourceId: string, sl
     const byId = new Map(rows.map(row => [String(row.request_id).toLowerCase(), row]));
     for (const requestId of names) {
       const prior = byId.get(clientRequestUuid(requestId)) ?? null;
-      if (!prior || !isTerminal(prior) || prior.state === 'committed') return { requestId, prior };
+      if (!prior || !isTerminal(prior)) return { requestId, prior };
+      if (prior.state !== 'committed') continue;
+      const live = await ctx.engine.readPageSnapshot(slug, { sourceId });
+      if (live?.sourceIncarnation === prior.source_incarnation && live.revision === prior.outcome?.revision) return { requestId, prior };
     }
   }
 }

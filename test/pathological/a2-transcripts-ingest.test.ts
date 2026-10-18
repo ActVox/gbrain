@@ -6,10 +6,14 @@
  *    its typed code while the other sessions land; an accepted write that
  *    outlasts the wait is a pending session (never a failure, never synced);
  *    a rerun waits on that write instead of admitting a duplicate; a pending
- *    write that ends without committing is re-queued; the connector watermark
- *    never passes a pending or failed conversation.
+ *    write that ends without committing is re-queued; a page deleted and
+ *    retention-purged since its write is created again instead of answered
+ *    with the old committed receipt, while an owner purge still refuses it
+ *    purged_content; the connector watermark never passes a pending or
+ *    failed conversation.
  * 2. Regression: the per-part catch treating anything but /too large|invalid
- *    byte sequence/ as a run abort, or a random request id per run.
+ *    byte sequence/ as a run abort, a random request id per run, or a
+ *    committed receipt replayed for a page that no longer exists.
  * 3. Existing coverage stubs the ingest result (connectors-ingest-failure) or
  *    pins the regex seam (transcripts-nul); none drives a real coordinator
  *    refusal or a real accepted write that commits after the wait.
@@ -27,6 +31,8 @@ import { saveCredential } from '../../src/core/connectors/credentials.ts';
 import { connectorSourceKey } from '../../src/core/connectors/config-keys.ts';
 import { CHATGPT_BASE_URL } from '../../src/core/connectors/providers/chatgpt.ts';
 import { waitForWrites } from '../../src/core/persistence/service.ts';
+import { purgeDeletedPagesCoordinated } from '../../src/core/persistence/purge-deleted.ts';
+import { operations } from '../../src/core/operations.ts';
 import type { WriteRequest } from '../../src/core/persistence/model.ts';
 import { chatgptHandler, newFixtureState, startFixture, type FixtureConversation, type FixtureState } from '../fixtures/connectors/fixture-server.ts';
 import { expectItemFailure, expectOthersUnchanged, expectUnitNotAborted, managedBrain, pathologicalArms, runScopedErrors, snapshotItems } from './harness.ts';
@@ -122,6 +128,41 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       const retried = await expectUnitNotAborted(() => ingest(engine, ctx, path));
       expect(retried).toMatchObject({ sessionsPending: 0, sessionsErrored: 0, sessionsImported: 1, cleanScan: true });
       expect((await putPageRequests(engine)).map(row => row.state)).toEqual(['committed', 'conflict', 'committed']);
+    }, { databaseUrl }), 180_000);
+
+    test('recovery: an identical re-ingest after the page was deleted and retention-purged admits a new creation instead of replaying the old receipt', async () => managedBrain(async ({ engine, ctx, root }) => {
+      const path = exportFile(root, { 'c-1': 'one' });
+      expect(await ingest(engine, ctx, path)).toMatchObject({ sessionsImported: 1, sessionsErrored: 0 });
+      const { slug } = await slugOf(engine, 'c-1');
+      const snapshot = await engine.readPageSnapshot(slug, { sourceId: 'default' });
+      await operations.find(op => op.name === 'delete_page')!.handler(ctx, { slug, expected_revision: snapshot!.revision, request_id: crypto.randomUUID() });
+      expect((await purgeDeletedPagesCoordinated(engine, 0)).slugs).toEqual([slug]);
+      expect(await engine.readPageSnapshot(slug, { sourceId: 'default', includeDeleted: true })).toBeNull();
+      const again = await expectUnitNotAborted(() => ingest(engine, ctx, path));
+      expect(again).toMatchObject({ sessionsImported: 1, sessionsErrored: 0, sessionsPending: 0, cleanScan: true });
+      expect((await slugOf(engine, 'c-1')).slug).toBe(slug);
+      expect((await putPageRequests(engine)).map(row => row.state)).toEqual(['committed', 'committed']);
+      const rerun = await ingest(engine, ctx, path);
+      expect(rerun).toMatchObject({ sessionsImported: 1, sessionsErrored: 0, pages: { imported: 0, skipped: 1 } });
+      expect((await putPageRequests(engine)).length).toBe(2);
+    }, { databaseUrl }), 180_000);
+
+    test('item: an identical re-ingest after the owner purged the page is refused purged_content, never replayed or re-created', async () => managedBrain(async ({ engine, ctx, root }) => {
+      const path = exportFile(root, { 'c-1': 'one' });
+      await ingest(engine, ctx, path);
+      const { slug } = await slugOf(engine, 'c-1');
+      const snapshot = await engine.readPageSnapshot(slug, { sourceId: 'default' });
+      await operations.find(op => op.name === 'delete_page')!.handler(ctx, { slug, purge: true, expected_revision: snapshot!.revision, request_id: crypto.randomUUID() });
+      await purgeDeletedPagesCoordinated(engine, 0);
+      const again = await expectUnitNotAborted(() => ingest(engine, ctx, path));
+      const c1 = sessions(again).get('c-1')!;
+      expectItemFailure({ key: c1.sessionId, code: c1.code }, { key: 'c-1', code: 'purged_content' });
+      expect(again).toMatchObject({ sessionsErrored: 1, sessionsImported: 0 });
+      expect((await putPageRequests(engine)).map(row => [row.state, row.error_code])).toEqual([['committed', null], ['failed', 'purged_content']]);
+      expect(await engine.readPageSnapshot(slug, { sourceId: 'default', includeDeleted: true })).toBeNull();
+      const rerun = await ingest(engine, ctx, path);
+      expect(sessions(rerun).get('c-1')?.code).toBe('purged_content');
+      expect(await engine.readPageSnapshot(slug, { sourceId: 'default', includeDeleted: true })).toBeNull();
     }, { databaseUrl }), 180_000);
 
     for (const injected of runScopedErrors()) {
