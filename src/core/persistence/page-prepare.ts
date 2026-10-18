@@ -548,12 +548,14 @@ async function prepareUnreadRestore(engine: BrainEngine, row: WriteRequest, snap
 /**
  * serializePageToMarkdown's bytes for a page whose body was not read back, streamed from its segments by export's
  * serializer: measured here, produced again into the publication's staging file (large-file.ts), never concatenated.
- * A withdrawal mirror of a segmented page (effects.ts, effect-recovery.ts) renders its file the same way.
+ * A withdrawal mirror of a segmented page (effects.ts, effect-recovery.ts) renders its file the same way, with
+ * `between` (its claim renewal) run after each piece each time the file is produced.
  */
-export async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot): Promise<StreamedFileContent> {
+export async function unreadPageFile(engine: BrainEngine, snapshot: PageSnapshot, between?: () => Promise<void>): Promise<StreamedFileContent> {
   const head = serializePageToMarkdown({ ...withoutBody(snapshot.page), compiled_truth: '', timeline: '' }, snapshot.tags).slice(0, -1);
   const ledger = snapshotLedger(snapshot);
-  return StreamedFileContent.measure(engine, exec => segmentedExportMarkdown(exec, snapshot.page, ledger, head));
+  const produce = (exec: BrainEngine) => segmentedExportMarkdown(exec, snapshot.page, ledger, head);
+  return StreamedFileContent.measure(engine, !between ? produce : async function* (exec) { for await (const piece of produce(exec)) { yield piece; await between(); } });
 }
 
 /** Work counters of segmented tag flips: `flips` applied, `hashStreams` content hashes recomputed over the segments. */

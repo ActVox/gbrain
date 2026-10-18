@@ -206,6 +206,29 @@ export async function releaseAbandonedClaims(engine: BrainEngine, processStarted
   return effects.length + requests.length;
 }
 
+/** @internal Claim renewals made between the pieces of a segmented page's file (effectClaimKeeper), for the bounded-work test. Counts, not time. */
+export const effectClaimWork = { renewals: 0 };
+
+/**
+ * Called between the pieces of a long read or write under a withdrawal-mirror or Git claim (a segmented page's file
+ * rendered, staged or compared): renews the 2-minute claim once `intervalMs` has passed since the last renewal, also
+ * while the mirror holds its recovery record, and refuses with `write_claim_lost` once the claim moved.
+ */
+export function effectClaimKeeper(engine: BrainEngine, effect: PersistenceEffect, intervalMs: number): () => Promise<void> {
+  let last = performance.now();
+  return async () => {
+    if (performance.now() - last < intervalMs) return;
+    last = performance.now();
+    effectClaimWork.renewals++;
+    const rows = await engine.executeRawDirect(`UPDATE persistence_effects SET claim_expires_at=now()+interval '2 minutes',updated_at=now()
+      WHERE id=$1 AND execution_token=$2::uuid AND state='running' AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING id`, [effect.id, effect.execution_token]);
+    if (rows.length !== 1) throw opError('write_claim_lost', 'The effect claim changed.',
+      `Another worker took over this ${effect.kind} effect of source ${effect.source_id} (its claim expired or was reassigned), so this attempt stopped; the current holder finishes it. Inspect the owner's effects rather than retrying by hand.`,
+      { fix: readFix(`Shows source ${effect.source_id}'s canonical owner with its blocking, retrying and parked effects, read-only.`,
+        { argv: ['gbrain', 'sources', 'writer', 'status', '--source', effect.source_id, '--json'] }) });
+  };
+}
+
 export async function renewPersistenceEffectClaim(engine: SqlEngine, effect: PersistenceEffect): Promise<boolean> {
   const rows = await engine.executeRaw(`UPDATE persistence_effects SET claim_expires_at=now()+interval '2 minutes',updated_at=now()
     WHERE id=$1 AND execution_token=$2::uuid AND state='running' AND recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING id`, [effect.id, effect.execution_token]);
