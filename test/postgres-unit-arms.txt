@@ -220,6 +220,7 @@ test/page-purge-journal-timeout-6511.test.ts
 test/page-state-engine.test.ts
 test/pathological/a26-safe-chunks-reseal.test.ts
 test/pathological/a27-credential-reseal.test.ts
+test/pathological/a44-slug-conflicts-rotation.test.ts
 test/pathological/a45-repair-all-kinds.test.ts
 test/pathological/a46-content-lane-kinds.test.ts
 test/pathological/a9-repair-core.test.ts
