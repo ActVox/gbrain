@@ -21,4 +21,7 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
   'backfill.rows': { file: 'test/pathological/a47-backfill-poison-row.test.ts',
     item: 'item: a row whose UPDATE violates a CHECK is skipped, recorded and passed; its siblings land',
     run: 'run: a run-scoped failure (' },
+  'purge.recorded_tombstones': { file: 'test/pathological/a49-unmanaged-purge-tombstones.test.ts',
+    item: 'item: a tombstone whose delete is refused is reported and kept; the other tombstones and the bulk delete still purge',
+    run: 'run: a run-scoped failure (' },
 };

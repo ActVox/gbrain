@@ -864,7 +864,7 @@ export class PostgresEngine implements BrainEngine {
 
   async purgeDeletedPages(
     olderThanHours: number,
-    opts?: { dryRun?: boolean },
+    opts?: { dryRun?: boolean; excludeIds?: number[] },
   ): Promise<{ slugs: string[]; count: number; pages?: { slug: string; deleted_at: Date }[] }> {
     return pagesImpl.purgeDeletedPages(this.engineSql, olderThanHours, opts);
   }

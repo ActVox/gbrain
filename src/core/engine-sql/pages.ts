@@ -292,11 +292,15 @@ export async function restorePage(exec: SqlExecutor, slug: string, opts?: { sour
 export async function purgeDeletedPages(
   exec: SqlExecutor,
   olderThanHours: number,
-  opts?: { dryRun?: boolean },
+  opts?: { dryRun?: boolean; excludeIds?: number[] },
 ): Promise<{ slugs: string[]; count: number; pages?: { slug: string; deleted_at: Date }[] }> {
     // Clamp to non-negative integer; runaway purge protection. The DELETE
     // cascades through content_chunks, page_links, chunk_relations via FKs.
     const hours = Math.max(0, Math.floor(olderThanHours));
+    // GBRA-130 A-49: tombstones the unmanaged belief-ledger expiry could not delete (or parked) stay for their own retry.
+    const excluded = opts?.excludeIds?.length ? sqlFragment`
+          AND NOT (pages.id = ANY(${opts.excludeIds}::bigint[]))` : sqlFragment``;
+    const excludedManifest = opts?.excludeIds?.length ? sqlFragment` AND NOT (p.id = ANY(${opts.excludeIds}::bigint[]))` : sqlFragment``;
     if (opts?.dryRun) {
       // SAME WHERE predicate as the DELETE below (same cutoff arithmetic,
       // same DB now() clock source) — only the verb differs, so preview and
@@ -306,7 +310,7 @@ export async function purgeDeletedPages(
         WHERE deleted_at IS NOT NULL
           AND deleted_at < now() - (${hours} || ' hours')::interval
           AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
-            AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
+            AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)${excluded}
         ORDER BY deleted_at ASC, slug ASC
       `);
       const pages = rows.map((r) => ({
@@ -319,14 +323,14 @@ export async function purgeDeletedPages(
     return exec.transaction(async (tx) => {
       const { rows: texts } = await tx.run<{ source_id: string; sha: string }>(sqlFragment`
         SELECT DISTINCT m.source_id, encode(m.sha256, 'hex') AS sha FROM page_body_manifest m JOIN pages p ON p.id = m.page_id
-        WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - (${hours} || ' hours')::interval`);
+        WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - (${hours} || ' hours')::interval${excludedManifest}`);
       const { rows } = await tx.run<{ slug: string; source_id: string }>(sqlFragment`
         DELETE FROM pages
         WHERE deleted_at IS NOT NULL
           AND deleted_at < now() - (${hours} || ' hours')::interval
           -- #6729: the old page of an open rename-identity downgrade waits for its disposition (identityDowngradePurgeHold).
           AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text
-            AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)
+            AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz)${excluded}
         RETURNING slug, source_id
       `);
       if (rows.length) await tx.run(sqlFragment`DELETE FROM page_body_stagings s USING unnest(${rows.map(r => r.source_id)}::text[], ${rows.map(r => r.slug)}::text[]) AS d(source_id, slug)
