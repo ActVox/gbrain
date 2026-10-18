@@ -12,7 +12,7 @@ Run one full gate (`bun run ci:ubicloud`) per PR, at handoff, on the tree you
 hand off (the tree rule in the project's shipping rules: a head whose tree
 matches an already-gated tree apart from the release stamp files needs no new
 gate). During development use `bun run ci:ubicloud:diff`, `--lanes` and
-targeted suites (`bun test <files>`). The gstack pregate remote stage
+targeted suites (`bun test --timeout=60000 <files>`). The gstack pregate remote stage
 (`scripts/pregate-remote-gate.sh`, `.gstack/pregate.json`'s `remote_gate`)
 runs the `:diff` form for the same reason. `:diff` narrows only doc-only
 trees today (doc checks plus gitleaks); any other tree still runs every lane,
