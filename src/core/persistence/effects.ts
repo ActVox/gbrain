@@ -40,6 +40,7 @@ import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, 
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
 import { commitGitTargets, DURABILITY_NOT_ENABLED, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
 import { retryIndexLockParks } from './effect-retry.ts';
+import { assertSegmentedMirrorGate, resumeGatedMirrors } from './segmented-mirror-gate.ts';
 import { gitDurabilityPolicy } from './git-durability-policy.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
 import { dispatchFactsBackstopEffect } from './effect-facts.ts';
@@ -197,6 +198,7 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
       await materializeAndAdvance(engine, effect, snapshot, opts.hostId);
       return;
     }
+    if (segmented) await assertSegmentedMirrorGate(engine, effect, snapshot.page.slug, opts.hostId);
     content = segmented ? await unreadPageFile(engine, snapshot, keep) : file.content as string;
   } catch (error) {
     // A segmented page whose fence a withdrawal cannot read whole (page_body_segmented) retries and parks like any failed
@@ -598,6 +600,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
 
 async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: EffectWorkerOptions, touched: Set<string>): Promise<number> {
   const limit = Math.max(1, Math.min(opts.limit ?? 2, 20));
+  await resumeGatedMirrors(engine, opts.hostId);
   const recoveries = await selectEffectRecoveries(engine, opts.hostId, limit);
   let attempted = 0;
   for (const recovery of recoveries) {
