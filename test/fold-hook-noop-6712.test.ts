@@ -4,7 +4,7 @@
  *
  * Protects: the publication transaction of a `put_page` and of a canonical one-file import whose stamp folds into its
  * apply runs the same SQL statements, in the same order, as the golden sequence recorded on the commit before the hook
- * (da413e41a; test/fixtures/fold-hook-noop-6712.json). Statements are the publication's own round trips (begin to
+ * (c64799845, the pre-hook side of the merge with master v0.60.300.0; test/fixtures/fold-hook-noop-6712.json). Statements are the publication's own round trips (begin to
  * commit), captured through the statement seam (PGLite: `countPgliteStatements`; Postgres: the `GBRAIN_SQL_TRACE` wire
  * trace), with whitespace collapsed and the per-call statement timeout masked. A hook that adds, drops or reorders a
  * statement for any other write fails here.
