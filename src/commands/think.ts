@@ -231,8 +231,8 @@ prints what would have been the input (exit 0).
       }
 
       // #2556: --take was documented (and parsed) since v0.28 but never
-      // executed — runThink ignored opts.take entirely. Persist through the
-      // coordinated takes_add mutation; a refusal (no repo, empty
+      // executed — runThink ignored opts.take entirely. Persist md-first
+      // through the canonical takes write-through; a refusal (no repo, empty
       // answer, failed synthesis, write error) exits non-zero (same F2
       // posture as --save: the user explicitly asked for a persist).
       if (take && anchor) {

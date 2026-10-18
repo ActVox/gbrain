@@ -15,16 +15,18 @@
  *     (control chars collapsed, fence-marker text removed, bounded length).
  *   - holder = resolveOwnerHolder (config emotional_weight.user_holder,
  *     else 'self') — the take is the OWNER's synthesized position.
- *   - persistence goes through the coordinated `takes_add` mutation (the
- *     same path `gbrain takes add` uses), which composes the fence from the
- *     page's database snapshot: a database-only page (`sync.write_through`
- *     off, a `storage.db_only` directory) gets the take in its database body
- *     and no file; a page whose file and database differ is refused
- *     (`source_changed`) with both copies kept (#6982). Before, the legacy
- *     md-first writer treated a page with no file as an empty body and
- *     created a takes-only file that the next sync imported over the page.
+ *   - persistence goes md-first through addTakeToPage (the same canonical
+ *     write-through every takes verb uses: fence row on disk, DB mirrored,
+ *     mirror failure downgraded to a warning), with the synthesis-derived
+ *     trust on the insert.
+ *   - #6982 (D-18): the take is refused (TAKE_WRITE_FAILED) when the page's
+ *     file is not its canonical copy (write-through off, `storage.db_only`,
+ *     gitignored), when the page has no file, or when the file and the
+ *     database differ outside the takes section. Appending there would write
+ *     a takes-only or stale file that the next sync imports over the page.
  *   - no brain repo (resolveTakesRepoDir null) → TAKE_MIRROR_UNAVAILABLE
- *     warning, nothing written.
+ *     warning, nothing written (md is canonical; a DB-only take would be
+ *     clobbered by the next reconcile).
  *
  * Remote (MCP) callers never reach this — the `think` op forces
  * safeTake=false for ctx.remote !== false, unchanged.
@@ -33,12 +35,12 @@
 import type { BrainEngine } from '../engine.ts';
 import { stripGapsSection, type ThinkResult } from './index.ts';
 import { resolveOwnerHolder } from '../owner-holder.ts';
-import { resolveTakesRepoDir } from '../takes-write.ts';
+import { resolveTakesRepoDir, addTakeToPage, TakesWriteError } from '../takes-write.ts';
 import { deriveTrust, derivedMaintenanceTransaction } from '../trust/taint.ts';
-import { loadConfig } from '../config.ts';
-import { OperationError } from '../ops/contract.ts';
-import { submitPageMutation } from '../persistence/page-mutations.ts';
-import { resolvePageWriteTarget } from '../write-through.ts';
+import { derivedFileTarget } from '../cycle/derived-write-through.ts';
+import { fileDatabaseDriftToken, mirroredBody, readStoredBody } from '../facts/file-body-guard.ts';
+import { stripTakesFence, TAKES_FENCE_BEGIN } from '../takes-fence.ts';
+import { existsSync, readFileSync } from 'node:fs';
 
 /** Max claim length for a fence cell — one readable line, not an essay. */
 export const TAKE_CLAIM_MAX_CHARS = 300;
@@ -46,7 +48,7 @@ export const TAKE_CLAIM_MAX_CHARS = 300;
 export interface PersistTakeResult {
   /** Appended fence row number, or null when nothing was written. */
   take_row: number | null;
-  /** Markdown file the row landed in (unset when nothing was written or the page is database-only). */
+  /** Markdown file the row landed in (set iff take_row is non-null). */
   path?: string;
   /** Machine-stable warning codes (mirrors the think warnings channel). */
   warnings: string[];
@@ -95,7 +97,7 @@ export function claimFromAnswer(answer: string): string | null {
 export async function persistTakeFromSynthesis(
   engine: BrainEngine,
   result: Pick<ThinkResult, 'answer' | 'synthesisOk' | 'taint_refs'>,
-  opts: { anchor: string; sourceId?: string },
+  opts: { anchor: string; sourceId?: string; lockTimeoutMs?: number },
 ): Promise<PersistTakeResult> {
   const warnings: string[] = [];
 
@@ -123,27 +125,67 @@ export async function persistTakeFromSynthesis(
   const holder = resolveOwnerHolder({
     configValue: await engine.getConfig('emotional_weight.user_holder'),
   });
-  const sourceId = opts.sourceId ?? 'default';
 
   // #5575 I2: the take restates the synthesis, so it carries the tier of everything in the synthesis prompt.
   const derivation = await deriveTrust(engine, result.taint_refs ?? [], { channel: 'derive:think' });
   try {
-    const written = await submitPageMutation({
-      engine, config: loadConfig() ?? { engine: engine.kind }, remote: false, sourceId, dryRun: false,
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-    }, { operation: 'takes_add', params: { slug: opts.anchor, claim, kind: 'take', holder, source: 'think', source_id: sourceId } });
-    const rowNum = Number(written.row_num);
-    await derivedMaintenanceTransaction(engine, derivation, async tx => ({ result: undefined, rows: (await tx.executeRaw<{ id: number }>(
-      'SELECT k.id FROM takes k JOIN pages p ON p.id=k.page_id WHERE p.source_id=$1 AND p.slug=$2 AND k.row_num=$3',
-      [sourceId, opts.anchor, rowNum])).map(take => ({ table: 'takes' as const, id: Number(take.id), sourceId })) }));
-    const target = written.mirror_written ? await resolvePageWriteTarget(engine, opts.anchor, sourceId) : null;
-    return { take_row: rowNum, ...(target?.ok ? { path: target.filePath } : {}), warnings };
+    await assertTakeFileCanonical(engine, opts.anchor, opts.sourceId ?? 'default');
+    const { rowNum, mirror } = await addTakeToPage(
+      {
+        engine,
+        slug: opts.anchor,
+        brainDir,
+        sourceId: opts.sourceId,
+        trust: derivation.trust,
+        ...(opts.lockTimeoutMs !== undefined ? { lockTimeoutMs: opts.lockTimeoutMs } : {}),
+      },
+      { claim, kind: 'take', holder, source: 'think' },
+    );
+    if (mirror.mirror_warning) {
+      warnings.push(`TAKE_DB_MIRROR_WARNING: ${mirror.mirror_warning}`);
+    } else {
+      try {
+        await derivedMaintenanceTransaction(engine, derivation, async tx => ({ result: undefined, rows: (await tx.executeRaw<{ id: number }>(
+          'SELECT k.id FROM takes k JOIN pages p ON p.id=k.page_id WHERE p.source_id=$1 AND p.slug=$2 AND k.row_num=$3',
+          [opts.sourceId ?? 'default', opts.anchor, rowNum])).map(take => ({ table: 'takes' as const, id: Number(take.id), sourceId: opts.sourceId ?? 'default' })) }));
+      } catch (e) {
+        warnings.push(`TAKE_LINEAGE_WARNING: the take was written at its derived trust tier but its input edges were not recorded: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return { take_row: rowNum, path: mirror.path, warnings };
   } catch (e) {
-    // Typed write refusals (page not found, a file that differs from the
-    // database, a malformed fence) become a loud warning + null row — think's
-    // answer already printed and must not be lost to a persistence failure.
-    const detail = e instanceof OperationError ? `${e.code}: ${e.message}` : (e instanceof Error ? e.message : String(e));
+    // Typed write refusals (page not found, lock timeout, fence malformed)
+    // become a loud warning + null row — think's answer already printed and
+    // must not be lost to a persistence failure.
+    const detail = e instanceof TakesWriteError ? `${e.code}: ${e.message}` : (e instanceof Error ? e.message : String(e));
     warnings.push(`TAKE_WRITE_FAILED: ${detail}`);
     return { take_row: null, warnings };
+  }
+}
+
+/** A page body with its takes section (fence and the heading addTakeToPage adds) removed and whitespace collapsed. */
+function bodyOutsideTakes(compiledTruth: string | null, timeline: string | null): string {
+  const text = `${compiledTruth ?? ''}\n${timeline ?? ''}`.replace(new RegExp(`(^|\\n)## Takes\\s*\\n(?=${TAKES_FENCE_BEGIN})`), '$1');
+  return stripTakesFence(text).replace(/\s+/g, ' ').trim();
+}
+
+async function assertTakeFileCanonical(engine: BrainEngine, slug: string, sourceId: string): Promise<void> {
+  const stored = await readStoredBody(engine, sourceId, slug);
+  if (!stored) return;
+  const resolved = await derivedFileTarget(engine, slug, sourceId);
+  if (!resolved.ok) {
+    throw new TakesWriteError('mirror_unavailable',
+      `${slug} has no canonical markdown file (${resolved.skipped}), so the take was not written: a takes file there would be imported over the database page.`,
+      `Add it with gbrain takes add ${slug} --source ${sourceId}, which puts a database-only page's take in its database body.`);
+  }
+  const path = resolved.target.filePath;
+  if (!existsSync(path)) {
+    throw new TakesWriteError('mirror_unavailable',
+      `${slug} has no checkout file, so the take was not written: a takes-only file would be imported over the database page.`,
+      `Restore the page's file first (gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId} with write-through on), then rerun the take.`);
+  }
+  const file = mirroredBody(readFileSync(path, 'utf-8'), slug);
+  if (bodyOutsideTakes(file.compiled_truth, file.timeline) !== bodyOutsideTakes(stored.compiled_truth, stored.timeline)) {
+    throw new TakesWriteError('mirror_unavailable', fileDatabaseDriftToken(slug, sourceId, 'before', 'the take was not written'));
   }
 }
