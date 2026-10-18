@@ -82,7 +82,7 @@ describe('CI execution evidence', () => {
     expect(job['runs-on']).toBe('macos-26');
     expect(job.if).toBe(mac.jobs['macos-26'].if);
     const tsc = job.steps.find(step => step.run === 'bun run typecheck')!;
-    expect(tsc['timeout-minutes']).toBe(7);
+    expect(tsc['timeout-minutes']).toBe(15);
     const restore = job.steps.find(step => step.uses?.startsWith('actions/cache/restore@') && step.with?.path === 'node_modules/.cache/gbrain-typecheck.tsbuildinfo')!;
     expect(restore.with!.key).toBe(unit.jobs.typecheck.steps.find(step => step.uses?.startsWith('actions/cache/restore@') && step.with?.path === restore.with!.path)!.with!.key);
     const save = job.steps.find(step => step.uses?.startsWith('actions/cache/save@'))!;
