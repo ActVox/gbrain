@@ -26,11 +26,14 @@ identifiers and attribution are available in the pre-removal Git revision
 | A Git effect's push is rejected because the remote moved | `git_push_unavailable` forever, parked after five attempts | the push runs `gbrain git commit-push --push-only --keep-checkout`, which merges the remote in memory and pushes without moving the checkout (`gbrain sources refresh` stays the only importer) |
 | Both machines changed the same page file | indistinguishable from a network failure | the effect holds `integrate_conflict` with the user's choice as its fix (`--keep-checkout --resolve <path>=<ours\|theirs>`) |
 | Git effects already parked on a push | needed `--pat-file` or one `retry-effects --request-id` per write | `gbrain sources writer retry-effects <source> --parked-pushes [--dry-run]` retries them all; it also covers `push_unconfirmed` and `integrate_conflict` |
+| Atoms a zero-yield managed re-extraction already retired | gone from search, and the purge removed them after 72 hours | doctor `atom_retirements_restorable` counts them per source; `gbrain repair atoms-restore` previews exactly the latest retired generation of each still-live origin that nothing replaced, and `--apply --expect <hash>` restores them with a receipt per atom; the purge keeps those tombstones for 30 days so there is time to decide |
 | Finding stuck Git backups | per-request lines in doctor `parked_effects` only | doctor `parked_effects` and `gbrain sync status` (`git_push_holds`) show, per source, how many are retrying or parked, any conflict, and the one fix; `sync status`'s `next` falls back to it |
 
 ### What you need to do
 
-Nothing for new runs. If a brain already lost atoms to a zero-yield re-extraction, see the atoms-restore notes below. If doctor shows `git_push_holds`, run the fix it names; a conflict asks you which version wins.
+Nothing for new runs. Nothing is restored on upgrade. If doctor warns `atom_retirements_restorable`, preview with `gbrain repair atoms-restore --source <id>` and apply with the printed hash once you agree. If doctor shows `git_push_holds`, run the fix it names; a conflict asks you which version wins.
+
+**Say to your agent:** *"Check whether my brain lost atoms to an empty re-extraction and show me what restoring them would bring back."*
 
 **Say to your agent:** *"My brain's Git backups stopped pushing. Find out why and get them moving again."*
 
