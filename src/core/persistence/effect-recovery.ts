@@ -130,6 +130,7 @@ export async function rebaseStaleEffectRecovery(engine: BrainEngine, effectId: s
     const [current] = await tx.executeRaw<PersistenceEffect>('SELECT * FROM persistence_effects WHERE id=$1 FOR UPDATE', [effectId]);
     const record = current?.recovery;
     if (!record) return null;
+    assertRecoveryVersion('persistence_effects', record, current.source_id);
     await tx.lockPageKeys([{ sourceId: current.source_id, slug: record.slug }]);
     const snapshot = await tx.readPageSnapshot(record.slug, { sourceId: current.source_id, includeDeleted: true });
     if (snapshot?.page.id === record.pageId && snapshot.revision === record.revision) return record;

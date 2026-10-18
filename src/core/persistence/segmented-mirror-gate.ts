@@ -19,7 +19,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
 import { SEGMENTED_WRITER_GATE_TTL_MS, SEGMENTED_WRITER_WINDOW_DAYS, segmentedWriterBlockers } from '../page-body/limits.ts';
-import type { PersistenceEffect } from './effect-model.ts';
+import { WITHHELD_BY_MIRROR, type PersistenceEffect } from './effect-model.ts';
 import type { SegmentedGateWriter } from './writer-versions.ts';
 import { liveSegmentedBlockers } from './segmented-gate-hold.ts';
 
@@ -76,7 +76,8 @@ export function _resetGatedMirrorResumeForTests(): void { lastResume = new WeakM
 
 /**
  * Once the writer gate is clear, requeues (through `retryParkedEffects`, with its authority, claim and recovery checks)
- * up to 100 requests on worktrees this host owns whose every parked target was parked by the gate. Looked for at most
+ * up to 100 requests on worktrees this host owns whose every parked target was parked by the gate, or is a Git or embedding
+ * target parked behind that mirror (`WITHHELD_BY_MIRROR`, re-armed once the mirror commits). Looked for at most
  * once per SEGMENTED_WRITER_GATE_TTL_MS per engine; never throws, so an effect pass is never stopped by it.
  */
 export async function resumeGatedMirrors(engine: BrainEngine, hostId: string): Promise<number> {
@@ -91,8 +92,8 @@ export async function resumeGatedMirrors(engine: BrainEngine, hostId: string): P
        WHERE e.kind='withdrawal-mirror' AND e.state='failed' AND e.error_code='targets_parked' AND w.owner_host_id=$1::uuid
        AND e.data->'parked' @> $2::text::jsonb
        AND NOT EXISTS (SELECT 1 FROM persistence_effects o CROSS JOIN LATERAL jsonb_array_elements(COALESCE(o.data->'parked','[]'::jsonb)) AS p(target)
-         WHERE o.request_id=e.request_id AND o.state<>'committed' AND COALESCE(p.target->>'error_code','')<>$3)
-       LIMIT 100`, [hostId, JSON.stringify([{ error_code: SEGMENTED_MIRROR_GATE_CODE }]), SEGMENTED_MIRROR_GATE_CODE]);
+         WHERE o.request_id=e.request_id AND o.state<>'committed' AND COALESCE(p.target->>'error_code','')<>ALL($3::text[]))
+       LIMIT 100`, [hostId, JSON.stringify([{ error_code: SEGMENTED_MIRROR_GATE_CODE }]), [SEGMENTED_MIRROR_GATE_CODE, WITHHELD_BY_MIRROR]]);
     if (!requests.length || (await mirrorGateBlockers(engine, hostId)).length) return 0;
     const { retryParkedEffects } = await import('./effect-retry.ts');
     for (const request of requests) {

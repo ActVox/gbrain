@@ -8,8 +8,10 @@
  *    its bytes, the canonical file keeps its bytes, nothing is cleared and the effect keeps retrying (never parks). The
  *    head blocker names it as needing intervention with the same upgrade fix.
  * 2. Fails when: recovery reads a version 3 record as version 1 (it embeds `after`, so the old reading removes the
- *    stage, publishes the embedded bytes and clears the record) or as anything else, `upgradeRecoveryStaging` rewrites an
- *    unknown request record's staging, or the refusal is untyped (`recovery_required`, `effect_unavailable`, a bare Error).
+ *    stage, publishes the embedded bytes and clears the record) or as anything else, `rebaseStaleEffectRecovery` (the
+ *    `--keep withdrawn` rebase) reads it, `upgradeRecoveryStaging` rewrites an unknown request record's staging, the
+ *    stuck-recovery preview mislabels it (`recovery_effect_unsupported`, `recovery_bundle_unsupported`), or the refusal
+ *    is untyped (`recovery_required`, `effect_unavailable`, a bare Error).
  * 3. PGLite always; PostgreSQL when DATABASE_URL is set. The record is written by the real segmented mirror (crash
  *    modelled at the `effect_recovery:staged` seam, where the hook rewrites the record's version while this pass still
  *    holds the worktree lock), so the stage, the reservation and the binding are real.
@@ -19,13 +21,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { cliRenderContext, renderAction } from '../../src/core/agent-output.ts';
 import { OperationError } from '../../src/core/ops/contract.ts';
-import { recoverEffectPublication } from '../../src/core/persistence/effect-recovery.ts';
+import { rebaseStaleEffectRecovery, recoverEffectPublication } from '../../src/core/persistence/effect-recovery.ts';
 import { runPersistenceEffects } from '../../src/core/persistence/effects.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { headBlockerAction } from '../../src/core/persistence/head-blocker.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
 import { clearResolvedRecovery } from '../../src/core/persistence/journal.ts';
 import { recoveryFiles } from '../../src/core/persistence/model.ts';
+import { scanStuckRecoveries } from '../../src/core/persistence/recovery-resolve.ts';
 import { upgradeRecoveryStaging } from '../../src/core/persistence/staging.ts';
 import { openTwinBrain, type TwinBrain } from '../helpers/segmented-twins.ts';
 import { fileOf, settle } from '../helpers/segmented-withdrawal.ts';
@@ -118,6 +121,21 @@ for (const kind of testBackends()) {
         expect(json((await brain.engine.executeRaw<{ recovery: unknown }>('SELECT recovery FROM persistence_effects WHERE id=$1', [effect!.id]))[0]!.recovery)).toEqual(written);
         await brain.engine.executeRaw(`UPDATE persistence_effects SET state='queued',execution_token=NULL,claim_expires_at=NULL WHERE id=$1`, [effect!.id]);
 
+        // `--keep withdrawn` rebases a stale record before publishing it; an unknown version is refused there too, never respread as version 1.
+        let persisted = false;
+        const rebase = await withEnv(brain.env(), () => rebaseStaleEffectRecovery(brain.engine, effect!.id, localHostId(), async () => { persisted = true; })).then(() => null, error => error);
+        expectUpgradeRefusal(rebase);
+        expect(persisted).toBe(false);
+        expect(json((await brain.engine.executeRaw<{ recovery: unknown }>('SELECT recovery FROM persistence_effects WHERE id=$1', [effect!.id]))[0]!.recovery)).toEqual(written);
+        expect(existsSync(written.staging.publication.path)).toBe(true);
+
+        // The stuck-recovery preview lists it refused with the upgrade fix, not as an effect it cannot write back.
+        const scan = await withEnv(brain.env(), () => scanStuckRecoveries(brain.engine, [brain.sourceId]));
+        const newer = scan.refused.find(refused => String(refused.effect_id) === String(effect!.id));
+        expect(newer?.code).toBe('recovery_version_unsupported');
+        expect(newer?.fix?.argv).toEqual(['gbrain', 'upgrade']);
+        expect(json((await brain.engine.executeRaw<{ recovery: unknown }>('SELECT recovery FROM persistence_effects WHERE id=$1', [effect!.id]))[0]!.recovery)).toEqual(written);
+
         // The head blocker's exit for it is the same upgrade, told to the user.
         const action = headBlockerAction({ predicate: 'effect_recovery', ids: [effect!.id], state: 'recovery_version_unsupported', owner: null, intervention: true }, brain.sourceId, `gbrain sync --source ${brain.sourceId}`);
         expect(action.argv).toEqual(['gbrain', 'upgrade']);
@@ -126,8 +144,8 @@ for (const kind of testBackends()) {
     }, 600_000);
 
     test('a version 3 write request recovery record is refused by staging upgrade, file listing and clearing, and left as it is', async () => {
-      const [request] = await brain.engine.executeRaw<{ id: string; worktree_id: string }>(
-        `SELECT id::text AS id, worktree_id::text AS worktree_id FROM persistence_requests WHERE source_id=$1 AND state='committed' AND worktree_id IS NOT NULL ORDER BY sequence DESC LIMIT 1`, [brain.sourceId]);
+      const [request] = await brain.engine.executeRaw<{ id: string; request_id: string; worktree_id: string }>(
+        `SELECT id::text AS id, request_id::text AS request_id, worktree_id::text AS worktree_id FROM persistence_requests WHERE source_id=$1 AND state='committed' AND worktree_id IS NOT NULL ORDER BY sequence DESC LIMIT 1`, [brain.sourceId]);
       // No staging: a version 1 reader's upgradeRecoveryStaging would allocate a restoration stage from `before` and rewrite the record.
       const record = { version: 3, path: fileOf(brain, SEGMENTED), root: brain.root, before: Buffer.from('prior bytes').toString('base64'), beforeHash: sha(Buffer.from('prior bytes')),
         afterHash: sha(readFileSync(fileOf(brain, SEGMENTED))), mode: null, ownerEpoch: '1', attempt: randomUUID(), next: { layout: 'future' } };
@@ -147,8 +165,12 @@ for (const kind of testBackends()) {
         expectUpgradeRefusal(listed);
         expectUpgradeRefusal(await clearResolvedRecovery(brain.engine, request!.id).then(() => null, error => error));
         expect(await stored()).toEqual(record);
+        // A live (recovering) request with it: the stuck-recovery preview refuses it with the upgrade fix, not as a bundle it cannot read.
+        await unguarded("UPDATE persistence_requests SET state='recovering' WHERE id=$1::uuid", [request!.id]);
+        expectUpgradeRefusal(await withEnv(brain.env(), () => scanStuckRecoveries(brain.engine, [brain.sourceId], { requestId: request!.request_id })).then(() => null, error => error));
+        expect(await stored()).toEqual(record);
       } finally {
-        await unguarded('UPDATE persistence_requests SET recovery=NULL WHERE id=$1::uuid', [request!.id]);
+        await unguarded("UPDATE persistence_requests SET recovery=NULL,state='committed' WHERE id=$1::uuid", [request!.id]);
       }
     }, 120_000);
   });
