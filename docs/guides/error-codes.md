@@ -1442,6 +1442,14 @@ More: [docs/guides/shared-brain-skills.md#approve-publication-following-and-edit
 |---|---|---|---|---|---|---|
 | A caller asked to forget a fact (remote forget) or remove a take (takes_remove) more trusted than its own writes, so nothing was removed and the owner was asked instead. | Lower-trust writers cannot overwrite, supersede or forget what the owner confirmed or curated (#5575 guarded supersession). The request became a trust proposal the owner can accept on the brain host; forget's frozen expired meaning is unchanged because nothing expired. | Do not retry. Tell the user the fact or take needs their decision and give them the command in fix (gbrain trust confirm <proposal_ref> on the brain host). | user | `repeat the read that failed` | 3 | no |
 
+### frontmatter_alias_limit
+
+<a id="frontmatter_alias_limit"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A file an older gbrain imported nests YAML aliases in its frontmatter that expand past the size limit, so sync holds it alone. | #7018 bounds YAML alias expansion on purpose (a few hundred bytes of nested anchors expand into gigabytes), so refusing bytes an older gbrain imported is intended, not a parser regression: the page keeps its last imported version and the rest of the source syncs. | Reduce the alias nesting in the frontmatter (or write the values out), or remove the file, then commit and sync again. | agent | `repeat the read that failed` | 1 | no |
+
 ### frontmatter_slug_conflict
 
 <a id="frontmatter_slug_conflict"></a>
