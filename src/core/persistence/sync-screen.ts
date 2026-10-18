@@ -3,10 +3,11 @@
  * sync screen (`screenSyncImport`) would refuse is held instead of admitted:
  * the caller writes the hold and advances the cursor in one transaction. A
  * pinned Git blob over the sync read bound is held by its size before its
- * content is loaded. `sync_parser_regression` stops the run only when the
- * page's import provenance proves the exact bytes imported validated before
- * and the refusal is not one this release makes on purpose (an intended
- * refusal, such as #7018's alias bound, holds that page alone).
+ * content is loaded. A parser regression is a refusal of bytes the page's
+ * import provenance proves imported validated before that this release does
+ * not make on purpose (an intended refusal, such as #7018's alias bound, holds
+ * that page alone): it is held `parser_regression` by default, and stops the run
+ * with `sync_parser_regression` only under GBRAIN_SYNC_PARSER_REGRESSION=stop.
  * Dry runs screen every pending import read-only with batched Git reads.
  * #6188: the screen runs with `fences: 'coordinated'` (see `screenSyncImport`):
  * a fence Tier 1 rewrites losslessly is admitted (publication commits the
@@ -313,8 +314,8 @@ export async function screenFrozenContent(screenInput: SyncImportScreenInput, ru
 
 /**
  * The hold a frozen import earns, or null to admit it. Throws
- * `sync_parser_regression` (policy `stop`) when gbrain would hold bytes the
- * page's provenance says a validating gbrain imported.
+ * `sync_parser_regression` (policy `stop`, opt-in) when gbrain would hold bytes
+ * the page's provenance says a validating gbrain imported.
  */
 export async function screenFrozenImport(engine: BrainEngine, input: FrozenImportScreen, run: SyncScreenRun): Promise<HeldEntry | null> {
   const { entry, slug, pageId, snapshot, content, blob } = input;
@@ -353,10 +354,10 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
             + `imported these exact bytes. ${intended.fix} The rest of the source keeps syncing.` }, content, blob);
       }
       const why = `gbrain ${VERSION} refuses ${entry.path} (${refusal.reason ?? 'yaml_parse'}${refusal.line !== undefined ? `, line ${refusal.line}` : ''}), but gbrain ${provenance.gbrain_version} imported these exact bytes and validated them.`;
-      if (run.policy.parserRegression === 'hold') return heldEntry(entry, slug, pageId, { code: 'parser_regression', message: `${why} Held under GBRAIN_SYNC_PARSER_REGRESSION=hold.` }, content, blob);
+      if (run.policy.parserRegression === 'hold') return heldEntry(entry, slug, pageId, { code: 'parser_regression', message: `${why} Held; the rest of the source keeps syncing.` }, content, blob);
       throw opError('sync_parser_regression', `Sync stopped: ${why}`,
         `This is a gbrain bug. Report it with the gbrain version (${VERSION}), the file (${entry.path}) and the code (${refusal.code}${refusal.reason ? `/${refusal.reason}` : ''}). `
-          + `Upgrade, or pin the last good version (${provenance.gbrain_version}), then run: ${input.retryCommand}. To hold such files and let the rest sync meanwhile, the user can set GBRAIN_SYNC_PARSER_REGRESSION=hold for the process that syncs.`,
+          + `Upgrade, or pin the last good version (${provenance.gbrain_version}), then run: ${input.retryCommand}. Sync stopped because GBRAIN_SYNC_PARSER_REGRESSION=stop is set for the process that syncs; without it (the default) such a file is held and the rest syncs.`,
         { fix: { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false,
           why: 'Collects the gbrain version and brain health to attach to the bug report; the sync checkpoint did not advance past this file.' } });
     }

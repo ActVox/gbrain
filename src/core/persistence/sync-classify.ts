@@ -149,9 +149,9 @@ function afterHold(s: SyncPathState): Matched {
     if ((tombstone || deletedMarker) && !s.published) return { cls: 'deleted_edited', settled: false, action: 'hold', side: 'deleted', state: tombstone ? 'tombstone_edited' : 'purged_differs' };
     if (s.marker?.kind === 'legacy' && s.marker.deletion && !s.fullObligation && s.level !== null && s.marker.blobOids.includes(s.level)) return { cls: 'legacy_same', settled: true, action: 'none' };
   }
-  if (s.mode === 'committed' && s.tree !== null && !CLEAN.has(s.dirty)) {
+  if (s.mode === 'committed' && s.tree !== null && !CLEAN.has(s.dirty) && s.dirty !== 'deleted') {
     const absorbed = (s.tree !== null && !!s.record && s.record.blobOids.includes(s.tree)) || (s.diskOid !== null && !!s.record && s.record.blobOids.includes(s.diskOid));
-    const settled = absorbed || s.published || (s.dirty === 'deleted' && !live);
+    const settled = absorbed || s.published;
     return { cls: 'dirty', settled, action: settled ? 'none' : 'hold' };
   }
   if (live) {
