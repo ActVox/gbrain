@@ -28,15 +28,21 @@ import { SYNC_PASS_COST_OP, type PassEpisode, type SyncSelection } from './sync-
 
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 
+/** What `selectionEligible` reads of a selection: equal universes (`sameUniverse`) admit exactly the same paths. */
+function universeOf(selection: SyncSelection, scope: string) {
+  return { sub: selection.srcSubpath ? selection.srcSubpath.replace(/^\/+|\/+$/g, '') : scope, includeHidden: selection.includeHidden.map(v => v.endsWith('/') ? `${v}**` : v),
+    exclude: selection.exclude, strategy: selection.strategy ?? 'markdown' };
+}
+const sameUniverse = (a: SyncSelection, b: SyncSelection, scope: string) => JSON.stringify(universeOf(a, scope)) === JSON.stringify(universeOf(b, scope));
+
 /** Whether a Git-root path is in the universe of `selection` (the eligibility of sync-pass.ts `readShadowLevel`). */
 export function selectionEligible(selection: SyncSelection, scope: string, slugMode: 'git-root' | 'source-root'): (gitPath: string) => boolean {
-  const sub = selection.srcSubpath ? selection.srcSubpath.replace(/^\/+|\/+$/g, '') : scope;
-  const includeHidden = selection.includeHidden.map(v => v.endsWith('/') ? `${v}**` : v);
+  const { sub, includeHidden, strategy } = universeOf(selection, scope);
   return gitPath => {
     if (sub && !gitPath.startsWith(`${sub}/`)) return false;
     const sourceRelative = sub ? gitPath.slice(sub.length + 1) : gitPath;
     return !matchesAnyGlob(sourceRelative, selection.exclude) && !isReservedSkillBundlePath(slugMode === 'source-root' ? sourceRelative : gitPath)
-      && isSyncable(gitPath, { strategy: (selection.strategy ?? 'markdown') as 'markdown', includeHidden });
+      && isSyncable(gitPath, { strategy: strategy as 'markdown', includeHidden });
   };
 }
 
@@ -79,12 +85,15 @@ export function episodeClosure(input: ClosureInput & { treePaths: Iterable<strin
 /**
  * The closure of an open episode at the pinned target `head` (one `ls-tree` of the whole commit), tallied in stretches as the
  * paths stream in: the pass still holds its level, so a 600k-path commit is never held a second time as a map or a path list.
+ * When the episode's universe equals the one the test compares it with (the pass's, or the configured one when `configured`),
+ * every path answers alike on both sides, so the closure is known without the walk.
  */
 export async function passEpisodeClosure(input: { gitRoot: string; root: string; head: string; slugMode: 'git-root' | 'source-root'; episode: PassEpisode; pass: SyncSelection;
   configuredSelection: SyncSelection; configured: boolean }): Promise<EpisodeClosure> {
   const scope = relative(realpathSync.native(input.gitRoot), realpathSync.native(input.root)).split(sep).join('/');
   const closure: ClosureInput = { episode: input.episode.selection, pass: input.pass, configuredSelection: input.configuredSelection, configured: input.configured, scope, slugMode: input.slugMode };
   const tally: ClosureTally = { included: true, covers: true, released: 0 };
+  if (sameUniverse(closure.episode, input.configured ? closure.configuredSelection : closure.pass, scope)) return closureOf(input.configured, tally);
   let stretch: string[] = [];
   faultPointNow('sync:closure_walk', { path: input.head });
   await walkTreeLevel(input.gitRoot, input.head, '', path => {

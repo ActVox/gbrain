@@ -4,7 +4,8 @@
  * one `ls-tree` walk; any change to what the closure depends on walks again.
  *
  * Protects:
- * - a writeback one-file commit (two stamps at the same head) walks the tree once (`sync:closure_walk`);
+ * - a writeback one-file commit (two stamps at the same head) walks the tree once (`sync:closure_walk`) when its episode's
+ *   universe differs from the pass's, and not at all when they are equal (fix 2, test/sync-pass-closure-universe-6712.test.ts);
  * - each closure input (head, slug mode, the episode's and the pass's selections, `configured`, the configured selection)
  *   is part of the key: changing any one walks again and returns what a fresh walk returns.
  *
@@ -15,9 +16,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { passClosureMemo, passEpisodeClosure } from '../src/core/persistence/sync-pass-episode.ts';
-import type { PassEpisode, SyncSelection } from '../src/core/persistence/sync-pass-row.ts';
+import { MANAGED_SYNC_PASS_OP, type PassEpisode, type SyncSelection } from '../src/core/persistence/sync-pass-row.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -43,17 +45,18 @@ test('each closure input is part of the key: a change walks again and matches a 
     writeFileSync(join(root, 'drafts/c.md'), 'c\n'); commit(root, 'two');
     const second = git(root, 'rev-parse', 'HEAD');
     const all: SyncSelection = { exclude: [], includeHidden: [], strategy: null, srcSubpath: null, mode: 'committed' };
-    const noDrafts: SyncSelection = { ...all, exclude: ['drafts/**'] };
+    const noDrafts: SyncSelection = { ...all, exclude: ['drafts/**'] }, noNotes: SyncSelection = { ...all, exclude: ['notes/**'] };
     const episode = (selection: SyncSelection): PassEpisode => ({ opened_at: '2026-01-01T00:00:00Z', selection, inherited: { noEmbed: true, noExtract: true, noSchemaPack: false, from: 'flag' } });
-    const base = { gitRoot: root, root, head: first, slugMode: 'git-root' as 'git-root' | 'source-root', episode: episode(all), pass: all, configuredSelection: all, configured: false };
+    // Every step keeps the episode's universe apart from the one it is compared with, so each closure walks (fix 2 skips equal ones).
+    const base = { gitRoot: root, root, head: first, slugMode: 'git-root' as 'git-root' | 'source-root', episode: episode(noDrafts), pass: all, configuredSelection: all, configured: false };
     const steps: Array<[string, typeof base]> = [
       ['same key', base], ['same key again', base],
       ['head', { ...base, head: second }],
-      ['episode selection', { ...base, head: second, episode: episode(noDrafts) }],
-      ['pass selection', { ...base, head: second, episode: episode(noDrafts), pass: noDrafts }],
-      ['configured selection', { ...base, head: second, episode: episode(noDrafts), pass: noDrafts, configuredSelection: noDrafts }],
-      ['configured', { ...base, head: second, episode: episode(noDrafts), pass: noDrafts, configuredSelection: noDrafts, configured: true }],
-      ['slug mode', { ...base, head: second, episode: episode(noDrafts), pass: noDrafts, configuredSelection: noDrafts, configured: true, slugMode: 'source-root' }],
+      ['episode selection', { ...base, head: second, episode: episode(noNotes) }],
+      ['pass selection', { ...base, head: second, episode: episode(noNotes), pass: noDrafts }],
+      ['configured selection', { ...base, head: second, episode: episode(noNotes), pass: noDrafts, configuredSelection: noDrafts }],
+      ['configured', { ...base, head: second, episode: episode(noNotes), pass: noDrafts, configuredSelection: noDrafts, configured: true }],
+      ['slug mode', { ...base, head: second, episode: episode(noNotes), pass: noDrafts, configuredSelection: noDrafts, configured: true, slugMode: 'source-root' }],
     ];
     const memo = passClosureMemo(), seen = countWalks(), walks: Record<string, number> = {};
     for (const [label, input] of steps) {
@@ -69,14 +72,32 @@ test('each closure input is part of the key: a change walks again and matches a 
 for (const backend of testBackends()) {
   const databaseUrl = backend === 'postgres' ? process.env.DATABASE_URL : undefined;
   describe(`#6712 PR 4b episode closure memo (${backend})`, () => {
-    test('a writeback one-file commit stamps twice at one head and walks the tree once', () => managedBrain(async ({ engine, root }) => {
+    test('a writeback one-file commit under a carried wider episode stamps twice at one head and walks the tree once', () => managedBrain(async ({ engine, root }) => {
+      expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+      const wider: PassEpisode = { opened_at: '2026-01-01T00:00:00Z', selection: { exclude: [], includeHidden: ['.hidden/**'], strategy: null, srcSubpath: null, mode: 'committed' },
+        inherited: { noEmbed: true, noExtract: true, noSchemaPack: false, from: 'flag' } };
+      await engine.executeRaw(`UPDATE op_checkpoints SET completed_keys=jsonb_build_array(jsonb_set(completed_keys->0, '{obligations,episode}', $2::text::jsonb, true)) WHERE op=$1`,
+        [MANAGED_SYNC_PASS_OP, JSON.stringify(wider)]);
+      writeFileSync(join(root, 'notes/a.md'), '---\ntitle: notes/a\n---\nA committed change of notes/a.\n'); commit(root, 'change a, not canonical');
+      const seen = countWalks(), before = await committedStamps(engine);
+      expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+      expect(await committedStamps(engine) - before).toBeGreaterThanOrEqual(2);
+      expect(seen.walks).toBe(1);
+      expect((await engine.executeRaw<{ e: unknown }>("SELECT completed_keys->0->'obligations'->'episode' AS e FROM op_checkpoints WHERE op=$1", [MANAGED_SYNC_PASS_OP]))[0]?.e ?? null).toBeNull();
+    }, { ...(databaseUrl ? { databaseUrl } : {}), setup }), 120_000);
+
+    test('a writeback one-file commit whose episode shares the pass\'s universe stamps twice and walks no tree (fix 2)', () => managedBrain(async ({ engine, root }) => {
       expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
       writeFileSync(join(root, 'notes/a.md'), '---\ntitle: notes/a\n---\nA committed change of notes/a.\n'); commit(root, 'change a, not canonical');
-      const seen = countWalks();
+      const seen = countWalks(), before = await committedStamps(engine);
       expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
-      const [stamps] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE intent ? 'stamp' AND state='committed'");
-      expect(stamps!.n).toBeGreaterThanOrEqual(3);
-      expect(seen.walks).toBe(1);
+      expect(await committedStamps(engine) - before).toBeGreaterThanOrEqual(2);
+      expect(seen.walks).toBe(0);
     }, { ...(databaseUrl ? { databaseUrl } : {}), setup }), 120_000);
   });
+}
+
+async function committedStamps(engine: BrainEngine): Promise<number> {
+  const [stamps] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE intent ? 'stamp' AND state='committed'");
+  return stamps!.n;
 }

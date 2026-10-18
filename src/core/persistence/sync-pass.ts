@@ -31,7 +31,7 @@ import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGit, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
 import { confirmedSyncDelta } from '../sync-rename-identity.ts';
-import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportKind, syncImportParser, syncImportParserFor,
+import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
   type GitHoldRecord, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { sameSyncOrigin, selectOriginClaimant, syncOriginPath } from './sync-origin.ts';
@@ -712,7 +712,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     return level === baselineOf(path);
   });
 
-  const parserFor = parserByKind(pack?.identity ?? null);
+  const parserFor = syncImportParsers(pack?.identity ?? null);
   const fp = (path: string) => parserFor(sourceRelative(path));
   // The page's fields come straight from `pages` (no `PageRow` per path); `at` is its slot, undefined for a page-less path.
   const stateOf = (path: string, dirty: SyncPathState['dirty'], probe: { dp: string; rawOid: string | null; rawSha256: string | null } | undefined): { state: SyncPathState; at?: number; legacyPageless?: true } => {
@@ -899,7 +899,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
   if (reuse) reuse.cache.pages = undefined;
   const round = (marking: boolean) => withRoundSnapshot(engine, async exec => {
     const base = marking ? prior?.mark : undefined;
-    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres' }))) : null;
+    const proof = base ? confirmGuard(timed('confirm', () => proveConfirm(exec, { sourceId, incarnation, passId: reuse!.passId, base, recorded: reuse!.recorded, postgres: kind === 'postgres', parallel: true }))) : null;
     const marked = marking && !base ? confirmGuard(readLevelMark(exec, sourceId, incarnation)) : null;
     // PGLite has no snapshot: the mark (or the proof, the next round's mark) runs before the reads it vouches for.
     if (kind === 'pglite') await (proof ?? marked)?.catch(() => undefined);
@@ -915,7 +915,7 @@ async function readRoundSnapshot(engine: BrainEngine, input: { kind: 'postgres' 
     const [work, markers, passRow] = await others;
     if (reuse && mark) reuse.cache.pages = { key, mark, table: read!.pages };
     const confirm = confirmed?.confirm ?? unkeyed;
-    return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (marked ? 1 : proof ? (kind === 'postgres' ? 2 : 1) : 0), ...(confirm ? { confirm } : {}),
+    return { pages: read!.pages, open: work, markers, passRow, statements: read!.statements + work.statements + 2 + (marked ? 1 : proof ? (kind === 'postgres' ? 6 : 1) : 0), ...(confirm ? { confirm } : {}),
       ...(confirmed?.read ? { changed: confirmed.changed } : {}) };
   });
   if (!reuse || reuse.working) return round(false);
@@ -980,7 +980,7 @@ export async function passWritesMatched(exec: Exec, input: { kind: 'postgres' | 
   if (!read || read.pages.length !== input.ids.length) return false;
   const writers = new Map((await exec.executeRaw<{ id: string; level: string | null; path: string | null }>(`SELECT p.id::text AS id, r.intent->>'level' AS level, r.intent->>'path' AS path
     FROM pages p JOIN persistence_requests r ON r.id=p.revision_write_request_id WHERE p.source_id=$1 AND p.id = ANY($2::bigint[])`, [input.sourceId, input.ids])).map(row => [row.id, row]));
-  const pages = read.pages, parserFor = parserByKind(input.pack);
+  const pages = read.pages, parserFor = syncImportParsers(input.pack);
   for (let i = 0; i < pages.length; i++) {
     const writer = writers.get(String(pages.id[i])), level = writer?.level ?? null, sourcePath = pages.sourcePath[i]!;
     if (!writer?.path || level === null || pages.deleted(i) || !pages.hasRecord(i)) return false;
@@ -1003,17 +1003,6 @@ async function readLevelHolds(engine: BrainEngine, sourceId: string, incarnation
   const holdByPath = new Map(holds.map(hold => [hold.path, hold]));
   const [basisMoved, driftMoved] = await Promise.all([holdBasisMoved(engine, sourceId, holdByPath, [...holdByPath.keys()]), movedDriftHolds(engine, sourceId, holds)]);
   return { holds, retry: new Set(retryPaths.filter(path => !retryConsumed?.has(path))), moved: [...basisMoved, ...driftMoved] };
-}
-
-/** One parser per importer kind (`syncImportParserFor`) for a whole level, not one object per path. */
-function parserByKind(schemaPack: string | null): (path: string) => SyncImportParser {
-  const parsers = new Map<string, SyncImportParser>();
-  return path => {
-    const kind = syncImportKind(path);
-    let parser = parsers.get(kind);
-    if (!parser) parsers.set(kind, parser = syncImportParserFor(path, schemaPack));
-    return parser;
-  };
 }
 
 /**
