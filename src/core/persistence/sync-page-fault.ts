@@ -273,9 +273,7 @@ async function repeatedWriteFailure(engine: Pick<BrainEngine, 'executeRaw'>, sou
   const detail = (done.error_detail ?? null) as Record<string, unknown> | null;
   const verdict = classifyTerminal({ source_id: sourceId, slug, operation: 'submit_job', state: 'failed', error_code: done.error_code, error_detail: detail,
     recovery: null, blocked_reason: null, compacted: false, error_message: done.error_message ?? null, intent_kind: 'managed_sync_import' });
-  // A `publication_timeout` receipt already spent its attempts (A-5): its path is held on the first one.
-  const exhausted = done.error_code === 'publication_timeout';
-  if (!exhausted && (!verdict || !UNPLACED.has(verdict.category))) return null;
+  if (!verdict || !UNPLACED.has(verdict.category)) return null;
   const field = (key: string) => typeof detail?.[key] === 'string' ? detail[key] as string : null;
   const fault = { code: done.error_code, origin: field('origin'), error_class: field('error_class'), errno: field('errno') ?? field('sqlstate') };
   const [row] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND source_incarnation=$2::uuid AND slug=$3
@@ -283,7 +281,7 @@ async function repeatedWriteFailure(engine: Pick<BrainEngine, 'executeRaw'>, sou
     AND COALESCE(error_detail->>'error_class','')=$6 AND COALESCE(error_detail->>'errno',error_detail->>'sqlstate','')=$7`,
   [sourceId, incarnation, slug, fault.code, fault.origin ?? '', fault.error_class ?? '', fault.errno ?? '']);
   const attempts = Number(row?.n ?? 0);
-  return attempts >= (exhausted ? 1 : PAGE_WRITE_FAILURE_REPEATS) ? { ...fault, attempts } : null;
+  return attempts >= PAGE_WRITE_FAILURE_REPEATS ? { ...fault, attempts } : null;
 }
 
 /**
