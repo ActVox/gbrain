@@ -3,9 +3,9 @@
  * baseline-commit self-heal, and path-containment guards. Peeled out of
  * src/commands/sync.ts (containment sprint C13-C14) as a pure move.
  */
-import { realpathSync } from 'fs';
+import { lstatSync, realpathSync } from 'fs';
 import { execFileSync } from './spawn.ts';
-import { isAbsolute, join, relative, sep } from 'path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { resolveSlugForPath, DEFAULT_SOURCE_ID } from './sync.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
@@ -616,11 +616,14 @@ export function isWithinRoot(
 /**
  * #774 NAV-1 TOCTOU: true only if filePath realpath-resolves inside gitRoot.
  * Guards symlink escape at the per-file level (a committed symlink whose
- * target lives outside the repo), not just at scope entry.
+ * target lives outside the repo), not just at scope entry. GBRA-133 S-4: a
+ * leaf that is not a symlink resolves through its parent directory (Bun's
+ * realpathSync returns ENOENT for an existing name containing a backslash).
  */
 export function isPathSafe(filePath: string, gitRoot: string): boolean {
   try {
-    return isWithinRoot(realpathSync(filePath), realpathSync(gitRoot));
+    const real = lstatSync(filePath).isSymbolicLink() ? realpathSync(filePath) : join(realpathSync(dirname(filePath)), basename(filePath));
+    return isWithinRoot(real, realpathSync(gitRoot));
   } catch {
     return false;
   }

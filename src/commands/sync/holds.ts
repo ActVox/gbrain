@@ -32,6 +32,7 @@ import { DEFAULT_SOURCE_ID, hasMalformedPathSegment, isCodeFilePath, resolveSlug
 import type { SyncActivePack } from './sync-run.ts';
 import { isPathContained } from '../../core/path-confine.ts';
 import { bindOrigin } from '../../core/persistence/origin-guard.ts';
+import { CLASSIC_FILE_HOLD_CODES, classifyClassicFile, type ClassicFileHold } from '../../core/classic-file-holds.ts';
 
 /** The file at a repo-relative path from git or a hold row, or null when it is missing or resolves outside the source root. */
 function fileUnderRoot(root: string, path: string): string | null {
@@ -101,9 +102,13 @@ function currentVersion(filePath: string): string | null | undefined {
  * retry request, an older frontmatter reader or fence screen, and holds whose
  * verdict depends on database state or the working tree). A held file that is
  * gone or no longer synced clears.
+ * GBRA-133: a symlink, permission or absent-from-worktree hold is re-classified
+ * every run and re-screened when its verdict changed (the link replaced by a
+ * file, a chmod, a restore), with no commit needed; gone when the path left
+ * the commit. `gitRoot` bounds a symlink target as in or out of the repository.
  * `selected` is null for a path outside this run's scope (left alone).
  */
-export function planHoldRescreen(holds: LegacyHolds, input: { root: string; touched: ReadonlySet<string>; selected: (path: string) => boolean | null }): void {
+export function planHoldRescreen(holds: LegacyHolds, input: { root: string; gitRoot?: string; touched: ReadonlySet<string>; selected: (path: string) => boolean | null }): void {
   for (const path of holds.retryPaths) if (!holds.existing.has(path)) holds.retryTaken.push(path);
   for (const [path, record] of holds.existing) {
     if (input.touched.has(path)) {
@@ -112,6 +117,20 @@ export function planHoldRescreen(holds: LegacyHolds, input: { root: string; touc
     }
     const selected = input.selected(path);
     if (selected === null) continue;
+    if (CLASSIC_FILE_HOLD_CODES.has(record.code)) {
+      const now = selected ? classifyClassicFile(input.root, path, input.gitRoot ?? input.root) : null;
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- path is a repo-relative hold path; lstat reads metadata only
+      const present = (() => { try { return !!lstatSync(join(input.root, path)); } catch { return false; } })();
+      if (!selected || (!now && !present)) {
+        holds.gone.push(path);
+      } else if (!holds.active || (now && now.code === record.code && now.reason === record.meta.reason && !holds.retryPaths.has(path))) {
+        continue;
+      } else {
+        holds.rescreen.push(path);
+      }
+      if (holds.retryPaths.has(path)) holds.retryTaken.push(path);
+      continue;
+    }
     const filePath = fileUnderRoot(input.root, path);
     if (!selected || !filePath) {
       holds.gone.push(path);
@@ -194,6 +213,17 @@ export async function holdRefusedImport(engine: BrainEngine, holds: LegacyHolds 
   try {
     const upstreamVersion = refusal.code === 'file_too_large' || !existsSync(filePath) ? null : readImportContent(filePath)?.upstreamVersion ?? null;
     await recordLegacyHold(engine, holds, { path, refusal, upstreamVersion });
+    return true;
+  } catch (e) {
+    serr(`  Could not record the hold for ${sanitizePathForDisplay(path)} (${e instanceof Error ? e.message : String(e)}); it counts as a failure this run.`);
+    return false;
+  }
+}
+
+/** GBRA-133: holds a path classic sync cannot read as a regular file (or that is absent from the working tree); false when the hold cannot be recorded. */
+export async function holdClassicFile(engine: BrainEngine, holds: LegacyHolds, path: string, refusal: ClassicFileHold): Promise<boolean> {
+  try {
+    await recordLegacyHold(engine, holds, { path, refusal, upstreamVersion: null });
     return true;
   } catch (e) {
     serr(`  Could not record the hold for ${sanitizePathForDisplay(path)} (${e instanceof Error ? e.message : String(e)}); it counts as a failure this run.`);

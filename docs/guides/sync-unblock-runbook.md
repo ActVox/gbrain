@@ -127,6 +127,8 @@ Every hold and error has three fields, from one table
 | `rename_identity_unreadable` | page | none | yes | always: the file title or id holds characters the database cannot compare |
 | `rename_reconcile_failed` | page | none | yes | always: the old page may be a duplicate |
 | `origin_conflict_decision` | page | none | yes | always: the pages differ, their ids conflict or none is the page the path names |
+| `file_unreadable` | page | none | yes | always: only a change to the checkout makes the file readable |
+| `absent_from_worktree` | page | none | yes | always: only a person decides whether the file comes back or its deletion is committed |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |
 | `page_identity_changed` | page | retry | no | the same path fails again after a rerun |
 | `pinned_git_worktree_conflict` | page | retry | no | the same path fails again after a rerun |

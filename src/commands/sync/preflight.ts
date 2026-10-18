@@ -139,7 +139,7 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
   // nothing else to do still re-screens them, and clears holds of gone files.
   const sourceRootMode = scoped && slugRootMode === 'source-root';
   if (holds) {
-    planHoldRescreen(holds, { root: sourceRootMode ? syncScopeRoot : gitContextRoot, touched: new Set(), selected: path => {
+    planHoldRescreen(holds, { root: sourceRootMode ? syncScopeRoot : gitContextRoot, gitRoot: gitContextRoot, touched: new Set(), selected: path => {
       const gitPath = sourceRootMode ? `${syncScopeRelPath}/${path}` : path;
       return inScope(gitPath) ? !excluded(gitPath) && isSelectedForRun(gitPath, syncOpts) : null;
     } });

@@ -91,6 +91,12 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
     human_reason: 'A rename imported but the old page could not be removed; a person runs a full sync of the source (it removes pages whose file is gone) or removes the old page with gbrain delete.' },
   { code: 'origin_conflict_decision', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: the pages differ, their ids conflict or none is the page the path names',
     human_reason: 'Several live pages record this file as their origin and sync cannot prove they are one document; a person keeps the page that is the file\'s and soft-deletes the others (gbrain repair origin-twins --source <source> lists them with the commands), then syncs.' },
+  // GBRA-130 A-7 / GBRA-133: the file is not a readable regular file inside the source root (a symlink, a non-regular file, a permission error).
+  { code: 'file_unreadable', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a change to the checkout makes the file readable',
+    human_reason: 'Sync cannot read this file as a regular file inside the source root (a symlink, a non-regular file or a permission error) and never follows it; make it a readable regular file in the checkout (or exclude it with sync.exclude) and commit, then run gbrain sources retry-held <source>.' },
+  // GBRA-133: a committed file missing from the working tree (a sparse checkout, a deletion not committed); classic sync holds it.
+  { code: 'absent_from_worktree', class: 'page', safe_actions: ['none'], needs_human: true, escalate: 'always: only a person decides whether the file comes back or its deletion is committed',
+    human_reason: 'The file is committed but missing from the checkout; a person restores it (git restore, or widens the sparse checkout) so the next sync imports it, or commits the deletion with gbrain git commit-push, which clears the hold.' },
   // Older releases recorded these as run failures; a rerun on this release holds the page instead.
   { code: 'revision_conflict', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },
   { code: 'page_identity_changed', class: 'page', safe_actions: ['retry'], needs_human: false, escalate: 'the same path fails again after a rerun' },

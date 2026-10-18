@@ -28,6 +28,18 @@ Under contract v1 an `error` value never changes. Where a surface sends a legacy
 
 ## Codes
 
+### absent_from_worktree
+
+<a id="absent_from_worktree"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Sync held one file that is committed at HEAD but missing from the working tree (a sparse checkout or a skip-worktree bit, or a local deletion that is not committed); the rest of the source synced. | Sync imports from the working tree, so it cannot import a file that is not on disk, and treating it as deleted would drop a committed file silently. Whether the file comes back or its deletion is committed is the user's choice; classic sync re-screens the hold on every run. | Restore the file (git restore -- <path>, or widen the sparse checkout) and the next sync imports it; or commit the deletion with gbrain git commit-push -m <msg> -- <path> and the next sync clears the hold. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `skip_worktree`, `deleted_locally`.
+
+More: [docs/guides/write-refusals.md#absent_from_worktree](../../docs/guides/write-refusals.md#absent_from_worktree)
+
 ### access_command_failed
 
 <a id="access_command_failed"></a>
@@ -1385,6 +1397,18 @@ More: [docs/guides/repair.md#file-removed-during-scan](../../docs/guides/repair.
 | The file is over the page size limit (24 MiB for a Markdown page, 5 MB for a code file), so it was not imported. | Every page under the limit is stored, chunked and searchable whatever its size; the limit bounds what one page may hold in this release. The same bytes refuse on every retry. A smaller page refused by an MCP or HTTP transport is a different refusal. | Leave the file out of the source (sync.exclude), or, if it must be in the brain, split it into files under the limit; then sync or import again. Never split a page under the limit. | agent | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/write-refusals.md#file_too_large](../../docs/guides/write-refusals.md#file_too_large)
+
+### file_unreadable
+
+<a id="file_unreadable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Sync held one file because it is not a readable regular file inside the source root (a symlink, a non-regular file or a permission error); the rest of the source synced. | Sync reads only regular files inside the source root and never follows a symlink, which can point anywhere on the host. The file waits in the hold store instead of failing the run, so it never blocks the source, and classic sync re-screens it on every run. | Replace the symlink with the regular file (or delete it), make the file readable to the account gbrain runs as, or leave it out with sync.exclude; the next gbrain sync --source <source> --no-pull re-screens it. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `symlink_in_repo`, `symlink_outside_root`, `symlink_dangling`, `symlink_loop`, `permission_denied`, `not_regular_file`.
+
+More: [docs/guides/write-refusals.md#file_unreadable](../../docs/guides/write-refusals.md#file_unreadable)
 
 ### fix_not_writable
 

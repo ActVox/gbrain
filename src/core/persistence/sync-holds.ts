@@ -43,6 +43,7 @@ import { FENCE_VERSION } from '../fence-repair/refusal.ts';
 import { fenceHoldFix, fenceHoldLocation, fencePreviewArgv, readFenceAutoRepair, type FenceAutoRepair, type FenceHoldLocation } from '../fence-repair/hold-fix.ts';
 import { contentHoldDocs, contentHoldFix } from '../content-repair/hold-fix.ts';
 import { classicRenameHoldFix } from '../classic-rename-holds.ts';
+import { classicFileHoldFix } from '../classic-file-holds.ts';
 import { STRUCTURED_WRITE_ADVICE, type FencesNormalized } from '../fence-repair/report.ts';
 import type { SyncDiscovery, SyncRename } from './sync-discovery.ts';
 import { isCodeFilePath, isImageFilePath, isMultimodalEnabled } from '../sync.ts';
@@ -72,8 +73,8 @@ type Exec = Pick<BrainEngine, 'executeRaw'>;
 
 export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regression' | 'managed_image_sync_unsupported' | 'concurrent_write' | 'preparation_stalled' | 'worktree_dirty' | 'file_drift'
   | 'legacy_slug_conflict' | 'write_interrupted' | 'origin_conflict'
-  /** GBRA-133 PR 1 (classic sync): src/core/classic-rename-holds.ts. */
-  | 'rename_identity_unreadable' | 'rename_reconcile_failed';
+  /** GBRA-133 PR 1 (classic sync): src/core/classic-rename-holds.ts and src/core/classic-file-holds.ts. */
+  | 'rename_identity_unreadable' | 'rename_reconcile_failed' | 'file_unreadable' | 'absent_from_worktree';
 /**
  * Flip lane C: the holds of a write that ran out of attempts, its preparation never settling (`preparation_stalled`)
  * or its statements ended by the database every time (`write_interrupted`). The file is not the problem: they route to
@@ -93,7 +94,8 @@ export interface PreparationStallMeta {
   /** The `gbrain sync` arguments that resume the cursor with its stored options (after `sources retry-held`). */
   sync_argv: string[];
 }
-export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason | OriginConflictReason;
+export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason | OriginConflictReason
+  | 'symlink_in_repo' | 'symlink_outside_root' | 'symlink_dangling' | 'symlink_loop' | 'permission_denied' | 'not_regular_file' | 'skip_worktree' | 'deleted_locally';
 
 export interface GitHoldMeta {
   reason?: GitHoldReason;
@@ -747,6 +749,7 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
       return repair(true, `The page that ${record.path} renames changed after the rename was recorded, so it was not moved; the preview proposes re-binding the rename to the current page for approval.`);
     case 'frontmatter_slug_conflict':
       return contentHoldFix(record);
+    case 'file_unreadable': case 'absent_from_worktree': return classicFileHoldFix(record);
     default:
       return record.meta.reason === 'needs_interpretation'
         ? repair(true, `Reading ${record.path} needs an interpretation (folded lines, a duplicate key or an unclosed list); the preview shows the exact proposal for approval.`)
