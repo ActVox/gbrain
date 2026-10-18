@@ -150,6 +150,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `rename-identity` | `rename_identity_downgrades` | Explicit-only, preview-bound, destructive consent. For an inexact Git rename that sync split into a delete plus an add (#6729): carries the old page's identity (id, version history, timeline, links, facts, aliases) onto the new slug, imports the new file onto it as an edit and retires the provisional page; or, with `--close`, settles the pair and moves nothing. `--slug <new-slug>` (and `--from <old-slug>`) names one pair; `--apply --expect <hash> --yes`. See [rename identity](#rename-identity). | `fact_rows_collide` (a fence row of the old page the new file does not keep with the same claim); `managed_remedy_unavailable` (a carry on a managed source; `--close` is the remedy there); pages changed after the preview (`changed_since_preview`). |
 | `overwritten-edits` | `sync_overwritten_db_edits` | Explicit-only, preview-bound. Restores database edits that an incremental managed sync replaced with a committed file edit and no `file_drift` hold (#6712, fixed by #6887). It restores only what the records prove: a database-only revision (its receipt published no file) archived by a managed-sync import that wrote different content, with no later revision holding the edit again. The preview diffs the live page against the edit; `--apply --expect <hash>` reverts each page to that version through a revision-bound, database-only `revert_version` and holds the committed file `file_drift` when it differs. See [overwritten edits](#overwritten-edits). | `unknown_*` findings (no persistence outcome on the writer's receipt, the import's content no longer readable, a segmented version), listed but not restored; pages that moved after the preview (`changed_since_preview`). |
 | `missing-tables` | `schema_missing_tables` | Explicit-only, preview-bound. Recreates, empty, a rebuildable cache table (`query_cache`, `code_traversal_cache`) that the applied migrations created but the brain no longer has, on a brain whose schema version already covers its creating migration, so `apply-migrations` never recreates it (#6911). DDL only (`IF NOT EXISTS`), no journal admission, brain-wide. See [missing tables](#missing-tables). | `user_data_tables`: a missing table that holds user data; this repair never recreates it, so restore its rows from a backup first. `other_tables`: a missing table that holds no user data; `gbrain init --migrate-only` recreates it if the base schema defines it. |
+| `url-clone-fences` | none (`gbrain sync --source <id>` stops at the pull with `pull_blocked_local_changes`) | Explicit-only, preview-bound, destructive consent. Clears the `## Facts` fence rows an older gbrain appended to files of a clone it owns (`gbrain sources add --url`), which block every `git pull --ff-only` that touches those files (#6946). The preview proves each changed file differs from HEAD only by appended fence rows; `--apply --expect <hash> --yes` backs each file up, keeps its rows database-only and restores the file from HEAD. Unmanaged brains only. See [URL clone fences](#url-clone-fences). | `non_fence_edit`, `unparsed_fence`, `staged_change`, `deleted`, `not_in_head`, `unreadable_checkout`: a file with any other difference from HEAD, named with why; files that changed after the preview (`changed_since_preview`). |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -1521,6 +1522,49 @@ again), or when the merged page would not read back exactly
 (`not_conserved`: merge by hand). Each merge is a revision-bound `put_page`;
 a page changed since the preview reports `changed_since_preview` and is kept.
 Undo a merge on a managed source with `git revert` of its commit.
+
+<a id="url-clone-fences"></a>
+### URL clone fences
+
+A source added with `gbrain sources add <id> --url <git-url>` is a clone gbrain
+owns and updates with `git pull --ff-only`. Before this release, `remember`,
+`extract_facts` and page writes on an unmanaged brain wrote `## Facts` fence
+rows and page files into that clone (#6946). The local change blocks every pull
+that touches the same file, so the clone stops following upstream. Current
+releases keep those writes database-only: a fact about a clone page is stored
+and recalled from the database with no fence row (`row_num` empty), and page
+write-through reports `skipped: "url_clone"`. A managed brain does the same
+with `gbrain sources mirror-readonly <id>`.
+
+A clone an older release already dirtied still blocks its pulls. `gbrain sync
+--source <id>` then prints `pull_blocked_local_changes` with the changed files
+and an `ask_user` fix naming this repair (the sync JSON `reason` stays
+`pull_failed`; the cycle's sync phase carries the code in `pull_blocked`).
+
+**Say to your agent:** *"Preview which files of the clone gbrain changed, show
+me the list, then restore them after I agree."*
+
+```bash
+gbrain repair url-clone-fences --source <id>                                # preview: fence_rows_only / refused classes
+gbrain repair url-clone-fences --source <id> --apply --expect <hash> --yes  # restores exactly the previewed files
+gbrain sync --source <id>                                                   # pulls again
+```
+
+The preview lists every tracked file that differs from HEAD and proves the
+difference is only fence rows gbrain appended: both fences parse, HEAD's rows
+are an unchanged prefix of the working copy's, and re-rendering HEAD with the
+working fence reproduces the file byte for byte. Any other difference is
+named with its class (`non_fence_edit`, `unparsed_fence`, `staged_change`,
+`deleted`, `not_in_head`, `unreadable_checkout`) and the file is left alone; resolve it in the clone (keep
+the edit upstream, or discard it with `git checkout -- <path>`), then preview
+again. Each restored file is first backed up under
+`~/.gbrain/backups/url-clone-fences/`. Its rows stay active and recallable as
+database-only facts, HEAD's bytes are imported as the page (as sync would
+import them), and only then is the file restored; each step is idempotent, so
+a stopped run previews the same file again. A file that changed since the preview
+reports `changed_since_preview` and is kept. Undo by copying the backup over
+the file. It is explicit-only and never runs from `--all`, doctor's
+remediation plan, the maintenance cycle or an upgrade.
 
 <a id="file-drift"></a>
 ### File drift

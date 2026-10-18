@@ -59,7 +59,7 @@ import { assertValidSourceId } from './source-id.ts';
 import { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
 import { acquireLeaseSet, maintenanceLockBusySkip, MAINTENANCE_LEASE_ID } from './cycle/lock-set.ts';
 import { assertEmbedNotStalled } from './embed-stall.ts'; import { embedBackfillFix } from './embed-consent.ts';
-import { anyAbortSignal } from './abort-signals.ts';
+import { anyAbortSignal } from './abort-signals.ts'; import { urlClonePullBlock, urlClonePullBlockSummary } from './url-clone.ts';
 import { maybeRefreshPlannerStats } from './planner-stats.ts'; import { listSourceChangedPages, sourceCycleWindowStamp, unionSlugSets, type SourceCycleWindow } from './cycle/source-window.ts';
 
 export { PHASE_SCOPE, SOURCE_FRESHNESS_PHASES, type PhaseScope } from './cycle/phase-scope.ts';
@@ -1303,6 +1303,7 @@ async function runPhaseSync(
     // doesn't report a clean run over a wedged source. Timeout-class partials
     // keep the pre-existing 'ok' mapping (they converge on retry by design).
     const pullFailedPartial = result.status === 'partial' && result.reason === 'pull_failed';
+    const pullBlock = pullFailedPartial && sourceId ? await urlClonePullBlock(engine, sourceId) : null;
     // Untracked-gap fix: uncommitted working-tree drift (files invisible to
     // commit-driven sync) surfaces as 'warn', not a clean 'ok +0' — a nightly
     // cycle over a dirty vault otherwise reports convergence it never achieved.
@@ -1321,7 +1322,7 @@ async function runPhaseSync(
       duration_ms: 0,
       summary: dryRun
         ? `${syncedCount} page(s) would sync, ${result.deleted} would delete`
-        : pullFailedPartial
+        : pullBlock ? urlClonePullBlockSummary(pullBlock) : pullFailedPartial
           ? `git pull failed, nothing imported — source may be behind its remote (sync anchor unchanged)`
           : `+${result.added} added, ~${result.modified} modified, -${result.deleted} deleted${uncommittedNote}${upstreamNote}`,
       details: {
@@ -1335,6 +1336,7 @@ async function runPhaseSync(
         syncStatus: result.status,
         ...(result.reason ? { syncReason: result.reason } : {}),
         ...(result.uncommitted ? { uncommitted: result.uncommitted } : {}),
+        ...(pullBlock ? { pull_blocked: { code: pullBlock.code, paths: pullBlock.paths, fix: pullBlock.fix } } : {}),
         dryRun,
       },
       pagesAffected: result.pagesAffected,
