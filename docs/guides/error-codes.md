@@ -2886,6 +2886,16 @@ More: [docs/guides/company-brain-ingestion.md#agent-and-ci-use](../../docs/guide
 
 More: [docs/guides/sync-unblock-runbook.md#dry-run-convergence-classes](../../docs/guides/sync-unblock-runbook.md#dry-run-convergence-classes)
 
+### recovery_prior_stage_unavailable
+
+<a id="recovery_prior_stage_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair stuck-recovery cannot apply that --keep choice to a page recovery over the single-string ceiling, because the staged copy of its prior file is missing, does not match its recorded SHA-256, or is not a regular file; nothing was changed. | A prior file over 24 MiB is not embedded in its recovery record: the record names a staged copy beside the file by path and SHA-256, and only that copy can put the prior bytes back. Without it --keep prior has nothing safe to restore, so the remaining exit is --keep disk, which the user must agree to. | Stop and ask the user; re-run only with the authorization the message names. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#recovery-prior-stage-unavailable](../../docs/guides/repair.md#recovery-prior-stage-unavailable)
+
 ### recovery_required
 
 <a id="recovery_required"></a>

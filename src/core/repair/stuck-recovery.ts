@@ -32,14 +32,23 @@ const selectionOf = (scope: RepairScope, requestId?: string): Selection => ({ so
 const hashOf = (scope: RepairScope, selection: Selection, items: StuckRecovery[]) =>
   previewHash({ kind: 'stuck-recovery-v1', brain_id: scope.brain_id, selection, items: items.map(found => found.digest) });
 
+/** A prior file over the single-string ceiling is the staged copy beside it (recovery-resolve.ts PriorStageView). */
+const STAGE_TEXT = {
+  verified: 'verified',
+  missing: 'missing (--keep prior is unavailable)',
+  mismatched: 'does not match its recorded SHA-256 (--keep prior is unavailable)',
+} as const;
+
 function fileLines(file: RecoveryFileView): string[] {
   const prior = file.prior.absent ? 'absent: prior was a create'
-    : `sha256 ${file.prior.sha256.slice(0, 16)}… size ${file.prior.size ?? '?'} mode ${file.prior.mode === null ? '?' : file.prior.mode.toString(8)}${file.prior.stored ? '' : ' (bytes not stored in the record)'}`;
+    : `sha256 ${file.prior.sha256.slice(0, 16)}… size ${file.prior.size ?? '?'} mode ${file.prior.mode === null ? '?' : file.prior.mode.toString(8)}`
+      + (file.prior.stage ? `, staged copy ${STAGE_TEXT[file.prior.stage.state]}` : file.prior.stored ? '' : ' (bytes not stored in the record)');
   const disk = file.disk.deleted ? 'deleted on disk' : file.disk.kind !== 'file' ? `${file.disk.kind} (not a regular file; resolve it by hand)`
     : `sha256 ${file.disk.sha256!.slice(0, 16)}… size ${file.disk.size} mode ${file.disk.mode.toString(8)}`;
   return [`    file ${file.relative}`, `      prior: ${prior}`, `      disk:  ${disk}`,
     `      recovery sees: ${file.matches === 'neither' ? 'neither the prior nor the published bytes (blocked)' : `the ${file.matches} bytes`}`,
-    ...(file.diff_path ? [`      diff: ${file.diff_path}`, `      reproduce: ${file.diff_command}`] : [])];
+    ...(file.diff_path ? [`      diff: ${file.diff_path}${file.diff_summary ? ' (summary: a version is over the 24 MiB single-string ceiling, so no full diff)' : ''}`,
+      `      reproduce: ${file.diff_command}`] : [])];
 }
 
 export const stuckRecoveryRepair: RepairHandler = {
