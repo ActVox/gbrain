@@ -32,7 +32,7 @@ import { OPEN_AT_STAMP_CAP, passFingerprint, readPassRow, SYNC_ORIGIN_DELETED_OP
 import { readSyncAdmission, type SyncAdmission } from './sync-admission.ts';
 import { faultPoint } from './fault-points.ts';
 import { passFoldBase, passIdleProbe, readShadowLevel, workingIdleChange, type PassLevelCache, type ShadowLevel, type ShadowPath } from './sync-pass.ts';
-import type { PassFold } from './sync-pass-fold.ts';
+import { ownWritebackCommit, type PassFold } from './sync-pass-fold.ts';
 import { loopYield } from './sync-yield.ts';
 import { recallWorkingStatCache, rememberWorkingStatCache, SyncTreeReadIncomplete } from './sync-git-stream.ts';
 import { syncPassKind } from './sync-classify.ts';
@@ -393,7 +393,7 @@ async function pinPass(engine: BrainEngine, input: SyncPassInput, lease: NonNull
     head, parserFp, pack, selectionFp, now: started, openEpisode: !!episode, owedTail: tail !== null, retryRow: retry.length > 0,
     notConvergedStreak: obligations.not_converged_streak, mismatchStreak: Object.keys(obligations.mismatch).length,
     requestNewer: probe?.newer === true, openAtStampFinished: !!converged && (converged.open_at_stamp === null || (probe?.stillOpen ?? 0) < converged.open_at_stamp.length),
-    workingChange: working.changed, rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
+    writebackOpen: probe?.writebackOpen === true, workingChange: working.changed, rescreenDueHold: holds.some(hold => holdRescreenDue(hold, retry.includes(hold.path))), full: opts.full === true });
   // Design §2.6: a withheld mass delete is applied by a full round once the owner host's env valve allows it.
   const valveOpen = !remote && !!obligations.deletes_withheld && massReconcileAllowed();
   // Design §4: keep_db writes the previous pass deferred (`keep_db_pending`: its cap, or write capacity) are owed to this pass, so it is
@@ -497,7 +497,7 @@ async function stampUnchangedPass(engine: BrainEngine, input: SyncPassInput, rou
     // Holds on paths that left the level go with it here too, as a stamp releases them.
     for (const path of level.releasableHolds) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
     await recordPassFenceTrend(tx, { worktreeId: context.binding.worktree_id, sourceId, passId, since: converged?.request_hwm ?? null });
-    const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP);
+    const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP, { prior: converged?.writeback });
     value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
       last_full_at: kind === 'full' || !converged ? at : converged.last_full_at, passes_since_full: kind === 'full' || !converged ? 0 : converged.passes_since_full + 1 };
     Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, stuck_since: null });
@@ -754,6 +754,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       // The previous round's level is done with: dropped before the next one is read, so a large source holds one level, not two.
       lastLevel = null;
       await faultPoint('sync:round_start', { sourceId, round });
+      // A folded writeback stamp whose Git effect moved HEAD by exactly the pass's own bytes ends the pass on that stamp.
+      if (folded && mode === 'committed' && await ownWritebackCommit(engine, { gitRoot: context.gitRoot, localPath: context.binding.local_path ?? context.root, from: folded.head,
+        writeIds: value.obligations.converged?.writeback ?? [] })) return synced(true);
       const levelInput = { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
           slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } };

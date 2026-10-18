@@ -52,22 +52,26 @@ export async function passConvergence(engine: Pick<BrainEngine, 'executeRaw'>, i
     duration_ms: t.duration_ms, timings_ms: t.timings_ms, last_full_at: o.converged?.last_full_at ?? null };
 }
 
-export type PassStatusReason = 'pass_unfinished' | 'not_converged' | 'settle_mismatch' | 'deletes_withheld' | 'selection_scoped' | 'admission_paused';
+export type PassStatusReason = 'pass_unfinished' | 'not_converged' | 'settle_mismatch' | 'deletes_withheld' | 'selection_scoped' | 'admission_paused' | 'writeback_failed';
 
-/** The state the newest pass puts the source in (design §9): never `synced` while it is open or ended unconverged. Null: nothing to add. */
-export function passStatusState(row: PassRow, withheld: DeletesWithheld | null, now = Date.now()): ['synced' | 'resumable' | 'blocked', PassStatusReason] | null {
+/**
+ * The state the newest pass puts the source in (design §9): never `synced` while it is open or ended unconverged, or while a
+ * writeback its stamp recorded (`converged.writeback`) has a failed or parked Git effect (`writebackFailed`: that request). Null: nothing to add.
+ */
+export function passStatusState(row: PassRow, withheld: DeletesWithheld | null, writebackFailed: string | null = null, now = Date.now()): ['synced' | 'resumable' | 'blocked', PassStatusReason] | null {
   const t = row.value.telemetry;
   if (t.outcome === 'open' || (t.outcome === 'resumable' && t.stop_reason !== 'not_converged' && t.stop_reason !== 'admission_paused')) return ['resumable', 'pass_unfinished'];
   if (t.stop_reason === 'admission_paused') return ['resumable', 'admission_paused'];
   if (t.stop_reason === 'not_converged' || (row.value.obligations.not_converged_streak ?? 0) > 0) return ['resumable', 'not_converged'];
   if (passHealth(row, { now, stalledMs: Number.POSITIVE_INFINITY }).reason === 'settle_mismatch') return ['resumable', 'settle_mismatch'];
+  if (writebackFailed) return ['blocked', 'writeback_failed'];
   if (withheld) return ['blocked', 'deletes_withheld'];
   if (t.outcome === 'synced' && t.stop_reason === 'selection_scoped') return ['synced', 'selection_scoped'];
   return null;
 }
 
 /** The next step for a pass reason (`resume`: the plain sync's arguments). */
-export function passStatusNext(sourceId: string, reason: PassStatusReason, row: PassRow, resume: string[]): Action {
+export function passStatusNext(sourceId: string, reason: PassStatusReason, row: PassRow, resume: string[], writebackFailed: string | null = null): Action {
   const verify = { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] };
   const sync: Action = { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify, why: '' };
   switch (reason) {
@@ -84,6 +88,10 @@ export function passStatusNext(sourceId: string, reason: PassStatusReason, row: 
       return { argv: ['gbrain', 'config', 'set', 'sync.admission', 'normal'], consent: [], actor: 'user', requires_exclusive: false, verify,
         user_message: `sync.admission pauses what sync admits for ${sourceId}; restore it with gbrain config set sync.admission normal when the pause is over.`,
         why: 'The pause is the owner\'s setting; it is never lifted automatically.' };
+    case 'writeback_failed':
+      return { argv: ['gbrain', 'sources', 'writer', 'retry-effects', sourceId, '--request-id', writebackFailed ?? '<id>', '--dry-run'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+        user_message: `The Git effect of a file sync rewrote in ${sourceId} (request ${writebackFailed}) failed and is parked, so the checkout does not hold what the brain holds. Fix the cause doctor's parked_effects names, then retry it with the same command without --dry-run.`,
+        why: 'The preview names the parked effect and what a retry runs (read-only); until it commits, the source is never idle.' };
     case 'selection_scoped':
       return { ...sync, why: 'The last pass converged at a narrower selection and did not advance last_commit; the plain sync runs the configured selection.' };
     default:

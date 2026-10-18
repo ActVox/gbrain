@@ -1121,7 +1121,7 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
   const newer = probe.newer, pending = probe.pending;
   const kind = syncPassKind({ converged: converged ? { target: converged.target, parserFp: '', pack: null, selectionFp: '', passesSinceFull: 0, lastFullAt: Date.now() } : null,
     head: head ?? '', parserFp: '', pack: null, selectionFp: '', now: Date.now(), openEpisode: false, owedTail: false, retryRow: false, notConvergedStreak: 0, mismatchStreak: 0,
-    requestNewer: newer, openAtStampFinished: pending && !input.assumeConverged, workingChange: false, rescreenDueHold: false, full: false });
+    requestNewer: newer, openAtStampFinished: pending && !input.assumeConverged, writebackOpen: probe.writebackOpen && !input.assumeConverged, workingChange: false, rescreenDueHold: false, full: false });
   timings.total = total();
   return { idle: kind.kind === 'idle', reasons: kind.blockers, timings_ms: timings, rows: (newer ? 1 : 0) + (pending ? 1 : 0) + (row ? 1 : 0) };
 }
@@ -1131,11 +1131,11 @@ export async function idleTickProbe(engine: BrainEngine, input: { sourceId: stri
  * worktree is newer than the converged watermark (a range on the unique `sequence` index; `requestHwm` overrides the
  * row's), whether any request is open (`persistence_requests_pending`), and how many of the ids recorded in
  * `converged.open_at_stamp` are still open (`r:<request>` requests, `e:<effect>` Git effects; `openAtStamp` null reads the
- * row's, so the probe needs no earlier read of the row).
+ * row's, so the probe needs no earlier read of the row), and whether a writeback in `converged.writeback` has an uncommitted Git effect.
  */
 export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, input: { sourceId: string; incarnation: string; worktreeId: string;
-  requestHwm: string | number | null; openAtStamp: readonly string[] | null }): Promise<{ passRow: Record<string, unknown> | null; newer: boolean; pending: boolean; stillOpen: number }> {
-  const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean; still_open: number | string }>(`WITH pass AS (
+  requestHwm: string | number | null; openAtStamp: readonly string[] | null }): Promise<{ passRow: Record<string, unknown> | null; newer: boolean; pending: boolean; stillOpen: number; writebackOpen: boolean }> {
+  const [probe] = await engine.executeRaw<{ pass_row: Record<string, unknown> | null; newer: boolean; pending: boolean; still_open: number | string; writeback_open: boolean }>(`WITH pass AS (
       SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1 AND fingerprint=$2),
     stamp AS (SELECT unnest(COALESCE($5::text[], ARRAY(SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(value->'obligations'->'converged'->'open_at_stamp')='array'
       THEN value->'obligations'->'converged'->'open_at_stamp' ELSE '[]'::jsonb END) FROM pass))) AS id)
@@ -1146,9 +1146,11 @@ export async function passIdleProbe(engine: Pick<BrainEngine, 'executeRaw'>, inp
       (SELECT count(*) FROM persistence_requests WHERE state IN ('queued','running','recovering') AND (worktree_id = $4 OR worktree_id IS NULL AND source_id = $6 AND source_incarnation = $7::uuid)
         AND 'r:'||request_id::text IN (SELECT id FROM stamp))
         + (SELECT count(*) FROM persistence_effects e JOIN persistence_requests r ON r.id = e.request_id
-            WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text IN (SELECT id FROM stamp)) AS still_open`,
+            WHERE r.worktree_id = $4 AND e.kind = 'git' AND e.state IN ('queued','running') AND 'e:'||e.id::text IN (SELECT id FROM stamp)) AS still_open,
+      EXISTS (SELECT 1 FROM persistence_effects e WHERE e.kind = 'git' AND e.state <> 'committed' AND e.request_id IN (SELECT id::uuid FROM pass,
+        jsonb_array_elements_text(CASE WHEN jsonb_typeof(value->'obligations'->'converged'->'writeback')='array' THEN value->'obligations'->'converged'->'writeback' ELSE '[]'::jsonb END) AS w(id))) AS writeback_open`,
     [MANAGED_SYNC_PASS_OP, `${input.sourceId}:${input.incarnation}`, input.requestHwm, input.worktreeId, input.openAtStamp ? [...input.openAtStamp] : null, input.sourceId, input.incarnation]);
-  return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0) };
+  return { passRow: probe?.pass_row ?? null, newer: probe?.newer === true, pending: probe?.pending === true, stillOpen: Number(probe?.still_open ?? 0), writebackOpen: probe?.writeback_open === true };
 }
 
 /**

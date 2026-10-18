@@ -542,7 +542,8 @@ export async function publishPassStamp(tx: BrainEngine, row: WriteRequest, p: Sy
   await recordPassFenceTrend(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, passId: p.passId!, since: pass.value.obligations.converged?.request_hwm ?? null });
   for (const path of stamp.releasedHolds) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
-  const watermark = read.watermark ?? await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP);
+  const watermark = read.watermark ?? await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP,
+    { prior: pass.value.obligations.converged?.writeback });
   const value: ManagedSyncPassValue = structuredClone(pass.value);
   const at = new Date().toISOString(), prior = value.obligations.converged;
   value.obligations.converged = { target: p.target, at, ...watermark, ...(stamp.rescreen ? { open_at_stamp: null } : {}),
