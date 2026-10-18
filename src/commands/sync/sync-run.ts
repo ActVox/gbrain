@@ -23,6 +23,7 @@ import { appendCompleted, appendCompletedOnce, type OpCheckpointKey } from '../.
 import { registerCleanup } from '../../core/process-cleanup.ts';
 import { DB_ACCESS_MARKER_PREFIX, shouldEmitDbAccessMarker } from '../../core/pg-access-classify.ts';
 import { serr } from '../../core/console-prefix.ts';
+import { ItemRun } from '../../core/item-failure.ts';
 import { buildPartialResult } from '../../core/sync-lock.ts';
 import type { createProgress } from '../../core/progress.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
@@ -30,7 +31,8 @@ import type { LegacyHolds } from './holds.ts';
 import { resolveSyncCheckpointSeconds, resolveSyncMaxCheckpointFailures, resolveSyncYieldEvery } from './checkpoint.ts';
 
 export type SyncActivePack = { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string> }> };
-export type SyncFailedFile = { path: string; error: string; line?: number };
+/** `code`: the import path's structured ledger code (GBRA-130 A-18); absent, the gate classifies `error`. */
+export type SyncFailedFile = { path: string; error: string; line?: number; code?: string };
 export type SyncOptionsForFilter = Parameters<typeof isSyncable>[1];
 export type SyncProgress = ReturnType<typeof createProgress>;
 
@@ -97,6 +99,8 @@ export interface SyncRun {
   readonly succeededPaths: string[];
   /** Every failure that gates `last_commit` (imports, deletes, renames, `<head>`). */
   readonly failedFiles: SyncFailedFile[];
+  /** GBRA-130 A-18: classifies each thrown import failure (a run-scoped one stops the sync) and trips when most files fail. */
+  readonly itemRun: ItemRun;
   readonly typeWarningCounts: Map<string, TypeWarningCount>;
   /** @checkpoint Files flushed since the last checkpoint write (count cadence). */
   sinceFlush: number;
@@ -157,6 +161,7 @@ export function createSyncRun(
     deletedSlugs: new Set<string>(),
     succeededPaths: [],
     failedFiles: [],
+    itemRun: new ItemRun('sync.import_files'),
     typeWarningCounts: new Map<string, TypeWarningCount>(),
     sinceFlush: 0,
     lastFlushAt: Date.now(),
