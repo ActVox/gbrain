@@ -33,4 +33,13 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
     item: 'B-6 item: a verdict the database refuses is not cached',
     run: 'B-6 run: a run-scoped error writing a verdict stops the pass',
   },
+  'backfill.rows': { file: 'test/pathological/a47-backfill-poison-row.test.ts',
+    item: 'item: a row whose UPDATE violates a CHECK is skipped, recorded and passed; its siblings land',
+    run: 'run: a run-scoped failure (' },
+  'purge.recorded_tombstones': { file: 'test/pathological/a49-unmanaged-purge-tombstones.test.ts',
+    item: 'item: a tombstone whose delete is refused is reported and kept; the other tombstones and the bulk delete still purge',
+    run: 'run: a run-scoped failure (' },
+  'retention.expired_sources': { file: 'test/pathological/a50-unmanaged-expired-sources.test.ts',
+    item: 'item: a source whose delete times out is blocked with its code and the manual purge; the other expired sources purge',
+    run: 'run: a run-scoped failure (' },
 };

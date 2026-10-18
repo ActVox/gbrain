@@ -1014,10 +1014,12 @@ export interface BrainEngine {
    * the cutoff (or is soft-deleted/restored) between the two statements.
    * Dry-run responses additionally carry `pages` (slug + deleted_at) for
    * display; the destructive path leaves `pages` undefined.
+   * `opts.excludeIds` keeps those page ids out of both (GBRA-130 A-49: the
+   * tombstones the unmanaged belief-ledger expiry failed or parked).
    */
   purgeDeletedPages(
     olderThanHours: number,
-    opts?: { dryRun?: boolean },
+    opts?: { dryRun?: boolean; excludeIds?: number[] },
   ): Promise<{ slugs: string[]; count: number; pages?: { slug: string; deleted_at: Date }[] }>;
   /**
    * v0.26.5: by default `listPages` excludes soft-deleted rows. Set

@@ -30,6 +30,9 @@ export const ISOLATE_SITES = {
   'autopilot.global_maintenance': 'A-10',
   'synthesize.postprocess': 'A-4',
   'synthesize.triage_verdict_cache': 'B-6',
+  'backfill.rows': 'A-47',
+  'purge.recorded_tombstones': 'A-49',
+  'retention.expired_sources': 'A-50',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
