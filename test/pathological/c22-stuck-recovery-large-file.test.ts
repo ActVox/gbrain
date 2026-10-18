@@ -12,7 +12,7 @@
  * the slow lane; this is the inventory row's regression in the pathological suite, on both engines.
  * Seams: the persistence fault hook at `publication:prepared` (the hand edit, then a transient serialization failure).
  */
-import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -52,20 +52,17 @@ async function settled<T>(call: () => Promise<T>): Promise<T> {
   }
 }
 
-async function withEngine(databaseUrl: string | undefined, run: (engine: BrainEngine) => Promise<void>): Promise<void> {
-  await withEnv(env, async () => {
-    let engine: BrainEngine;
-    let close: (() => Promise<void>) | undefined;
-    if (databaseUrl) { const pg = await isolatedPersistencePostgres(databaseUrl); engine = pg.engine; close = pg.close; }
-    else { const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engine = lite; }
-    try { await run(engine); }
-    finally { await disposePersistenceConsumer(engine); await engine.disconnect(); await close?.(); }
-  });
-}
-
 for (const { backend, databaseUrl } of pathologicalArms()) {
   describe(`C-22 stuck-recovery of a large-file page recovery (${backend})`, () => {
-    test('C-22 item: the preview lists a stuck recovery over 24 MiB with both fingerprints, and --keep prior restores the staged prior and lets the delete publish', () => withEngine(databaseUrl, async engine => {
+    let engine: BrainEngine;
+    let close: (() => Promise<void>) | undefined;
+    beforeAll(async () => {
+      if (databaseUrl) { const pg = await isolatedPersistencePostgres(databaseUrl); engine = pg.engine; close = pg.close; return; }
+      const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engine = lite;
+    }, 120_000);
+    afterAll(() => withEnv(env, async () => { await disposePersistenceConsumer(engine); await engine.disconnect(); await close?.(); }));
+
+    test('C-22 item: the preview lists a stuck recovery over 24 MiB with both fingerprints, and --keep prior restores the staged prior and lets the delete publish', () => withEnv(env, async () => {
       await engine.setConfig('pages.segmented_storage', 'on');
       const root = join(home, `src-${randomUUID().slice(0, 8)}`);
       mkdirSync(join(root, 'notes'), { recursive: true });
