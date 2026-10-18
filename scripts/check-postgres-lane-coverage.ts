@@ -7,7 +7,8 @@
  * the file. This guard fails on every test/ file outside test/e2e/ that has
  * such an arm and no Postgres lane:
  *
- *   - arm: a zero-argument `testBackends()` call, or a `process.env.DATABASE_URL`
+ *   - arm: a zero-argument `testBackends()` or `pathologicalArms()` (the
+ *     test/pathological/ harness wrapper) call, or a `process.env.DATABASE_URL`
  *     read (directly or through a variable that holds it) used as a condition,
  *     a call or constructor argument, or a `database_url`/`databaseUrl`
  *     property value. Code inside a `withEnv({ DATABASE_URL: ... })` callback
@@ -105,6 +106,9 @@ function underOwnDatabaseUrl(node: ts.Node): boolean {
   return false;
 }
 
+/** Zero-argument calls that select the PostgreSQL arm when DATABASE_URL is set. */
+const ARM_CALLS = new Set(['testBackends', 'pathologicalArms']);
+
 /** First line of a Postgres arm in `path`, or null. */
 export function postgresArm(path: string): { line: number; what: string } | null {
   const sf = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -113,9 +117,9 @@ export function postgresArm(path: string): { line: number; what: string } | null
   const found: Array<{ line: number; what: string }> = [];
   const reads: ts.Node[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'testBackends' && node.arguments.length === 0
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ARM_CALLS.has(node.expression.text) && node.arguments.length === 0
       && !underOwnDatabaseUrl(node)) {
-      found.push({ line: line(node), what: 'testBackends()' });
+      found.push({ line: line(node), what: `${node.expression.text}()` });
     }
     if (isDatabaseUrlRead(node) && !underOwnDatabaseUrl(node)) reads.push(node);
     ts.forEachChild(node, visit);
