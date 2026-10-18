@@ -103,7 +103,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       const held = (await holdsOf(engine, r.sourceId)).find(h => h.path === 'notes/b.md');
       expect({ cursor: await r.lastCommit() === r.head(), healthy: await page(engine, r.sourceId, 'ok/healthy-1') !== null,
         a: await page(engine, r.sourceId, 'notes/a'), b: await page(engine, r.sourceId, 'notes/b'), d: await page(engine, r.sourceId, 'notes/d'), c: await page(engine, r.sourceId, 'notes/c'),
-        hold: held && { code: held.code, origin: held.meta.rename_from?.pageId }, ledger: loadSyncFailures().filter(f => f.source_id === r.sourceId).length })
+        hold: held && { code: held.code, origin: held.meta.rename_from?.pageId ?? null }, ledger: loadSyncFailures().filter(f => f.source_id === r.sourceId).length })
         .toEqual({ cursor: true, healthy: true, a, b: null, d: c, c: null, hold: { code: 'rename_identity_unreadable', origin: a }, ledger: 0 });
       const fix = gitHoldItem(held!).fix;
       expect({ actor: fix.actor, argv: fix.argv, then: fix.then?.argv }).toEqual({ actor: 'user', argv: ['gbrain', 'sources', 'status', r.sourceId, '--json'],
