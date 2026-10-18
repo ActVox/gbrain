@@ -49,7 +49,6 @@ async function renderSummary(writtenSlugs: string[]): Promise<{ body: string; ma
     executeRaw: async () => [],
     addTag: async () => {},
     transaction: async <T>(fn: (tx: BrainEngine) => Promise<T>) => fn(engine),
-    addTag: async () => {},
   } as unknown as BrainEngine;
   try {
     await writeSummaryPage(
