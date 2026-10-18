@@ -77,7 +77,7 @@ import { resolveCycleDate, utcDate } from './cycle-date.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { stampDreamProvenance, summaryProvenanceLines } from './dream-provenance.ts';
 import { putDerivedPage, summaryDerivation, withTranscriptTaint } from './dream-taint.ts';
-import { findLegacyCompletion, findSynthV2Completion, partitionCompletedSynthesis } from './synthesize-completion.ts';
+import { findSynthV2Completion, partitionCompletedSynthesis } from './synthesize-completion.ts';
 
 // Re-exports: the drain was peeled to inline-drain.ts (dream-wave C7), the
 // allow-list loader to filing-rules.ts (#2397); patterns.ts and the
@@ -531,7 +531,7 @@ async function runPhaseSynthesizeInner(
       process.stderr.write(`[dream] warning: verdict cache sweep failed: ${e instanceof Error ? e.message : String(e)}\n`);
     }
 
-    const { completed, successfulLegacyKeys, successfulV2Keys, synthesisIdentity } = await partitionCompletedSynthesis(engine, transcripts, opts.sourceId ?? 'default', maintenance, opts.dryRun);
+    const { completed, retainedSkips, successfulV2Keys, synthesisIdentity } = await partitionCompletedSynthesis(engine, transcripts, opts.sourceId ?? 'default', maintenance, opts.dryRun);
     const synthesisState = { candidates: transcripts.length - completed.size, already_synthesized: completed.size };
     const pass = await runTriagePass(engine, transcripts.filter(t => !completed.has(t.filePath)), {
       model: config.triage.model,
@@ -741,19 +741,12 @@ async function runPhaseSynthesizeInner(
       // completed under the pre-v2 path-based key family — single-chunk OR
       // a full chunked set — treat as already-synthesized and skip.
       // Prevents a full paid re-synthesis when the corpus root moves or
-      // the chunking outcome changes across versions.
-      const legacyCompletion = findLegacyCompletion(
-        successfulLegacyKeys,
-        t.filePath,
-        hash16,
-      );
-      if (legacyCompletion) {
-        skipReports.push({
-          filePath: t.filePath,
-          reason: legacyCompletion === 'chunked'
-            ? 'already_synthesized_legacy_chunked'
-            : 'already_synthesized_legacy_single_chunk',
-        });
+      // the chunking outcome changes across versions. #6924: a managed
+      // brain also skips completions recorded before it went managed
+      // (partitionCompletedSynthesis decides which ones count).
+      const retainedSkip = retainedSkips.get(t.filePath);
+      if (retainedSkip) {
+        skipReports.push({ filePath: t.filePath, reason: retainedSkip });
         continue;
       }
 
