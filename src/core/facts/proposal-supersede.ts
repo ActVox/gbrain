@@ -227,6 +227,18 @@ function publishFile(filePath: string, body: string, expected: string, slug: str
   renameSync(tmp, filePath);
 }
 
+/** Restore a failed publication only while the checkout still carries this operation's published bytes. */
+function restorePublishedFile(filePath: string, before: string, published: string, slug: string, sourceId: string): void {
+  if (existsSync(filePath) && readFileSync(filePath, 'utf-8') === published) {
+    writeFileSync(filePath, before, 'utf-8');
+    return;
+  }
+  console.warn(`[facts.proposal] ${slug} (file_database_drift: the proposal transaction failed after publication and the file changed again, `
+    + `so its current bytes were preserved instead of restoring the old file. Check the database copy before retrying the proposal. `
+    + `Import the editor's file with gbrain sync --source ${sourceId}; if the database copy should win, re-save it with write-through on; `
+    + `when both changed, ask the user which edit wins)`);
+}
+
 /** Mirror the page body the fence change produced (the #4696 rule: keep the old hash so sync re-imports). */
 async function mirrorBody(tx: BrainEngine, slug: string, sourceId: string, body: string, fromFile: boolean, expected: StoredBody | null): Promise<string | null> {
   if (fromFile) {
@@ -286,7 +298,7 @@ async function acceptUnmanaged(engine: BrainEngine, proposal: PairProposal, stor
         if (plan && fileBody !== null) { publishFile(filePath!, plan.body, fileBody, slug!, fresh.source_id); published = true; }
       })));
     } catch (err) {
-      if (published) writeFileSync(filePath!, fileBody!, 'utf-8');
+      if (published) restorePublishedFile(filePath!, fileBody!, plan!.body, slug!, fresh.source_id);
       if (err instanceof ProposalFileDrift) return { id: fresh.id, action: 'accept', status: 'refused', reason: err.message };
       throw err;
     }
@@ -330,7 +342,7 @@ async function undoUnmanaged(engine: BrainEngine, proposal: PairProposal, store:
         if (plan && fileBody !== null) { publishFile(filePath!, plan.body, fileBody, before.fence!.slug, fresh.source_id); published = true; }
       })));
     } catch (err) {
-      if (published) writeFileSync(filePath!, fileBody!, 'utf-8');
+      if (published) restorePublishedFile(filePath!, fileBody!, plan!.body, before.fence!.slug, fresh.source_id);
       if (err instanceof ProposalFileDrift) return { id: fresh.id, action: 'undo', status: 'refused', reason: err.message };
       throw err;
     }

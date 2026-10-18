@@ -68,3 +68,20 @@ export function editWhenPrepared(b: FactsBrain, edit: () => Promise<void> | void
     return typeof value === 'function' ? value.bind(target) : value;
   } });
 }
+
+/** An editor saves after the awaited database write, inside the real transaction, before the final rename. */
+export function editAfterWrite(b: FactsBrain, method: 'insertFacts' | 'refreshPageBody', edit: () => void): BrainEngine {
+  let fired = false;
+  const wrap = (engine: BrainEngine): BrainEngine => new Proxy(engine, { get(target, prop) {
+    if (prop === 'transaction') return <T>(run: (tx: BrainEngine) => Promise<T>, opts?: Parameters<BrainEngine['transaction']>[1]) =>
+      target.transaction(tx => run(wrap(tx)), opts);
+    if (prop === method) return async (...args: unknown[]) => {
+      const result = await (target[method] as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+      if (!fired && existsSync(`${b.file}.tmp`)) { fired = true; edit(); }
+      return result;
+    };
+    const value = Reflect.get(target, prop, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  return wrap(b.engine);
+}
