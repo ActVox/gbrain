@@ -26,6 +26,20 @@ export function setPassBatch(key: string, value: BatchHead | null, header = ''):
   if (value) passBatches.set(key, { value, header }); else passBatches.delete(key);
 }
 /**
+ * GBRA-130: whether this pass already passed over the refused receipt of `requestId` (a file changed after admission).
+ * A pass's request ID is its path at its level, so reading the same receipt again means the committed level did not move:
+ * an uncommitted edit, which the settle path holds `worktree_dirty` instead of the pass using its rounds on it.
+ * Records the receipt otherwise. Only the newest passes of this process are kept.
+ */
+export function passedOverBefore(passId: string, requestId: string): boolean {
+  const seen = passedOver.get(passId) ?? new Set<string>();
+  if (seen.has(requestId)) return true;
+  passedOver.delete(passId); passedOver.set(passId, seen.add(requestId));
+  for (const old of passedOver.keys()) if (passedOver.size > 8) passedOver.delete(old);
+  return false;
+}
+const passedOver = new Map<string, Set<string>>();
+/**
  * One step of an in-memory batch inside `tx`: the drain lease fences it (the pass that holds the lease is the batch's only
  * writer), and it lands only while the batch's header still is `beforeHeader` (the cursor row's compare-and-swap contract).
  * Returns false when it did not land.
