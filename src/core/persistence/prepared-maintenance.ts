@@ -532,6 +532,7 @@ async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, co
     return (await import('../chronicle/publish.ts')).prepareChronicleMutation(engine, row, config);
   }
   if (row.intent?.kind === 'managed_maintenance_retire_stale_atoms') return (await import('../repair/stale-atoms.ts')).prepareStaleAtomRetirement(engine, row, config);
+  if (row.intent?.kind === 'managed_maintenance_restore_reextract_atom') return (await import('../repair/atoms-restore.ts')).prepareAtomRestore(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_retire_ghost_page') return (await import('../repair/ghost-pages.ts')).prepareGhostPageRetirement(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_resolve_origin_twin') return (await import('../repair/origin-twins.ts')).prepareOriginTwinResolve(engine, row, config);
   if (row.intent?.kind !== 'managed_maintenance_consolidate') throw opError('invalid_params', 'Unsupported maintenance request.',

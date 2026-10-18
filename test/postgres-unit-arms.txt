@@ -286,6 +286,7 @@ test/pathological/d2-fence-write-overwrite.test.ts
 test/pathological/d21-migration-verifier-record.test.ts
 test/pathological/d22-legacy-hash-body-history.test.ts
 test/pathological/d23-extract-atoms-db-only.test.ts
+test/pathological/d24-atoms-restore.test.ts
 test/pathological/d3-forget-overwrite.test.ts
 test/pathological/d4-proposal-overwrite.test.ts
 test/pathological/d5-phantom-canonical-overwrite.test.ts
