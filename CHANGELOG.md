@@ -10,6 +10,35 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.297.0] - 2026-10-18
+
+**Ten failures in the #6948 class are fixed or ruled out, each proven by a probe that fails on master and passes here: facts no longer land on retired or page-less entity pages, re-keying a fact no longer collides on the ontology index, and one bad item no longer fails or blocks its whole batch.** The sweep covers the GBRA-130 inventory rows B-7, B-9, B-10, C-9, C-23, A-36, A-42, A-51, A-60 and A-65.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Enrichment or `extract_entities` names a person whose page was retired into another | it wrote to the retired alias page | it follows the `superseded_by` chain to the canonical page; an unfollowable chain (no target, or a cycle) is skipped with a reason |
+| A rename, phantom redirect or relink re-keys an ontology fact onto a slug that already holds the same observation | raw `23505` on `idx_facts_ontology_stint_dedup` and the whole write rolled back | the duplicate is dropped first (the active row, then the row at the target, then the oldest survives) and supersession links follow the survivor |
+| An extractor names an organization under `companies/` when its page lives under `orgs/` (#6925) | the fact landed on a page-less slug or stayed unlinked | `companies/`, `orgs/` and `organizations/` resolve as one directory; `projects/` and `people/` keep their own |
+| Facts already stranded on a page-less entity slug | entity recall and trajectories never found them | `gbrain repair facts-rehome` previews each slug with its class and, after you agree, `--apply --expect <hash>` moves exactly the previewed database-only facts. It never runs on upgrade |
+| A put_page fact extraction job died during a provider outage or a config problem | it stayed dead | the next maintenance pass re-submits it once extraction works again (once an hour per job, `facts.absorb_retry.max_resubmits` times, default 3); `gbrain facts retry-dead` lists and resets them and doctor counts them |
+| One entity in a fact extraction batch is refused because its page changed | the whole batch failed on every retry | the other entities' facts are counted and the refused entity is reported |
+| An atom title starts with a dot (#6804) | it minted an ungrammatical `atoms/<date>/.title-…` slug | the dot is stripped, and the next extraction retires an existing dot-led atom |
+| One conversation page in a batch request is refused for a deterministic reason | every page in the batch was blocked | the batch is re-published in halves and only the page that fails alone is blocked |
+| `gbrain repair captured-facts` meets an unreadable corpus file | its session was treated as cleared | the file is listed as `unreadable_corpus_file` and its session is `unclassifiable` |
+| `quarantine clear --force` on a page whose frontmatter lowers its sync tier (#6919) | it promised the page stays cleared | it says the next sync drops the override and how to keep it cleared; `--json` gains `override_survives_sync` |
+
+A-60 (a swallowed belief commit mark) is not real: the ledger's own scan lists the unmarked write, doctor warns, and the reconcile cycle fills the mark. It ships as a regression test.
+
+### What you need to do
+
+Nothing. If facts sit on entity slugs with no page, preview `gbrain repair facts-rehome` and apply it after reviewing.
+
+### For contributors
+
+- Row probes live in `test/pathological/<row>-*.test.ts` and run on PGLite and Postgres. `check:postgres-lanes` counts a `pathologicalArms()` call as a Postgres arm.
+
 ## [0.60.296.0] - 2026-10-18
 
 **Several live pages recording one file no longer stop a source's whole managed sync, verified duplicates heal on their own, and no writer can create such a pair any more.** Hotfix for #6948.
