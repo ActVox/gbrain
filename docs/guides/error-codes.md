@@ -2670,7 +2670,7 @@ More: [docs/ENGINES.md#pg-statement-build-failed](../../docs/ENGINES.md#pg-state
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Another gbrain process holds this PGLite brain's single-writer lock. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait for the current command or server to close, then retry. Do not remove a live lock. Reason legacy_owner_unverified is different: a lock folder from an older gbrain whose owner cannot be proven dead never frees itself, so ask the user and run the read-only preview in fix (gbrain pglite-repair --legacy-lock --dry-run). | agent | `repeat the read that failed` | 1 | yes |
+| Another gbrain process holds this PGLite brain's single-writer lock. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait for the current command or server to close, then retry. Do not remove a live lock. Reason legacy_owner_unverified is different: a lock folder from an older release whose owner cannot be proven dead never frees itself, so ask the user and run the read-only preview in fix (gbrain pglite-repair --legacy-lock --dry-run). | agent | `repeat the read that failed` | 1 | yes |
 
 Reasons: `timeout`, `live_serve`, `legacy_owner_unverified`.
 
@@ -2792,7 +2792,7 @@ More: [docs/guides/repair.md#projection-owner-resident](../../docs/guides/repair
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A clone gbrain owns (sources add --url) has local changes in its checkout, so git pull --ff-only cannot fast-forward it and every sync of the source stops at the pull. | Older gbrain releases appended ## Facts fence rows to clone files on unmanaged brains (#6946); a local change to a file the upstream also changed blocks every fast-forward. Current releases keep facts about a clone database-only. | Ask the user, then preview the repair: gbrain repair url-clone-fences --source <id>. It proves which files differ from HEAD only by gbrain fence rows and restores those after keeping their facts database-only; a file with any other edit is named and left for the user. | user | `repeat the read that failed` | 1 | no |
+| A gbrain-owned clone (sources add --url) has local changes in its checkout, so git pull --ff-only cannot fast-forward it and every sync of the source stops at the pull. | Older gbrain releases appended ## Facts fence rows to clone files on unmanaged brains (#6946); a local change to a file the upstream also changed blocks every fast-forward. Current releases keep facts about a clone database-only. | Ask the user, then preview the repair: gbrain repair url-clone-fences --source <id>. It proves which files differ from HEAD only by gbrain fence rows and restores those after keeping their facts database-only; a file with any other edit is named and left for the user. | user | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/repair.md#url-clone-fences](../../docs/guides/repair.md#url-clone-fences)
 
@@ -3885,8 +3885,6 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | A page's Git or embedding work is withheld because its withdrawal mirror failed before rewriting the page's file; the file may still hold the withdrawn text. | A withdrawal's Git and embedding effects touch only the pages its mirror committed (GBRA-130 A-12). Retrying the request's effects reruns the mirror for this page and re-arms the withheld work once the mirror commits it. | Read the parked effects with gbrain doctor --only parked_effects, fix the cause the mirror recorded, then preview gbrain sources writer retry-effects <source> --request-id <id> --dry-run and run it without --dry-run. | agent | `gbrain doctor --json` | 1 | no |
-
-More: [docs/architecture/key-files/core-persistence.md](../../docs/architecture/key-files/core-persistence.md)
 
 ### withdrawal_provenance
 

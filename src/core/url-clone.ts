@@ -111,7 +111,7 @@ export async function urlClonePullBlock(engine: SqlEngine, sourceId: string): Pr
     code: 'pull_blocked_local_changes',
     source_id: sourceId,
     paths,
-    message: `Source "${sourceId}" is a clone gbrain owns (sources add --url) and its checkout has local changes in ${paths.length} file(s) (${shown}), `
+    message: `Source "${sourceId}" is a gbrain-owned clone (sources add --url) and its checkout has local changes in ${paths.length} file(s) (${shown}), `
       + 'so git pull --ff-only cannot fast-forward it and every sync stops at the pull. Older gbrain releases appended ## Facts fence rows to clone files; '
       + 'current releases keep facts about a clone database-only.',
     fix: {

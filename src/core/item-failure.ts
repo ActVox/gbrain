@@ -115,11 +115,6 @@ function classifyOne(error: unknown): ClassifiedItemFailure | null {
   if (typeof name === 'string' && ITEM_ERROR_NAMES[name]) return { code: ITEM_ERROR_NAMES[name]!, scope: 'item', class: 'content', message, requestId: null };
   const pending = acceptedPendingReceipt(error);
   if (pending) return { code: 'write_pending', scope: 'pending', class: 'transient', message, requestId: pending.request_id };
-  const refusal = providerItemRefusal(error);
-  if (refusal) return { code: refusal, scope: 'item', class: 'content', message, requestId: null };
-  if ((typeof name === 'string' && AI_ERROR_NAMES.has(name)) || /\bfetch failed\b/i.test(message)) {
-    return { code: 'provider_error', scope: 'item', class: 'transient', message, requestId: null };
-  }
   if (error instanceof OperationError) {
     const code = String(error.code === 'storage_error' && error.writeError ? error.writeError : error.canonicalCode);
     const requestId = error.writeRequest?.request_id ?? null;
@@ -136,6 +131,11 @@ function classifyOne(error: unknown): ClassifiedItemFailure | null {
   }
   if (typeof raw === 'string' && RUN_ERRNOS.has(raw)) return { code: 'disk_full', scope: 'run', class: 'transient', message, requestId: null };
   if (typeof raw === 'string' && ITEM_ERRNOS.has(raw)) return { code: 'unreadable_item', scope: 'item', class: 'content', message, requestId: null };
+  const refusal = providerItemRefusal(error);
+  if (refusal) return { code: refusal, scope: 'item', class: 'content', message, requestId: null };
+  if ((typeof name === 'string' && AI_ERROR_NAMES.has(name)) || /^fetch failed\b/i.test(message)) {
+    return { code: 'provider_error', scope: 'item', class: 'transient', message, requestId: null };
+  }
   if (/ECONNRESET|ECONNREFUSED|connection (terminated|ended|closed)|Connection terminated|socket hang up/i.test(message)) {
     return { code: 'connection_lost', scope: 'run', class: 'transient', message, requestId: null };
   }
@@ -145,7 +145,8 @@ function classifyOne(error: unknown): ClassifiedItemFailure | null {
 /**
  * Classifies one failure raised while processing a single item. The `cause`
  * chain is walked (at most 5 deep): a run-scoped stop anywhere in it wins, so a
- * wrapped abort or authorization failure is never one item's; otherwise the
+ * wrapped abort or authorization failure is never one item's (a model provider's
+ * own socket failure under a provider error stays the provider's); otherwise the
  * outermost recognized error decides.
  */
 export function classifyItemFailure(error: unknown): ClassifiedItemFailure {
@@ -154,7 +155,8 @@ export function classifyItemFailure(error: unknown): ClassifiedItemFailure {
   let current: unknown = error;
   for (let depth = 0; depth < 5 && current != null; depth++) {
     const classified = classifyOne(current);
-    if (classified?.scope === 'run') return depth === 0 ? classified : { ...classified, message };
+    const providerTransport = first?.code === 'provider_error' && classified?.code === 'connection_lost';
+    if (classified?.scope === 'run' && !providerTransport) return depth === 0 ? classified : { ...classified, message };
     if (classified && !first) first = depth === 0 ? classified : { ...classified, message };
     current = (current as { cause?: unknown }).cause;
   }

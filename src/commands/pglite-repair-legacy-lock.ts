@@ -87,7 +87,7 @@ async function applyUnderKernelLock(dataDir: string, json: boolean, args: readon
   if (!auth) return currentExitCode();
   const receipt = applyLegacyLockRemoval(inspection);
   if (json) emit({ status: 'ok', ...receipt, next_command: 'gbrain doctor --json' });
-  else console.log(`Moved the legacy lock of ${receipt.data_dir} to ${receipt.moved_to} and wrote the kernel-v1 marker.\n  Undo (with gbrain stopped): ${receipt.restore_command}\n  Next: gbrain doctor --json`);
+  else console.log(`Moved the legacy lock of ${receipt.data_dir} to ${receipt.moved_to} and wrote the kernel-v1 marker.\n  Undo (once no process has the brain open): ${receipt.restore_command}\n  Next: gbrain doctor --json`);
   return 0;
 }
 
