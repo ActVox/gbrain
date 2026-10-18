@@ -371,6 +371,7 @@ test/shared-skills-writer-boundary.test.ts
 test/source-retire-missing-checkout.test.ts
 test/source-row-diagnostics.test.ts
 test/stats-health-source-scope.test.ts
+test/sync-absent-from-worktree-s27.test.ts
 test/sync-admission-6712.test.ts
 test/sync-capacity-preflight.test.ts
 test/sync-checkpoint-moved-6834.test.ts

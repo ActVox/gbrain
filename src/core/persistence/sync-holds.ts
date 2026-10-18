@@ -985,7 +985,7 @@ export interface SyncHoldPolicy {
   cap: number;
   escalateCount: number;
   escalatePct: number;
-  /** What a refusal of bytes that imported before does: stop the run (default) or hold it as `parser_regression`. */
+  /** What a refusal of bytes that imported before does: hold it as `parser_regression` (default) or, with `GBRAIN_SYNC_PARSER_REGRESSION=stop`, stop the run. */
   parserRegression: 'stop' | 'hold';
 }
 
@@ -1001,7 +1001,7 @@ export async function readSyncHoldPolicy(engine: Pick<BrainEngine, 'getConfig'>,
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
   };
   return { mode: mode === 'fail' ? 'fail' : 'hold', cap: Math.floor(number('sync.hold_cap', GIT_HOLD_CAP)), escalateCount: number('sync.hold_escalate_count', GIT_HOLD_ESCALATE_COUNT),
-    escalatePct: number('sync.hold_escalate_pct', GIT_HOLD_ESCALATE_PCT), parserRegression: retiredSyncSetting('sync.parser_regression', env).toLowerCase() === 'hold' ? 'hold' : 'stop' };
+    escalatePct: number('sync.hold_escalate_pct', GIT_HOLD_ESCALATE_PCT), parserRegression: retiredSyncSetting('sync.parser_regression', env).toLowerCase() === 'stop' ? 'stop' : 'hold' };
 }
 
 /** More holds than the source should carry, or too large a share of this run's screened imports. */
@@ -1012,8 +1012,9 @@ export function holdsEscalated(policy: Pick<SyncHoldPolicy, 'escalateCount' | 'e
 
 /**
  * Import provenance of a page synced from a file: the exact bytes it imported
- * and the gbrain that validated them. The parser-regression stop fires only
- * when a newer gbrain refuses bytes this record says imported validated.
+ * and the gbrain that validated them. A parser regression (held by default,
+ * stopped under GBRAIN_SYNC_PARSER_REGRESSION=stop) is only a newer gbrain
+ * refusing bytes this record says imported validated.
  */
 export interface SyncImportProvenance {
   source_id: string;
