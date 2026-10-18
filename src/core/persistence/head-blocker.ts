@@ -7,7 +7,8 @@
  * reports `restart_required` (a zombie publication), or a withdrawal-mirror effect recovery its own last attempt refused
  * `unexpected_file_bytes` whose file still matches neither recorded version (an edit made while the mirror was publishing;
  * recovery only finishes forward and never overwrites it), or a page write's publication recovery refused the same way (#6650;
- * `gbrain repair stuck-recovery` is its exit), whether it blocks a queued head or is the head itself. Every other blocker is live and transient (a foreground publication,
+ * `gbrain repair stuck-recovery` is its exit), whether it blocks a queued head or is the head itself, or an effect or request
+ * recovery record a newer gbrain wrote (`recovery_version_unsupported`: an upgrade is its exit). Every other blocker is live and transient (a foreground publication,
  * a refresh or recovery making progress, a lapsed lease the next consumer reclaims), so the drain keeps its progress-aware wait.
  */
 import { existsSync, readFileSync } from 'node:fs';
@@ -18,6 +19,7 @@ import { claimStateOf } from './claim-phase.ts';
 import { isTerminal, type RequestState } from './model.ts';
 import { sha256 } from './digest.ts';
 import { claimableWriteSql, EARLIER_HEAD, foregroundPrioritySql, SYNC_KIND } from './journal.ts';
+import { recoveryUpgradeFix, recoveryVersionKnown, type RecoveryTable } from './recovery-version.ts';
 
 export type HeadBlockerPredicate = 'worktree_owner' | 'refresh_fence' | 'effect_recovery' | 'withdrawal_mirror' | 'request_recovery'
   | 'zombie_publication' | 'lease' | 'root_hold';
@@ -43,7 +45,7 @@ interface RowRef { request_id: string; state: string; claim_phase: unknown; exec
 interface ProbeRow { id: string; worktree_id: string | null; owner_host_id: string | null; worktree_state: string | null; claimable: boolean;
   fence: { id: string; state: string } | null; effect_recovery: EffectRecoveryRef[] | null; mirrors: string[] | null; request_recovery: RequestRecoveryRef[] | null;
   earlier: RowRef[] | null; ahead: RowRef[] | null }
-interface EffectRecoveryRef { id: string; error_code: string | null; slug: string | null; path: string | null; before: string | null; after: string | null }
+interface EffectRecoveryRef { id: string; error_code: string | null; slug: string | null; path: string | null; before: string | null; after: string | null; version: unknown }
 interface RequestRecoveryRef { request_id: string; state: RequestState; blocked_reason: string | null; slug: string; version: string | null; path: string | null;
   before: string | null; after: string | null }
 const REQUEST_RECOVERY = (alias: string) => `jsonb_build_object('request_id',${alias}.request_id::text,'state',${alias}.state,'blocked_reason',${alias}.blocked_reason,
@@ -65,7 +67,12 @@ const effectRecoveryStuck = (effect: EffectRecoveryRef) => stuckOnFile(effect.er
 /** A live page recovery (a terminal one never restores its file; a skill bundle has no stuck-recovery exit). */
 const requestRecoveryStuck = (request: RequestRecoveryRef) => request.version === '1' && !isTerminal(request)
   && stuckOnFile(request.blocked_reason, request.path, request.before, request.after);
+/** A record a newer gbrain wrote (recovery-version.ts): no recovery here finishes it, so only an upgrade clears it. */
+const newerRecord = (table: RecoveryTable, version: unknown) => !recoveryVersionKnown(table, { version: typeof version === 'string' && /^\d+$/.test(version) ? Number(version) : version });
+const newerBlocker = (predicate: 'effect_recovery' | 'request_recovery', ids: string[]): HeadBlocker =>
+  ({ predicate, ids, state: 'recovery_version_unsupported', owner: null, intervention: true });
 const requestRecoveryBlocker = (refs: RequestRecoveryRef[]): HeadBlocker => {
+  if (refs.some(ref => newerRecord('persistence_requests', ref.version))) return newerBlocker('request_recovery', refs.map(ref => ref.request_id));
   const stuck = refs.find(requestRecoveryStuck);
   return { predicate: 'request_recovery', ids: refs.map(ref => ref.request_id), state: stuck ? 'unexpected_file_bytes' : null, owner: null, intervention: !!stuck,
     ...(stuck ? { file: { slug: stuck.slug, path: stuck.path! } } : {}) };
@@ -89,7 +96,7 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
       (SELECT jsonb_build_object('id',f.id::text,'state',f.state) FROM persistence_worktree_refreshes f
         WHERE f.worktree_id=r.worktree_id AND f.state IN ('fenced','merged','recovery_required') LIMIT 1) AS fence,
       (SELECT jsonb_agg(jsonb_build_object('id',e.id::text,'error_code',e.error_code,'slug',e.recovery->>'slug','path',e.recovery->>'path',
-        'before',e.recovery->>'beforeHash','after',e.recovery->>'afterHash') ORDER BY e.id) FROM persistence_effects e WHERE e.worktree_id=r.worktree_id AND e.recovery IS NOT NULL) AS effect_recovery,
+        'before',e.recovery->>'beforeHash','after',e.recovery->>'afterHash','version',e.recovery->'version') ORDER BY e.id) FROM persistence_effects e WHERE e.worktree_id=r.worktree_id AND e.recovery IS NOT NULL) AS effect_recovery,
       (SELECT array_agg(m.id::text) FROM persistence_effects m WHERE m.worktree_id=r.worktree_id AND m.kind='withdrawal-mirror' AND m.state IN ('queued','running')
         AND (NOT (m.data ? 'targets') OR m.data->'targets' @> jsonb_build_array(jsonb_build_object('slug',r.slug)))) AS mirrors,
       (SELECT jsonb_agg(${REQUEST_RECOVERY('b')} ORDER BY b.sequence) FROM persistence_requests b WHERE b.worktree_id=r.worktree_id AND b.recovery IS NOT NULL) AS request_recovery,
@@ -112,6 +119,10 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
       const live = await refreshOwnerLive(row.worktree_id);
       blocked({ predicate: 'refresh_fence', ids: [row.fence.id], state: row.fence.state, owner: { kind: 'refresh', pid: null, live, restart_required: false },
         intervention: row.fence.state === 'recovery_required' || live === false });
+      continue;
+    }
+    if (row.effect_recovery?.length && row.effect_recovery.some(effect => newerRecord('persistence_effects', effect.version))) {
+      blocked(newerBlocker('effect_recovery', row.effect_recovery.map(effect => effect.id)));
       continue;
     }
     if (row.effect_recovery?.length) {
@@ -147,7 +158,7 @@ export async function readHeadBlockers(engine: BrainEngine, ids: string[], hostI
 async function recoveringHeadBlocker(engine: BrainEngine, id: string, hostId: string | null, opts: { timeoutMs?: number; signal?: AbortSignal }): Promise<HeadBlocker | null> {
   const [row] = await engine.executeRaw<{ ref: RequestRecoveryRef; owner_host_id: string | null }>(`SELECT ${REQUEST_RECOVERY('r')} AS ref, w.owner_host_id::text AS owner_host_id
     FROM persistence_requests r JOIN persistence_worktrees w ON w.id=r.worktree_id WHERE r.id=$1::uuid AND r.recovery IS NOT NULL`, [id], opts);
-  if (!row || !hostId || row.owner_host_id !== hostId || !requestRecoveryStuck(row.ref)) return null;
+  if (!row || !hostId || row.owner_host_id !== hostId || (!requestRecoveryStuck(row.ref) && !newerRecord('persistence_requests', row.ref.version))) return null;
   return requestRecoveryBlocker([row.ref]);
 }
 
@@ -178,6 +189,12 @@ export function headBlockerAction(blocker: HeadBlocker, sourceId: string, resume
       why: `Refresh ${blocker.ids[0]} left the checkout fenced (${blocker.state})${blocker.owner?.live === false ? ' and no refresh process holds its lock' : ''}, so nothing on the source's worktree is claimed. `
         + `Resuming it finishes (or names why it cannot finish) the refresh and lifts the fence; then rerun: ${resumeCommand}`,
       verify: { argv: status } };
+  }
+  if (blocker.state === 'recovery_version_unsupported') {
+    const kind = blocker.predicate === 'effect_recovery' ? 'withdrawal-mirror effect' : 'write request';
+    return { ...recoveryUpgradeFix(sourceId),
+      why: `A ${kind} recovery record on source ${sourceId}'s worktree (${blocker.ids.join(', ')}) was written by a newer gbrain, so this gbrain cannot finish it and every write there waits; `
+        + `waiting does not clear it. Upgrading gbrain on the owner host lets its writer finish the recovery; then rerun: ${resumeCommand}` };
   }
   if (blocker.predicate === 'zombie_publication') {
     const who = `the gbrain ${blocker.owner?.kind ?? 'owner'} process${blocker.owner?.pid ? ` (pid ${blocker.owner.pid})` : ''}`;

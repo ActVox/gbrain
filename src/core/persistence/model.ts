@@ -1,4 +1,5 @@
 import type { BrainEngine } from '../engine.ts';
+import { assertRecoveryVersion } from './recovery-version.ts';
 
 export type Principal = { kind: 'oauth_client' | 'legacy_token' | 'local_cli' | 'local_stdio' | 'application'; id: string };
 export type RequestState = 'queued' | 'running' | 'recovering' | 'committed' | 'conflict' | 'failed' | 'cancelled';
@@ -58,6 +59,7 @@ export interface BundleRecoveryRecord {
 }
 export type RecoveryRecord = FileRecoveryRecord | BundleRecoveryRecord;
 export function recoveryFiles(record: RecoveryRecord): FileRecoveryRecord[] {
+  assertRecoveryVersion('persistence_requests', record, null);
   if (record.version === 1) return [record];
   if (record.version === 2 && record.target === 'skill_bundle' && Array.isArray(record.files)
     && record.files.length > 0 && record.files.length <= 128 && record.files.every(file => file.version === 1)) return record.files;
