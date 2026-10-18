@@ -12,7 +12,7 @@ export const DEFERRED: ReadonlyArray<readonly [string, string, string]> = [
   ['A-8', 'GBRA-129', 'Managed discovery: two pages claim one source_path, or the page at the file\'s slug records another origin'],
   ['A-16', 'next wave (effect variant fixed with C-1)', 'A staging-bytes recovery, or a terminal request that still holds a recovery record, has no preview-bound exit (only the withdrawal-mirror effect variant is fixed)'],
   ['A-19', 'deferred (intentional gate; narrow later)', 'Legacy rename reconcile'],
-  ['A-20', 'GBRA-101 (4b)', 'Managed screen'],
+  ['A-20', 'not reproducible (4b): frontmatter validation is pack-independent, pinned by test/sync-pack-independent-frontmatter-6712.test.ts; real if that guard fails', 'Managed screen'],
   ['A-29', 'deferred (intentional gate; narrow later)', 'One live job (waiting/active/delayed/waiting-children/paused) whose submission_authority is SQL NULL, malformed, or a future version written by a n...'],
   ['A-32', 'deferred: next wave (test.todo)', 'Legacy un-syncable sweep'],
   ['A-33', 'deferred: next wave (test.todo)', 'Full sync reconcile delete'],
