@@ -61,7 +61,7 @@ import { isAborted } from '../abort-check.ts';
 import { logPhantomEvent, type PhantomOutcome } from '../facts/phantom-audit.ts';
 import { MOVE_WITHDRAWAL_SUBJECT_SQL } from '../facts/withdrawal-schema.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
-import { fileBodyMatchesStored, fileDatabaseDriftFix, mirrorFileBody, readStoredBody, replaceStoredBody, replaceableFile } from '../facts/file-body-guard.ts';
+import { fileBodyMatchesStored, fileDatabaseDriftToken, mirrorFileBody, readStoredBody, replaceStoredBody, replaceableFile } from '../facts/file-body-guard.ts';
 import { recordRenameAlias } from '../page-state/rename-alias.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
@@ -309,22 +309,18 @@ async function mergeIntoCanonicalBody(
   if (body === null) return { renumber };
   const written = await maintenanceTransaction(engine, tx =>
     replaceStoredBody(tx, sourceId, canonical.slug, { compiled_truth: body, timeline: expected.timeline ?? '' }, expected));
-  return written ? { renumber } : { held: `${canonical.slug} (file_database_drift: the canonical's database body changed while the phantom was redirected, so nothing was written; the next cycle retries)` };
+  return written ? { renumber } : { held: fileDatabaseDriftToken(canonical.slug, sourceId, 'during', 'the phantom was not redirected; the next cycle retries', 'the phantom redirect') };
 }
 
 /** #6982: the hold entry for a phantom whose canonical file and database body differ (or moved during the redirect). */
 function canonicalDriftToken(canonical: string, phantomSlug: string, sourceId: string, when: 'before' | 'during'): string {
-  return `${canonical} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : 'changed while the phantom was redirected'}, `
-    + `so the phantom ${phantomSlug} was not redirected and neither copy changed. ${fileDatabaseDriftFix(canonical, sourceId)})`;
+  return fileDatabaseDriftToken(canonical, sourceId, when, `the phantom ${phantomSlug} was not redirected`, 'the phantom redirect');
 }
 
-/** #6982: the hold entry for a phantom whose own file holds content its database row lacks. */
+/** #6982: the hold entry for a phantom whose own file holds content its database row lacks (or changed before the unlink). */
 function phantomFileDriftToken(phantomSlug: string, sourceId: string, when: 'before' | 'during'): string {
-  return when === 'before'
-    ? `${phantomSlug} (file_database_drift: the phantom's file holds content its database row lacks, so it was not redirected and the file was kept. `
-      + `gbrain sync --source ${sourceId} imports the file; ask the user before discarding it)`
-    : `${phantomSlug} (file_database_drift: the phantom's file changed while it was redirected, so the file was kept. `
-      + `gbrain sync --source ${sourceId} imports it again as a page; ask the user whether to keep it or delete the file)`;
+  return fileDatabaseDriftToken(phantomSlug, sourceId, when, when === 'before' ? 'the phantom was not redirected'
+    : 'the redirect moved its rows to the canonical page but kept the file, which sync imports again as a page until the user deletes it', 'the phantom redirect');
 }
 
 /** A phantom left in place by a `file_database_drift` hold: audited as drift and reported by the pass. */

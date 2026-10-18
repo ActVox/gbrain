@@ -44,7 +44,7 @@ import type { Page, PageType } from '../types.ts';
 // slot and can deadlock a fully-occupied worker (#2050). synthesize.ts
 // drains its own children the same way.
 import { loadAllowedSlugPrefixes, loadOutputRoot, runSubagentsInline } from './synthesize.ts';
-import { withFileHolds, writeDreamPageFile } from './derived-write-through.ts';
+import { reverseWriteDreamRefs, withFileHolds } from './derived-write-through.ts';
 import { stampDreamProvenance } from './dream-provenance.ts';
 import { probeChatModelWithKey } from '../ai/chat-key-probe.ts';
 import { normalizeModelId } from '../model-id.ts';
@@ -425,8 +425,7 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     const reverseWriteCount = maintenance ? await verifyMaintenanceOutputs(engine, maintenance, finalized)
       : await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal, fileHolds);
     const details = { reflections_considered: submitted.length, reflections_selected: selected, plan_basis: plan.basis, patterns_written: finalized.length,
-      ...(quoteVerify ? { quote_verify: quoteVerify } : {}), reverse_write_count: reverseWriteCount, publish_deferred: held, ...grounding.details,
-      ...(fileHolds.length ? { file_holds: fileHolds } : {}),
+      ...(quoteVerify ? { quote_verify: quoteVerify } : {}), reverse_write_count: reverseWriteCount, publish_deferred: held, ...grounding.details, ...(fileHolds.length ? { file_holds: fileHolds } : {}),
       timeline_appends: appends.length, appended_unverified: appendedUnverified, child_outcome: outcome, job_id: job.id };
     const appendedNote = appends.length > 0 ? `; ${appends.length} timeline entr${appends.length === 1 ? 'y' : 'ies'} appended${quoteVerify ? ' (quote-verified)' : ''}` : '';
 
@@ -1086,50 +1085,13 @@ async function countChildTimelineAppends(engine: BrainEngine, childIds: number[]
 
 // ── Reverse-write ────────────────────────────────────────────────────
 
-import { validateSourceId } from '../utils.ts';
 import { renderTimelineEntry } from '../timeline-write-through.ts';
 import { materializedMarker } from '../timeline-marker.ts';
 
-/**
- * Reverse-render each pattern page to its markdown file (`writeDreamPageFile`, #6982): a page whose file holds an edit
- * the database lacks keeps that file and its `file_database_drift` entry is pushed to `held`.
- */
-async function reverseWriteRefs(
-  engine: BrainEngine,
-  brainDir: string,
-  refs: Array<{ slug: string; source_id: string }>,
-  nativeSourceId = 'default',
-  signal?: AbortSignal,
-  held?: string[],
-): Promise<number> {
-  let count = 0;
-  for (const { slug, source_id } of refs) {
-    throwIfAborted(signal, '[dream] patterns reverse-write');
-    // v0.32.8 F6: guard against malformed source_id (would let join() break
-    // out of brainDir). validateSourceId throws on `..`, `/`, etc.
-    validateSourceId(source_id);
-    const page = await engine.getPage(slug, { sourceId: source_id });
-    if (!page) continue;
-    const tags = await engine.getTags(slug, { sourceId: source_id });
-    // #4077: re-check after the row reads — an abort that lands during
-    // getPage/getTags must not reach this ref's file write.
-    throwIfAborted(signal, '[dream] patterns reverse-write');
-    try {
-      // v0.32.8 F6: with no checkout root, foreign-source pages land under
-      // brainDir/.sources/<id>/<slug>.md so same-slug-different-source pages
-      // don't collide on disk; the cycle's own source (#1586: brainDir IS that
-      // source's checkout) stays at brainDir/<slug>.md. `.sources/` is a
-      // reserved prefix; walkBrainRepo skips dot-dirs.
-      const file = await writeDreamPageFile(engine, brainDir, slug, source_id, { nativeSourceId, markdown: renderPageToMarkdown(page, tags) });
-      if (file.written) count++;
-      else if (file.held) held?.push(file.held);
-      else if (file.error) process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${file.error}\n`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${msg}\n`);
-    }
-  }
-  return count;
+/** Reverse-render each pattern page to its markdown file (`reverseWriteDreamRefs`, #6982); holds go to `held`. */
+async function reverseWriteRefs(engine: BrainEngine, brainDir: string, refs: Array<{ slug: string; source_id: string }>,
+  nativeSourceId = 'default', signal?: AbortSignal, held?: string[]): Promise<number> {
+  return reverseWriteDreamRefs(engine, brainDir, refs, { phase: 'patterns', nativeSourceId, signal, held, render: renderPageToMarkdown });
 }
 
 function renderPageToMarkdown(page: Page, tags: string[]): string {

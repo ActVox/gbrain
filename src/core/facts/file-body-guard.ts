@@ -24,8 +24,8 @@ export interface StoredBody {
 
 /** The diagnostic and repair choices for a held unmanaged file/body mirror. */
 export function fileDatabaseDriftToken(slug: string, sourceId: string, when: 'before' | 'during',
-  disposition = 'its rows stay unfenced, active and searchable until they agree'): string {
-  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : 'changed while the fence step ran'}, `
+  disposition = 'its rows stay unfenced, active and searchable until they agree', step = 'the fence step'): string {
+  return `${slug} (file_database_drift: the canonical file and the database body ${when === 'before' ? 'differ' : `changed while ${step} ran`}, `
     + `so neither was replaced and ${disposition}. If the file holds the newer edit, `
     + `gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
     + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins)`;
@@ -75,12 +75,6 @@ export async function mirrorFileBody(tx: BrainEngine, sourceId: string, slug: st
   return replaceStoredBody(tx, sourceId, slug, mirroredBody(fileBytes, slug), expected, hash);
 }
 
-/** The fix sentence of a `file_database_drift` hold: which command settles each side, and when to ask the user. */
-export function fileDatabaseDriftFix(slug: string, sourceId: string): string {
-  return `If the file holds the newer edit, gbrain sync --source ${sourceId} imports it; if the database copy is newer, re-save it with write-through on `
-    + `(gbrain get ${slug} --source ${sourceId}, then gbrain put ${slug} --source-id ${sourceId}); when both changed, ask the user which edit wins`;
-}
-
 /** Page states a checkout file is compared with: the live row, then its newest page_versions rows. */
 const HISTORY_ROWS = 20;
 
@@ -91,7 +85,7 @@ function fileHeldBy(fileBytes: string, slug: string, state: StoredState): boolea
   if (!fileBodyMatchesStored(fileBytes, slug, state)) return false;
   const file = contentHashFrontmatterAndTags({ frontmatter: parseMarkdown(fileBytes, `${slug}.md`).frontmatter });
   const stored = contentHashFrontmatterAndTags({ frontmatter: state.frontmatter ?? {} });
-  return Object.entries(file.frontmatter).every(([key, value]) => stableJson(value) === stableJson(stored.frontmatter[key]));
+  return Object.entries(file.frontmatter).every(([key, value]) => stored.frontmatter[key] !== undefined && stableJson(value) === stableJson(stored.frontmatter[key]));
 }
 
 /**

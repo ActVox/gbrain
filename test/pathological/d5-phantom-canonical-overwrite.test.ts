@@ -144,9 +144,9 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         writeFileSync(b.path(CANONICAL), edited);
         const bodyBefore = await b.body(CANONICAL);
         const result = await expectUnitNotAborted(() => b.pass());
-        expect({ redirected: result.redirected, held: heldFor(result, CANONICAL).length }).toEqual({ redirected: 0, held: 1 });
         expect({ body: (await b.body(CANONICAL)) === bodyBefore, file: b.file(CANONICAL) === edited }).toEqual({ body: true, file: true });
         expect(await b.live(PHANTOM)).toBe(true);
+        expect({ redirected: result.redirected, held: heldFor(result, CANONICAL).length }).toEqual({ redirected: 0, held: 1 });
       });
     }, 180_000);
 
@@ -157,12 +157,13 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         await b.dbEdit(CANONICAL, DB_EDIT);
         const [canonicalFile, phantomFile] = [b.file(CANONICAL), b.file(PHANTOM)];
         const result = await expectUnitNotAborted(() => b.pass());
-        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
         const body = await b.body(CANONICAL);
         expect({ edit: body.includes(DB_EDIT), fence: claims(body) }).toEqual({ edit: true, fence: [CLAIM] });
-        expect({ canonicalFile: b.file(CANONICAL) === canonicalFile, phantomFile: b.file(PHANTOM) === phantomFile }).toEqual({ canonicalFile: true, phantomFile: true });
+        expect({ canonicalFile: b.file(CANONICAL) === canonicalFile, phantomFile: existsSync(b.path(PHANTOM)) && b.file(PHANTOM) === phantomFile })
+          .toEqual({ canonicalFile: true, phantomFile: true });
         expect(await b.versionsHolding(CANONICAL, DB_EDIT)).toBeGreaterThan(0);
         expect(await b.live(PHANTOM)).toBe(false);
+        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
       });
     }, 180_000);
 
@@ -170,9 +171,9 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       await withBrain(databaseUrl, async b => {
         const versionsBefore = await b.versionsHolding(CANONICAL, 'works at acme-example');
         const result = await expectUnitNotAborted(() => b.pass());
-        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
         expect({ file: claims(b.file(CANONICAL)), db: claims(await b.body(CANONICAL)) }).toEqual({ file: [CLAIM], db: [CLAIM] });
         expect(await b.versionsHolding(CANONICAL, 'works at acme-example')).toBe(versionsBefore + 1);
+        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
         expect({ phantomLive: await b.live(PHANTOM), phantomFile: existsSync(b.path(PHANTOM)) }).toEqual({ phantomLive: false, phantomFile: false });
       });
     }, 180_000);

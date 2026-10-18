@@ -1,7 +1,7 @@
 import { observationDateLine, observationDateRule } from '../ai/date-grounding.ts';
 import { isConsumerDateGroundingOn } from '../facts/extract.ts';
 import { maintenancePreflight, publishMaintenancePage, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
-import { withFileHolds, writeDreamPageFile } from './derived-write-through.ts';
+import { reverseWriteDreamRefs, withFileHolds, writeDreamPageFile } from './derived-write-through.ts';
 import { deferPublishOrThrow, finishDeferredPostprocess, loadCommittedOutputsOrDefer, postprocessManagedSynthesis, withPostprocessConflicts, withPublishPending, type PostprocessConflict, type RetainedOutput } from './synthesize-postprocess.ts';
 /**
  * Synthesize phase (v0.23; #4152 two-stage cascade) — conversation-to-brain
@@ -89,7 +89,6 @@ import { discoverTranscripts, DEFAULT_EXCLUDE_PATTERNS, type DiscoveredTranscrip
 import { loadStorageConfig, isDbOnly } from '../storage-config.ts';
 import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
-import { validateSourceId } from '../utils.ts';
 import { safeSplitIndex, truncateUtf8 } from '../text-safe.ts';
 import { PAGE_SLUG_SEG } from '../cjk.ts';
 import { withChatPhase, estimateChatCostUsd } from '../ai/chat-usage.ts';
@@ -1175,16 +1174,14 @@ async function runPhaseSynthesizeInner(
 
     // Dual-write: reverse-render each DB row → markdown file.
     const fileHolds: string[] = [];
-    const reverseWriteCount = maintenance ? (maintenance.binding ? writtenRefs.length : 0)
-      : await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal, fileHolds);
+    const reverseWriteCount = maintenance ? (maintenance.binding ? writtenRefs.length : 0) : await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal, fileHolds);
 
     const summarySlug = buildDreamSummarySlug(config.outputRoot, summaryDate);
     const writtenSlugs = writtenRefs.map(r => r.slug);
     if (SUMMARY_SLUG_RE.test(summarySlug) && !publishPending) {
       const preserveSummary = maintenance && !writtenRefs.length && await engine.readPageSnapshot(summarySlug, { sourceId: cycleSourceId });
-      const summaryHeld = preserveSummary ? undefined : await writeSummaryPage(engine, opts.brainDir, summarySlug, summaryDate, finalizedRefs.map(r => r.slug), childOutcomes, cycleSourceId, opts.signal, maintenance)
-        .catch((e: unknown) => { deferPublishOrThrow(e, summarySlug); publishPending++; return undefined; });
-      if (summaryHeld) fileHolds.push(summaryHeld);
+      if (!preserveSummary) await writeSummaryPage(engine, opts.brainDir, summarySlug, summaryDate, finalizedRefs.map(r => r.slug), childOutcomes, cycleSourceId, opts.signal, maintenance)
+        .then(held => held && fileHolds.push(held), (e: unknown) => { deferPublishOrThrow(e, summarySlug); publishPending++; });
     }
 
     // #4077: nothing below runs for a cancelled cycle — no phase-end embed
@@ -2977,46 +2974,11 @@ async function collectChildPutPageSlugs(
 
 // ── Reverse-write DB rows → markdown files ───────────────────────────
 
-/**
- * Reverse-render each page a child wrote to its markdown file (`writeDreamPageFile`, #6982): a page whose file holds an
- * edit the database lacks keeps that file and its `file_database_drift` entry is pushed to `held`.
- */
-async function reverseWriteRefs(
-  engine: BrainEngine,
-  brainDir: string,
-  refs: Array<{ slug: string; source_id: string; first_write_at?: Date }>,
-  nativeSourceId = 'default',
-  signal?: AbortSignal,
-  held?: string[],
-): Promise<number> {
-  let count = 0;
-  for (const { slug, source_id, first_write_at } of refs) {
-    throwIfAborted(signal, '[dream] synthesize reverse-write');
-    // v0.32.8 F6: validate source_id is filesystem-safe before any join().
-    validateSourceId(source_id);
-    const page = await engine.getPage(slug, { sourceId: source_id });
-    if (!page) continue;
-    const tags = await engine.getTags(slug, { sourceId: source_id });
-    // #4077: re-check after the row reads — an abort that lands during
-    // getPage/getTags must not reach this ref's file write.
-    throwIfAborted(signal, '[dream] synthesize reverse-write');
-    try {
-      // v0.32.8 F6: with no checkout root, foreign-source pages land at
-      // brainDir/.sources/<id>/<slug>.md so same-slug-different-source pages
-      // don't collide; the cycle's own source (#1586: brainDir IS that
-      // source's checkout) stays at brainDir/<slug>.md.
-      const markdown = isDreamOwnedPage(page, first_write_at) ? renderPageToMarkdown(page, tags) : serializePageToMarkdown(page, tags);
-      const file = await writeDreamPageFile(engine, brainDir, slug, source_id, { nativeSourceId, markdown });
-      if (file.written) count++;
-      else if (file.held) held?.push(file.held);
-      else if (file.error) process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${file.error}\n`);
-    } catch (e) {
-      // Per-slug failures are non-fatal — phase continues.
-      const msg = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${msg}\n`);
-    }
-  }
-  return count;
+/** Reverse-render each page a child wrote to its markdown file (`reverseWriteDreamRefs`, #6982); holds go to `held`. */
+async function reverseWriteRefs(engine: BrainEngine, brainDir: string, refs: Array<{ slug: string; source_id: string; first_write_at?: Date }>,
+  nativeSourceId = 'default', signal?: AbortSignal, held?: string[]): Promise<number> {
+  return reverseWriteDreamRefs(engine, brainDir, refs, { phase: 'synthesize', nativeSourceId, signal, held,
+    render: (page, tags, ref) => isDreamOwnedPage(page, ref.first_write_at) ? renderPageToMarkdown(page, tags) : serializePageToMarkdown(page, tags) });
 }
 
 /**

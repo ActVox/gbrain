@@ -130,10 +130,10 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         writeFileSync(b.path(PHANTOM), edited);
         const [canonicalFile, canonicalBody] = [b.file(CANONICAL), await b.body(CANONICAL)];
         const result = await expectUnitNotAborted(() => b.pass());
+        expect({ phantomFile: existsSync(b.path(PHANTOM)) && b.file(PHANTOM) === edited, phantomLive: await b.live(PHANTOM) }).toEqual({ phantomFile: true, phantomLive: true });
         const held = heldFor(result, PHANTOM);
         expect({ redirected: result.redirected, held: held.length, fix: held.some(h => h.includes('gbrain sync --source default')) })
           .toEqual({ redirected: 0, held: 1, fix: true });
-        expect({ phantomFile: b.file(PHANTOM) === edited, phantomLive: await b.live(PHANTOM) }).toEqual({ phantomFile: true, phantomLive: true });
         expect({ canonicalFile: b.file(CANONICAL) === canonicalFile, canonicalBody: (await b.body(CANONICAL)) === canonicalBody })
           .toEqual({ canonicalFile: true, canonicalBody: true });
       });
@@ -144,8 +144,8 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const edited = `---\naliases: [alice-ex]\n---\n${PHANTOM_BODY}`;
         writeFileSync(b.path(PHANTOM), edited);
         const result = await expectUnitNotAborted(() => b.pass());
+        expect({ phantomFile: existsSync(b.path(PHANTOM)) && b.file(PHANTOM) === edited, phantomLive: await b.live(PHANTOM) }).toEqual({ phantomFile: true, phantomLive: true });
         expect({ redirected: result.redirected, held: heldFor(result, PHANTOM).length }).toEqual({ redirected: 0, held: 1 });
-        expect({ phantomFile: b.file(PHANTOM) === edited, phantomLive: await b.live(PHANTOM) }).toEqual({ phantomFile: true, phantomLive: true });
       });
     }, 180_000);
 
@@ -155,10 +155,10 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         _resetWriteThroughCacheForTest();
         const phantomFile = b.file(PHANTOM);
         const result = await expectUnitNotAborted(() => b.pass());
-        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
         expect({ phantomFile: existsSync(b.path(PHANTOM)) && b.file(PHANTOM) === phantomFile, phantomLive: await b.live(PHANTOM) })
           .toEqual({ phantomFile: true, phantomLive: false });
         expect(claims(await b.body(CANONICAL))).toEqual([CLAIM]);
+        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
       });
     }, 180_000);
 
@@ -169,17 +169,17 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         const racing = editsBeforePhantomDelete(b.engine, async () => { writeFileSync(b.path(PHANTOM), edited); landed = true; });
         const result = await expectUnitNotAborted(() => b.pass(racing));
         expect(landed).toBe(true);
-        expect({ redirected: result.redirected, held: heldFor(result, PHANTOM).length }).toEqual({ redirected: 1, held: 1 });
         expect({ phantomFile: existsSync(b.path(PHANTOM)) && b.file(PHANTOM) === edited }).toEqual({ phantomFile: true });
+        expect({ redirected: result.redirected, held: heldFor(result, PHANTOM).length }).toEqual({ redirected: 1, held: 1 });
       });
     }, 180_000);
 
     test('D-6 agreeing copies: the phantom is redirected and its file is removed', async () => {
       await withBrain(databaseUrl, async b => {
         const result = await expectUnitNotAborted(() => b.pass());
-        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
         expect({ phantomFile: existsSync(b.path(PHANTOM)), phantomLive: await b.live(PHANTOM) }).toEqual({ phantomFile: false, phantomLive: false });
         expect({ file: claims(b.file(CANONICAL)), db: claims(await b.body(CANONICAL)) }).toEqual({ file: [CLAIM], db: [CLAIM] });
+        expect({ redirected: result.redirected, held: result.held }).toEqual({ redirected: 1, held: [] });
       });
     }, 180_000);
   });
