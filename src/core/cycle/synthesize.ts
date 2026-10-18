@@ -1,7 +1,7 @@
 import { observationDateLine, observationDateRule } from '../ai/date-grounding.ts';
 import { isConsumerDateGroundingOn } from '../facts/extract.ts';
 import { maintenancePreflight, publishMaintenancePage, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
-import { reverseWriteDreamRefs, withFileHolds, writeDreamPageFile } from './derived-write-through.ts';
+import { reportFileHolds, reverseWriteDreamRefs, writeDreamPageFile } from './derived-write-through.ts';
 import { deferPublishOrThrow, finishDeferredPostprocess, loadCommittedOutputsOrDefer, postprocessManagedSynthesis, withPostprocessConflicts, withPublishPending, type PostprocessConflict, type RetainedOutput } from './synthesize-postprocess.ts';
 /**
  * Synthesize phase (v0.23; #4152 two-stage cascade) — conversation-to-brain
@@ -1353,7 +1353,7 @@ async function runPhaseSynthesizeInner(
     const turnsSamples = childOutcomes.filter(
       (o): o is { jobId: number; status: string; turns: number } => typeof o.turns === 'number',
     );
-    return withFileHolds(withPostprocessConflicts(postprocessConflicts, withPublishPending(publishPending, ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s${deferralSuffix}`, {
+    return reportFileHolds(withPostprocessConflicts(postprocessConflicts, withPublishPending(publishPending, ok(`${submittedTranscripts} transcript(s) synthesized in ${(ms / 1000).toFixed(1)}s${deferralSuffix}`, {
       transcripts_discovered: transcripts.length,
       transcripts_processed: submittedTranscripts,
       pages_written: writtenSlugs.length,
@@ -1420,7 +1420,7 @@ async function runPhaseSynthesizeInner(
         // child counters + triage pass usage). cost_usd null when unpriced.
         spend: spendBlock,
       },
-    }), postprocessDeferral)), fileHolds);
+    }), postprocessDeferral)), fileHolds, 'page');
   } catch (e) {
     return failed(makeError('InternalError', 'SYNTH_PHASE_FAIL', e instanceof Error ? (e.message || 'synthesize phase threw') : String(e),
       e instanceof OperationError ? e.suggestion : undefined), e instanceof OperationError ? { error_code: e.code } : {});

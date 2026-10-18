@@ -107,7 +107,6 @@ src/core/cycle/chronicle.ts	discover	sql	STREAM
 src/core/cycle/concept-publication.ts	composeConceptRepublication	call:serializeMarkdown	INLINE	
 src/core/cycle/concept-publication.ts	composeConceptRepublication	field	INLINE	
 src/core/cycle/concept-publication.ts	conceptPreservationHold	field	INLINE	
-src/core/cycle/concept-publication.ts	fileHoldsPage	field	INLINE	
 src/core/cycle/concept-publication.ts	preserveCanonicalFences	call:serializeMarkdown	INLINE	after assertInlineBody
 src/core/cycle/concept-publication.ts	preserveCanonicalFences	field	INLINE	assertInlineBody: refuses a segmented page (concept pages inline; enrich/connector callers SEGW)
 src/core/cycle/concept-publication.ts	publishClassicConcept	call:serializeMarkdown	INLINE	

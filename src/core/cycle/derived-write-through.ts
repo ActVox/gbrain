@@ -13,6 +13,12 @@
  * database-only. The first run after the key is enabled also writes the
  * generated pages that have no file yet, a bounded batch per run. A page the
  * phase retires has its file removed, so sync cannot bring it back.
+ *
+ * #6982: a file is replaced or removed only when it holds nothing the
+ * database lacks (`replaceableFile`: absent, or equal to the page or one of
+ * its recent versions), and the write is bound to the bytes compared. A file
+ * holding a hand edit or an unindexed file at the path is left as it is and
+ * the page is reported in the hook's `held` list (`file_database_drift`).
  */
 import { execFileSync } from '../spawn.ts';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -22,11 +28,11 @@ import type { PhaseResult } from '../cycle.ts';
 import type { Page } from '../types.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { validateSourceId } from '../utils.ts';
-import { fileDatabaseDriftToken, replaceableFile } from '../facts/file-body-guard.ts';
 import { isDbOnly, loadStorageConfig } from '../storage-config.ts';
-import { deletePageThrough, isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough } from '../write-through.ts';
+import { deletePageThrough, isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough, type PageWriteTarget } from '../write-through.ts';
 import { urlCloneReadOnly } from '../url-clone.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { fileDatabaseDriftToken, replaceableFile } from '../facts/file-body-guard.ts';
 
 export const DERIVED_WRITE_THROUGH_KEYS = {
   extract_atoms: 'cycle.extract_atoms.write_through',
@@ -53,21 +59,73 @@ function gitIgnores(root: string, filePath: string): boolean {
 }
 
 /**
+ * The checkout file a generated page publishes to, or why it has none this
+ * module writes: write-through off (`disabled_by_config`), no resolvable
+ * target, or a target ignored by git or inside a declared `storage.db_only`
+ * directory (`not_canonical`). `includeDeleted` resolves a retired page's
+ * recorded path.
+ */
+export async function derivedFileTarget(engine: BrainEngine, slug: string, sourceId: string,
+  opts: { includeDeleted?: boolean } = {}): Promise<{ ok: true; target: Extract<PageWriteTarget, { ok: true }> } | { ok: false; skipped: string }> {
+  if (await isWriteThroughDisabled(engine)) return { ok: false, skipped: 'disabled_by_config' };
+  const target = await resolvePageWriteTarget(engine, slug, sourceId, opts);
+  if (!target.ok) return { ok: false, skipped: target.skipped };
+  let storage = null;
+  try { storage = loadStorageConfig(target.writeRoot); } catch { /* unreadable gbrain.yml: sync reports it */ }
+  if ((storage && isDbOnly(slug, storage)) || gitIgnores(target.writeRoot, target.filePath)) return { ok: false, skipped: 'not_canonical' };
+  return { ok: true, target };
+}
+
+/**
  * Write one generated page's markdown file. Never throws; the result says
  * whether a file was written, why not, or the write error. Ignored and db_only
  * targets are skipped on purpose (`skipped: 'not_canonical'`).
- * `expectedFileBytes` binds the write to the file the caller read.
+ * `expectedFileBytes` binds the write to the file the caller read (and
+ * already compared); without it the file must pass `replaceableFile` first,
+ * else nothing is written (`skipped: 'file_database_drift'`).
  */
 export async function writeDerivedPageThrough(engine: BrainEngine, slug: string, sourceId: string,
   opts: { expectedFileBytes?: string | null } = {}): Promise<{ written: boolean; skipped?: string; error?: string }> {
-  const target = await resolvePageWriteTarget(engine, slug, sourceId);
-  if (!target.ok) return { written: false, skipped: target.skipped };
-  let storage = null;
-  try { storage = loadStorageConfig(target.writeRoot); } catch { /* unreadable gbrain.yml: sync reports it */ }
-  if ((storage && isDbOnly(slug, storage)) || gitIgnores(target.writeRoot, target.filePath)) return { written: false, skipped: 'not_canonical' };
-  const result = await writePageThrough(engine, slug, { sourceId, expectedFileBytes: opts.expectedFileBytes });
+  const resolved = await derivedFileTarget(engine, slug, sourceId);
+  if (!resolved.ok) return { written: false, skipped: resolved.skipped };
+  let expectedFileBytes = opts.expectedFileBytes;
+  if (expectedFileBytes === undefined) {
+    const file = await replaceableFile(engine, sourceId, slug, resolved.target.filePath);
+    if (!file.ok) return { written: false, skipped: 'file_database_drift' };
+    expectedFileBytes = file.expectedFileBytes;
+  }
+  const result = await writePageThrough(engine, slug, { sourceId, expectedFileBytes });
   if (result.error) console.error(`[write-through] ${slug}: ${result.error}`);
   return result;
+}
+
+/**
+ * Remove a retired generated page's file when the retired page (or one of
+ * its versions) holds everything in it; the unlink is bound to the bytes
+ * compared. Returns `file_database_drift` when the file holds an edit the
+ * database lacks.
+ */
+async function deleteDerivedPageThrough(engine: BrainEngine, slug: string, sourceId: string): Promise<{ removed: boolean; skipped?: string }> {
+  const resolved = await derivedFileTarget(engine, slug, sourceId, { includeDeleted: true });
+  if (!resolved.ok) return { removed: false, skipped: resolved.skipped };
+  const file = await replaceableFile(engine, sourceId, slug, resolved.target.filePath);
+  if (!file.ok) return { removed: false, skipped: 'file_database_drift' };
+  if (file.expectedFileBytes === null) return { removed: false, skipped: 'file_not_present' };
+  return deletePageThrough(engine, slug, { sourceId, target: resolved.target, expectedFileBytes: file.expectedFileBytes });
+}
+
+/** `result` with its held page files reported: added to `details.file_holds`, a `warn` status unless it failed, and a summary note. */
+export function reportFileHolds(result: PhaseResult, held: readonly string[] | undefined, noun: string): PhaseResult {
+  if (!held?.length) return result;
+  return { ...result, status: result.status === 'fail' ? 'fail' : 'warn',
+    details: { ...result.details, file_holds: [...new Set([...((result.details.file_holds as string[] | undefined) ?? []), ...held])] },
+    summary: `${result.summary} (${held.length} ${noun} file(s) left as they are: file_database_drift)` };
+}
+
+/** The phase's write-through hook: `write` publishes pages and removes retired ones' files; `held` reports each page left alone. */
+export interface DerivedWriteThrough {
+  write(slugs: readonly string[], retired?: readonly string[]): Promise<void>;
+  held: string[];
 }
 
 /**
@@ -81,11 +139,21 @@ export async function derivedWriteThrough(
   phase: keyof typeof DERIVED_WRITE_THROUGH_KEYS,
   sourceId: string,
   opts: { managed: boolean; dryRun: boolean },
-): Promise<((slugs: readonly string[], retired?: readonly string[]) => Promise<void>) | null> {
+): Promise<DerivedWriteThrough | null> {
   if (opts.managed || opts.dryRun || !await derivedWriteThroughEnabled(engine, phase)) return null;
+  const held: string[] = [];
+  const kept = (skipped: string | undefined) => skipped === 'file_database_drift' || skipped === 'file_changed';
   const write = async (slugs: readonly string[], retired: readonly string[] = []) => {
-    for (const slug of slugs) await writeDerivedPageThrough(engine, slug, sourceId);
-    for (const slug of retired) await deletePageThrough(engine, slug, { sourceId });
+    for (const slug of slugs) {
+      if (kept((await writeDerivedPageThrough(engine, slug, sourceId)).skipped)) {
+        held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the generated page was not written to its file'));
+      }
+    }
+    for (const slug of retired) {
+      if (kept((await deleteDerivedPageThrough(engine, slug, sourceId)).skipped)) {
+        held.push(fileDatabaseDriftToken(slug, sourceId, 'before', 'the retired page\'s file was not removed'));
+      }
+    }
   };
   const rows = await engine.executeRaw<{ slug: string }>(
     `SELECT slug FROM pages
@@ -96,7 +164,7 @@ export async function derivedWriteThrough(
     [sourceId, phase === 'extract_atoms' ? 'atom' : 'concept', DERIVED_BACKFILL_LIMIT],
   );
   await write(rows.map(r => r.slug));
-  return write;
+  return { write, held };
 }
 
 /** What a dream reverse-write did with one page's file. `held` is its `file_database_drift` entry. */
@@ -143,13 +211,6 @@ export async function writeDreamPageFile(engine: BrainEngine, brainDir: string, 
 /** #6982: the hold entry for a dream page whose file holds an edit the database lacks. */
 function dreamFileDriftToken(slug: string, sourceId: string, when: 'before' | 'during'): string {
   return fileDatabaseDriftToken(slug, sourceId, when, 'the dream output stays in the database only', 'the dream reverse-write');
-}
-
-/** A dream phase result with its held page files: listed in `details.file_holds`, and an ok phase warns. */
-export function withFileHolds(result: PhaseResult, held: readonly string[]): PhaseResult {
-  if (held.length === 0) return result;
-  return { ...result, status: result.status === 'ok' ? 'warn' : result.status, details: { ...result.details, file_holds: [...new Set([...((result.details.file_holds as string[] | undefined) ?? []), ...held])] },
-    summary: `${result.summary}; ${held.length} page file(s) held because they differ from the database (details.file_holds)` };
 }
 
 /**

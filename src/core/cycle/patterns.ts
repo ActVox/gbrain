@@ -44,7 +44,7 @@ import type { Page, PageType } from '../types.ts';
 // slot and can deadlock a fully-occupied worker (#2050). synthesize.ts
 // drains its own children the same way.
 import { loadAllowedSlugPrefixes, loadOutputRoot, runSubagentsInline } from './synthesize.ts';
-import { reverseWriteDreamRefs, withFileHolds } from './derived-write-through.ts';
+import { reportFileHolds, reverseWriteDreamRefs } from './derived-write-through.ts';
 import { stampDreamProvenance } from './dream-provenance.ts';
 import { probeChatModelWithKey } from '../ai/chat-key-probe.ts';
 import { normalizeModelId } from '../model-id.ts';
@@ -471,7 +471,7 @@ async function runPatternsPass(engine: BrainEngine, opts: PatternsPhaseOpts, con
     // named nothing; re-running it is exactly the spend bug.
     await engine.setConfig(keys.evidence, new Date(newestEvidenceMs).toISOString());
 
-    return withFileHolds(withGroundingStatus(ok(`${writtenRefs.length} pattern page(s) written/updated${appendedNote} (${outcome})`, details), grounding), fileHolds);
+    return reportFileHolds(withGroundingStatus(ok(`${writtenRefs.length} pattern page(s) written/updated${appendedNote} (${outcome})`, details), grounding), fileHolds, 'page');
   } catch (e) {
     return failed(makeError('InternalError', 'PATTERNS_PHASE_FAIL',
       e instanceof Error ? (e.message || 'patterns phase threw') : String(e)));
@@ -764,7 +764,7 @@ async function retryPendingAppends(engine: BrainEngine, opts: PatternsPhaseOpts,
  */
 function withAppendRetry(result: PhaseResult, retried: AppendRetry | null): PhaseResult {
   if (!retried) return result;
-  return withFileHolds(withGroundingRetry(result, retried), retried.fileHolds);
+  return reportFileHolds(withGroundingRetry(result, retried), retried.fileHolds, 'page');
 }
 
 function withGroundingRetry(result: PhaseResult, retried: AppendRetry): PhaseResult {
