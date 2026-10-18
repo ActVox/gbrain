@@ -1127,7 +1127,7 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // doctor reader probes for the column on older brains.
   'pages.links_attendance_blocked_revision',
   'pages.links_attendance_blocked_at',
-  // GBRA-130 A-1 (migration v257) — the link-extraction failure record. Same
+  // GBRA-130 A-1 (migration v258) — the link-extraction failure record. Same
   // posture as the v180 attendance marker: absent from both schema blobs, so
   // fresh and upgraded brains share its ordinal; column-only and nullable, no
   // index or function in either blob references it, and the doctor reader
