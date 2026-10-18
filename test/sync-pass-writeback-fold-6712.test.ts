@@ -12,17 +12,20 @@
  *   the next tick converges at that commit and the one after is idle;
  * - a writeback whose Git effect fails for good shows in doctor (`parked_effects`) and in `sync status` (blocked,
  *   `writeback_failed`), never as an idle, healthy source;
- * - against a bare tracking remote: a foreign commit pushed first keeps every tick non-idle until the effect resolves; once it
- *   commits (the push integrates the remote, #7010), the ownWritebackCommit shortcut refuses the merge, a full level read
- *   imports the foreign file and the source idles. A remote that refuses every push parks the effect: doctor and
- *   `sync status` show it, and no tick is idle.
+ * - against a bare tracking remote (the keep-checkout publish, #7010): a foreign commit pushed first keeps every tick
+ *   non-idle until the effect resolves; it commits a merge of the writeback and foreign commits on the remote only, the
+ *   checkout stays at the writeback commit, the source converges there and idles with no foreign page, and
+ *   `sources refresh` imports the foreign file through a full level read. Both sides changing the writeback file holds the
+ *   effect with `integrate_conflict` (sync status names the user's choice), then parks it: blocked, never idle. A remote
+ *   that refuses every push parks the effect: doctor and `sync status` show it, and no tick is idle.
  *
  * PGLite here; Postgres through test/e2e/sync-pass-writeback-fold-6712-postgres.test.ts.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { checkParkedEffects } from '../src/commands/doctor/checks/parked-effects.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
@@ -30,9 +33,11 @@ import { startPersistenceConsumer } from '../src/core/persistence/service.ts';
 import { MANAGED_SYNC_PASS_OP } from '../src/core/persistence/sync-pass-row.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
+import { refreshWorktree } from '../src/core/persistence/worktree-refresh.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { waitFor } from './helpers/wait-for.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const commit = (root: string, message: string) => { git(root, 'add', '-A'); git(root, 'commit', '-qm', message); };
@@ -77,18 +82,20 @@ const enableDurability = (engine: BrainEngine) => engine.executeRaw("UPDATE pers
 /** The worktree tracks a bare remote (`<home>/remote.git`) its branch was pushed to, so a Git effect pushes. */
 const trackedSetup = ({ root }: { root: string }) => {
   setup({ root });
-  const remote = join(root, '..', 'remote.git');
-  execFileSync('git', ['init', '-q', '--bare', remote]);
-  git(root, 'remote', 'add', 'origin', remote);
+  execFileSync('git', ['init', '-q', '--bare', remoteDir(root)]);
+  git(root, 'remote', 'add', 'origin', remoteDir(root));
   git(root, 'push', '-q', '-u', 'origin', `HEAD:refs/heads/${git(root, 'symbolic-ref', '--short', 'HEAD')}`);
 };
-/** A commit another clone pushed to the remote: notes/c, a file the worktree has never seen. */
-const foreignPush = (root: string) => {
+const remoteDir = (root: string) => join(root, '..', 'remote.git');
+const remoteTip = (root: string) => git(root, '--git-dir', remoteDir(root), 'rev-parse', `refs/heads/${git(root, 'symbolic-ref', '--short', 'HEAD')}`);
+/** A commit another clone pushed to the remote, writing `content` at `path`; returns it. */
+const foreignPush = (root: string, path: string, content: string) => {
   const clone = join(root, '..', 'foreign');
-  execFileSync('git', ['clone', '-q', join(root, '..', 'remote.git'), clone]);
+  execFileSync('git', ['clone', '-q', remoteDir(root), clone]);
   git(clone, 'config', 'user.name', 'Other'); git(clone, 'config', 'user.email', 'other@example.invalid');
-  writeFileSync(join(clone, 'notes/c.md'), note('notes/c', 'A foreign note pushed by another clone.'));
-  commit(clone, 'foreign c'); git(clone, 'push', '-q');
+  writeFileSync(join(clone, path), content);
+  commit(clone, `foreign ${path}`); git(clone, 'push', '-q');
+  return git(clone, 'rev-parse', 'HEAD');
 };
 /** Runs the writeback's Git effect once more now (its retry backoff skipped) and waits until that attempt ends. */
 async function attemptNow(engine: BrainEngine): Promise<string> {
@@ -250,39 +257,82 @@ for (const backend of testBackends()) {
   });
 
   describe(`#6712 PR 4b writeback fold against a tracking remote, durability on (${backend})`, () => {
-    const tracked = (run: Parameters<typeof managedBrain>[0]) => managedBrain(run, { ...(databaseUrl ? { databaseUrl } : {}), setup: trackedSetup });
+    // The keep-checkout publish runs this checkout's own CLI as a child (GBRAIN_JOB_CHILD_CLI), over the file transport.
+    const tracked = (run: Parameters<typeof managedBrain>[0]) => {
+      const bin = mkdtempSync(join(tmpdir(), 'gbrain-wb-cli-')), cli = join(bin, 'gbrain-child');
+      writeFileSync(cli, `#!/bin/sh\nexec '${process.execPath}' '${resolve(import.meta.dir, '../src/cli.ts')}' "$@"\n`); chmodSync(cli, 0o700);
+      return withEnv({ GBRAIN_JOB_CHILD_CLI: cli, GBRAIN_GIT_ALLOW_FILE_TRANSPORT: '1' },
+        () => managedBrain(run, { ...(databaseUrl ? { databaseUrl } : {}), setup: trackedSetup })).finally(() => rmSync(bin, { recursive: true, force: true }));
+    };
 
-    // Written for the push path that integrates a moved remote (#7010, through #6530's commitAndPush). The path before it
-    // never integrates: the push is refused non-fast-forward until the effect parks (failed, `writeback_failed`).
-    test('the remote moved first: non-idle until the effect resolves; it commits, the shortcut refuses the merge, a full read imports the foreign file, then idle', () => tracked(async ({ engine, root }) => {
+    test('the remote moved first: non-idle until the effect resolves; it commits a merge on the remote only, the checkout stays, and sources refresh imports the foreign file', () => tracked(async ({ engine, root }) => {
       expect((await tick(engine)).status).toBe('first_sync');
       await enableDurability(engine);
-      foreignPush(root);
+      const foreign = foreignPush(root, 'notes/c.md', note('notes/c', 'A foreign note pushed by another clone.'));
       writebackCommit(root);
-      // The effect's push runs before the confirm round, where the ownWritebackCommit shortcut would end the pass on its stamp.
-      const reads: number[] = [];
-      installFaultHook(async (point, detail) => {
-        if (point === 'sync:level_read') reads.push(detail.round as number);
-        if (point === 'sync:round_start' && detail.round === 2) await attemptNow(engine);
-      });
       expect((await tick(engine)).status).toBe('synced');
-      installFaultHook(undefined);
       const resolved = await ticksUntilResolved(engine);
       expect(resolved.ticks.filter(kind => kind === 'idle')).toEqual([]);
       expect(resolved.state).toBe('committed');
-      const head = git(root, 'rev-parse', 'HEAD');
-      expect(git(root, 'show', `${head}:notes/c.md`)).toContain('A foreign note pushed by another clone.');
-      expect(git(root, 'rev-parse', `origin/${git(root, 'symbolic-ref', '--short', 'HEAD')}`)).toBe(head);
-      expect(reads).toContain(2);
-      expect((await engine.getPage('notes/c', { sourceId: 'default' }))?.compiled_truth).toContain('A foreign note pushed by another clone.');
-      expect(await lastCommit(engine)).toBe(head);
+      // The keep-checkout publish (#7010) merged the remote in memory and pushed the merge; the checkout did not move.
+      const writeback = git(root, 'rev-parse', 'HEAD'), tip = remoteTip(root);
+      expect(git(root, 'log', '-1', '--format=%s')).toBe('gbrain: persist canonical memory update');
+      expect(git(root, 'status', '--porcelain')).toBe('');
+      expect(existsSync(join(root, 'notes/c.md'))).toBe(false);
+      expect(git(root, '--git-dir', remoteDir(root), 'rev-list', '--parents', '-n', '1', tip).split(' ').slice(1).sort()).toEqual([writeback, foreign].sort());
+      expect(git(root, '--git-dir', remoteDir(root), 'show', `${tip}:notes/a.md`)).toBe(readFileSync(join(root, 'notes/a.md'), 'utf8').trimEnd());
+      expect(git(root, '--git-dir', remoteDir(root), 'show', `${tip}:notes/c.md`)).toBe(note('notes/c', 'A foreign note pushed by another clone.').trimEnd());
+      // The pass imports only what the checkout holds: it converges at the writeback commit and idles, with no notes/c page.
+      const converge = await tick(engine);
+      expect(converge.kind).not.toBe('idle');
+      expect(await lastCommit(engine)).toBe(writeback);
       expect(await tick(engine)).toEqual({ status: 'up_to_date', kind: 'idle' });
+      expect(await engine.getPage('notes/c', { sourceId: 'default' })).toBeNull();
+      // sources refresh fast-forwards the checkout to the merge; its sync imports notes/c through a full level read.
+      const reads: number[] = [];
+      installFaultHook(point => { if (point === 'sync:level_read') reads.push(1); });
+      expect((await refreshWorktree(engine, 'default')).status).toBe('completed');
+      installFaultHook(undefined);
+      expect(git(root, 'rev-parse', 'HEAD')).toBe(tip);
+      expect(reads.length).toBeGreaterThan(0);
+      expect((await engine.getPage('notes/c', { sourceId: 'default' }))?.compiled_truth).toContain('A foreign note pushed by another clone.');
+      expect(await lastCommit(engine)).toBe(tip);
+      expect(await tick(engine)).toEqual({ status: 'up_to_date', kind: 'idle' });
+    }), 240_000);
+
+    test('both sides changed the writeback file: the effect holds integrate_conflict, retries, then parks; sync status shows it blocked, never idle and healthy', () => tracked(async ({ engine, root }) => {
+      expect((await tick(engine)).status).toBe('first_sync');
+      await enableDurability(engine);
+      const theirs = foreignPush(root, 'notes/a.md', note('notes/a', 'The other clone\'s version of notes/a.'));
+      writebackCommit(root);
+      expect((await tick(engine)).status).toBe('synced');
+      // The first attempt holds it: nothing is pushed, the checkout keeps this side's bytes, and the hold names the user's choice.
+      expect(await attemptNow(engine)).toBe('queued');
+      expect(remoteTip(root)).toBe(theirs);
+      expect(git(root, 'status', '--porcelain')).toBe('');
+      expect(readFileSync(join(root, 'notes/a.md'), 'utf8')).toContain('A committed change of notes/a.');
+      const held = await readSyncStatus(engine, 'default', { detail: false });
+      expect(held.git_push_holds).toMatchObject([{ retrying: 1, parked: 0, codes: ['integrate_conflict'], conflict: { paths: ['notes/a.md'], remote: theirs } }]);
+      expect(held.next).toEqual(held.git_push_holds[0]!.fix);
+      const resolved = await ticksUntilResolved(engine);
+      expect(resolved.ticks.filter(kind => kind === 'idle')).toEqual([]);
+      expect(resolved.state).toBe('failed');
+      const effect = (await writebackEffect(engine))!;
+      expect(JSON.stringify(effect.data.parked)).toContain('integrate_conflict');
+      expect(remoteTip(root)).toBe(theirs);
+      const status = await readSyncStatus(engine, 'default', { detail: false });
+      expect({ state: status.state, reason: status.reason }).toEqual({ state: 'blocked', reason: 'writeback_failed' });
+      expect(status.git_push_holds).toMatchObject([{ retrying: 0, parked: 1, codes: ['integrate_conflict'], conflict: { paths: ['notes/a.md'], remote: theirs } }]);
+      expect((await checkParkedEffects(engine, ['default'])).status).toBe('warn');
+      expect((await tick(engine)).kind).not.toBe('idle');
+      const again = await readSyncStatus(engine, 'default', { detail: false });
+      expect({ state: again.state, reason: again.reason }).toEqual({ state: 'blocked', reason: 'writeback_failed' });
     }), 240_000);
 
     test('the remote refuses every push: non-idle while it retries; parked, doctor and sync status show it, never idle and healthy', () => tracked(async ({ engine, root }) => {
       expect((await tick(engine)).status).toBe('first_sync');
       await enableDurability(engine);
-      const hook = join(root, '..', 'remote.git', 'hooks', 'pre-receive');
+      const hook = join(remoteDir(root), 'hooks', 'pre-receive');
       writeFileSync(hook, '#!/bin/sh\necho "refused by policy" >&2\nexit 1\n'); chmodSync(hook, 0o755);
       writebackCommit(root);
       expect((await tick(engine)).status).toBe('synced');
