@@ -7586,6 +7586,7 @@ Every hold and error has three fields, from one table
 | `origin_conflict_decision` | page | none | yes | always: the pages differ, their ids conflict or none is the page the path names |
 | `file_unreadable` | page | none | yes | always: only a change to the checkout makes the file readable |
 | `absent_from_worktree` | page | none | yes | always: only a person decides whether the file comes back or its deletion is committed |
+| `unsupported_path` | page | none | yes | always: only a rename makes the name a page path |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |
 | `page_identity_changed` | page | retry | no | the same path fails again after a rerun |
 | `pinned_git_worktree_conflict` | page | retry | no | the same path fails again after a rerun |
