@@ -514,6 +514,10 @@ test('breaker: write_interrupted receipts trip it like stalled ones, and the tri
   expect(why).not.toContain('5 write(s) of this sync could not finish preparing');
   expect((await s.holds()).map(hold => [hold.path, hold.code]).sort()).toEqual([['notes/s0.md', 'preparation_stalled'], ['notes/s1.md', 'write_interrupted'],
     ['notes/s2.md', 'preparation_stalled'], ['notes/s3.md', 'write_interrupted']]);
+  // #6712 PR 4b retired the blocked-cursor conversion that re-screened these holds: the next pass re-screens both codes itself.
+  installFaultHook(undefined);
+  expect(await s.sync()).toMatchObject({ status: 'first_sync', added: 7, pass: { outcome: 'synced', candidates: 7 } });
+  expect(await s.holds()).toEqual([]);
   // Only write_interrupted receipts: the trip names that code alone.
   const t = await source(engine, files);
   stallPaths(engine, t.id, new Set(Object.keys(files)), 'consumer:prepared', () => 'write_interrupted');

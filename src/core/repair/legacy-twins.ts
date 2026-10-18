@@ -59,6 +59,7 @@ import { liveFileDrift } from '../persistence/drift-conflicts.ts';
 import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { readSyncImportProvenance, recordSyncImportProvenance } from '../persistence/sync-holds.ts';
+import { bindOrigin } from '../persistence/origin-guard.ts';
 import { mergeTwinInto, twinMergeConflicts } from '../persistence/twin-merge.ts';
 import { MASS_RECONCILE_MIN_PAGES, MASS_RECONCILE_RATIO, massReconcileAllowed } from '../sync-reconcile.ts';
 import type { GhostOwner } from '../ghost-pages.ts';
@@ -357,7 +358,8 @@ async function applyTwinMerge(tx: BrainEngine, pair: LegacyTwinPair, incarnation
   const [twinRow] = await tx.executeRaw<{ source_uri: string | null }>('SELECT source_uri FROM pages WHERE id=$1', [twin.page_id]);
   const record = await readSyncImportProvenance(tx, sourceId, incarnation, twin.page_id);
   const merged = await mergeTwinInto(tx, { sourceId, incarnation, survivor: legacy, twin });
-  await tx.executeRaw('UPDATE pages SET source_path=$2, source_uri=COALESCE(source_uri, $3) WHERE id=$1', [legacy.page_id, pair.path, twinRow?.source_uri ?? null]);
+  await bindOrigin(tx, { sourceId, pageId: legacy.page_id, sourcePath: pair.path });
+  await tx.executeRaw('UPDATE pages SET source_uri=COALESCE(source_uri, $2) WHERE id=$1', [legacy.page_id, twinRow?.source_uri ?? null]);
   if (record) {
     const [now] = await tx.executeRaw<{ revision: string }>('SELECT knowledge_revision::text AS revision FROM pages WHERE id=$1', [legacy.page_id]);
     await recordSyncImportProvenance(tx, { ...record, page_id: legacy.page_id, revision: now!.revision });
