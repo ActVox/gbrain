@@ -275,9 +275,12 @@ test/pathological/d1-unfenced-facts-overwrite.test.ts
 test/pathological/d15-sync-reexport-overwrite.test.ts
 test/pathological/d16-google-file-replacement.test.ts
 test/pathological/d17-github-file-replacement.test.ts
+test/pathological/d2-fence-write-overwrite.test.ts
 test/pathological/d21-migration-verifier-record.test.ts
 test/pathological/d22-legacy-hash-body-history.test.ts
 test/pathological/d23-extract-atoms-db-only.test.ts
+test/pathological/d3-forget-overwrite.test.ts
+test/pathological/d4-proposal-overwrite.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
 test/persistence-capacity-forecast.test.ts
