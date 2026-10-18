@@ -268,6 +268,7 @@ test/pathological/c-23-override-and-doctor-fixes.test.ts
 test/pathological/c-9-facts-absorb-dead.test.ts
 test/pathological/c1-effect-stuck-recovery.test.ts
 test/pathological/c2-url-clone-fences.test.ts
+test/pathological/c22-stuck-recovery-large-file.test.ts
 test/pathological/c4-bundle-stuck-recovery.test.ts
 test/pathological/c5-writer-transfer-cancel.test.ts
 test/pathological/c7-content-receipt-root.test.ts
