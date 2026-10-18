@@ -171,16 +171,6 @@ function isFileDatabaseDrift(error: unknown): boolean {
   return error instanceof OperationError && error.code === 'source_changed' && error.detail === 'file_database_drift';
 }
 
-/**
- * Why a mirror or Git walk passes a page by without writing its file: the file differs from the database, or a
- * segmented page's body holds a run it cannot read whole (a facts fence longer than BLOCK_MAX_BYTES across forced cuts,
- * `page_body_segmented`). The target is recorded as skipped with that reason; any other error retries and parks.
- */
-function unmirrorable(error: unknown): SkippedTarget['reason'] | null {
-  if (isFileDatabaseDrift(error)) return 'file_database_drift';
-  return error instanceof OperationError && error.code === 'page_body_segmented' ? 'page_body_segmented' : null;
-}
-
 /** The target a failing attempt was working on; unset means the failure is effect-wide. */
 interface EffectAttempt { target?: string }
 
@@ -200,18 +190,18 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
   let content: string | StreamedFileContent;
   try {
     file = binding?.local_path ? await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
-      segmented ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true }) : undefined;
+      segmented ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true, between: keep }) : undefined;
     if (!file || snapshot.page.deleted_at || !existsSync(file.path)) {
       // A withdrawal cannot resurrect a deleted or missing physical page.
       await materializeAndAdvance(engine, effect, snapshot, opts.hostId);
       return;
     }
-    await keep();
     content = segmented ? await unreadPageFile(engine, snapshot, keep) : file.content as string;
   } catch (error) {
-    const skipped = unmirrorable(error);
-    if (!skipped) throw error;
-    await materializeAndAdvance(engine, effect, snapshot, opts.hostId, skipped);
+    // A segmented page whose fence a withdrawal cannot read whole (page_body_segmented) retries and parks like any failed
+    // target, so writer status and doctor list it; only a file that differs from the database is passed by.
+    if (!isFileDatabaseDrift(error)) throw error;
+    await materializeAndAdvance(engine, effect, snapshot, opts.hostId, 'file_database_drift');
     return;
   }
   const target = { kind: 'withdrawal-mirror' as const, path: file.path, root: file.root, beforeHash: file.expectedBeforeHash ?? null,
@@ -286,12 +276,12 @@ async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: 
     // Only the file's comparison with the stored page is needed here, so a segmented page's file is never rendered.
     file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
       snapshot.page.deleted_at || isSegmentedPage(snapshot.page) ? null : serializePageToMarkdown(snapshot.page, snapshot.tags),
-      opts.hostId, { allowMissing: true });
-    await effectClaimKeeper(engine, effect, effectRenewalIntervalMs)();
+      opts.hostId, { allowMissing: true, between: effectClaimKeeper(engine, effect, effectRenewalIntervalMs) });
   } catch (error) {
-    const skipped = unmirrorable(error);
-    if (!skipped) throw error;
-    await skipTarget(engine, effect, snapshot, skipped);
+    // A segmented page whose fence a withdrawal cannot read whole (page_body_segmented) retries and parks like any failed
+    // target, so writer status and doctor list it; only a file that differs from the database is passed by.
+    if (!isFileDatabaseDrift(error)) throw error;
+    await skipTarget(engine, effect, snapshot, 'file_database_drift');
     return;
   }
   if (!file) throw opError('source_changed', 'The Git binding changed.',

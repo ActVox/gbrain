@@ -16,7 +16,7 @@ import { persistenceFileHash, publishPersistenceFile } from './coordinator.ts';
 import type { EffectRecovery, PersistenceEffect } from './effect-model.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
 import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, discardStreamingStage, publishStreamedStage, upgradeRecoveryStaging } from './staging.ts';
-import { existsAt, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
+import { existsAt, stageStreamedContent, streamingStagePath, type StreamedFileContent } from './large-file.ts';
 import { unreadPageFile } from './page-prepare.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { declarePersistenceProtocol } from './protocol.ts';
@@ -154,14 +154,15 @@ function stagingReported(error: unknown): boolean {
 
 /**
  * A version 2 record whose stage could not be written while the canonical file still holds its prior bytes protects
- * nothing: no file changed and no stage exists. It is cleared with its reserved capacity in one transaction, so the
- * worktree's other writes and effects are no longer held behind it and this effect retries (and parks) as any failed
- * mirror does. A record whose file moved, or whose stage exists, is kept for recovery, as it is when the release
- * itself fails (the staging error is the one reported).
+ * nothing: no file changed and no stage, whole or in progress, exists. It is cleared with its reserved capacity in one
+ * transaction, so the worktree's other writes and effects are no longer held behind it and this effect retries (and
+ * parks) as any failed mirror does. A record whose file moved, or whose stage or in-progress stream is still on disk
+ * (the writer could not remove it), is kept for recovery, as it is when the release itself fails (the staging error is
+ * the one reported).
  */
 async function releaseUnstagedRecord(engine: BrainEngine, effect: PersistenceEffect, hostId: string, record: EffectRecovery): Promise<void> {
   const stage = record.staging?.publication;
-  if (!stage || existsAt(stage.path) || persistenceFileHash(record.path) !== record.beforeHash) return;
+  if (!stage || existsAt(stage.path) || existsAt(streamingStagePath(stage.path)) || persistenceFileHash(record.path) !== record.beforeHash) return;
   await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     await guardEffectSource(tx, effect, hostId);

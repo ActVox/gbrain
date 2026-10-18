@@ -50,6 +50,7 @@ import { bodyUnread, isSegmentedPage, pageBodySegmentedError, withoutBody } from
 import { fileBodyDigests, overlaidFileBodyDigests, storedBodyDigests, type ByteSource, type FileReading, type RegionDigests } from '../page-body/body-digests.ts';
 import { ledgerApplies, type BodyLedger } from '../page-body/segment-ledger.ts';
 import { inferredHeadPrefix } from '../page-body/streamed-import.ts';
+import { fenceTooLargeError } from '../page-body/read-range.ts';
 import { FRONTMATTER_HEAD_MAX_BYTES } from '../page-body/limits.ts';
 import { occurrencesWithoutChunks, readSegmentedBody } from '../page-body/ingest.ts';
 import { ContentHashStream } from '../page-body/content-hash-stream.ts';
@@ -216,22 +217,23 @@ function snapshotLedger(snapshot: PageSnapshot): BodyLedger {
  * that applies cannot be overlaid streamed, so it refuses (`page_body_segmented`) instead of reading as drift.
  */
 async function segmentedFileMatches(engine: BrainEngine, slug: string, bytes: ByteSource, snapshot: PageSnapshot,
-  sourcePath: () => Promise<string>, activePack?: ParseOpts['activePack']): Promise<boolean> {
+  sourcePath: () => Promise<string>, activePack?: ParseOpts['activePack'], between?: () => Promise<void>): Promise<boolean> {
   const ledger = snapshotLedger(snapshot);
   let stored: RegionDigests | undefined;
   const matches = async (reading: FileReading, inferred: boolean) => {
     const file = fileBodyDigests(bytes, reading, slug, { activePack });
+    await between?.();
     if (file.kind !== 'ok') return file.reason;
-    // A facts fence under a ledger that applies is compared overlaid, one complete fence block at a time; a block too
-    // long to overlay whole (held split across forced cuts) still refuses.
+    // A facts fence under a ledger that applies is compared overlaid, one complete fence block at a time; a fence longer
+    // than FENCE_MAX_BYTES refuses, as the stored side's trusted read does.
     const fileDigests = file.factsFence && ledgerApplies(ledger)
       ? await overlaidFileBodyDigests(bytes, reading, file.regions, async text => (await overlayCanonicalBodies(engine.executeRaw.bind(engine), text, '',
         ledger.withdrawals, { sourceId: snapshot.page.source_id, marker: ledger.globalPurges })).compiled_truth,
-      () => pageBodySegmentedError(snapshot.page, 'fileMatchesSnapshot (a facts fence block under withdrawals longer than a block)'))
+      fence => fenceTooLargeError(slug, snapshot.page.source_id, fence), between)
       : file.digests;
     const parsed = { ...file.parsed, compiled_truth: fileDigests.truth, timeline: fileDigests.timeline };
     const type = importedFileType(parsed, snapshot.page, inferred);
-    stored ??= await storedBodyDigests(engine, Number(snapshot.page.id), ledger);
+    stored ??= await storedBodyDigests(engine, Number(snapshot.page.id), ledger, between);
     return digest(canonical({ ...parsed, frontmatter: withoutSafetyAssessments(parsed.frontmatter), type }, parsed.tags))
       === digest(canonical({ ...withoutBody(snapshot.page), frontmatter: withoutSafetyAssessments(snapshot.page.frontmatter ?? {}), compiled_truth: stored.truth, timeline: stored.timeline }, snapshot.tags));
   };
@@ -248,7 +250,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     /** #6368: a tombstone purge whose file matches these sync.exclude globs (relative to the source root) owns no file. */
     excludeTombstone?: { patterns: string[]; onExcluded: (path: string) => void };
     /** #6517: a delete whose file another live page of the source records owns no file; the census target and claimants are reported. */
-    sharedOrigin?: { onShared: (shared: SharedOrigin) => void } } = {}): Promise<PreparedMutation['file']> {
+    sharedOrigin?: { onShared: (shared: SharedOrigin) => void };
+    /** Runs between the pieces of a segmented page's file comparison (an effect's claim renewal). */
+    between?: () => Promise<void> } = {}): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
   // An in-memory canonical file over the 25 MiB push-scan cap is refused (only a page over the 24 MiB single-string
   // ceiling renders one). That page's file is streamed instead (restore_page of a page whose body was not read back,
@@ -328,7 +332,7 @@ async function compareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 's
   if (before && snapshot) {
     const importPath = async () => scannerSourcePath(root, path, mode ?? await scannerSlugRootMode(engine, row.source_id, root));
     // An inline page's file over the push-scan cap cannot hold its body (at most 24 MiB): drift, never read whole.
-    const matches = bodyUnread(snapshot.page) ? await segmentedFileMatches(engine, row.slug, before, snapshot, importPath, options.activePack)
+    const matches = bodyUnread(snapshot.page) ? await segmentedFileMatches(engine, row.slug, before, snapshot, importPath, options.activePack, options.between)
       : before.length <= PUSH_SCAN_MAX_FILE_BYTES && await fileMatchesSnapshot(engine, row.slug, (before instanceof FileBytes ? Buffer.from(before.subarray()) : before).toString('utf8'), snapshot, importPath, options.activePack);
     if (!matches) {
       const held = await heldFileRefusal(engine, row, root, path, 'drift', options.remote === true);
