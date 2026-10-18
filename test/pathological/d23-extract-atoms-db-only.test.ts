@@ -1,16 +1,15 @@
 /**
- * D-23 (GBRA-131, #6986): extract_atoms reads a declared `storage.db_only` page from the database and publishes it
- * whether or not a local cache file sits at its path.
+ * D-23 (GBRA-131, #6986): extract_atoms reads a declared `storage.db_only` page from the database, and a db_only
+ * page's stale cache file no longer wedges coordinated writes to that page.
  *
- * Protects: on a managed brain whose gbrain.yml declares `meetings/` db_only, a meeting page is extracted and its
- * atoms publish when (a) no file exists (the database is the only copy) and (b) a stale cache file exists at the
- * slug path (db_only directories are written to disk as a gitignored cache that sync never imports, so the
- * database copy is the copy of record). The cache file's bytes are left exactly as they were. A page that is NOT
- * declared db_only and whose canonical file differs still refuses `file_database_drift`, so the drift guard is not
- * loosened for file-backed pages.
- * Fails when: the coordinated publication compares the db_only page with its stale cache file and refuses
- * "The canonical file contains an uncoordinated local edit" (`source_changed` / `file_database_drift`), which halts
- * every db_only meeting page on every run (doctor extract_health at 100% halt).
+ * Protects: on a managed brain whose gbrain.yml declares `meetings/` db_only, (a) a meeting page is extracted and
+ * its atoms publish whether its cache file is absent or stale, with the cache bytes left as they were; (b) a
+ * coordinated write to the meeting whose cache holds an earlier database state (a version the database already
+ * had, left behind by a writer that skipped the cache) publishes and refreshes the cache. A cache holding content
+ * the database never had still refuses `source_changed` with both copies kept, and an edited published atom
+ * file still refuses, so the drift guard is not loosened for uncoordinated edits.
+ * Fails when: the coordinated publication treats a stale db_only cache as an uncoordinated local edit and refuses
+ * "The canonical file contains an uncoordinated local edit" (`source_changed` / `file_database_drift`) on every write.
  * Seams: a stub chat model (no paid calls); the real managed coordinator. PGLite always, Postgres when DATABASE_URL
  * is set.
  */
@@ -22,6 +21,7 @@ import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
 import { runPhaseExtractAtoms } from '../../src/core/cycle/extract-atoms.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { operations } from '../../src/core/operations.ts';
+import { importFromContent } from '../../src/core/import-file.ts';
 import { managedBrain, pathologicalArms } from './harness.ts';
 
 const MEETING = 'meetings/2026-04-03-acme-example';
@@ -77,8 +77,8 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
     }
 
 
-    test('D-23 a coordinated write to a db_only meeting whose cache file is stale publishes to the database and leaves the cache', async () => {
-      const cacheBytes = `---\ntype: meeting\ntitle: Acme example sync\n---\n\n${prose('older cache')}\n`;
+    test('D-23 a coordinated write to a db_only meeting whose cache holds an earlier database state publishes and refreshes the cache', async () => {
+      const older = `---\ntype: meeting\ntitle: Acme example sync\n---\n\n${prose('older cache')}\n`;
       await managedBrain(async ({ engine, root, ctx }) => {
         const snap = (await engine.readPageSnapshot(MEETING, { sourceId: 'default' }))!;
         const outcome = await operations.find(o => o.name === 'put_page')!.handler(ctx, { slug: MEETING, expected_revision: snap.revision,
@@ -87,12 +87,32 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         await disposePersistenceConsumer(engine);
         expect(outcome).toBe('published');
         expect((await engine.getPage(MEETING, { sourceId: 'default' }))!.compiled_truth).toContain('edited in the database');
-        expect(readFileSync(join(root, `${MEETING}.md`), 'utf8')).toBe(cacheBytes);
+        expect(readFileSync(join(root, `${MEETING}.md`), 'utf8')).toContain('edited in the database');
       }, { databaseUrl, setup: async ({ engine, root }) => {
         writeFileSync(join(root, 'gbrain.yml'), 'storage:\n  db_only:\n    - meetings/\n');
-        await engine.putPage(MEETING, { type: 'meeting', title: 'Acme example sync', compiled_truth: prose('current'), timeline: '' }, { sourceId: 'default' });
+        await importFromContent(engine, MEETING, older, { sourceId: 'default', noEmbed: true });
         mkdirSync(dirname(join(root, `${MEETING}.md`)), { recursive: true });
-        writeFileSync(join(root, `${MEETING}.md`), cacheBytes);
+        writeFileSync(join(root, `${MEETING}.md`), older);
+        await importFromContent(engine, MEETING, `---\ntype: meeting\ntitle: Acme example sync\n---\n\n${prose('current')}\n`, { sourceId: 'default', noEmbed: true });
+      } });
+    }, 180_000);
+
+    test('D-23 control: a db_only cache holding content the database never had still refuses and both copies stay', async () => {
+      const edited = `---\ntype: meeting\ntitle: Acme example sync\n---\n\n${prose('local unpublished edit')}\n`;
+      await managedBrain(async ({ engine, root, ctx }) => {
+        const snap = (await engine.readPageSnapshot(MEETING, { sourceId: 'default' }))!;
+        const outcome = await operations.find(o => o.name === 'put_page')!.handler(ctx, { slug: MEETING, expected_revision: snap.revision,
+          content: `---\ntype: meeting\ntitle: Acme example sync\n---\n\n${prose('edited in the database')}\n` })
+          .then(() => 'published', (error: { code?: string; detail?: string }) => `${error.code}/${error.detail}`);
+        await disposePersistenceConsumer(engine);
+        expect(outcome).toMatch(/^source_changed\//);
+        expect((await engine.readPageSnapshot(MEETING, { sourceId: 'default' }))!.revision).toBe(snap.revision);
+        expect(readFileSync(join(root, `${MEETING}.md`), 'utf8')).toBe(edited);
+      }, { databaseUrl, setup: async ({ engine, root }) => {
+        writeFileSync(join(root, 'gbrain.yml'), 'storage:\n  db_only:\n    - meetings/\n');
+        await importFromContent(engine, MEETING, `---\ntype: meeting\ntitle: Acme example sync\n---\n\n${prose('current')}\n`, { sourceId: 'default', noEmbed: true });
+        mkdirSync(dirname(join(root, `${MEETING}.md`)), { recursive: true });
+        writeFileSync(join(root, `${MEETING}.md`), edited);
       } });
     }, 180_000);
 
