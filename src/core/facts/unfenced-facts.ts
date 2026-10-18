@@ -557,6 +557,9 @@ async function fenceDatabaseOnlyPage(engine: BrainEngine, sourceId: string, enti
  * comparison, nothing is written. Otherwise the prior body is kept in page_versions, the body is mirrored, the rows are
  * stamped, and the `.tmp` is renamed into place last, so a rolled-back transaction leaves the file as it was.
  */
+/** Thrown inside the fence transaction when the file changed after the mirror, so the mirror and row stamps roll back. */
+class FileChangedDuringFence extends Error {}
+
 async function fenceFilePage(engine: BrainEngine, sourceId: string, entitySlug: string, filePath: string,
   group: UnfencedFactRow[], outcome: UnfencedFactsOutcome, lockRoot?: string): Promise<void> {
   const target = await resolvePageWriteTarget(engine, entitySlug, sourceId);
@@ -609,9 +612,10 @@ async function fenceFilePage(engine: BrainEngine, sourceId: string, entitySlug: 
         );
       }
       assertSourceFilesystemActive();
+      if (readFileSync(filePath, 'utf-8') !== bytes) throw new FileChangedDuringFence();
       renameSync(tmpPath, filePath);
       return true;
-    });
+    }).catch(error => { if (error instanceof FileChangedDuringFence) return false; throw error; });
     if (!written) {
       rmSync(tmpPath, { force: true });
       outcome.failed_pages.push(fileDatabaseDriftToken(entitySlug, sourceId, 'during'));

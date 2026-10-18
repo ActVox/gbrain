@@ -73,11 +73,12 @@ export async function summaryDerivation(engine: BrainEngine, sourceId: string, s
  * #6982: a live body it replaces with a different one is kept in page_versions first (putPage itself keeps none).
  */
 export async function putDerivedPage(engine: BrainEngine, derivation: Derivation, slug: string,
-  page: Parameters<BrainEngine['putPage']>[1], opts: { sourceId: string }): Promise<void> {
+  page: Parameters<BrainEngine['putPage']>[1], opts: { sourceId: string; tags?: readonly string[] }): Promise<void> {
   await derivedMaintenanceTransaction(engine, derivation, async tx => {
     const prior = await readStoredBody(tx, opts.sourceId, slug, true);
     if (prior && (prior.compiled_truth !== page.compiled_truth || (prior.timeline ?? '') !== (page.timeline ?? ''))) await tx.createVersion(slug, opts);
-    const written = await tx.putPage(slug, page, opts);
+    const written = await tx.putPage(slug, page, { sourceId: opts.sourceId });
+    for (const tag of opts.tags ?? []) await tx.addTag(slug, tag, { sourceId: opts.sourceId, tagSource: 'frontmatter' });
     return { result: undefined, rows: [{ table: 'pages' as const, id: Number(written.id), sourceId: opts.sourceId }] };
   });
 }

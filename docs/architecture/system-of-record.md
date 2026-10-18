@@ -231,7 +231,7 @@ or a physical projection that leaves attribution untouched):
 - `src/core/chronicle/publish.ts` (3): Life Chronicle event generations: maintenance requests on managed brains; the unmanaged event write, retirement soft delete and retired stamp run in `maintenanceTransaction`.
 - `src/core/company-brain/profile.ts` (1): legacy sync soft deletes (`softDeleteSyncPages`) run in `maintenanceTransaction`, inside the company-brain source check when one is active.
 - `src/core/cycle/dream-provenance.ts` (1): the dream provenance frontmatter stamp runs per page in `maintenanceTransaction`, or `derivedMaintenanceTransaction` at the child's derived tier when the ref carries its taint (unmanaged brains only; managed synthesis publishes through maintenance requests).
-- `src/core/cycle/dream-taint.ts` (2): the unmanaged dream summary page, and the page_versions row of the different body it replaces (#6982), run in `derivedMaintenanceTransaction` at the tier of the pages it indexes; managed brains publish it through a maintenance request.
+- `src/core/cycle/dream-taint.ts` (3): the unmanaged dream summary page, its frontmatter tags, and the page_versions row of the different body it replaces (#6982), run in `derivedMaintenanceTransaction` at the tier of the pages it indexes; managed brains publish it through a maintenance request.
 - `src/core/cycle/drift.ts` (1): the unmanaged drift report page runs in `maintenanceTransaction`; managed brains publish it through a maintenance request.
 - `src/core/cycle/extract-atoms-page-state.ts` (1): the atom completion stamp runs in `maintenanceTransaction`.
 - `src/core/cycle/extract-atoms.ts` (1): stale atom retirement soft-deletes in 500-page `maintenanceTransaction` chunks.

@@ -3104,7 +3104,7 @@ async function writeSummaryPage(
     compiled_truth: parsed.compiled_truth,
     timeline: parsed.timeline,
     frontmatter: parsed.frontmatter,
-  }, { sourceId });
+  }, { sourceId, tags: parsed.tags });
 
   const fileWriteRaw = (await engine.getConfig('dream.synthesize.summary_file_write'))?.trim().toLowerCase();
   const fileWriteEnabled = !(fileWriteRaw === 'false' || fileWriteRaw === '0' || fileWriteRaw === 'off');
