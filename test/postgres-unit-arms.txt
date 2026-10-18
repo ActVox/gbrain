@@ -223,11 +223,17 @@ test/pathological/a10-global-maintenance-stamp.test.ts
 test/pathological/a21-facts-expire-deleted.test.ts
 test/pathological/a22-consolidate-buckets.test.ts
 test/pathological/a23-patterns-grounding.test.ts
+test/pathological/a26-safe-chunks-reseal.test.ts
+test/pathological/a27-credential-reseal.test.ts
 test/pathological/a4-synthesize-postprocess.test.ts
 test/pathological/a41-maintain-sources.test.ts
+test/pathological/a44-slug-conflicts-rotation.test.ts
+test/pathological/a45-repair-all-kinds.test.ts
+test/pathological/a46-content-lane-kinds.test.ts
 test/pathological/a47-backfill-poison-row.test.ts
 test/pathological/a49-unmanaged-purge-tombstones.test.ts
 test/pathological/a50-unmanaged-expired-sources.test.ts
+test/pathological/a9-repair-core.test.ts
 test/pathological/b6-triage-verdict-surrogate.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts

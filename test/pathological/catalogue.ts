@@ -59,4 +59,8 @@ export const CATALOGUE: Record<IsolateSite, SiteCases> = {
     run: 'a run-scoped error while grounding timeline appends still stops grounding' },
   'links.extract_stale': { file: 'test/pathological/a1-links-extract.test.ts',
     item: 'A-1 item: a page whose derive throws is reported', run: 'A-1 run: a run-scoped error at one page stops the unit' },
+  'repair.apply_items': { file: 'test/pathological/a9-repair-core.test.ts', item: 'item case: an item whose apply throws', run: 'run case: a run-scoped' },
+  'repair.all_kinds': { file: 'test/pathological/a45-repair-all-kinds.test.ts', item: 'item case: a kind whose plan throws', run: 'run case: a run-scoped' },
+  'repair.content_lane_kinds': { file: 'test/pathological/a46-content-lane-kinds.test.ts', item: 'item case: fences throwing is recorded', run: 'run case: a run-scoped' },
+  'migration.credential_reseal': { file: 'test/pathological/a27-credential-reseal.test.ts', item: 'item case: the unbuildable page is held', run: 'run case: a run-scoped' },
 };

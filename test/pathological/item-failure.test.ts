@@ -103,3 +103,7 @@ describe('ItemRun breaker', () => {
 test('RUN_SCOPED_CODES holds item_failures_systemic so a tripped inner loop stops its outer loop', () => {
   expect(RUN_SCOPED_CODES.has('item_failures_systemic')).toBe(true);
 });
+
+test('a role that may not create schema objects stops the run: schema_owner_required is run-scoped', () => {
+  expect(classifyItemFailure(new OperationError('schema_owner_required', 'This database role may not create query_cache.'))).toMatchObject({ code: 'schema_owner_required', scope: 'run' });
+});

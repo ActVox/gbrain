@@ -39,6 +39,10 @@ export const ISOLATE_SITES = {
   'patterns.ground_pages': 'A-23',
   'patterns.ground_timeline_appends': 'A-23',
   'links.extract_stale': 'A-1',
+  'repair.apply_items': 'A-9',
+  'repair.all_kinds': 'A-45',
+  'repair.content_lane_kinds': 'A-46',
+  'migration.credential_reseal': 'A-27',
 } as const satisfies Record<string, string>;
 
 export type IsolateSite = keyof typeof ISOLATE_SITES;
@@ -62,7 +66,7 @@ export const RUN_SCOPED_CODES: ReadonlySet<string> = new Set([
   'queue_capacity', 'write_quota_exhausted', 'write_capacity_backpressure', 'maintenance_backpressure', 'database_contention',
   'writer_registration_required', 'writer_identity_invalid', 'writer_not_initialized', 'writer_upgrade_required',
   'writer_not_quiesced', 'writer_admin_locked', 'unsupported_mutation_protocol', 'write_claim_lost', 'connection_lost',
-  'permission_denied', 'scope_denied', 'config', 'auth', 'connector_holds_exhausted', 'transfer_in_progress', 'disk_full',
+  'permission_denied', 'schema_owner_required', 'scope_denied', 'config', 'auth', 'connector_holds_exhausted', 'transfer_in_progress', 'disk_full',
 ]);
 
 /** Item codes that fail the same way until the item changes. Every other item code is transient. */
