@@ -220,9 +220,12 @@ test/page-purge-journal-timeout-6511.test.ts
 test/page-state-engine.test.ts
 test/pathological/a1-links-extract.test.ts
 test/pathological/a10-global-maintenance-stamp.test.ts
+test/pathological/a18-ledger-path-text.test.ts
 test/pathological/a21-facts-expire-deleted.test.ts
 test/pathological/a22-consolidate-buckets.test.ts
 test/pathological/a23-patterns-grounding.test.ts
+test/pathological/a24-phantom-redirect-cursor.test.ts
+test/pathological/a25-propose-takes-poison-pages.test.ts
 test/pathological/a26-safe-chunks-reseal.test.ts
 test/pathological/a27-credential-reseal.test.ts
 test/pathological/a4-synthesize-postprocess.test.ts
