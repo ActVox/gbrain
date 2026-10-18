@@ -18,4 +18,14 @@ export interface SiteCases {
 }
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
+  'synthesize.postprocess': {
+    file: 'test/pathological/a4-synthesize-postprocess.test.ts',
+    item: 'A-4 item: a carried output whose postprocess request ended revision_conflict',
+    run: 'A-4 run: a run-scoped error while reading a carried output stops the pass',
+  },
+  'synthesize.triage_verdict_cache': {
+    file: 'test/pathological/b6-triage-verdict-surrogate.test.ts',
+    item: 'B-6 item: a verdict the database refuses is not cached',
+    run: 'B-6 run: a run-scoped error writing a verdict stops the pass',
+  },
 };
