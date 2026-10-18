@@ -17,11 +17,11 @@ export const REQUEST_RECOVERY_VERSIONS: readonly number[] = [1, 2];
 export type RecoveryTable = 'persistence_requests' | 'persistence_effects';
 const KNOWN: Record<RecoveryTable, readonly number[]> = { persistence_requests: REQUEST_RECOVERY_VERSIONS, persistence_effects: EFFECT_RECOVERY_VERSIONS };
 
-/** True for a record this binary knows how to recover (an absent record is not refused). */
+/** True unless the record names a version this binary does not know (an absent record, or one with no version, is not refused). */
 export function recoveryVersionKnown(table: RecoveryTable, record: unknown): boolean {
   if (record === null || record === undefined) return true;
   const version = (record as { version?: unknown }).version;
-  return typeof version === 'number' && KNOWN[table].includes(version);
+  return version === undefined || (typeof version === 'number' && KNOWN[table].includes(version));
 }
 
 /** The upgrade fix: only a newer gbrain on the canonical owner host reads the record. */

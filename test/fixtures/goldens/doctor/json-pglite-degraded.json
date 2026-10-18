@@ -1263,6 +1263,7 @@
             "preparation_policy": {
               "maintenance_preparation_ms": "<volatile>",
               "max_preparation_attempts": 2,
+              "max_transient_retries": 5,
               "preparation_ceiling_ms": "<volatile>",
               "sync_preparation_ms": "<volatile>"
             },

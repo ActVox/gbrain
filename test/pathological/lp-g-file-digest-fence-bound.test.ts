@@ -170,6 +170,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`the drift c
       const fileBytes = statSync(file).size;
       // `bodyDigestWork.fileBytes` counts the scan (the file once whole), the region digests (each region once) and the overlay pass:
       // the truth region before the fence read and hashed as emitted (twice its bytes), then the fence as far as it was read.
+      // test-reads-source-ok[raw-bytes]: reads this test's own fixture page file to measure its regions, not src/ text.
       const scanned = fileBodyDigests(Buffer.from(readFileSync(file)), { prefix: new Uint8Array(0), skip: 0 }, 'probe.md', {});
       if (scanned.kind !== 'ok') throw new Error(scanned.reason);
       const regionBytes = [...scanned.regions.truth, ...scanned.regions.timeline].reduce((n, piece) => n + ('text' in piece ? Buffer.byteLength(piece.text) : piece.end - piece.start), 0);
