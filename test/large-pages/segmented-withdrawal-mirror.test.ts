@@ -10,24 +10,34 @@
  *    (`largeFileWork`), and the bytes it stages are exactly the file's. Its recovery record names the staged file by
  *    path and digest instead of embedding it, and a mirror interrupted before or after writing that stage recovers
  *    forward: the stage is written from the segments, or the written one renamed, exactly once.
+ *    A facts fence longer than a segment (split by forced cuts) is mirrored joined, after a source withdrawal applies. A
+ *    stage the filesystem refuses (EIO) leaves no record behind: other writes on the worktree proceed and the mirror
+ *    retries, then parks after its attempts. The mirror renders the file only when it has a file to rewrite, the Git
+ *    walk never renders it, and the claim is renewed between the pieces (`largeFileWork.bytesMeasured`,
+ *    `effectClaimWork.renewals`, counts not time).
  * 2. Fails when: the withdrawal-mirror effect skips a segmented page (`page_body_segmented`) and leaves the purged claim
  *    on disk, the Git walk skips it, the mirror renders the body as one string (nothing staged in pieces), the record
- *    embeds the file or reserves it twice, or recovery cannot finish an interrupted mirror.
+ *    embeds the file or reserves it twice, or recovery cannot finish an interrupted mirror; a cross-cut fence parks the
+ *    mirror (`page_projection_stale`); a refused stage keeps its record (writes on the worktree stay pending and the
+ *    mirror never parks); the Git walk or a mirror of a missing file measures the file; no renewal happens mid-stream.
  * 3. PGLite always; PostgreSQL when DATABASE_URL is set (test/postgres-unit-arms.txt). The switch is off for the inline
  *    twin's writes and on for the segmented twin's. The interruptions are modelled at the `effect_recovery:before_stage`
- *    and `effect_recovery:staged` seams (fault-points.ts) with a hook that throws once.
+ *    and `effect_recovery:staged` seams (fault-points.ts) with a hook that throws once; the EIO at
+ *    `large_file:stage_streaming`.
  */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { exportBodyLedger, readExportPage, readExportWithdrawals, segmentedExportMarkdown } from '../../src/core/export-snapshot.ts';
 import { buildEmbedSkipMarker, EMBED_SKIP_KEY } from '../../src/core/embed-skip.ts';
 import { serializeMarkdown, slugStampedFrontmatter } from '../../src/core/markdown.ts';
 import { buildContentFlagMarker, CONTENT_FLAG_KEY } from '../../src/core/quarantine.ts';
 import { SEGMENT_MAX_BYTES } from '../../src/core/page-body/limits.ts';
-import { runPersistenceEffects } from '../../src/core/persistence/effects.ts';
+import { __setEffectRenewalIntervalForTests, runPersistenceEffects } from '../../src/core/persistence/effects.ts';
+import { effectClaimWork } from '../../src/core/persistence/effect-journal.ts';
+import { PARK_AFTER_FAILURES } from '../../src/core/persistence/effect-model.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
 import { largeFileWork } from '../../src/core/persistence/large-file.ts';
@@ -52,6 +62,28 @@ const STREAM_CLAIM = 'Twin Example vault code is 2718';
 const PARTIAL_CLAIM = 'Twin Example vault code is 3141';
 /** The claim purged from a page the content gate marked in the database only. */
 const MARKED_CLAIM = 'Twin Example safe code is 6022';
+/** A page whose one facts fence is longer than a segment, so the segmenter splits it with forced cuts. */
+const CROSS_CUT = 'people/cuts-example';
+const CROSS_CLAIM = 'Twin Example gate code is 4410';
+const CROSS_KEPT = 'Routine note number 10999 about the weekly planning meeting';
+/** The claims whose mirror stage the filesystem refuses (EIO) once, and on every attempt. */
+const EIO_ONCE = 'Twin Example vault code is 5021';
+const EIO_ALWAYS = 'Twin Example vault code is 5022';
+const OTHER = 'people/oth-example';
+/** The claim of the bounded-work mirror, and the page whose canonical file is gone before its purge (and its claim). */
+const BOUND_CLAIM = 'Twin Example vault code is 7310';
+const RENEW_CLAIM = 'Twin Example vault code is 7312';
+const GONE = 'people/gone-example';
+const GONE_CLAIM = 'Twin Example vault code is 7311';
+const eio = () => Object.assign(new Error('EIO: i/o error, write'), { code: 'EIO', errno: -5, syscall: 'write' });
+const factRow = (n: number, claim: string) => `| ${n} | ${claim} | fact | 1.0 | world | medium | 2026-01-01 |  | chat |  |`;
+const crossCutPage = () => {
+  const rows = Array.from({ length: 11_000 }, (_, i) => factRow(i + 1, `Routine note number ${i} about the weekly planning meeting`));
+  rows.splice(5_500, 0, factRow(11_001, CROSS_CLAIM));
+  return '---\ntype: person\ntitle: Twin Example\n---\n\n# Twin Example\n\nA page whose facts fence is longer than a segment.\n\n'
+    + '<!--- gbrain:facts:begin -->\n| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |\n'
+    + '|---|-------|------|------------|------------|------------|------------|-------------|--------|---------|\n' + rows.join('\n') + '\n<!--- gbrain:facts:end -->\n';
+};
 
 const fileOf = (brain: TwinBrain, slug: string) => join(brain.root, slug + '.md');
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -252,6 +284,165 @@ for (const kind of testBackends()) {
       expect(file.toString('utf8')).toContain(KEPT);
       expect(file.equals(await exported(brain, SEGMENTED))).toBe(true);
       expect(stagingLeft(brain)).toEqual([]);
+    }, 600_000);
+  });
+
+  describe(kind + ': a withdrawal mirrors a segmented page whose facts fence crosses a forced cut', () => {
+    let brain: TwinBrain;
+
+    beforeAll(async () => {
+      brain = await openTwinBrain(kind, [], async seed => { await seed.setSwitch(true); });
+      expect(await brain.call('put_page', { slug: CROSS_CUT, content: crossCutPage() })).toMatchObject({ state: 'committed' });
+      expect(await brain.storageOf(CROSS_CUT)).toBe('segmented');
+      await settle(brain, kind);
+    }, 600_000);
+
+    afterAll(() => brain.close(), 120_000);
+
+    test('purge_fact rewrites the file without the claim, the fence joined across the cut as discovery joins it', async () => {
+      // The fence runs on across at least one forced cut (a facts slot that opens in one segment and closes in a later one).
+      const [split] = await brain.engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM page_body_manifest m JOIN pages p ON p.id=m.page_id,
+        jsonb_array_elements(m.facts_slots) s WHERE p.source_id=$1 AND p.slug=$2 AND m.gen_to IS NULL AND s ? 'open_start'`, [brain.sourceId, CROSS_CUT]);
+      expect(split!.n).toBeGreaterThan(1);
+      expect(readFileSync(fileOf(brain, CROSS_CUT), 'utf8')).toContain(CROSS_CLAIM);
+
+      const receipt = await purge(brain, kind, CROSS_CUT, CROSS_CLAIM);
+      expect(await effectsOf(brain, receipt.requestId)).toEqual(SETTLED);
+      const file = readFileSync(fileOf(brain, CROSS_CUT));
+      expect(file.toString('utf8')).not.toContain(CROSS_CLAIM);
+      expect(file.toString('utf8')).toContain(CROSS_KEPT);
+      expect(file.equals(await exported(brain, CROSS_CUT))).toBe(true);
+      expect(stagingLeft(brain)).toEqual([]);
+    }, 600_000);
+  });
+
+  describe(kind + ': a mirror stage the filesystem refuses holds nothing behind it', () => {
+    let brain: TwinBrain;
+    const mirrorOf = async (requestId: string) => (await brain.engine.executeRaw<{ state: string; error_code: string | null; recovering: boolean; data: any }>(
+      `SELECT e.state, e.error_code, e.recovery IS NOT NULL AS recovering, e.data FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
+        WHERE r.request_id=$1::uuid AND e.kind='withdrawal-mirror'`, [requestId]))[0]!;
+    const reserved = async () => (await brain.engine.executeRaw<{ bytes: string }>('SELECT recovery_bytes::text AS bytes FROM persistence_counters')).map(row => Number(row.bytes));
+    const pass = () => withEnv(brain.env(), async () => {
+      await brain.engine.executeRaw(`UPDATE persistence_effects SET next_attempt_at=now() WHERE source_id=$1 AND state='queued'`, [brain.sourceId]);
+      await runPersistenceEffects(brain.engine, { engine: kind, embedding_disabled: true } as never, { hostId: localHostId(), limit: 20 });
+    });
+    /** purge_fact committed; its effects are then run by `pass` only. */
+    const submitPurge = async (claim: string) => {
+      const [fact] = await brain.engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND fact=$3', [brain.sourceId, SEGMENTED, claim]);
+      const dry = await brain.call('purge_fact', { id: Number(fact!.id), dry_run: true }, SEGMENTED);
+      const requestId = randomUUID();
+      expect(await brain.call('purge_fact', { id: Number(fact!.id), confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: requestId }, SEGMENTED))
+        .toMatchObject({ state: 'committed' });
+      return requestId;
+    };
+
+    beforeAll(async () => {
+      brain = await openTwinBrain(kind, [], async seed => {
+        await seed.setSwitch(true);
+        await seed.put(SEGMENTED, 1_100_000);
+      });
+      await extract(brain, SEGMENTED, [EIO_ONCE, EIO_ALWAYS, KEPT]);
+      expect(await brain.storageOf(SEGMENTED)).toBe('segmented');
+      await settle(brain, kind);
+    }, 600_000);
+
+    afterAll(() => { installFaultHook(undefined); return brain.close(); }, 120_000);
+
+    test('an EIO while staging is retried and the next attempt publishes', async () => {
+      let refused = 0;
+      installFaultHook(async point => { if (point === 'large_file:stage_streaming' && refused === 0) { refused++; throw eio(); } });
+      let requestId = '';
+      try {
+        requestId = await submitPurge(EIO_ONCE);
+        await settle(brain, kind);
+      } finally { installFaultHook(undefined); }
+      expect(refused).toBe(1);
+      const file = readFileSync(fileOf(brain, SEGMENTED));
+      expect(file.toString('utf8')).not.toContain(EIO_ONCE);
+      expect(file.equals(await exported(brain, SEGMENTED))).toBe(true);
+      expect(await effectsOf(brain, requestId)).toEqual(SETTLED);
+      expect(await mirrorOf(requestId)).toMatchObject({ recovering: false });
+      expect(await reserved()).toEqual((await reserved()).map(() => 0));
+      expect(stagingLeft(brain)).toEqual([]);
+    }, 600_000);
+
+    test('a stage refused on every attempt parks the mirror after its attempts while other writes on the worktree proceed', async () => {
+      const before = readFileSync(fileOf(brain, SEGMENTED));
+      let refused = 0;
+      installFaultHook(async point => { if (point === 'large_file:stage_streaming') { refused++; throw eio(); } });
+      let requestId = '';
+      try {
+        requestId = await submitPurge(EIO_ALWAYS);
+        await waitFor(async () => { await pass(); return refused >= 1; }, { timeoutMs: 60_000, intervalMs: 100, label: 'the first stage write refused' });
+        // Another page of the same worktree is written while the mirror retries: the refused stage holds no record that blocks it.
+        expect(await brain.call('put_page', { slug: OTHER, content: '---\ntype: person\ntitle: Other Example\n---\n\nWritten while a mirror retries.\n' }))
+          .toMatchObject({ state: 'committed' });
+        expect(readFileSync(fileOf(brain, OTHER), 'utf8')).toContain('Written while a mirror retries.');
+        await waitFor(async () => { await pass(); return (await mirrorOf(requestId)).state === 'failed'; },
+          { timeoutMs: 120_000, intervalMs: 100, label: 'the mirror parked' }).catch(() => undefined);
+      } finally { installFaultHook(undefined); }
+      expect(await mirrorOf(requestId)).toMatchObject({ state: 'failed', error_code: 'targets_parked', recovering: false,
+        data: { parked: [{ slug: SEGMENTED, error_code: 'effect_unavailable' }] } });
+      expect(refused).toBe(PARK_AFTER_FAILURES);
+      expect(await reserved()).toEqual((await reserved()).map(() => 0));
+      expect(readFileSync(fileOf(brain, SEGMENTED)).equals(before)).toBe(true);
+      expect(stagingLeft(brain)).toEqual([]);
+    }, 600_000);
+  });
+
+  describe(kind + ': the mirror and Git walk do only the work a target needs', () => {
+    let brain: TwinBrain;
+    let restoreRenewal: () => void = () => {};
+
+    beforeAll(async () => {
+      brain = await openTwinBrain(kind, [], async seed => {
+        await seed.setSwitch(true);
+        await seed.put(SEGMENTED, 1_100_000);
+        await seed.put(GONE, 1_100_000);
+      });
+      await extract(brain, SEGMENTED, [BOUND_CLAIM, RENEW_CLAIM, KEPT]);
+      await extract(brain, GONE, [GONE_CLAIM, KEPT]);
+      expect([await brain.storageOf(SEGMENTED), await brain.storageOf(GONE)]).toEqual(['segmented', 'segmented']);
+      await settle(brain, kind);
+    }, 600_000);
+
+    afterAll(() => { restoreRenewal(); return brain.close(); }, 120_000);
+
+    test('the file is measured once, by the mirror; the Git walk only compares it', async () => {
+      resetWork();
+      const receipt = await purge(brain, kind, SEGMENTED, BOUND_CLAIM);
+      const work = { ...largeFileWork };
+      const file = readFileSync(fileOf(brain, SEGMENTED));
+      expect(await effectsOf(brain, receipt.requestId)).toEqual(SETTLED);
+      expect(file.toString('utf8')).not.toContain(BOUND_CLAIM);
+      expect(file.equals(await exported(brain, SEGMENTED))).toBe(true);
+      expect(work.bytesMeasured).toBe(file.length);
+      expect(work.bytesWritten).toBe(file.length);
+    }, 600_000);
+
+    test('the mirror renews its claim between the pieces of the file it measures and stages', async () => {
+      // Interval 0: every piece renews, so the count is a function of the pieces, not of time.
+      restoreRenewal = __setEffectRenewalIntervalForTests(0);
+      effectClaimWork.renewals = 0;
+      let receipt: Awaited<ReturnType<typeof purge>>;
+      try { receipt = await purge(brain, kind, SEGMENTED, RENEW_CLAIM); } finally { restoreRenewal(); }
+      const renewals = effectClaimWork.renewals;
+      expect(await effectsOf(brain, receipt!.requestId)).toEqual(SETTLED);
+      expect(readFileSync(fileOf(brain, SEGMENTED), 'utf8')).not.toContain(RENEW_CLAIM);
+      // At least one renewal per segment of each pass over the file: once measured, once staged.
+      const [segments] = await brain.engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM page_body_manifest m JOIN pages p ON p.id=m.page_id
+        WHERE p.source_id=$1 AND p.slug=$2 AND m.gen_to IS NULL AND m.staging_id IS NULL`, [brain.sourceId, SEGMENTED]);
+      expect(segments!.n).toBeGreaterThan(1);
+      expect(renewals).toBeGreaterThanOrEqual(2 * segments!.n);
+    }, 600_000);
+
+    test('a page whose canonical file is gone is never rendered by its mirror', async () => {
+      rmSync(fileOf(brain, GONE));
+      resetWork();
+      const receipt = await purge(brain, kind, GONE, GONE_CLAIM);
+      expect(await effectsOf(brain, receipt.requestId)).toEqual(SETTLED);
+      expect(existsSync(fileOf(brain, GONE))).toBe(false);
+      expect(largeFileWork.bytesMeasured).toBe(0);
     }, 600_000);
   });
 

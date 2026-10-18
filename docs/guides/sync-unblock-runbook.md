@@ -111,6 +111,7 @@ Every hold and error has three fields, from one table
 | `concurrent_write` | page | reconcile | yes | always: the file and the database page diverge |
 | `file_drift` | page | reconcile | yes | always: the page changed in the database since its file was last imported |
 | `preparation_stalled` | page | retry, upgrade | no | 3 failed attempts over 24 h, or writer status names a step that never finishes |
+| `write_interrupted` | page | retry | no | 3 failed attempts over 24 h: gbrain sources writer status --source <source> --json (read-only) names the load on the write owner |
 | `invalid_fence` | page | repair | no | the fence repair preview offers no plan (a manual reason) |
 | `invalid_frontmatter` | page | repair | no | the repair preview needs an interpretation (--include-ambiguous) |
 | `frontmatter_slug_conflict` | page | repair | no | the lane recorded why it could not decide |
@@ -140,7 +141,6 @@ Every hold and error has three fields, from one table
 | `sync_incomplete` | page | retry | no | never: an unfinished cursor resumes with the same command |
 | `connection_lost` | connection | retry | no | three reruns in a row end connection_lost (the database is unreachable from this host) |
 | `database_contention` | connection | retry | no | three reruns in a row stop on it |
-| `write_interrupted` | connection | retry | no | a rerun ends write_interrupted on the same entry again: gbrain sources writer status --source <source> --json (read-only) names the load on the write owner |
 | `write_capacity` | connection | retry | no | writer status shows the cap held by requests that never settle |
 | `write_capacity_backpressure` | connection | retry | no | reason lifetime_ids (request ids never free, so only the host raise lifts it), or the pause outlasts a day |
 | `capacity_paused` | connection | retry | no | reason lifetime_ids (only the host raise resumes it), or the same pause after the raise |
@@ -217,6 +217,11 @@ it and kept going; the receipt lists the hold (`held`, `held_count`) and
 - `preparation_stalled`: the write owner, not the file, stalled;
   `gbrain sources writer status --source <id> --json` names the step.
   `unblock --apply` schedules the re-screen.
+- `write_interrupted`: the database ended the file's statements (SQLSTATE
+  57014, a statement timeout or cancel) at every attempt, so the file is held
+  and the rest of the source syncs. Writer status names the load on the write
+  owner; reduce it, then `gbrain sources retry-held <id>` (or
+  `unblock --apply`) and the same sync.
 - `invalid_fence` and `frontmatter_slug_conflict`: the content-repair lane
   clears them. Managed sync drops a `slug:` line naming no page or file
   (#6865). `unblock --apply` runs it on the held paths now; the maintenance

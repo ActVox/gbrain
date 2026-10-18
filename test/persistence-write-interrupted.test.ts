@@ -15,9 +15,16 @@
  *    loaded host is prepared again, its whole body streamed again, without limit), or when contention or a connection loss is counted.
  * 3. Existing coverage: page-purge-journal-timeout-6511.test.ts bounds the purge's own lookups only;
  *    persistence-preparation-deadline tests bound preparation deadlines, never a publication's interruptions.
- *    A managed sync member that ends `write_interrupted` is a transient connection-class fault (SYNC_FAULT_TABLE): the
- *    run re-freezes it in place under a fresh request (STOPS_PER_ENTRY times in a row), then stops resumable with
- *    `retry` and an escalation naming the read-only `gbrain sources writer status`, never "Unknown code" for a person.
+ *    A managed sync member that ends `write_interrupted` is a page-class hold, like `preparation_stalled` (SYNC_FAULT_TABLE):
+ *    the run moves past it and the rest of the source lands; sync status lists the hold with the read-only
+ *    `gbrain sources writer status` as its fix, and `gbrain sources retry-held` re-admits it.
+ *    The charge is atomic with the claim's release or failure: a crash right after it (the
+ *    `persistence:interruption_charged` seam) leaves no claim for the expired-owner sweep to charge again, so the one
+ *    promised re-preparation survives. On the recovery route the charge commits before the request is marked
+ *    recovering; a crash between them (the `persistence:recovery_interruption_charged` seam) leaves a running request
+ *    that holds its recovery record, which neither expired-owner sweep takes (`recovery IS NULL`), so the owner's
+ *    recovery pass finishes it with the one charge. A group's shared read (preparationReads) the database cancelled is no member's own
+ *    statement: no member is charged, and a bounded member never reads it as its own deadline.
  * 4. Semantic injection: installFaultHook on the publication's before_commit seam (inside the publication transaction),
  *    throwing an error carrying the SQLSTATE, for every publication of the claims the test names. Counts claims, never
  *    time. Runs on PGLite and, with DATABASE_URL, on Postgres.
@@ -36,8 +43,13 @@ import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { resetWriteSwitches } from '../src/core/persistence/switches.ts';
 import { classifySyncFault } from '../src/core/persistence/sync-fault-class.ts';
-import { performManagedSync, STOPS_PER_ENTRY } from '../src/core/persistence/sync-run.ts';
-import { readSyncStatus, unblockSync } from '../src/core/persistence/sync-status.ts';
+import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
+import { retryHeld } from '../src/commands/sources-retry-held.ts';
+import { boundedReads, PreparationDeadlineError } from '../src/core/persistence/bounded-reads.ts';
+import { startClaimPhase } from '../src/core/persistence/claim-phase.ts';
+import { preparationAbortReason } from '../src/core/persistence/coordinator.ts';
+import { preparationReads } from '../src/core/persistence/group-publish.ts';
 import { receiptClass, resumableStop } from '../src/core/persistence/sync-stop-class.ts';
 import { classifyRecordedFault } from '../src/core/persistence/terminal-classify.ts';
 import type { WriteRequest } from '../src/core/persistence/model.ts';
@@ -51,15 +63,34 @@ const interruption = (code: string) => Object.assign(new Error(code === '57014' 
 const page = (title: string) => `---\ntitle: ${title}\ntype: note\n---\n# ${title}\n\nBody of ${title}.\n`;
 const WRITER_STATUS = 'gbrain sources writer status';
 
-test('write_interrupted is a transient connection fault whose escalation names the read-only writer status', () => {
-  expect(classifySyncFault({ code: 'write_interrupted' })).toEqual({ class: 'connection', safe_actions: ['retry'], needs_human: false });
-  expect(classifyRecordedFault({ source_id: 'notes', code: 'write_interrupted', slug: 'a' })).toMatchObject({ category: 'transport', public_category: 'transient',
-    class: 'connection', safe_actions: ['retry'], needs_human: false, escalate: expect.stringContaining(WRITER_STATUS) });
+test('write_interrupted is a page-class hold whose escalation names the read-only writer status', () => {
+  expect(classifySyncFault({ code: 'write_interrupted' })).toEqual({ class: 'page', safe_actions: ['retry'], needs_human: false });
+  expect(classifyRecordedFault({ source_id: 'notes', code: 'write_interrupted', slug: 'a' })).toMatchObject({ category: 'sync_fault', public_category: 'transient',
+    class: 'page', safe_actions: ['retry'], needs_human: false, escalate: expect.stringContaining(WRITER_STATUS) });
   const receipt = { request_id: randomUUID(), source_id: 'notes', slug: 'a', operation: 'put_page', state: 'failed', error_code: 'write_interrupted',
     error_message: 'The database ended this write\'s statements 2 time(s).', error_detail: { origin: 'database_interruption', sqlstate: '57014', attempts: 2, limit: 2 },
     recovery: null, blocked_reason: null, compacted: false, publication_started: false, intent: { kind: 'managed_sync_import' } } as unknown as WriteRequest;
-  expect(receiptClass(receipt)).toBe('transport');
-  expect(resumableStop(receipt)).toBe(true);
+  expect(receiptClass(receipt)).toBe('page');
+  expect(resumableStop(receipt)).toBe(false);
+});
+
+const STABLE_READ = 'SELECT local_path FROM sources WHERE id=$1';
+/** Two group members' views of one shared read the database cancelled (57014), as preparationReads hands them out. */
+async function sharedReadFailures(): Promise<unknown[]> {
+  const engine = { kind: 'postgres', executeRaw: async () => { throw interruption('57014'); }, getConfig: async () => null } as unknown as BrainEngine;
+  const shared = preparationReads(engine);
+  const members = [startClaimPhase(Date.now(), new AbortController().signal, 10_000), startClaimPhase(Date.now(), new AbortController().signal, 10_000)];
+  return Promise.all(members.map(clock => boundedReads(shared, clock).executeRaw(STABLE_READ, ['default']).then(() => null, (error: unknown) => error)));
+}
+
+test('a shared read the database cancelled is no member\'s own deadline: each member sees a transient database failure', async () => {
+  const failures = await sharedReadFailures();
+  expect(failures).toHaveLength(2);
+  for (const failure of failures) {
+    expect(failure).not.toBeInstanceOf(PreparationDeadlineError);
+    expect(preparationAbortReason(failure)).toBeNull();
+    expect((failure as { code?: string }).code).toBe('57014');
+  }
 });
 
 type Row = { state: string; error_code: string | null; error_message: string | null; error_detail: Record<string, unknown> | null; preparation_attempts: number; has_recovery: boolean };
@@ -146,7 +177,7 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
     expect(await row(requestId)).toMatchObject({ state: 'committed' });
   }, 120_000);
 
-  test('a managed sync entry that ends write_interrupted is re-frozen in place, then stops resumable with a retry', async () => withEnv({ GBRAIN_HOME: home,
+  test('a managed sync entry that ends write_interrupted is held: the rest of the source lands, and retry-held re-admits it', async () => withEnv({ GBRAIN_HOME: home,
     GBRAIN_SYNC_FAILURES_DIR: home, GBRAIN_SOURCE: undefined, OPENAI_API_KEY: undefined, VOYAGE_API_KEY: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
     const id = `wi-${randomUUID().slice(0, 8)}`, root = join(home, id);
     const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -169,25 +200,68 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
       }
       if (point === 'publication:before_commit' && pageA.has(detail.requestId)) throw interruption('57014');
     });
-    const result = await performManagedSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true });
-    installFaultHook(undefined);
-    expect(result).toMatchObject({ status: 'blocked_by_failures', failureCodes: [{ code: 'write_interrupted', count: 1 }] });
-    const requests = await engine.executeRaw<{ state: string; error_code: string | null; preparation_attempts: number }>(
-      "SELECT state,error_code,preparation_attempts FROM persistence_requests WHERE source_id=$1 AND slug='a' ORDER BY sequence", [id]);
-    expect(requests).toEqual(Array.from({ length: STOPS_PER_ENTRY + 1 }, () => ({ state: 'failed', error_code: 'write_interrupted', preparation_attempts: 2 })));
-    expect(await engine.readPageSnapshot('a', { sourceId: id })).toBeNull();
-    const status = await readSyncStatus(engine, id);
-    expect(status.last_error).toMatchObject({ code: 'write_interrupted', category: 'transport', public_category: 'transient', class: 'connection',
-      safe_actions: ['retry'], needs_human: false });
-    expect(status).toMatchObject({ state: 'resumable', needs_human: false });
-    expect(status.next?.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
-    expect(status.next?.user_message).toBeUndefined();
-    expect((await unblockSync(engine, id, { apply: false })).refused).toEqual([]);
-    // The cause gone, the same sync converges.
-    expect((await performManagedSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true })).status).not.toBe('blocked_by_failures');
-    expect(await engine.readPageSnapshot('a', { sourceId: id })).not.toBeNull();
+    const sync = () => performManagedSync(engine, { sourceId: id, noPull: true, noEmbed: true, noExtract: true });
+    const first = await sync();
+    expect(first.status).not.toBe('blocked_by_failures');
     expect(await engine.readPageSnapshot('b', { sourceId: id })).not.toBeNull();
+    expect(await engine.readPageSnapshot('a', { sourceId: id })).toBeNull();
+    // One request for `a`, never re-frozen in place: its two preparations, then the hold.
+    const requests = async () => engine.executeRaw<{ state: string; error_code: string | null; preparation_attempts: number }>(
+      "SELECT state,error_code,preparation_attempts FROM persistence_requests WHERE source_id=$1 AND slug='a' ORDER BY sequence", [id]);
+    expect(await requests()).toEqual([{ state: 'failed', error_code: 'write_interrupted', preparation_attempts: 2 }]);
+    const writerStatus = ['gbrain', 'sources', 'writer', 'status', '--source', id, '--json'];
+    const held = await readSyncStatus(engine, id);
+    expect(held.last_error).toBeNull();
+    expect(held.needs_human).toBe(false);
+    expect(held.holds).toEqual([expect.objectContaining({ path: 'a.md', code: 'write_interrupted', class: 'page', needs_human: false,
+      fix: expect.objectContaining({ argv: writerStatus }) })]);
+    // A second run with the cause still there makes no worse: it ends without blocking and `a` stays held.
+    expect((await sync()).status).not.toBe('blocked_by_failures');
+    expect((await readSyncStatus(engine, id)).holds).toEqual([expect.objectContaining({ path: 'a.md', code: 'write_interrupted' })]);
+    // The cause gone, retry-held re-admits the entry and the same sync imports it.
+    installFaultHook(undefined);
+    await retryHeld(engine, id);
+    expect((await sync()).status).not.toBe('blocked_by_failures');
+    expect(await engine.readPageSnapshot('a', { sourceId: id })).not.toBeNull();
+    expect((await readSyncStatus(engine, id)).holds).toEqual([]);
   }), 300_000);
+
+  test('a crash right after an interruption is charged costs exactly one attempt: the claim it leaves is not charged again', async () => {
+    const slug = `db/crash-${++n}`, requestId = randomUUID();
+    const claims = { n: 0, attempts: [] as number[] };
+    let crashed = false;
+    installFaultHook(async (point, detail) => {
+      if (detail.requestId !== requestId) return;
+      if (point === 'consumer:preparing') {
+        claims.n++;
+        claims.attempts.push((await row(requestId)).preparation_attempts);
+        if (claims.n === 1) throw interruption('57014');
+      }
+      // The owner dies here: nothing after the seam runs, and the claim it held lapses.
+      if (point === 'persistence:interruption_charged' && !crashed) { crashed = true; throw new Error('owner died (probe)'); }
+    });
+    const pending = call({ slug, content: page(`Crash ${n}`), request_id: requestId }).catch(error => error as { code?: string });
+    while (!crashed) await new Promise(resolve => setTimeout(resolve, 20));
+    await engine.executeRaw("UPDATE persistence_requests SET claim_expires_at=now()-interval '1 second' WHERE request_id=$1::uuid AND state='running'", [requestId]);
+    expect(await pending).toMatchObject({ state: 'committed' });
+    expect(claims.n).toBe(2);
+    expect(claims.attempts).toEqual([0, 1]);
+  }, 120_000);
+
+  test('a group\'s shared read the database cancelled charges no member: the member is released uncounted and commits', async () => {
+    const [shared] = await sharedReadFailures();
+    const slug = `db/shared-${++n}`, requestId = randomUUID();
+    const claims = { n: 0, attempts: [] as number[] };
+    installFaultHook(async (point, detail) => {
+      if (detail.requestId !== requestId || point !== 'consumer:preparing') return;
+      claims.n++;
+      claims.attempts.push((await row(requestId)).preparation_attempts);
+      if (claims.n <= 3) throw shared;
+    });
+    expect(await call({ slug, content: page(`Shared ${n}`), request_id: requestId })).toMatchObject({ state: 'committed' });
+    expect(claims.n).toBe(4);
+    expect(claims.attempts).toEqual([0, 0, 0, 0]);
+  }, 120_000);
 
   describe('worktree-backed page', () => {
     let brainDir: string;
@@ -223,6 +297,37 @@ for (const backend of testBackends()) describe(`[${backend}] transient publicati
       expect(readFileSync(path).equals(bytes)).toBe(true);
       expect(await engine.readPageSnapshot(slug, { sourceId })).toEqual(before);
       expect(Number((await engine.executeRaw<{ n: string }>('SELECT count(*)::text AS n FROM persistence_requests WHERE recovery IS NOT NULL'))[0]!.n)).toBe(0);
+    }, 120_000);
+
+    test('a crash between the recovery route\'s charge and its recovering mark costs exactly one attempt: the sweep does not charge it again', async () => {
+      const slug = `wt/crash-${++n}`;
+      expect(await call({ slug, content: page(`Prior ${n}`), request_id: randomUUID() }, sourceId)).toMatchObject({ state: 'committed', write_through: { written: true } });
+      const path = join(brainDir, `${slug}.md`);
+      const before = await engine.readPageSnapshot(slug, { sourceId });
+      const requestId = randomUUID();
+      const claims = { n: 0, attempts: [] as number[] };
+      let crashed: Row | null = null;
+      installFaultHook(async (point, detail) => {
+        if (detail.requestId !== requestId) return;
+        if (point === 'consumer:preparing') {
+          claims.n++;
+          claims.attempts.push((await row(requestId)).preparation_attempts);
+        }
+        if (point === 'publication:before_commit' && claims.n === 1) throw interruption('57014');
+        // The owner dies here: the charge has committed, the request is not marked recovering, and its claim lapses.
+        if (point === 'persistence:recovery_interruption_charged' && !crashed) { crashed = await row(requestId); throw new Error('owner died (probe)'); }
+      });
+      const pending = call({ slug, content: page(`Next ${n}`), request_id: requestId, expected_revision: before!.revision }, sourceId).catch(error => error as { code?: string });
+      while (!crashed) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(crashed).toMatchObject({ state: 'running', preparation_attempts: 1, has_recovery: true });
+      await engine.executeRaw("UPDATE persistence_requests SET claim_expires_at=now()-interval '1 second' WHERE request_id=$1::uuid AND state='running'", [requestId]);
+      expect(await pending).toMatchObject({ state: 'committed' });
+      expect(claims.n).toBe(2);
+      expect(claims.attempts).toEqual([0, 1]);
+      // The receipt is returned at commit; the owner clears the recovery record right after it.
+      for (let i = 0; i < 100 && (await row(requestId)).has_recovery; i++) await new Promise(resolve => setTimeout(resolve, 50));
+      expect(await row(requestId)).toMatchObject({ state: 'committed', preparation_attempts: 0, has_recovery: false });
+      expect(readFileSync(path, 'utf8')).toContain(`Next ${n}`);
     }, 120_000);
   });
 });

@@ -1,7 +1,7 @@
 import { chmodSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
-import { opError } from '../ops/contract.ts';
+import { OperationError, opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import type { Action } from '../agent-output.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
@@ -115,7 +115,8 @@ function recordBelongs(record: EffectRecovery, effect: PersistenceEffect, bindin
  * no longer holds its prior bytes, a leaf already holds the stage's name (the transaction verifies or refuses it), the
  * record no longer belongs to the binding (the transaction refuses it) or the page moved on (the transaction clears it).
  */
-async function stageStreamedMirror(engine: BrainEngine, effect: PersistenceEffect, hostId: string, content?: StreamedFileContent): Promise<void> {
+async function stageStreamedMirror(engine: BrainEngine, effect: PersistenceEffect, hostId: string, content?: StreamedFileContent,
+  between?: () => Promise<void>): Promise<void> {
   const [row] = await engine.executeRaw<{ recovery: EffectRecovery | null }>(
     'SELECT recovery FROM persistence_effects WHERE id=$1 AND execution_token=$2::uuid', [effect.id, effect.execution_token]);
   const record = row?.recovery;
@@ -123,7 +124,7 @@ async function stageStreamedMirror(engine: BrainEngine, effect: PersistenceEffec
   if (!record || !stage || !recordBelongs(record, effect, await getWorktreeBinding(engine, effect.source_id, hostId))) return;
   const detail = { effectId: effect.id, requestId: effect.request_id, sourceId: effect.source_id, slug: record.slug, path: stage.path };
   await faultPoint('effect_recovery:before_stage', detail);
-  await withFilesystemPublication([record.root], async () => {
+  try { await withFilesystemPublication([record.root], async () => {
     // A stream a crash cut short is still under its in-progress name; it is discarded and the stage produced again.
     discardStreamingStage(record);
     if (existsAt(stage.path) || record.beforeHash === record.afterHash || persistenceFileHash(record.path) !== record.beforeHash) return;
@@ -131,23 +132,58 @@ async function stageStreamedMirror(engine: BrainEngine, effect: PersistenceEffec
     if (!file) {
       const snapshot = await engine.readPageSnapshot(record.slug, { sourceId: effect.source_id, includeDeleted: true });
       if (!snapshot || snapshot.page.id !== record.pageId || snapshot.revision !== record.revision) return;
-      file = await unreadPageFile(engine, snapshot);
+      file = await unreadPageFile(engine, snapshot, between);
     }
     await stageStreamedContent(engine, record.path, file, stage, record.mode);
-  });
+  }); } catch (error) {
+    if (stagingReported(error)) await releaseUnstagedRecord(engine, effect, hostId, record).catch(() => undefined);
+    throw error;
+  }
   await faultPoint('effect_recovery:staged', detail);
+}
+
+/**
+ * The stage write ended with an error this process saw (a filesystem error such as EIO or ENOSPC, or a gbrain refusal),
+ * not with its death: the writer removed its in-progress file, so nothing of the stage is on disk.
+ */
+function stagingReported(error: unknown): boolean {
+  if (error instanceof OperationError) return true;
+  const { code, syscall } = (error ?? {}) as { code?: unknown; syscall?: unknown };
+  return typeof code === 'string' && typeof syscall === 'string';
+}
+
+/**
+ * A version 2 record whose stage could not be written while the canonical file still holds its prior bytes protects
+ * nothing: no file changed and no stage exists. It is cleared with its reserved capacity in one transaction, so the
+ * worktree's other writes and effects are no longer held behind it and this effect retries (and parks) as any failed
+ * mirror does. A record whose file moved, or whose stage exists, is kept for recovery, as it is when the release
+ * itself fails (the staging error is the one reported).
+ */
+async function releaseUnstagedRecord(engine: BrainEngine, effect: PersistenceEffect, hostId: string, record: EffectRecovery): Promise<void> {
+  const stage = record.staging?.publication;
+  if (!stage || existsAt(stage.path) || persistenceFileHash(record.path) !== record.beforeHash) return;
+  await engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
+    await guardEffectSource(tx, effect, hostId);
+    await lockCounters(tx, ['brain', `worktree:${effect.worktree_id}`]);
+    const current = await lockedEffect(tx, effect);
+    if (digest(current.recovery) !== digest(record)) return;
+    await clearRecovery(tx, current);
+  });
 }
 
 /** Under the native lock: finish forward, never restore withdrawn bytes. */
 export async function recoverEffectPublication(engine: BrainEngine, effect: PersistenceEffect, hostId: string,
-  hooks: { boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit') => Promise<void>; content?: StreamedFileContent } = {}): Promise<void> {
+  hooks: { boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit') => Promise<void>; content?: StreamedFileContent;
+    /** Called between the pieces of a streamed stage (the effect's claim renewal). */
+    between?: () => Promise<void> } = {}): Promise<void> {
   const releaseCapacity = tryAcquirePublicationCapacity(engine);
   if (!releaseCapacity) throw opError('writer_pool_capacity', 'Mirror recovery is waiting for publication capacity.',
     `Every publication slot of the writer pool is busy, so mirror recovery for source ${effect.source_id} has not started; the worker tries again once a slot frees. Nothing needs resubmitting.`,
     { fix: effectStatusFix(effect) });
   try {
     if (effect.recovery) await upgradeRecoveryStaging(engine, 'persistence_effects', effect.id, effect.worktree_id!, 'forward');
-    await stageStreamedMirror(engine, effect, hostId, hooks.content);
+    await stageStreamedMirror(engine, effect, hostId, hooks.content, hooks.between);
     await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('synchronous_commit','on',true),set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
     const binding = await guardEffectSource(tx, effect, hostId);
