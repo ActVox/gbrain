@@ -18,4 +18,5 @@ export interface SiteCases {
 }
 
 export const CATALOGUE: Record<IsolateSite, SiteCases> = {
+  'repair.apply_items': { file: 'test/pathological/a9-repair-core.test.ts', item: 'item case: an item whose apply throws', run: 'run case: a run-scoped' },
 };
