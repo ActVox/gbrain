@@ -15,7 +15,10 @@
  *   most freezes throw is systemic and stops without holding (guards).
  * - S-64: on Postgres, where bulk groups are on, the same throw in a group follower is held on the follower's own path,
  *   and with `sync.holds=fail` the run stops naming the follower (the group head's path before).
- * The deliberate-refusal and systemic guards pass before and after.
+ * - S-60: a `storage_error` that two syncs in a row record on one file with the same message stayed `connection` / `retry`
+ *   with `next` = rerun the same sync forever; it is now `page` class and `needs_human`, naming the file. A message that
+ *   changes between runs stays a rerun, and the count survives a resumed cursor's repeated observation.
+ * The deliberate-refusal, systemic and changing-message guards pass before and after.
  *
  * PGLite here; Postgres through test/e2e/sync-entry-faults-6712-postgres.test.ts.
  */
@@ -27,8 +30,10 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { opError } from '../src/core/ops/contract.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { resolveBulkSettings } from '../src/core/persistence/sync-group.ts';
+import { recordManagedSyncFailure } from '../src/core/persistence/sync-failures.ts';
 import { readGitSourceHolds } from '../src/core/persistence/sync-holds.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { readSyncStatus } from '../src/core/persistence/sync-status.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
@@ -164,5 +169,44 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: one odd f
     commit(root, 'eight');
     await expect(performManagedSync(engine, OPTS)).rejects.toThrow('synthetic systemic fault');
     expect((await holds(engine)).length).toBeLessThan(8);
+  }), 240_000);
+  test('S-60: a storage_error two syncs in a row record on one file with the same message names a person instead of rerunning', () => brain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/odd.md'), note('notes/odd')); commit(root, 'odd');
+    installFaultHook(point => { if (point === 'sync:mid_checkpoint') throw new Error('synthetic deterministic fault'); });
+    await expect(performManagedSync(engine, OPTS)).rejects.toThrow('synthetic deterministic fault');
+    const once = await readSyncStatus(engine, 'default');
+    expect(once.last_error).toMatchObject({ code: 'storage_error', path: 'notes/odd.md', class: 'connection', safe_actions: ['retry'], needs_human: false });
+    expect(once.next?.argv?.slice(0, 2)).toEqual(['gbrain', 'sync']);
+    await expect(performManagedSync(engine, OPTS)).rejects.toThrow('synthetic deterministic fault');
+    const twice = await readSyncStatus(engine, 'default');
+    expect(twice.last_error).toMatchObject({ code: 'storage_error', path: 'notes/odd.md', repeats: 2, class: 'page', safe_actions: ['none'], needs_human: true });
+    expect(twice.last_error!.human_reason).toContain('notes/odd.md stopped the last 2 syncs with the same storage_error');
+    expect([twice.state, twice.reason]).toEqual(['blocked', 'needs_human']);
+    expect(twice.next?.argv?.slice(0, 2)).not.toEqual(['gbrain', 'sync']);
+    expect(twice.next?.user_message).toContain('notes/odd.md');
+    installFaultHook(undefined);
+    expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+    expect(await atHead(engine, root)).toBe(true);
+    expect((await readSyncStatus(engine, 'default')).last_error).toBeNull();
+  }), 240_000);
+
+  test('S-60 guard: a storage_error whose message changes between runs stays a rerun', () => brain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/odd.md'), note('notes/odd')); commit(root, 'odd');
+    let run = 0;
+    installFaultHook(point => { if (point === 'sync:mid_checkpoint') throw new Error(`synthetic fault number ${run}`); });
+    for (run = 1; run <= 3; run++) await expect(performManagedSync(engine, OPTS)).rejects.toThrow(`synthetic fault number ${run}`);
+    expect((await readSyncStatus(engine, 'default')).last_error).toMatchObject({ code: 'storage_error', attempts: 3, class: 'connection', safe_actions: ['retry'], needs_human: false });
+  }), 240_000);
+
+  test('S-60: a resumed run recording the same observation counts a new run; one invocation recording it twice does not', () => brain(async ({ engine }) => {
+    const base = { source_id: 'default', source_incarnation: '00000000-0000-4000-8000-000000000000', path: 'notes/odd.md', code: 'storage_error', message: 'synthetic',
+      request_id: null, run_id: 'run-1', target: 'a'.repeat(40), cursor_key: 'lanef-s60-key', phase: 'freeze' as const, state: 'failed', observation_id: 'run-1:0:freeze:storage_error' };
+    expect((await recordManagedSyncFailure(engine, { ...base, invocation: 'one' })).failure.repeats).toBe(1);
+    expect((await recordManagedSyncFailure(engine, { ...base, invocation: 'one' })).failure.repeats).toBe(1);
+    expect((await recordManagedSyncFailure(engine, { ...base, invocation: 'two' })).failure.repeats).toBe(2);
+    expect((await recordManagedSyncFailure(engine, { ...base, invocation: 'three', observation_id: 'run-2:0:freeze:storage_error' })).failure).toMatchObject({ repeats: 3, attempts: 2 });
+    expect((await recordManagedSyncFailure(engine, { ...base, invocation: 'four', observation_id: 'run-3:0:freeze:storage_error', path: 'notes/other.md' })).failure).toMatchObject({ repeats: 1, attempts: 3 });
   }), 240_000);
 });

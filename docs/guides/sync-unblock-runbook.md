@@ -109,6 +109,11 @@ Every hold and error has three fields, from one table
   user raises), and a slug-conflict hold the lane decided a person must settle
   ([`merge_recommended`](write-refusals.md#merge_recommended),
   [`content_repair_needs_human`](write-refusals.md#content_repair_needs_human)).
+  A recorded `storage_error` is `connection` and `retry` the first time; when
+  two runs in a row stop on the same path with the same code and message
+  (`last_error.repeats` 2 or more), it is deterministic, so `last_error` turns
+  `needs_human` (class `page`, or `systemic` for a phase path such as
+  `<discovery>`) and `human_reason` names the file.
 
 ## Decision table
 

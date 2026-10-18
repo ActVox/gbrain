@@ -1367,7 +1367,7 @@ async function recordRunFailure(engine: BrainEngine, error: unknown, run: { curs
     const failedCursor = cursor ?? stored?.completed_keys?.[0];
     const { failure } = await recordManagedSyncFailure(engine, { source_id: context.sourceId, source_incarnation: context.incarnation, path: cursor?.entries[cursor.index]?.path ?? failedCursor?.pending?.intent.path ?? `<${phase}>`, code,
       message: error instanceof Error ? error.message : String(error), request_id: failedCursor?.pending?.requestId ?? null,
-      run_id: failedCursor?.runId ?? discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: cursor?.failureKey ?? key,
+      run_id: failedCursor?.runId ?? discoveryRun, invocation: discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: cursor?.failureKey ?? key,
       syncOptions: failedCursor?.syncOptions ?? syncOptions, processingOptions: failedCursor?.processingOptions ?? processingOptions, phase, state: 'failed',
       observation_id: failedCursor ? `${failedCursor.runId}:${failedCursor.index}:${phase}:${code}` : `${key}:discovery:${discoveryTarget}:${code}` });
     if (error instanceof Error) error.message = run.remote ? 'Managed sync is blocked; ask the host operator to inspect doctor.' : `${formatManagedSyncFailure(failure)} Fix the cause, then run: ${managedSyncRetryCommand(failure, run.repoPath)}`;
