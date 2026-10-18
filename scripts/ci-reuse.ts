@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Master-push reuse of an identical-tree full-suite run (P2, docs/TESTING.md#master-push-reuse).
+ * Master-push reuse of an identical-tree full-suite run (P2, docs/ci-event-parity.md#master-push-reuse).
  *
  *   bun scripts/ci-reuse.ts --workflow test|e2e --sha <push sha> --repo <owner/name>
  *        --output <GITHUB_OUTPUT> [--summary <GITHUB_STEP_SUMMARY>] [--record <reuse.json>]

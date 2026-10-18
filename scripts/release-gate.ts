@@ -24,7 +24,7 @@
  * publishes the current VERSION once master's CI for HEAD is green. Writes
  * `publish=true|false` and `sha=<commit>` to --output (GITHUB_OUTPUT).
  *
- * Master-push reuse (scripts/ci-reuse.ts, docs/TESTING.md#master-push-reuse):
+ * Master-push reuse (scripts/ci-reuse.ts, docs/ci-event-parity.md#master-push-reuse):
  * a green push run whose latest attempt has a succeeded `reused-full-suite`
  * job reused a pull request run's full suite. On publish the gate reads that
  * push run's `reused-full-suite` artifact (reuse.json, written by
