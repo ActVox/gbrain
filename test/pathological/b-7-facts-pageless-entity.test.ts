@@ -43,8 +43,8 @@ async function seedPages(engine: BrainEngine): Promise<void> {
   const pages: Array<[string, string, string, string[]]> = [
     ['orgs/acme-example', 'Acme Example', 'organization', ['acme example', 'Acme Example Holdings']],
     ['orgs/delta-example', 'Delta Example', 'organization', []],
-    ['orgs/gamma-example', 'Gamma Example', 'organization', ['gamma example']],
-    ['companies/gamma-example-labs', 'Gamma Example Labs', 'company', ['gamma example']],
+    ['orgs/omega-one-example', 'Omega One Example', 'organization', ['omega example']],
+    ['companies/omega-two-example', 'Omega Two Example', 'company', ['omega example']],
     ['people/jane-doe-example', 'Jane Doe Example', 'person', []],
   ];
   for (const [slug, title, type, aliases] of pages) await importFromContent(engine, slug, md(title, type, aliases), { noEmbed: true });
@@ -106,7 +106,7 @@ for (const arm of pathologicalArms()) {
       await seedFact(engine, 'companies/acme-example', 'Acme Example hired a head of sales');
       await seedFact(engine, 'companies/acme-example', 'Acme Example opened a second office');
       await seedFact(engine, 'companies/acme-example-holdings', 'Acme Example Holdings filed its annual report');
-      await seedFact(engine, 'companies/gamma-example', 'Gamma Example shipped a beta');
+      await seedFact(engine, 'companies/omega-example', 'Omega Example shipped a beta');
       await seedFact(engine, 'people/zed-nobody-example', 'Zed Nobody Example likes chess');
       await seedFact(engine, 'orgs/acme-example', 'Acme Example is based in a placeholder city');
       const before = await factSlugs(engine);
@@ -115,7 +115,7 @@ for (const arm of pathologicalArms()) {
       expect(preview.listing!.map(l => [l.item, l.class])).toEqual([
         ['default:companies/acme-example', 'rehome'],
         ['default:companies/acme-example-holdings', 'rehome'],
-        ['default:companies/gamma-example', 'ambiguous'],
+        ['default:companies/omega-example', 'ambiguous'],
         ['default:people/zed-nobody-example', 'unresolved'],
       ]);
       expect(preview.listing![0].detail).toContain('orgs/acme-example');
@@ -126,7 +126,7 @@ for (const arm of pathologicalArms()) {
     test('an apply with the preview hash moves exactly the previewed facts; ambiguous and unresolved stay where they are', async () => {
       await seedFact(engine, 'companies/acme-example', 'Acme Example hired a head of sales');
       await seedFact(engine, 'companies/acme-example-holdings', 'Acme Example Holdings filed its annual report');
-      await seedFact(engine, 'companies/gamma-example', 'Gamma Example shipped a beta');
+      await seedFact(engine, 'companies/omega-example', 'Omega Example shipped a beta');
       await seedFact(engine, 'people/zed-nobody-example', 'Zed Nobody Example likes chess');
       const handler = await rehomeHandler();
       const scope = await resolveRepairScope(engine);
@@ -134,7 +134,7 @@ for (const arm of pathologicalArms()) {
       const preview = await runRepair(ctxFor(engine), handler, scope, { apply: false, explicit: true });
       const applied = await runRepair(ctxFor(engine), handler, scope, { apply: true, explicit: true, expect: preview.preview_hash });
       expect(applied.applied).toBe(2);
-      expect((await factSlugs(engine)).map(f => f.entity_slug)).toEqual(['orgs/acme-example', 'orgs/acme-example', 'companies/gamma-example', 'people/zed-nobody-example']);
+      expect((await factSlugs(engine)).map(f => f.entity_slug)).toEqual(['orgs/acme-example', 'orgs/acme-example', 'companies/omega-example', 'people/zed-nobody-example']);
     });
 
     test('a stale preview refuses: an unknown hash is refused, and a slug whose facts changed since the preview is kept', async () => {
@@ -156,6 +156,20 @@ for (const arm of pathologicalArms()) {
       await managedBrain(async ({ engine, ctx }) => {
         await operationsByName.put_page.handler(ctx, { slug: 'orgs/acme-example', content: md('Acme Example', 'organization', ['acme example']) });
         await writeSingleFact(engine, 'default', { fact: 'Acme Example signed a lease', provenance: 'test:b-7', entity: 'companies/acme-example', visibility: 'world', remote: false });
+        expect((await factSlugs(engine)).map(f => f.entity_slug)).toEqual(['orgs/acme-example']);
+      }, { databaseUrl: arm.databaseUrl });
+    }, 120_000);
+
+    test('repair facts-rehome applies as a coordinated write on a managed brain', async () => {
+      await managedBrain(async ({ engine, ctx }) => {
+        await writeSingleFact(engine, 'default', { fact: 'Acme Example hired a head of sales', provenance: 'test:b-7', entity: 'companies/acme-example', visibility: 'world', remote: false });
+        expect((await factSlugs(engine)).map(f => f.entity_slug)).toEqual(['companies/acme-example']);
+        await operationsByName.put_page.handler(ctx, { slug: 'orgs/acme-example', content: md('Acme Example', 'organization', ['acme example']) });
+        const handler = await rehomeHandler();
+        const scope = await resolveRepairScope(engine);
+        const preview = await runRepair(ctx, handler, scope, { apply: false, explicit: true });
+        const applied = await runRepair(ctx, handler, scope, { apply: true, explicit: true, expect: preview.preview_hash });
+        expect(applied.applied).toBe(1);
         expect((await factSlugs(engine)).map(f => f.entity_slug)).toEqual(['orgs/acme-example']);
       }, { databaseUrl: arm.databaseUrl });
     }, 120_000);

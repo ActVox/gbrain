@@ -1327,6 +1327,38 @@ ordinary page fact. An observation whose source was already the page's own
 slug and that a page write detached carries no trace of the move, so it is not
 found.
 
+<a id="facts-rehome"></a>
+### Facts on an entity slug with no page
+
+Before the B-7 resolver fix, an extractor that named an organization under
+`companies/acme-example` missed the page `orgs/acme-example`, even when that
+page listed `acme example` as an alias, and managed writes kept the invented
+slug as the fact's entity (#6925). Those facts sit on an `entity_slug` no page
+answers for, so entity recall and trajectories never find them. `gbrain repair
+facts-rehome` moves them to the page they name. It is explicit-only and
+preview-bound, and it never runs on upgrade.
+
+**Say to your agent:** *"Some facts sit on entity slugs that have no page.
+Preview moving them to their pages, then apply after I agree."* The agent runs
+`gbrain repair facts-rehome` and, after you agree, the printed apply command.
+
+```bash
+gbrain repair facts-rehome                      # preview: one line per page-less slug
+gbrain repair facts-rehome --apply --expect <hash>
+```
+
+The preview lists every page-less `entity_slug` with its class. `rehome`: the
+strict resolver reaches one live entity page by identity evidence (the exact
+page, the same name under another organization directory, or a unique alias),
+and the slug's database-only facts move there. `ambiguous` (more than one page
+answers), `unverified` (only a bare-name guess answers), `unresolved` (no page
+answers) and `fence_owned` (every fact is a row of a page's Facts table) are
+listed and never moved. The apply moves exactly the previewed facts; a slug that
+gained a page, lost its target or whose facts changed since the preview reports
+`changed_since_preview` and is kept. A duplicate ontology observation already on
+the target is merged rather than copied. It writes the database only; no page is
+rewritten.
+
 <a id="failed-writes"></a>
 ### Failed writes
 
