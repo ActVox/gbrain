@@ -24,6 +24,7 @@ const ROOT = process.argv[2] ?? process.env.GBRAIN_GUARD_ROOT ?? new URL('..', i
 const EXEMPT = {
   'src/core/persistence/sync-prepare.ts': 'owner git edits (managed sync) pass by design; doctor core_memory reports any overage',
   'src/core/persistence/group-publish.ts': 'bulk managed sync of owner git edits; groupable() excludes core-locked members',
+  'src/core/persistence/sync-pass-fold.ts': 'adds the pass checkpoint rows to the managed sync import sync-prepare.ts prepared (owner git edits); writes no page text of its own (test/sync-pass-fold-6712.test.ts, core guard)',
   'src/core/persistence/reconcile-prepare.ts': 'reconciles the owner checkout into the database (owner edit)',
   'src/core/persistence/file-repair.ts': 'publishes bytes the owner approved with gbrain repair frontmatter --apply',
   'src/core/persistence/grandfather.ts': 'adopts pages that already exist at activation; no content change',

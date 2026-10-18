@@ -13,6 +13,10 @@
  *   matched paths and classifies that one again. And a hold appears on an unchanged `matched` path between rounds: round 2 classifies that path again (held)
  *   instead of reusing round 1's verdict, so the hold stands and the pass reports it.
  *
+ * - core guard: the fold wraps the managed-sync import's own publication (sync-prepare.ts, a core-guard exemption: owner Git
+ *   edits) and writes no page text of its own. An always_load page that grows core past its budget publishes the same
+ *   whether its import folds the stamp or not, while a guarded agent write of the same growth is refused.
+ *
  * PGLite here; Postgres through test/e2e/sync-pass-fold-6712-postgres.test.ts.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -26,6 +30,7 @@ import { readGitHold, writeGitHold } from '../src/core/persistence/sync-holds.ts
 import { admitWrite } from '../src/core/persistence/journal.ts';
 import { preparePageAdmission } from '../src/core/persistence/page-mutations.ts';
 import { waitFor } from './helpers/wait-for.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { randomUUID } from 'node:crypto';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { RECOVERY_VERSION } from '../src/core/markdown.ts';
@@ -149,6 +154,48 @@ for (const backend of testBackends()) {
       expect({ status: next.status, added: next.added, modified: next.modified }).toEqual({ status: next.status === 'up_to_date' ? 'up_to_date' : 'synced', added: 0, modified: 0 });
       expect(await engine.executeRaw("SELECT slug FROM persistence_requests WHERE intent->>'kind'='managed_sync_import' AND sequence>$1", [after])).toEqual([]);
       expect((await performManagedSync(engine, OPTS)).pass).toBeUndefined();
+    }), 180_000);
+    test('core guard: an always_load import publishes the same with its stamp folded or not; a guarded write of that growth is refused', () => brain(async ({ engine, ctx, root }) => {
+      expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+      await engine.setConfig('memory.core.max_chars', '500');
+      const core = (slug: string, body: string) => `---\ntype: concept\ntitle: ${slug}\nalways_load: true\n---\n\n${body}\n`;
+      const receipt = async (slug: string, after: number) => (await engine.executeRaw<{ state: string; stamp: string | null; skipped: string | null }>(
+        "SELECT state, outcome->>'pass_stamp' AS stamp, outcome->>'pass_stamp_skipped' AS skipped FROM persistence_requests WHERE intent->>'kind'='managed_sync_import' AND slug=$1 AND sequence>$2", [slug, after]));
+      const coreRow = async (slug: string) => (await engine.executeRaw<{ always_load: boolean; chars: number }>(
+        "SELECT (frontmatter->>'always_load')::boolean AS always_load, length(compiled_truth)::int AS chars FROM pages WHERE source_id='default' AND slug=$1 AND deleted_at IS NULL", [slug]))[0];
+
+      writeFileSync(join(root, 'notes/a.md'), core('notes/a', 'a'.repeat(600))); commit(root, 'core a');
+      let after = await lastSequence(engine);
+      expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+      expect(await receipt('notes/a', after)).toEqual([{ state: 'committed', stamp: 'folded', skipped: null }]);
+
+      writeFileSync(join(root, 'notes/b.md'), core('notes/b', 'b'.repeat(600))); commit(root, 'core b');
+      after = await lastSequence(engine);
+      expect((await stampByCheckpoint(() => performManagedSync(engine, OPTS))).status).toBe('synced');
+      expect(await receipt('notes/b', after)).toEqual([{ state: 'committed', stamp: null, skipped: 'error' }]);
+
+      expect(await coreRow('notes/a')).toEqual({ always_load: true, chars: (await coreRow('notes/b'))!.chars });
+      expect((await coreRow('notes/a'))!.chars).toBeGreaterThan(500);
+      const head = git(root, 'rev-parse', 'HEAD');
+      expect(await checkpoint(engine)).toEqual({ last_commit: head, converged: head });
+
+      // The budget is live on the guarded path: an agent's write of the same growth is refused there.
+      const refused = await (async () => {
+        try {
+          const current = (await engine.readPageSnapshot('notes/c', { sourceId: 'default' }))!;
+          const prepared = await preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/c', request_id: randomUUID(), expected_revision: current.revision, content: core('notes/c', 'c'.repeat(600)) } });
+          const requestId = (await admitWrite(engine, prepared.admission!)).request_id;
+          let code: string | null = null;
+          await waitFor(async () => {
+            code = (await engine.executeRaw<{ state: string; error_code: string | null }>('SELECT state, error_code FROM persistence_requests WHERE request_id=$1::uuid', [requestId]))
+              .find(row => row.state !== 'pending' && row.state !== 'claimed')?.error_code ?? null;
+            return code !== null;
+          }, { timeoutMs: 30_000, label: 'the guarded core write ends' });
+          return code;
+        } catch (error) { return (error as { code?: string }).code ?? String(error); }
+      })();
+      expect(refused).toBe('core_budget_exceeded');
+      expect((await coreRow('notes/c'))!.always_load).not.toBe(true);
     }), 180_000);
   });
 
