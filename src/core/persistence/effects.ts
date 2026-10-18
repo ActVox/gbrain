@@ -351,10 +351,12 @@ async function publishGitPage(engine: BrainEngine, effect: PersistenceEffect, bi
     await finishPage(engine, effect, snapshot, { git: 'skipped', reason: 'db_only' });
     return;
   }
-  // A page the mirror passed is committed only when its raw bytes are the mirror's rendering of the page as it is now.
-  // A segmented page's rendering is measured from its segments (unreadPageFile), never held as one string.
-  if (verdict === 'evidence' && (snapshot.page.deleted_at
-    || persistenceFileHash(path) !== (content === null ? (await unreadPageFile(engine, snapshot, keep)).hash : fileContentHash(content)))) {
+  // A page the mirror passed is committed only when its raw bytes are the mirror's rendering of the page as it is now: the
+  // hash the mirror recorded writing at this revision, else the rendering measured now (a segmented page's from its
+  // segments, unreadPageFile, never held as one string).
+  const mirrored = attempt.gate?.files.get(snapshot.page.slug);
+  if (verdict === 'evidence' && (snapshot.page.deleted_at || persistenceFileHash(path) !== (mirrored?.revision === snapshot.revision ? mirrored.hash
+    : content === null ? (await unreadPageFile(engine, snapshot, keep)).hash : fileContentHash(content)))) {
     await skipTarget(engine, effect, snapshot, 'withdrawal_not_mirrored');
     return;
   }

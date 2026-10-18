@@ -157,9 +157,10 @@ export function singleFileGitEffect(effect: PersistenceEffect): boolean {
  * recovery records each one, `data.published`); a cursor position is no proof,
  * since the mirror also passes pages it skipped or found without a file.
  * `passed`: pages the mirror moved past without parking or awaiting a retry; it
- * never revisits them.
+ * never revisits them. `files`: the hash of the bytes the mirror wrote to each
+ * published page's file and the revision it rendered (`data.published_files`).
  */
-export interface MirrorGate { state: 'pending' | 'failed' | 'committed'; published: Set<string>; passed: Set<string> }
+export interface MirrorGate { state: 'pending' | 'failed' | 'committed'; published: Set<string>; passed: Set<string>; files: Map<string, { hash: string; revision: string }> }
 
 /**
  * Per request id, the gate of its withdrawal mirror: every mirror that has not
@@ -175,7 +176,8 @@ export async function mirrorGates(engine: SqlEngine, requestIds: readonly string
     const after = data.after_slug;
     const unfinished = new Set([...(data.parked ?? []).flatMap(entry => entry.slug ? [entry.slug] : []), ...(data.retry_slugs ?? [])]);
     const passed = (data.targets ?? []).filter(target => after !== undefined && target.slug <= after && !unfinished.has(target.slug)).map(target => target.slug);
-    return [request_id, { state: state === 'queued' || state === 'running' ? 'pending' : state, published: new Set(data.published ?? []), passed: new Set(passed) }];
+    return [request_id, { state: state === 'queued' || state === 'running' ? 'pending' : state, published: new Set(data.published ?? []), passed: new Set(passed),
+      files: new Map(Object.entries(data.published_files ?? {})) }];
   }));
 }
 

@@ -84,7 +84,9 @@ export interface PersistenceEffect {
     /** #5396: scan targets passed without a file publication (a sync-skip metafile, or a file with an uncoordinated local edit). */
     skipped?: SkippedTarget[];
     /** GBRA-130 A-12: pages whose file this withdrawal mirror rewrote, recorded by its recovery with the cursor step. */
-    published?: string[] };
+    published?: string[];
+    /** The SHA-256 of the bytes this mirror wrote to each published page's file, at the page revision it rendered. */
+    published_files?: Record<string, { hash: string; revision: string }> };
   state: 'queued' | 'running' | 'committed' | 'failed';
   execution_token: string | null;
   claim_expires_at: string | Date | null;

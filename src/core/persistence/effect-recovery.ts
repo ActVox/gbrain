@@ -281,10 +281,12 @@ export async function recoverEffectPublication(engine: BrainEngine, effect: Pers
     await clearRecovery(tx, current);
     // GBRA-130 A-12: the page's file now holds the mirrored bytes; Git may commit only pages recorded here.
     const published = [...new Set([...(current.data.published ?? []), record.slug])];
-    await tx.executeRaw(`UPDATE persistence_effects SET data=jsonb_set(data,'{published}',$2::text::jsonb) WHERE id=$1`, [current.id, JSON.stringify(published)]);
+    const publishedFiles = { ...current.data.published_files, [record.slug]: { hash: record.afterHash, revision: record.revision } };
+    await tx.executeRaw(`UPDATE persistence_effects SET data=jsonb_set(jsonb_set(data,'{published}',$2::text::jsonb),'{published_files}',$3::text::jsonb) WHERE id=$1`,
+      [current.id, JSON.stringify(published), JSON.stringify(publishedFiles)]);
     // One page per transaction/cursor checkpoint bounds work and restart cost;
     // a retried parked target is consumed without rewinding the cursor.
-    await advanceEffectCursor(tx, { ...current, data: { ...current.data, published } }, record.slug);
+    await advanceEffectCursor(tx, { ...current, data: { ...current.data, published, published_files: publishedFiles } }, record.slug);
     await hooks.boundary?.('before_mirror_commit');
   }); } finally { releaseCapacity(); }
 }
