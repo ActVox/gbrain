@@ -198,8 +198,8 @@ export function pageRecoveryBytes(kind: BrainEngine['kind'], switchRaw: string |
  * (only a missing row is unset, which means on). A configured `pages.max_bytes` never exceeds the engine ceiling.
  */
 export async function readPageBodyPolicy(engine: PolicyEngine): Promise<PageBodyPolicy> {
-  const read = (key: string) => engine.getConfig(key).catch(() => null);
   const readOrFail = (key: string) => engine.getConfig(key).then(value => ({ value }), () => null);
+  const read = async (key: string) => (await readOrFail(key))?.value ?? null;
   const [switchRead, maxRead, retireRaw, versionsRaw, pinnedRaw] = await Promise.all([
     readOrFail(PAGE_BODY_CONFIG_KEYS.segmentedStorage), readOrFail(PAGE_BODY_CONFIG_KEYS.maxBytes), read(PAGE_BODY_CONFIG_KEYS.flipRetireMaxRows),
     read(PAGE_BODY_CONFIG_KEYS.versionsMaxPerPage), read(PAGE_BODY_CONFIG_KEYS.versionsMaxPinnedBytes),

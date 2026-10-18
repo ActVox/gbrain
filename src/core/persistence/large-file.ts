@@ -27,9 +27,10 @@ const PIECE_BYTES = SEGMENT_MAX_BYTES;
 /**
  * @internal Work the large-file path does, for the memory-bound tests: bytes read from canonical or staged files
  * (`bytesRead`), streamed into a staging file (`bytesWritten`) or copied by the kernel into a before stage
- * (`bytesCopied`), and the largest single piece held (`largestPiece`, at most a segment). Counts, not time.
+ * (`bytesCopied`), produced to measure a streamed file (`bytesMeasured`, also counted in `bytesRead`), and the largest
+ * single piece held (`largestPiece`, at most a segment). Counts, not time.
  */
-export const largeFileWork = { bytesRead: 0, bytesWritten: 0, bytesCopied: 0, largestPiece: 0 };
+export const largeFileWork = { bytesRead: 0, bytesWritten: 0, bytesCopied: 0, bytesMeasured: 0, largestPiece: 0 };
 
 function counted(bytes: number, field: 'bytesRead' | 'bytesWritten'): void {
   largeFileWork[field] += bytes;
@@ -101,7 +102,7 @@ export class StreamedFileContent {
   static async measure(engine: BrainEngine, produce: (engine: BrainEngine) => AsyncIterable<string | Uint8Array>): Promise<StreamedFileContent> {
     const hash = createHash('sha256');
     let bytes = 0;
-    for await (const piece of pieces(produce(engine))) { counted(piece.length, 'bytesRead'); hash.update(piece); bytes += piece.length; }
+    for await (const piece of pieces(produce(engine))) { counted(piece.length, 'bytesRead'); largeFileWork.bytesMeasured += piece.length; hash.update(piece); bytes += piece.length; }
     return new StreamedFileContent(bytes, hash.digest('hex'), produce);
   }
   pieces(engine: BrainEngine): AsyncIterable<Uint8Array> { return pieces(this.produce(engine)); }
