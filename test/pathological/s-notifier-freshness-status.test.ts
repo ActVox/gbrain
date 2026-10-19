@@ -61,6 +61,14 @@ async function classicBrain(databaseUrl: string | undefined, run: (b: { engine: 
   } finally { rmSync(home, { recursive: true, force: true }); }
 }
 
+async function printed(run: () => Promise<void>): Promise<string> {
+  const out: string[] = [];
+  const log = console.log;
+  console.log = (...parts: unknown[]) => { out.push(parts.join(' ')); };
+  try { await run(); } finally { console.log = log; }
+  return out.join('\n');
+}
+
 async function searchFreshness(engine: BrainEngine, remote: boolean): Promise<Array<Record<string, unknown>>> {
   const meta: Array<{ key: string; value: unknown }> = [];
   const ctx = { engine, config: {}, logger: { info() {}, warn() {}, error() {} }, dryRun: false, remote, sourceId: SOURCE,
@@ -114,6 +122,35 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
           expect(JSON.stringify(behind)).not.toContain('/tmp/');
         } finally { await watcher.stop(); await engine.setConfig('sync.on_commit', 'false'); }
         expect((await searchFreshness(engine, false))[0]?.state).toBe('not_monitored');
+      });
+    }, 180_000);
+
+    test('sync status --json carries the notifier block and prints it; doctor commit_notifier names the resident or warns with the fix', async () => {
+      await classicBrain(databaseUrl, async ({ engine }) => {
+        const { runSyncStatus } = await import('../../src/commands/sync/operator.ts');
+        const { commitNotifierEntry } = await import('../../src/commands/doctor/checks/commit-notifier.ts');
+        const doctor = async () => (await commitNotifierEntry.run({ engine, args: [], orphanRatioSourceId: undefined } as never)) as Array<{ name: string; status: string; message: string; fix?: { argv?: string[] } }>;
+        const json = JSON.parse(await printed(() => runSyncStatus(engine, ['--source', SOURCE, '--json']))) as { notifier?: { resident: unknown; fix: { argv?: string[] } | null } };
+        expect(json.notifier).toMatchObject({ resident: null, fix: { argv: ['gbrain', 'sync', '--source', SOURCE, '--no-pull'] } });
+        expect(await printed(() => runSyncStatus(engine, ['--source', SOURCE]))).toContain(`notifier for ${SOURCE}: none running`);
+        const [off] = await doctor();
+        expect(off).toMatchObject({ name: 'commit_notifier', status: 'ok' });
+        expect(off!.message).toContain('sync.on_commit is off');
+
+        await engine.setConfig('sync.on_commit', 'true');
+        const [unwatched] = await doctor();
+        expect(unwatched).toMatchObject({ name: 'commit_notifier', status: 'warn', fix: { argv: ['gbrain', 'sync', '--source', SOURCE, '--no-pull'] } });
+        expect(unwatched!.message).toContain('none running');
+        const lines: string[] = [];
+        const watcher = startServeHeadWatcher(engine, { log: line => lines.push(line), pollMs: 1000, debounceMs: 100 });
+        try {
+          await until('a live resident', async () => (await readNotifierBlock(engine, SOURCE))?.resident?.live === true, lines);
+          const [watched] = await doctor();
+          expect(watched).toMatchObject({ name: 'commit_notifier', status: 'ok' });
+          expect(watched!.message).toContain(`notifier for ${SOURCE}: serve`);
+          const live = JSON.parse(await printed(() => runSyncStatus(engine, ['--source', SOURCE, '--json']))) as { notifier?: { resident: { kind: string } | null; fix: unknown } };
+          expect(live.notifier).toMatchObject({ resident: { kind: 'serve' }, fix: null });
+        } finally { await watcher.stop(); await engine.setConfig('sync.on_commit', 'false'); }
       });
     }, 180_000);
   });

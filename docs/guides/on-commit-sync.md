@@ -106,7 +106,15 @@ a sync is finishing is still served.
 gbrain config get sync.on_commit
 gbrain sync status --source <id> --json
 gbrain sync trigger --source <id> --json
+gbrain doctor --only commit_notifier --json
 ```
+
+sync status prints a `notifier for <id>:` line (the `notifier` object in
+`--json`): the resident that syncs the source and its detection mode, or none
+running with the fix, plus the notifier state, retry schedule and pending
+requests. Doctor `commit_notifier` reads the same record: with sync.on_commit on
+it warns for a source no resident watches or a stalled notifier, and with it off
+it warns only when a recorded request waits with no resident.
 
 Search and query responses carry a freshness entry per source (current, behind,
 syncing, unknown or not_monitored, with the observed HEAD, when it was observed,

@@ -2222,6 +2222,28 @@
         {
           "category": "brain",
           "details": {
+            "docs": "docs/guides/on-commit-sync.md",
+            "sources": [
+              {
+                "pending_markers": 0,
+                "reason": null,
+                "resident": null,
+                "source_id": "default",
+                "stalled": false,
+                "state": null
+              }
+            ],
+            "sync_on_commit": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "sync.on_commit is off; residents still run explicit sync requests. notifier for default: none running; idle.",
+          "name": "commit_notifier",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "checkouts": 0,
             "tracked": []
           },
