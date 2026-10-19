@@ -3100,6 +3100,8 @@ export interface ChatResult {
   providerMetadata?: Record<string, any>;
   /** Set when a `chat_fallback_chain` entry answered: the call's own model, which failed or refused (`model` names the one that ran). */
   fallbackFrom?: string;
+  /** With `fallbackFrom`: why that model did not answer ("failed (<first error line>)" / "refused (...)"). */
+  fallbackReason?: string;
 }
 
 export interface ChatOpts {
