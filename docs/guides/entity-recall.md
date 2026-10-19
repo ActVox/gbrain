@@ -196,8 +196,15 @@ with its reason, and the identity-sibling decision.
 | `mentions.sibling_merge` | `true` | `false` stops showing identity siblings and linking a shared name to each sibling; frontmatter `identity: separate` does it for one page. |
 | `search.alias_fanout_max` | `4` | Other names search and query also search per call; `0` turns the fan-out off. |
 
+A name written only in Katakana must stand as a whole Katakana run: デン
+links 「デン」, デンに, 喫茶デン and デン・カフェ, but not インシデント or デンタル.
+Katakana, small kana, ー and voicing marks continue a run; Hiragana, Han,
+Latin, punctuation and ・ end it. A short name inside a real Katakana compound
+is refused too, so add the compound as its own alias when it names the entity.
+
 Mention links written inside a longer Hangul word, or across a space, by a
-matcher older than the Hangul boundary rule (#5829) are stale:
+matcher older than the Hangul boundary rule (#5829), and links written inside a
+longer Katakana word by a matcher older than the Katakana rule (#6843), are stale:
 `gbrain doctor` counts them in `stale_mentions`, and
 `gbrain extract links --by-mention --rebuild --source db` removes them while
 keeping real mentions. A name that is also a common word (a person titled
