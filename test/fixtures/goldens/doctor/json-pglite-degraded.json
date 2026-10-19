@@ -2451,6 +2451,7 @@
             "facts": {
               "missing": 0,
               "other_model": 0,
+              "partially_embedded": 0,
               "stale": 0
             },
             "model": "voyage:voyage-4",

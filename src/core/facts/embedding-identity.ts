@@ -1,5 +1,6 @@
 import type { BrainEngine } from '../engine.ts';
 import { AUDIT_ROW_SOURCES } from './audit-sources.ts';
+import { EMBED_MAX_CHARS } from '../ai/embed-batch-plan.ts';
 
 // #6960: one anti-join per fingerprint, each an equality on fact_hash, so the
 // planner hashes or index-probes the fingerprint once per fact. A single
@@ -22,6 +23,15 @@ export const eligibleFactEmbedding = `${retainedFactEmbedding}
 
 export const staleFactEmbedding = `(f.embedding IS NULL OR f.embedding_model IS DISTINCT FROM $3
   OR f.embedded_text_hash IS DISTINCT FROM md5(f.fact) OR vector_dims(f.embedding)<>$4::int)`;
+
+/**
+ * #6975: the fact is longer than the text embed() sends (EMBED_MAX_CHARS UTF-16 code units),
+ * so its vector covers only a prefix. md5(fact) stays the freshness key: the vector is current
+ * and nothing re-embeds or charges for it; doctor reports it as partially embedded. UTF-16
+ * length is code points plus one per astral character; octet_length bounds it from above.
+ */
+export const partiallyEmbeddedFact = `(octet_length(f.fact) > ${EMBED_MAX_CHARS}
+  AND length(f.fact) + length(regexp_replace(f.fact, '[^\\U00010000-\\U0010FFFF]', '', 'g')) > ${EMBED_MAX_CHARS})`;
 
 export async function countStaleFactEmbeddings(engine: Pick<BrainEngine, 'executeRaw'>, model: string, dimensions: number, sourceId?: string) {
   const [row] = await engine.executeRaw<{ count: number; chars: string }>(`SELECT count(*)::int AS count,
