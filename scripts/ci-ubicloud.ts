@@ -11,7 +11,9 @@
  *                      `ubi-runner.sh usage`; 4 when the quota is busy)
  *   --size SIZE        Ubicloud size (default standard-16)
  *   --slots N          concurrent work slots per VM (default: half of --size's vCPUs)
- *   --location LOC     Ubicloud location (default eu-central-h1)
+ *   --location LOC     Ubicloud location (default eu-central-h1). A full gate
+ *                      runs only there; another location needs --lanes and
+ *                      is a diagnostic run, never gate evidence
  *   --image IMAGE      boot image (default: UBI_CI_IMAGE, else stock Ubuntu 24.04);
  *                      gbrain-ci@latest is the prebaked machine image
  *                      scripts/ubicloud/build-ci-image.sh builds
@@ -86,6 +88,8 @@ const COMMITTED_WEIGHTS = join(ROOT, "scripts/ubicloud/weights.json");
 const LOCAL_WEIGHTS = join(ROOT, ".context/ci-ubicloud/weights.json");
 const ALL_LANES = ["gitleaks", "verify", "serial", "slow", "unit", "pg-arms", "e2e"] as const;
 const BATCH_TIMEOUT_MS = 20 * 60 * 1000;
+// Test timeouts and the mined shard weights are calibrated on this location's VMs.
+const GATE_LOCATION = "eu-central-h1";
 // Items this heavy are the run's long poles: spread them one per VM so two of
 // them never compete for the same VM's CPUs.
 const HEAVY_MS = 60_000;
@@ -122,7 +126,7 @@ function parseArgs(argv: string[]): Opts {
     vms: 0,
     size: "standard-16",
     slots: 0,
-    location: "eu-central-h1",
+    location: GATE_LOCATION,
     image: process.env.UBI_CI_IMAGE || "stock",
     lanes: new Set(ALL_LANES),
     diff: false,
@@ -150,6 +154,7 @@ function parseArgs(argv: string[]): Opts {
     else usage(`unknown argument ${arg}`);
   }
   for (const lane of opts.lanes) if (!(ALL_LANES as readonly string[]).includes(lane)) usage(`unknown lane ${lane}`);
+  if (opts.location !== GATE_LOCATION && !argv.includes("--lanes")) usage(`a full gate runs only in ${GATE_LOCATION}. Test timeouts and the mined shard weights are calibrated there; on 2026-10-19 us-east-a2 ran about half as fast and timed out tests that pass in ${GATE_LOCATION}, so a full run in ${opts.location} is not gate evidence. Wait for ${GATE_LOCATION} capacity or run bun run ci:local (and report it as local). To run a diagnostic subset in ${opts.location}, pass --lanes.`);
   if (!Number.isInteger(opts.ttlHours) || opts.ttlHours < 0 || opts.ttlHours > 8760) usage("--ttl-hours must be a whole number of hours from 0 (no expiry) to 8760");
   if (!Number.isInteger(opts.vms) || opts.vms < 0 || (opts.vms === 0 && argv.includes("--vms"))) usage("--vms must be a positive integer");
   // One slot per two vCPUs: the whole corpus still fits inside the longest
@@ -616,6 +621,7 @@ async function main() {
     exitCode = 1;
   }
   console.log(exitCode === 0 ? `\n[ci-ubicloud] All checks passed in ${clock()}.` : `\n[ci-ubicloud] FAILED after ${clock()}.`);
+  if (opts.location !== GATE_LOCATION) console.log(`[ci-ubicloud] diagnostic run in ${opts.location}: not gate evidence (a full gate runs only in ${GATE_LOCATION}).`);
   process.exit(exitCode);
 }
 
