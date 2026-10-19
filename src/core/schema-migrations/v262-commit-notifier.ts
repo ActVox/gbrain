@@ -18,8 +18,8 @@ import type { Migration } from './types.ts';
 //   and the coverage record the freshness notice reads (observed HEAD, time,
 //   detection mode, owner liveness). Written on change, never on every poll.
 // DDL only, nothing to backfill: an absent row reads as "not monitored".
-export const v261: Migration = {
-  version: 261,
+export const v262: Migration = {
+  version: 262,
   name: 'commit_notifier',
   idempotent: true,
   sql: `
