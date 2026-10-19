@@ -186,7 +186,7 @@ for (const backend of testBackends()) {
         const before = await factRows(engine);
         const result = await runPhaseConsolidate(engine, { sourceId: 'default', minOldestAgeMs: 0 });
         expect(result.details.clusters_held_same_instant).toBe(1);
-        expect(await engine.executeRaw("SELECT request_id FROM write_requests WHERE intent->>'kind'='managed_maintenance_consolidate'")).toEqual([]);
+        expect(await engine.executeRaw("SELECT request_id FROM persistence_requests WHERE intent->>'kind'='managed_maintenance_consolidate'")).toEqual([]);
         expect(await factRows(engine)).toEqual(before);
         expect(await takeCount(engine)).toBe(0);
       }, { databaseUrl });
