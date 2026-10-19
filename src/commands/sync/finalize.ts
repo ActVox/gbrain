@@ -8,9 +8,9 @@ import { chunkerStamp } from '../../core/chunkers/code.ts';
 import { serr, slog } from '../../core/console-prefix.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import { clearOpCheckpoint } from '../../core/op-checkpoint.ts';
-import { commitTimeMs } from '../../core/source-health.ts';
+import { commitTimeMsAsync } from '../../core/source-health.ts';
 import { writeSyncAnchor, writeChunkerVersion } from '../../core/sync-anchor.ts';
-import { git } from '../../core/sync-git.ts';
+import { gitAsync } from '../../core/sync-git.ts';
 import { buildPartialResult } from '../../core/sync-lock.ts';
 import {
   sanitizePathForDisplay,
@@ -66,7 +66,7 @@ export async function finishWithoutChanges(
     // (#1794): advance to the PINNED target, and clear any checkpoint (a resume
     // whose remaining range turned out to have no syncable changes still
     // completes cleanly here).
-    await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
+    await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, await commitTimeMsAsync(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeChunkerVersion(engine, opts.sourceId, chunkerStamp());
     if (!company) { await clearOpCheckpoint(engine, ckpt.paths); await clearOpCheckpoint(engine, ckpt.target); }
@@ -124,7 +124,7 @@ export async function finalizeIncrementalSync(
   // during the success-path git/anchor writes doesn't fire a stale flush.
   run.deregisterCheckpointCleanup();
 
-  const headVerificationSucceeded = verifyPinnedHead(run, plan);
+  const headVerificationSucceeded = await verifyPinnedHead(run, plan);
 
   // #5988: a deleted or renamed-away held file clears its hold; so does one
   // whose file is gone or no longer synced. A failed delete keeps it.
@@ -231,7 +231,7 @@ function identityDowngradesOf(plan: Pick<SyncPlan, 'manifest' | 'inScope' | 'isS
 }
 
 /** v0.42.x (#1794, T3): pin-reachability gate; records a `<head>` sentinel on a rewrite. */
-function verifyPinnedHead(run: SyncRun, plan: Pick<SyncPlan, 'company' | 'gitContextRoot' | 'pin'>): boolean {
+async function verifyPinnedHead(run: SyncRun, plan: Pick<SyncPlan, 'company' | 'gitContextRoot' | 'pin'>): Promise<boolean> {
   const { failedFiles } = run;
   const { company, gitContextRoot, pin } = plan;
   // v0.42.x (#1794, T3): pin-reachability gate, replacing the pre-v0.42 strict
@@ -249,11 +249,11 @@ function verifyPinnedHead(run: SyncRun, plan: Pick<SyncPlan, 'company' | 'gitCon
   //     the tree we imported against is gone. Block; do not advance.
   let headVerificationSucceeded = false;
   try {
-    const currentHead = company ? company.plan.revision!.commit : git(gitContextRoot, ['rev-parse', 'HEAD']);
+    const currentHead = company ? company.plan.revision!.commit : await gitAsync(gitContextRoot, ['rev-parse', 'HEAD']);
     if (currentHead !== pin) {
       let pinStillReachable = false;
       try {
-        git(gitContextRoot, ['merge-base', '--is-ancestor', pin, currentHead]);
+        await gitAsync(gitContextRoot, ['merge-base', '--is-ancestor', pin, currentHead]);
         pinStillReachable = true;
       } catch {
         pinStillReachable = false;
@@ -305,7 +305,7 @@ async function applyBookmarkGate(
     // "fresh". The checkpoint rows clear here — CONVERGENCE CONTRACT: sync
     // convergence == IMPORT convergence; downstream extract/facts/embed is
     // decoupled (its own resumable stale sweeps).
-    await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
+    await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, await commitTimeMsAsync(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     await writeChunkerVersion(engine, opts.sourceId, chunkerStamp());
@@ -555,11 +555,13 @@ async function extractAffectedPages(run: SyncRun, plan: Pick<SyncPlan, 'opts' | 
   let extractError: string | undefined;
   if (!opts.noExtract && totalChanges <= 100 && pagesAffected.length > 0) {
     try {
-      const { extractLinksForSlugs, extractTimelineForSlugs, stampExtracted, slugsSafeToStamp } = await import('../extract.ts');
+      const { extractLinksForSlugs, extractTimelineForSlugs, indexMarkdownTree, stampExtracted, slugsSafeToStamp } = await import('../extract.ts');
       // #774: pages' source_path is git-root-relative, so extract resolves
       // files from gitContextRoot (== repoPath realpath when unscoped).
-      const linksResult = await extractLinksForSlugs(engine, gitContextRoot, pagesAffected, extractOpts);
-      const timelineResult = await extractTimelineForSlugs(engine, gitContextRoot, pagesAffected, extractOpts);
+      // GBRA-133 2b.1: one tree walk per run, shared by both hooks.
+      const tree = await indexMarkdownTree(gitContextRoot);
+      const linksResult = await extractLinksForSlugs(engine, gitContextRoot, pagesAffected, { ...extractOpts, tree });
+      const timelineResult = await extractTimelineForSlugs(engine, gitContextRoot, pagesAffected, { ...extractOpts, tree });
       if (linksResult.created > 0 || timelineResult.created > 0) {
         slog(`  Extracted: ${linksResult.created} links, ${timelineResult.created} timeline entries`);
       }

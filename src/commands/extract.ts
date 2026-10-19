@@ -296,26 +296,52 @@ export function walkMarkdownFiles(dir: string): { path: string; relPath: string 
   // subtrees before recursion (saving IO), and isSyncable filters the emit
   // set against the canonical markdown-strategy rules.
   const files: { path: string; relPath: string }[] = [];
-  function walk(d: string) {
-    for (const entry of readdirSync(d)) {
-      const full = join(d, entry);
-      try {
-        const st = lstatSync(full);
-        if (st.isDirectory()) {
-          // v0.37.7.0 #1169: pass parentDir so pruneDir can detect git
-          // submodule pointers (`.git` as a file inside the candidate).
-          if (!pruneDir(entry, d)) continue;
-          walk(full);
-        } else if (entry.endsWith('.md') && !entry.startsWith('_')) {
-          const rel = relative(dir, full);
-          if (!isSyncable(rel, { strategy: 'markdown' })) continue;
-          files.push({ path: full, relPath: rel });
-        }
-      } catch { /* skip unreadable */ }
-    }
-  }
-  walk(dir);
+  for (const _ of markdownWalk(dir, dir, file => files.push(file))) { /* one directory done */ }
   return files;
+}
+
+/** The walk behind `walkMarkdownFiles`, in its order; yields after each directory it finishes. */
+function* markdownWalk(dir: string, d: string, emit: (file: { path: string; relPath: string }) => void): Generator<void> {
+  for (const entry of readdirSync(d)) {
+    const full = join(d, entry);
+    try {
+      const st = lstatSync(full);
+      if (st.isDirectory()) {
+        // v0.37.7.0 #1169: pass parentDir so pruneDir can detect git
+        // submodule pointers (`.git` as a file inside the candidate).
+        if (!pruneDir(entry, d)) continue;
+        yield* markdownWalk(dir, full, emit);
+      } else if (entry.endsWith('.md') && !entry.startsWith('_')) {
+        const rel = relative(dir, full);
+        if (!isSyncable(rel, { strategy: 'markdown' })) continue;
+        emit({ path: full, relPath: rel });
+      }
+    } catch { /* skip unreadable */ }
+  }
+  yield;
+}
+
+/** A source tree as the sync hooks read it: `walkMarkdownFiles` entries with their slugs, and `buildSlugPathIndex` of them. */
+export interface MarkdownTree { files: Array<{ path: string; relPath: string; slug: string }>; slugToPath: Map<string, string> }
+
+/**
+ * GBRA-133 2b.1/2b.3: `walkMarkdownFiles` plus `buildSlugPathIndex` for a sync, the same entries in the same order,
+ * yielding to the event loop after each directory, so a resident's commit-triggered sync never holds its event loop
+ * for the whole walk (about 0.75 s at 100k files). The sync hooks share one tree per run.
+ */
+export async function indexMarkdownTree(dir: string): Promise<MarkdownTree> {
+  const tree: MarkdownTree = { files: [], slugToPath: new Map() };
+  const emit = (file: { path: string; relPath: string }) => {
+    const slug = pathToSlug(file.relPath);
+    tree.files.push({ ...file, slug });
+    indexSlugPath(tree.slugToPath, slug, file.relPath);
+  };
+  for (const _ of markdownWalk(dir, dir, emit)) await new Promise<void>(resolve => setImmediate(resolve));
+  return tree;
+}
+
+function indexSlugPath(index: Map<string, string>, slug: string, relPath: string): void {
+  if (!index.has(slug) || relPath === `${slug}.md`) index.set(slug, relPath);
 }
 
 /**
@@ -338,10 +364,7 @@ export function buildSlugPathIndex(
   files: ReadonlyArray<{ relPath: string }>,
 ): Map<string, string> {
   const index = new Map<string, string>();
-  for (const file of files) {
-    const slug = pathToSlug(file.relPath);
-    if (!index.has(slug) || file.relPath === `${slug}.md`) index.set(slug, file.relPath);
-  }
+  for (const file of files) indexSlugPath(index, pathToSlug(file.relPath), file.relPath);
   return index;
 }
 
@@ -495,6 +518,9 @@ async function loadSourceLinkPacks(engine: BrainEngine, sourceIds: string[], pac
   }
 }
 
+/** What link extraction reads a page type through: a whole-tree map (full `gbrain extract`) or the sync hook's endpoint lookup. */
+export type PageTypeLookup = Pick<ReadonlyMap<string, string>, 'get'>;
+
 function loadFsPageTypes(files: ReadonlyArray<{ path: string; relPath: string }>, pack: LinkExtractionPack | null): Map<string, string> {
   const types = new Map<string, string>();
   const activePack = pack?.page_types ? { page_types: pack.page_types } : undefined;
@@ -503,6 +529,38 @@ function loadFsPageTypes(files: ReadonlyArray<{ path: string; relPath: string }>
     catch { types.set(pathToSlug(file.relPath), 'unknown'); }
   }
   return types;
+}
+
+/**
+ * GBRA-133 2b.1: the sync hook's page types, parsed from the files of the link endpoints its pages actually look up
+ * instead of from every file in the tree (`loadFsPageTypes`, which full `gbrain extract` keeps). `pass` runs the
+ * extraction against the lookup; a walked slug it asks for and has no type yet is recorded, its file parsed, and the
+ * pass repeated until one asks for nothing new (an answer can make extraction ask for more, e.g. a person target
+ * prompts the attendance candidates). Each answer is what `loadFsPageTypes` gives that slug: the parse under the
+ * active pack, `unknown` when the file cannot be read, and the last walked file on a slug collision. So the links
+ * match the whole-tree parse, held and never-imported targets included, and a pack page-type change applies at once.
+ */
+export async function withEndpointPageTypes<T>(repoPath: string, tree: MarkdownTree, pack: LinkExtractionPack | null,
+  pass: (pageTypes: PageTypeLookup) => Promise<T>): Promise<T> {
+  const { files, slugToPath } = tree;
+  const lastWalked = slugToPath.size === files.length ? null : new Map(files.map(file => [file.slug, file.relPath]));
+  const activePack = pack?.page_types ? { page_types: pack.page_types } : undefined;
+  const types = new Map<string, string>();
+  for (;;) {
+    const missing = new Set<string>();
+    const result = await pass({ get: (slug) => {
+      const type = types.get(slug);
+      if (type === undefined && slugToPath.has(slug)) missing.add(slug);
+      return type;
+    } });
+    if (!missing.size) return result;
+    for (const slug of missing) {
+      const relPath = lastWalked?.get(slug) ?? slugToPath.get(slug)!;
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- relPath is an entry of the walkMarkdownFiles(repoPath) walk the caller indexed, never caller input
+      try { types.set(slug, parseMarkdown(readFileSync(join(repoPath, relPath), 'utf-8'), relPath, { activePack }).type); }
+      catch { types.set(slug, 'unknown'); }
+    }
+  }
 }
 
 /**
@@ -527,7 +585,7 @@ async function loadSlugAliasTargets(engine: BrainEngine, sourceId: string, allSl
 export async function extractLinksFromFile(
   content: string, relPath: string, allSlugs: Set<string>,
   opts?: { includeFrontmatter?: boolean; globalBasename?: boolean; pack?: LinkExtractionPack | null;
-    pageTypes?: ReadonlyMap<string, string>; aliases?: ReadonlyMap<string, string>;
+    pageTypes?: PageTypeLookup; aliases?: ReadonlyMap<string, string>;
     lineGrammar?: { enabled?: boolean; allowUndeclaredTypes?: boolean } },
 ): Promise<ExtractedLink[]> {
   const links: ExtractedLink[] = [];
@@ -1725,15 +1783,15 @@ export async function extractLinksForSlugs(
   engine: BrainEngine,
   repoPath: string,
   slugs: string[],
-  opts?: { sourceId?: string; includeFrontmatter?: boolean },
+  opts?: { sourceId?: string; includeFrontmatter?: boolean; tree?: MarkdownTree },
 ): Promise<ExtractForSlugsResult> {
-  const allFiles = walkMarkdownFiles(repoPath);
+  const tree = opts?.tree ?? await indexMarkdownTree(repoPath);
   // Resolve each requested slug to its REAL path (see buildSlugPathIndex).
   // The old reconstructed path missed any file whose name is not already a
   // slug: `existsSync` was false, the page was skipped in silence, and the
   // caller stamped it extracted anyway — so `extract --stale` never came
   // back for it and the edges were lost for good.
-  const slugToPath = buildSlugPathIndex(allFiles);
+  const slugToPath = tree.slugToPath;
   const allSlugs = new Set(slugToPath.keys());
   // Post-sync extract replaces each page's own markdown-derived edges in the
   // caller's source (the put_page contract); cross-source extraction would
@@ -1744,7 +1802,6 @@ export async function extractLinksForSlugs(
   const sourceId = opts?.sourceId ?? 'default';
   const pack = (await loadActivePackForLocalEngine(engine, { sourceId }))?.manifest ?? null;
   if (!pack) throw new Error('Cannot extract links: active schema pack is unavailable.');
-  const pageTypes = loadFsPageTypes(allFiles, pack);
   const aliases = await loadSlugAliasTargets(engine, sourceId, allSlugs);
   // #4999: resolved HERE, like isGlobalBasenameEnabled above, so every caller
   // (sync, GitHub/Google source inline extracts) honours the configured
@@ -1758,15 +1815,27 @@ export async function extractLinksForSlugs(
   // leaves the page stale and `extract --stale` picks it up next run.
   const processed: string[] = [];
   const errors: Array<{ slug: string; error: string }> = [];
-  const reads: Array<{ slug: string; relPath: string; content: string; links: LinkBatchInput[] }> = [];
+  const files: Array<{ slug: string; relPath: string; content: string } | { slug: string; error: string }> = [];
   for (const slug of slugs) {
     const relPath = quarantined.has(slug) ? undefined : resolveSlugRelPath(slugToPath, repoPath, slug);
     if (relPath === undefined) continue;
-    try {
-      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- relPath comes from the slug→path index built by walkMarkdownFiles(repoPath) (repo-relative entries of that walk) or the validated-slug legacy fallback, never from a caller
-      const content = readFileSync(join(repoPath, relPath), 'utf-8');
-      reads.push({ slug, relPath, content, links: await extractLinksFromFile(content, relPath, allSlugs, { globalBasename, includeFrontmatter, pack, pageTypes, aliases }) });
-    } catch (e) { errors.push({ slug, error: e instanceof Error ? e.message : String(e) }); }
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- relPath comes from the slug→path index built by walkMarkdownFiles(repoPath) (repo-relative entries of that walk) or the validated-slug legacy fallback, never from a caller
+    try { files.push({ slug, relPath, content: readFileSync(join(repoPath, relPath), 'utf-8') }); }
+    catch (e) { files.push({ slug, error: e instanceof Error ? e.message : String(e) }); }
+  }
+  const extracted = await withEndpointPageTypes(repoPath, tree, pack, async (pageTypes) => {
+    const out: Array<{ slug: string; relPath: string; content: string; links: LinkBatchInput[] } | { slug: string; error: string }> = [];
+    for (const file of files) {
+      if ('error' in file) { out.push(file); continue; }
+      try { out.push({ ...file, links: await extractLinksFromFile(file.content, file.relPath, allSlugs, { globalBasename, includeFrontmatter, pack, pageTypes, aliases }) }); }
+      catch (e) { out.push({ slug: file.slug, error: e instanceof Error ? e.message : String(e) }); }
+    }
+    return out;
+  });
+  const reads: Array<{ slug: string; relPath: string; content: string; links: LinkBatchInput[] }> = [];
+  for (const entry of extracted) {
+    if ('error' in entry) errors.push(entry);
+    else reads.push(entry);
   }
   // A16: metadata for the changed pages and their link endpoints only; the
   // whole-brain load is deferred to the rare attendance (meeting) page.
@@ -1795,11 +1864,11 @@ export async function extractTimelineForSlugs(
   engine: BrainEngine,
   repoPath: string,
   slugs: string[],
-  opts?: { sourceId?: string },
+  opts?: { sourceId?: string; tree?: MarkdownTree },
 ): Promise<ExtractForSlugsResult> {
   // Real-path resolution, same as extractLinksForSlugs. Both halves come off
   // one `links_extracted_at` stamp, so both must agree on what was read.
-  const slugToPath = buildSlugPathIndex(walkMarkdownFiles(repoPath));
+  const slugToPath = (opts?.tree ?? await indexMarkdownTree(repoPath)).slugToPath;
   // v0.18.0+ multi-source: source-qualify so timeline rows don't fan out
   // across every source containing the slug (the addTimelineEntry's
   // INSERT...SELECT-from-pages fan-out was Data R1's HIGH 2).
