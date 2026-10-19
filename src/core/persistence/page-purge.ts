@@ -381,9 +381,10 @@ export async function finishPagePurge(ctx: Pick<OperationContext, 'engine' | 'co
   return { ...result, ...extra };
 }
 
+export const PAGE_PURGE_TOMBSTONES_SQL = 'SELECT content_hash,slug FROM page_purges WHERE source_id=$1 ORDER BY purged_at DESC LIMIT $2';
 /** Prefetch for import screens: every page tombstone of a source, content hash -> slug (bounded). */
 export async function readPagePurgeTombstones(engine: BrainEngine, sourceId: string, limit = 10_000): Promise<Map<string, string>> {
-  const rows = await engine.executeRaw<{ content_hash: string; slug: string }>('SELECT content_hash,slug FROM page_purges WHERE source_id=$1 ORDER BY purged_at DESC LIMIT $2', [sourceId, limit]);
+  const rows = await engine.executeRaw<{ content_hash: string; slug: string }>(PAGE_PURGE_TOMBSTONES_SQL, [sourceId, limit]);
   return new Map(rows.map(r => [r.content_hash, r.slug]));
 }
 

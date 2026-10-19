@@ -40,10 +40,11 @@ import { admitKeepDbReconcile, driftSkippedSlugs, freezeKeepDbReconcile, release
 const KEEP_DB_CAPACITY_REFUSALS = new Set(['capacity', 'write_capacity_backpressure', 'queue_capacity', 'write_quota_exhausted', 'writer_busy', 'writer_pool_capacity']);
 import type { SyncProcessingOptions } from './sync-authority.ts';
 import type { SyncClassified } from './sync-classify.ts';
-import { readOnlySameContentScreen } from './sync-convergence.ts';
+import { readOnlySameContentScreen, type ConvergenceScreen } from './sync-convergence.ts';
 import type { ManagedSyncContext } from './sync-discovery.ts';
 import { sha256 } from './digest.ts';
 import { readBlobs } from './sync-git-stream.ts';
+import { faultPoint } from './fault-points.ts';
 import { RECOVERY_VERSION } from '../markdown.ts';
 import { readSyncImportProvenances, recordSyncImportProvenances, syncImportParserFor, writeGitHold,
   type GitHoldCode, type GitHoldMeta, type SyncImportProvenance } from './sync-holds.ts';
@@ -63,6 +64,8 @@ import { frontmatterIdentity } from '../sync-rename-identity.ts';
 
 /** Legacy pages the sweep screens per pass after the incarnation's first full round (design §2.7, [estimated]). */
 export const PASS_LEGACY_SWEEP_MAX = 500;
+/** GBRA-108: legacy pages one sweep slice screens and records before the next is screened. */
+export const LEGACY_SWEEP_SLICE = 100;
 /** keep_db DB-wins writes a pass admits (design §4, [estimated]). */
 export const PASS_KEEP_DB_MAX = 200;
 /** The bootstrap Decision gate (design §2.7, [estimated]): file_drift Decisions per 10,000 pages. */
@@ -116,7 +119,9 @@ export interface PassApplyInput {
   /** A remote caller's slug-prefix grant (null: source-wide): paths outside it are left unsettled and never counted (design §5). */
   grantPrefixes?: readonly string[] | null;
   /** Test seam: the read-only same-content screen (default `readOnlySameContentScreen`). */
-  screen?: (level: ShadowLevel, paths: ShadowPath[]) => Promise<Map<string, 'same' | 'differs' | 'unknown'>>;
+  screen?: ConvergenceScreen;
+  /** GBRA-108: after each committed legacy-sweep slice (the pass saves its row and reports progress). */
+  onSwept?: () => Promise<void>;
 }
 
 /** The source-relative path (`SyncEntry.path`, the hold key) and the recorded origin of a level path. */
@@ -405,19 +410,32 @@ async function adoptRecords(engine: BrainEngine, level: ShadowLevel, state: Pass
   state.adopted += (await writeRecords(engine, level, writes, state.recorded)).size;
 }
 
-/** Design §2.7: the bounded read-only legacy sweep; an equal page gets a record and is `matched`. */
+/**
+ * Design §2.7: the bounded read-only legacy sweep; an equal page gets a record and is `matched`. The first full round
+ * sweeps every legacy page, LEGACY_SWEEP_SLICE at a time (GBRA-108): each slice's records commit before the next
+ * slice is screened and the slice is reported as progress (`onSwept`), so a pass stopped mid-sweep keeps what it
+ * recorded (those pages classify `matched` and the next pass sweeps the rest) and a long sweep is never a stalled pass.
+ */
 async function sweepLegacy(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
   const legacy = await filterYielding(level.paths, entry => entry.result.cls === 'legacy_unverified' && entry.pageId !== null && entry.revision !== null && entry.state.level !== null && entry.slug);
-  if (!legacy.length) return;
   const sweepAll = input.fullRound && !input.obligations.legacy_sweep?.first_full_at;
   const budget = sweepAll ? legacy.length : Math.max(0, PASS_LEGACY_SWEEP_MAX - state.swept.screened);
   const batch = legacy.slice(0, budget);
-  if (!batch.length) return;
-  const screen = input.screen ?? readOnlySameContentScreen(engine, input.context, input.processingOptions);
-  const verdicts = await screen(level, batch);
-  state.swept.screened += batch.length;
+  const screen = batch.length ? input.screen ?? readOnlySameContentScreen(engine, input.context, input.processingOptions) : null;
+  for (let at = 0; screen && at < batch.length; at += LEGACY_SWEEP_SLICE) {
+    await faultPoint('sync:legacy_slice', { sourceId: level.sourceId });
+    await sweepSlice(engine, level, batch.slice(at, at + LEGACY_SWEEP_SLICE), screen, state);
+    await input.onSwept?.();
+  }
+  // A full round that finds no legacy page left (an earlier pass recorded them before it stopped) has swept them all too.
   if (sweepAll) state.sweptAll = true;
-  const same = batch.filter(entry => verdicts.get(entry.path) === 'same');
+}
+
+/** One sweep slice: screen it, then record its equal pages (fenced on the revision the level read). */
+async function sweepSlice(engine: BrainEngine, level: ShadowLevel, slice: ShadowPath[], screen: ConvergenceScreen, state: PassApplyState): Promise<void> {
+  const verdicts = await screen(level, slice);
+  state.swept.screened += slice.length;
+  const same = slice.filter(entry => verdicts.get(entry.path) === 'same');
   if (!same.length) return;
   const blobs = level.mode === 'committed' ? await readBlobs(level.gitRoot, [...new Set(same.map(entry => entry.state.level!))], LEVEL_BLOB_MAX_BYTES) : new Map<string, Buffer>();
   const writes = same.flatMap((entry): RecordWrite[] => {

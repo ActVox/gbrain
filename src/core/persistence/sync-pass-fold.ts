@@ -53,6 +53,11 @@ export interface PassFold {
   episodeFullId: string | null; scope: string;
   /** The pass row's obligations when the import was frozen: the stamp writes them, as the checkpoint request reads the row's. */
   obligations?: ManagedSyncPassValue['obligations'];
+  /**
+   * The imports of the batch the stamp rides, this one included: the stamp's counts were read before that batch drained,
+   * and the proof shows each of them wrote its page, so the tail owes all of them (absent on a stamp frozen before: 1).
+   */
+  batch?: number;
 }
 
 /**
@@ -154,6 +159,6 @@ async function provenStamp(tx: BrainEngine, { row, p, root }: { row: WriteReques
   const prior = pass.value.obligations.converged?.writeback;
   const read = prior?.length ? await readConvergedWatermark(tx, scope, row.request_id, OPEN_AT_STAMP_CAP, { own: writeback, prior }) : watermark;
   await publishPassStamp(tx, row, p, root, async () => {}, fold.obligations ? { value: { ...pass.value, obligations: fold.obligations } } : pass,
-    { changed: stamp.changed + (outcome.noop === true ? 0 : 1), watermark: read, ...(emptyScope === undefined ? {} : { emptyScope }) });
+    { changed: stamp.changed + (outcome.noop === true ? 0 : fold.batch ?? 1), watermark: read, ...(emptyScope === undefined ? {} : { emptyScope }) });
   return null;
 }

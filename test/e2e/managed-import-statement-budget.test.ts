@@ -44,7 +44,7 @@ function measured(scale: number): Promise<Measured> {
   return run;
 }
 async function measure(scale: number): Promise<Measured> {
-  // One file for every size: the trace buffers process-wide and flushes into the first file it was given.
+  // One file for every size: the trace writes each pool's records to the file it was created with.
   const trace = join(home, 'trace.jsonl');
   return withEnv({ GBRAIN_SQL_TRACE: trace, GBRAIN_SQL_TRACE_LABEL: 'import-budget', GBRAIN_HOME: join(home, `home-${scale}`) }, async () => {
     const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!, 'instance', 6);
