@@ -60,14 +60,38 @@ type Hook = (point: FaultPoint, detail: FaultDetail) => Promise<void>;
 /**
  * A sync whose rounds after the first, when their confirm round is taken, are each compared with a cacheless full read;
  * `also` runs first at every seam, and `confirms` is each round's confirm verdict.
+ *
+ * The pass's narrowed read and the comparison's full read happen one after the other, so each round's open work is held
+ * still from the round's start until its comparison ends: no request is claimed, a claimed request waits before it
+ * prepares or publishes, a Git effect waits before it finishes, and the round starts reading once nothing else is running.
+ * Otherwise a write committing between the two reads makes them differ by that path's open work alone.
  */
 async function compared(engine: BrainEngine, { force = false, also }: { force?: boolean; also?: Hook } = {}) {
   const rounds: Compared[] = [], mismatches: unknown[] = [], confirms: Array<{ round: number; taken: boolean | null; reason: string | null }> = [];
+  const waiting = new Set<string>();
+  let thaw = () => {}, thawed = Promise.resolve();
+  const still = async () => {
+    thawed = new Promise<void>(resolve => { thaw = resolve; });
+    await waitFor(async () => {
+      const running = await engine.executeRaw<{ id: string }>(`SELECT 'r' || request_id::text AS id FROM persistence_requests WHERE source_id='default' AND state='running'
+        UNION ALL SELECT 'e' || id::text FROM persistence_effects WHERE source_id='default' AND kind='git' AND state='running'`);
+      return running.every(row => waiting.has(row.id));
+    }, { timeoutMs: 60_000, label: 'the open work of the source holds still' });
+  };
   installFaultHook(async (point, detail) => {
-    await also?.(point, detail);
+    const held = point === 'consumer:preparing' || point === 'consumer:prepared' ? `r${detail.requestId}` : point === 'effect:git:mid' ? `e${detail.effectId}` : null;
+    if (held) waiting.add(held);
+    try {
+      await also?.(point, detail);
+      if (held || point === 'consumer:claiming') await thawed;
+    } finally { if (held) waiting.delete(held); }
     if (point === 'sync:level_narrow' && force) throw new Error('a refused patch');
-    if (point === 'sync:level_read') confirms.push({ round: detail.round!, taken: detail.level?.confirm?.taken ?? null, reason: detail.level?.confirm?.reason ?? null });
-    if (point !== 'sync:level_read' || !detail.level?.confirm?.taken) return;
+    if (point === 'sync:round_start') await still();
+    if (point === 'sync:level_read') await compare(detail).finally(() => thaw());
+  });
+  const compare = async (detail: FaultDetail) => {
+    confirms.push({ round: detail.round!, taken: detail.level?.confirm?.taken ?? null, reason: detail.level?.confirm?.reason ?? null });
+    if (!detail.level?.confirm?.taken) return;
     const input = detail.level.input as Parameters<typeof readShadowLevel>[1];
     const narrowed = project(detail.level.shadow as ShadowLevel);
     const full = project((await readShadowLevel(engine, { ...input, pass: { ...input.pass!, cache: undefined, passId: undefined } }))!);
@@ -75,12 +99,12 @@ async function compared(engine: BrainEngine, { force = false, also }: { force?: 
     if (!same) mismatches.push({ round: detail.round, narrowed, full });
     rounds.push({ round: detail.round!, narrow: detail.level.confirm.narrow, same, paths: narrowed.paths.length, classes: Object.fromEntries(narrowed.paths.map(entry => [entry.path, entry.result.cls])),
       open: narrowed.paths.filter(entry => entry.state.openWork).map(entry => entry.path) });
-  });
+  };
   try {
     const result = await performManagedSync(engine, OPTS);
     expect(mismatches).toEqual([]);
     return { status: result.status, rounds, confirms };
-  } finally { installFaultHook(undefined); }
+  } finally { thaw(); installFaultHook(undefined); }
 }
 const narrowed = (run: { rounds: Compared[] }) => run.rounds.filter(round => round.narrow === 'taken');
 
@@ -151,6 +175,33 @@ for (const backend of testBackends()) {
       const run = await compared(engine);
       expect(narrowed(run).length).toBeGreaterThan(0);
       expect(run.rounds.every(round => round.same)).toBe(true);
+    }, mixSetup), 600_000);
+
+    // The comparison's own guard: one of the mix's open writes, held before it publishes, is let go right after the pass's
+    // narrowed read of a round that saw it open. Without the hold on the round's open work it commits before the full read,
+    // which then differs by that path's open work alone; with it, it commits once the comparison ended.
+    test('the seeded mix: a write let go right after a narrowed read commits only after the comparison read', () => brain(async ({ engine, ctx, root }) => {
+      await seedMix({ engine, ctx, root });
+      const seeded = (await engine.executeRaw<{ id: string }>("SELECT request_id::text AS id FROM persistence_requests WHERE source_id='default' AND state='queued'")).map(row => row.id);
+      expect(seeded).toHaveLength(2);
+      const stillOpen = async () => (await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE request_id=ANY($1::uuid[]) AND state IN ('queued','running','recovering')", [seeded])).length > 0;
+      let release: () => void = () => {}, released = 0;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const also: Hook = async (point, detail) => {
+        if (point === 'consumer:prepared' && seeded.includes(detail.requestId ?? '')) { await gate; return; }
+        if (point !== 'sync:level_read' || !detail.level?.confirm?.taken || released) return;
+        if (!(detail.level.shadow as ShadowLevel).paths.some(entry => entry.state.openWork)) return;
+        released = detail.round!;
+        release();
+        // Room for the released writes to commit before the comparison reads, as they would on a busy host.
+        for (const until = Date.now() + 3_000; Date.now() < until && await stillOpen();) await new Promise(resolve => setTimeout(resolve, 50));
+      };
+      let run: Awaited<ReturnType<typeof compared>>;
+      try { run = await compared(engine, { also }); } finally { release(); }
+      expect(released).toBeGreaterThan(0);
+      expect(run.rounds.find(round => round.round === released)).toMatchObject({ narrow: 'taken', same: true });
+      expect(run.rounds.find(round => round.round === released)!.open.length).toBeGreaterThan(0);
+      await waitFor(async () => !await stillOpen(), { timeoutMs: 60_000, label: 'the mix\'s open writes commit' });
     }, mixSetup), 600_000);
 
     // A kept entry is re-checked against this round's open work (sync-pass.ts `keptUnread`): no patched origin names it.
