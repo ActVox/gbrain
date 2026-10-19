@@ -46,6 +46,7 @@ const LEDGER: Record<string, string> = {
   unpurge_page: 'test/page-purge.test.ts',
   capture: 'test/capture-op.test.ts',
   edit_page: 'test/edit-page.test.ts',
+  append_page: 'test/large-pages/append-concurrency.test.ts',
   get_write_request: 'test/persistence-receipt-operations.test.ts',
   list_write_requests: 'test/persistence-receipt-operations.test.ts',
   cancel_write_request: 'test/persistence-receipt-operations.test.ts',

@@ -87,11 +87,14 @@ test/import-revision-concurrency.test.ts
 test/keyword-statement-timeout-knob-6495.test.ts
 test/keyword-timeout-negative-cache-6495.test.ts
 test/lane-apply-pipelining.test.ts
+test/large-pages/append-concurrency.test.ts
+test/large-pages/append-cost.test.ts
 test/large-pages/chunk-retirement-plan.test.ts
 test/large-pages/chunk-visibility.test.ts
 test/large-pages/contextual-reembed-segmented.test.ts
 test/large-pages/credential-reseal-segments.test.ts
 test/large-pages/doctor-skipped-segmented.test.ts
+test/large-pages/edit-segmented.test.ts
 test/large-pages/forget-reason-segmented.test.ts
 test/large-pages/forget-scope.test.ts
 test/large-pages/gbra117-segmented-classes-window.test.ts

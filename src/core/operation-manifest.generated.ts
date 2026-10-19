@@ -817,6 +817,23 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           }
         }
       },
+      "within": {
+        "type": "object",
+        "description": "Match only in this stored-body range: edit_target's byte_start/byte_end from a get_page window read.",
+        "fullSurfaceOnly": true,
+        "properties": {
+          "byte_start": {
+            "type": "number",
+            "required": true,
+            "description": "First stored byte."
+          },
+          "byte_end": {
+            "type": "number",
+            "required": true,
+            "description": "End stored byte (exclusive)."
+          }
+        }
+      },
       "source_id": {
         "type": "string",
         "description": "Write source."
@@ -824,6 +841,61 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "request_id": {
         "type": "string",
         "description": "Reuse only to retry."
+      }
+    },
+    "mutating": true,
+    "scope": "write",
+    "area": "pages"
+  },
+  {
+    "name": "append_page",
+    "idempotent": true,
+    "outputRedaction": "no_stored_text",
+    "description": "Add text to the end of a page, in time proportional to the text: use it for logs and conversations instead of re-putting a large page. request_id is required (a retry never appends twice). Optional expected_revision / expected_tail_sha256 (tail_sha256 from get_page body: 'none') refuse with revision_changed / tail_changed when the page moved.",
+    "params": {
+      "slug": {
+        "type": "string",
+        "description": "Page slug (an existing page).",
+        "required": true
+      },
+      "text": {
+        "type": "string",
+        "required": true,
+        "description": "Text to add, at most 4194304 bytes; a larger append uses begin_page_upload mode 'append'."
+      },
+      "request_id": {
+        "type": "string",
+        "required": true,
+        "description": "A new UUID per append; reuse only to retry."
+      },
+      "expected_revision": {
+        "type": "string",
+        "description": "Append only while the page is at this revision."
+      },
+      "expected_tail_sha256": {
+        "type": "string",
+        "description": "Append only while the region's last 4096 bytes have this sha256 (get_page body: 'none' tail_sha256)."
+      },
+      "region": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "truth",
+          "timeline"
+        ],
+        "description": "auto (default): the last non-empty region."
+      },
+      "separator": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "none"
+        ],
+        "description": "auto (default): one newline first when the tail lacks one."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "Write source."
       }
     },
     "mutating": true,

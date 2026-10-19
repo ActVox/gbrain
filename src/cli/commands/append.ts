@@ -302,7 +302,8 @@ const ONE_REQUEST_ONLY = ['allow_empty', 'allow_shrink', 'drop_timeline', 'dry_r
  * `gbrain put <slug> --file PATH` (main.ts runs it before parsing put's args).
  * A page that fits one put_page request (the page ceiling locally, the
  * smallest transport cap on a thin client) returns false with `args` now
- * carrying `--content=<file>`, so the ordinary put dispatch sends it. A larger
+ * carrying the file as put's stdin param (content), so the ordinary put
+ * dispatch sends it. A larger
  * file returns true after writing: on the trusted local CLI it streams through
  * the import's two-pass reader into this process's engine (spec 3.1), never
  * held as one string, when the brain is unmanaged; a thin client, a managed
@@ -310,7 +311,7 @@ const ONE_REQUEST_ONLY = ['allow_empty', 'allow_shrink', 'drop_timeline', 'dry_r
  * serve holds takes it through an upload session, still streamed in parts.
  * Failures are rendered here, so true also means "done".
  */
-export async function runPutFile(op: { name: string }, args: string[], opts: {
+export async function runPutFile(op: { name: string; cliHints?: { stdin?: string } }, args: string[], opts: {
   parse: (op: never, args: string[]) => Record<string, unknown>;
   connect: () => Promise<BrainEngine>;
   format: (op: string, result: unknown, params: Record<string, unknown>) => string;
@@ -331,7 +332,7 @@ export async function runPutFile(op: { name: string }, args: string[], opts: {
     if (size <= PAGE_MAX_BYTES) {
       const content = decodeTextInput(readFileSync(path), path);
       if (!thin || toolCallFrameBytes('put_page', { ...params, content }) <= DIRECT_FRAME_MAX_BYTES) {
-        args.splice(0, args.length, `--content=${content}`, ...rest);
+        args.splice(0, args.length, `--${op.cliHints?.stdin ?? 'content'}=${content}`, ...rest);
         return false;
       }
     }

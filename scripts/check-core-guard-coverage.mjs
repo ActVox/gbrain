@@ -48,6 +48,7 @@ const EXEMPT = {
   'src/core/facts/conversation-relink.ts': 'sets entity_slug on database-only conversation fact rows; page text is unchanged',
   'src/core/cycle/extract-facts.ts': 'fence reconcile and deleted-page expiry write fact rows only; page text is unchanged',
   'src/core/cycle/extract-takes.ts': 'takes reextract writes take rows only; page text is unchanged',
+  'src/core/persistence/page-edit.ts': 'segmented edit_page splices through page-append.ts prepareSegmentedSpliceMutation, which declines an always-loaded core page to preparePageMutation; the splice never changes frontmatter',
   'src/core/repair/take-supersession.ts': 'reprojection writes takes.superseded_by only; fence edits go through put_page (preparePageMutation)',
 };
 
