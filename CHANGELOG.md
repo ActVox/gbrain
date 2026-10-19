@@ -12,30 +12,22 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.311.0] - 2026-10-19
 
-**Fix wave 20: about thirty answers that were quietly wrong are now right.** Recall honours every filter you give it, think names the model that actually answered, doctor and the advisor stop calling stale or failed checks healthy, `embed --max-usd` respects your own prices, Katakana names stop matching inside longer words, `get_links` pages instead of returning everything, and a disabled Gmail API is reported as what it is. Thirty-one contributor fixes were rewritten on master and credited. Nothing here adds a paid call or a migration.
+**The dream `consolidate` phase no longer silently supersedes a real fact when two typed statements of one metric share an effective time, and the facts an earlier run closed that way can be reopened.** Fixes the residual case of #6023.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| `recall --entity X --session Y` without `--since` | the session filter was dropped | both filters apply before the limit |
-| `recall --since <garbage>` or an empty `--session` | silently recalled everything | refused `invalid_params` with the accepted forms |
-| `recall --since-last-run` with more new facts than `--limit` | the overflow was never shown | the next run continues where the last one stopped |
-| `think` answered by a `chat_fallback_chain` model | reported, priced and saved the model that failed | names the model that answered, plus `requested_model` |
-| advisor backup coverage with expired or future-dated evidence; a collector that fails to read | read healthy | warns, or reports `collector_failed` |
-| `embed --max-usd` with a model priced by `gbrain pricing set` | stopped with `no_pricing` | uses your price |
-| A known price with no context ceiling | `no_pricing` | `no_context_ceiling`, naming the model |
-| `config set chat_model` while config.json or an env var pins it | said it worked | warns that the write is shadowed; `config unset <key> --file` clears the pin |
-| A Katakana alias inside a longer Katakana word; a page titled with one generic word | created a mention link | no link; `MENTION_EXTRACTOR_VERSION` 7 rescans mentions once |
-| `get_links` / `get_backlinks` on a hub page | every row, unbounded | 500 by default (max 5000) with `truncated` and `next_cursor`; `--all` on the CLI |
-| Gmail API disabled in the OAuth project | `connector_account_changed` | the credential refusal with its fix |
-| `dream --drain` stopped by a provider outage | exit 11, help said 3 | transient failures retry (11); permanent ones and no progress exit 1 naming the blocker |
-| `extract links --source db` reaching a page whose source has no row | aborted the run | defers and names the page; the run continues |
-| Codex "always allow" on a gbrain tool, then `connect --install --fresh-token` | refused `configuration_conflict` | keeps your approvals |
-| A meeting that hasn't happened yet | got "Discussed in" timeline rows | rows are added once it has ended |
-| A fact longer than the embedding input | coverage claimed for text never embedded | reported as partially embedded; nothing re-embeds |
+| A consolidation cluster holds two typed facts with the same metric, unit and period at the same effective time (an amount and its correction recorded on one day, or one statement stored twice) | the higher-confidence one became the take and the other got a `valid_until` equal to its own `valid_from`, a zero-length validity that marked a real fact superseded | the cluster is left unchanged. The phase reports `warn` with `details.clusters_held_same_instant` and `details.same_instant_clusters`, each with the fact ids and a next step: ask which statement is current, then `gbrain forget` the other. The managed path holds it before admission, and an intent an older release admitted publishes nothing |
+| Facts an earlier run closed at their own instant | no supported way back | `gbrain repair consolidate-ties` lists them with their tied partners and take; `--apply --expect <hash>` reopens exactly the previewed facts. It never runs on upgrade |
 
-Every user-visible change is listed in the upgrade notice. Contributed by @javieraldape, @tarush1989, @spiky02plateau, @akinduroifedayo, @johnerik, @troyhoffman-oss, @Masashi-Ono0611 and @Kkkkkuro.
+A typed series at distinct times still consolidates with its chronological writeback.
+
+### What you need to do
+
+Nothing. If `gbrain dream` reports held clusters, answer the question it relays. To check for facts an earlier run closed, preview `gbrain repair consolidate-ties`.
+
+Contributed by @Kkkkkuro (report and reproduction on #6023).
 
 ## [0.60.310.0] - 2026-10-19
 
