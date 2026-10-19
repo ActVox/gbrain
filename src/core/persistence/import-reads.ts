@@ -85,7 +85,17 @@ export function importGroupReads(engine: BrainEngine, rows: ReadonlyArray<{ slug
   };
 }
 
-const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+const flattened = new Map<string, string>();
+/** A statement's whitespace-normalized text, remembered for the (bounded) set of statements a screen sends. */
+const flat = (sql: string) => {
+  let text = flattened.get(sql);
+  if (text === undefined) {
+    if (flattened.size >= 1024) flattened.clear();
+    text = sql.replace(/\s+/g, ' ').trim();
+    flattened.set(sql, text);
+  }
+  return text;
+};
 const ORIGIN = flat(SYNC_ORIGIN_PAGES_SQL), TIMELINE = flat(STORED_TIMELINE_SQL), TAKES = flat(TAKE_COLLISIONS_SQL), FENCE = flat(SAFE_FENCE_SQL);
 
 /**

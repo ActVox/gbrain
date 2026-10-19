@@ -194,11 +194,12 @@ const SCREEN_STABLE_READS = [WORKTREE_BINDING_SQL, SOURCE_TRUST_CONFIG_SQL, PAGE
  * own reads plus a constant, not every shared read once per page.
  */
 export function readOnlySameContentScreen(engine: BrainEngine, context: ManagedSyncContext, processingOptions: SyncProcessingOptions): ConvergenceScreen {
+  // One run for all of the screen's calls, so they share its Git top level (sync-prepare.ts `syncGitTopLevel`), read once.
+  const runId = randomUUID();
   return async (level, paths) => {
     const verdicts = new Map<string, 'same' | 'differs' | 'unknown'>();
     const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, context.root);
     const committed = level.mode === 'committed' ? await readBlobs(level.gitRoot, [...new Set(paths.map(entry => entry.state.level!).filter(Boolean))], 8 * 1024 * 1024) : new Map<string, Buffer>();
-    const runId = randomUUID();
     const pages = importGroupReads(engine, paths.flatMap(entry => entry.slug ? [{ slug: entry.slug, source_id: level.sourceId }] : []), { reread: true });
     const relative = (entry: ShadowPath) => level.scope ? entry.path.slice(level.scope.length + 1) : entry.path;
     const origins = paths.flatMap(entry => {
