@@ -21,6 +21,7 @@ import { pageSnapshotKey } from '../page-snapshot-batch.ts';
 import { SAFE_FENCE_SQL } from '../page-state/projections.ts';
 import { STORED_TIMELINE_SQL, TAKE_COLLISIONS_SQL } from './canonical-projections.ts';
 import { SYNC_ORIGIN_PAGES_SQL } from './sync-origin.ts';
+import { registerSliceView } from './slice-memo.ts';
 
 type DuplicateInput = { hash: string; frontmatterId?: string | null; excludeSlug?: string };
 type Duplicate = { slug: string; id: number } | null;
@@ -144,7 +145,7 @@ export function sliceReads(engine: BrainEngine, slice: { sourceId: string; pageI
     return once(kind, async () => byKey(await engine.executeRaw<Record<string, unknown>>('SELECT DISTINCT page_id FROM takes WHERE page_id=ANY($1::bigint[])', [pageIds]), 'page_id'))
       .then(rows => rows.has(id) ? engine.executeRaw(sql, params) : []);
   };
-  return new Proxy(engine, { get(target, key) {
+  return registerSliceView(new Proxy(engine, { get(target, key) {
     if (key === 'executeRaw') return (sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) => {
       const kind = flat(sql);
       const answered = !opts?.signal && params && [ORIGIN, TIMELINE, TAKES, FENCE].includes(kind) ? answer(kind, sql, params) : undefined;
@@ -152,5 +153,5 @@ export function sliceReads(engine: BrainEngine, slice: { sourceId: string; pageI
     };
     const value = Reflect.get(target, key, target);
     return typeof value === 'function' ? value.bind(target) : value;
-  } });
+  } }));
 }
