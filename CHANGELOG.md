@@ -10,6 +10,18 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.317.0] - 2026-10-19
+
+**Two CI flakes are closed at their source, and a stuck native safety suite now leaves a log instead of a silent timeout.** `test-reads-source-smell` failed with `ENOENT` when `import-file.test.ts` removed its scratch directory from `test/` mid-walk; scratch now lives in the system temp directory and a lint rule keeps it there. The native data-safety suites no longer wait inside `Bun.spawnSync`, where Bun 1.4.0 to 1.4.2 can poison a process (oven-sh/bun#34069).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A unit test needing a scratch directory | `import-file` and `files` made theirs inside `test/`, racing `test-reads-source-smell`'s walk (15 of 82 probe runs failed) | both use `mkdtempSync(join(tmpdir(), ...))` (0 of 79); `check-test-isolation` rule R8 refuses a new scratch path inside the test tree |
+| `persistence-sync-origin-native` and `export-publication-native` on Bun 1.4.0 | 21 untimed sync `git` calls and four sync child runs, each a window for the spawnSync poisoning that spins every later test to its 180 s deadline | every child process is awaited, with the same assertions |
+| A native data-safety suite that stalls | ran until the 15-minute job timeout, which kept no log | named, its process table and (macOS) a native stack sampled, and killed at 300 s; the step fails |
+
 ## [0.60.316.0] - 2026-10-19
 
 **A commit is searchable within about a second whenever any gbrain process is running, and a sync request is never dropped.** Before this, only `gbrain serve` watched for commits: managed sources only, after a 3 s debounce, and a wake could be lost. Classic sources never synced on commit, a lone `gbrain jobs work` took 5 s, and the autopilot daemon waited for its next wall-clock tick (up to 7 minutes). `sync.on_commit` is still off by default.
