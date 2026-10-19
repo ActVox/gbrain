@@ -489,6 +489,88 @@ describe('master-red: push-to-master runs', () => {
     expect(masterIssue(w)!.state).toBe('closed');
   });
 
+  // Recorded API JSON from Test push runs on 2026-10-18/19 (#7020, #7056): run 10213 green (ac1ba4c9) ->
+  // run 10222 (39170624583, 4fb9c4c7) attempt 1 red in "Unit-lane PostgreSQL arms 2/19 / Bun 1.4.0" ->
+  // attempt 2 green after "re-run failed jobs", whose rebuilt ci-manifest flags every carried-over receipt
+  // as attempt 1 (incomplete, trimmed to 3 of 1242 problems) -> run 10289 (39252817766, 99be3927) green
+  // with the full suite reused (persistence-validation skipped, no ci-manifest). The attempt-1 manifest was
+  // replaced by attempt 2's, so it is rebuilt from the #7020 body.
+  const rerunRuns = mr<{ workflow_runs: RunInfo[] }>('runs-test-rerun.json').workflow_runs;
+  const run = (n: number, attempt = 1) => rerunRuns.find(r => r.run_number === n && r.run_attempt === attempt)!;
+  const RR = { g10213: run(10213), r10222: run(10222), g10222: run(10222, 2), g10289: run(10289) };
+  const PG_JOB = 'persistence-validation / Unit-lane PostgreSQL arms 2/19 / Bun 1.4.0';
+  const SEGMENTED = 'test/large-pages/segmented-prior-view.test.ts';
+  const redManifest = (r: RunInfo) => completeManifest(r, {
+    files: [{ file: SEGMENTED, lane: 'pg-arms-bun-1.4.0', arm: 'postgres', executed: 4, failed: 1, skipped: 0 }],
+    failures: [{ lane: 'pg-arms-bun-1.4.0', file: SEGMENTED, arm: 'postgres', test: 'prior view of a segmented page (postgres) > while the prior view is alive the heap holds no copy of the prior timeline', signature: 'expect(received).toBeLessThan(expected) Expected: < N Received: N' }],
+  });
+  const rerunIncident = async () => {
+    const w = new World();
+    w.addRun(RR.g10213).addRun(RR.r10222, `jobs-${RR.r10222.id}.json`, redManifest(RR.r10222));
+    expect((await go(w, RR.r10222)).masterRed!.action).toBe('create');
+    w.addRun(RR.g10222, `jobs-${RR.g10222.id}-attempt-2.json`, mr('ci-manifest-39170624583-attempt-2.json'));
+    const rerun = await go(w, RR.g10222);
+    expect(rerun.masterRed!.reason).toBe('green but failing jobs not re-run');
+    const incident = masterIssue(w)!;
+    expect(mrState(incident)).toMatchObject({ status: 'red', blocked: [PG_JOB], evidence: { run_id: RR.g10222.id, complete: false } });
+    incident.state = 'closed';
+    incident.comments.push('Master is green; the original red is fixed by a repair PR.');
+    w.addRun(RR.g10289, `jobs-${RR.g10289.id}.json`, null);
+    return { w, incident };
+  };
+
+  test('an incident closed by hand never comes back on a green run: run 39170624583 red on attempt 1, green on attempt 2 (#7020 closed, false #7056)', async () => {
+    const { w, incident } = await rerunIncident();
+    const r = await go(w, RR.g10289);
+    expect(r.masterRed!.evaluated).toEqual([RR.g10289.id]);
+    expect(r.masterRed!.action).not.toBe('create');
+    expect(w.labeled('master-red').map(i => i.number)).toEqual([incident.number]);
+    expect(incident.state).toBe('closed');
+    const state = mrState(incident);
+    expect(state).toMatchObject({ status: 'green', open_jobs: [], open_files: [], blocked: [], evaluated: { run_id: RR.g10289.id, run_attempt: 1 } });
+    expect(incident.body).not.toContain('State rebuilt');
+    expect(incident.body).toContain(`None: #${incident.number} was closed by hand while red`);
+    expect(incident.body).not.toContain('every previously failing job ran and passed');
+    const again = await go(w, RR.g10289);
+    expect(again.masterRed!.action).toBe('none');
+    expect(w.labeled('master-red')).toHaveLength(1);
+  });
+
+  test('after a hand close, a run whose latest attempt is red still opens a new incident from the last green run', async () => {
+    const { w, incident } = await rerunIncident();
+    const red: RunInfo = { ...RR.r10222, id: 39260000001, run_number: 10290, run_attempt: 2, head_sha: 'b'.repeat(40) };
+    w.addRun(red, `jobs-${RR.r10222.id}.json`, redManifest(red));
+    const r = await go(w, red);
+    expect(r.masterRed!.evaluated).toEqual([RR.g10289.id, red.id]);
+    expect(r.masterRed!.action).toBe('create');
+    const opened = masterIssue(w)!;
+    expect(opened.number).not.toBe(incident.number);
+    expect(opened.state).toBe('open');
+    expect(incident.state).toBe('closed');
+    const state = mrState(opened);
+    expect(state).toMatchObject({ status: 'red', first_red: { run_id: red.id, run_attempt: 2 }, latest_red: { run_id: red.id }, suspect: { from_sha: RR.g10289.head_sha, to_sha: red.head_sha } });
+    expect(state.open_jobs.map(j => j.job)).toEqual([PG_JOB]);
+    expect(state.tests.map(t => t.file)).toEqual([SEGMENTED]);
+    expect(opened.body).not.toContain('State rebuilt');
+  });
+
+  test('the rebuild judges each run by its latest attempt: a red attempt 1 cleared by a green re-run opens nothing, with or without a prior issue', async () => {
+    const fresh = () => new World()
+      .addRun(RR.g10213)
+      .addRun(RR.g10222, `jobs-${RR.g10222.id}-attempt-2.json`, mr('ci-manifest-39170624583-attempt-2.json'))
+      .addRun(RR.g10289, `jobs-${RR.g10289.id}.json`, null);
+    const none = fresh();
+    expect((await go(none, RR.g10289)).masterRed!.action).toBe('none');
+    expect(none.issues).toHaveLength(0);
+
+    const blind = fresh();
+    blind.issues.push({ number: 90, title: 'Master red: Test', state: 'closed', labels: [{ name: 'master-red' }], body: 'closed by hand; no state block', created: 0, comments: [] });
+    const r = await go(blind, RR.g10289);
+    expect(r.masterRed!.action).toBe('update');
+    expect(blind.labeled('master-red').map(i => [i.number, i.state])).toEqual([[90, 'closed']]);
+    expect(mrState(blind.issue(90))).toMatchObject({ status: 'green', first_red: null, open_jobs: [], evaluated: { run_id: RR.g10289.id } });
+  });
+
   test('a green run where a previously failing job did not run keeps the issue open and names the manual-close step', async () => {
     const w = testWorld(T.g8315, T.r8320);
     await go(w, T.r8320);
