@@ -29,8 +29,8 @@ function fan(from: string, n: number, opts: { reverse?: boolean; prefix?: string
   });
 }
 
-async function put(engine: BrainEngine, slug: string, sourceId = 'default') {
-  await engine.putPage(slug, { type: 'note' as never, title: slug, compiled_truth: `${slug} body`, frontmatter: {} }, { sourceId });
+async function put(engine: BrainEngine, slug: string, sourceId = 'default', type = 'note') {
+  await engine.putPage(slug, { type: type as never, title: slug, compiled_truth: `${slug} body`, frontmatter: {} }, { sourceId });
 }
 
 export async function seedLinkPagingFixture(engine: BrainEngine): Promise<void> {
@@ -39,7 +39,8 @@ export async function seedLinkPagingFixture(engine: BrainEngine): Promise<void> 
      ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config`);
   await engine.executeRaw(`UPDATE sources SET config = '{"federated": true}'::jsonb WHERE id = 'default'`);
   for (const slug of [...TARGETS, 'hubs/at-cap', 'hubs/over-cap', 'hubs/many', 'hubs/typed', 'hubs/wide', 'hubs/backlinked',
-    'hubs/temporal', 'people/alice-example', 'companies/acme-example', 'fed/hub', 'idn/a', 'idn/b']) await put(engine, slug);
+    'hubs/temporal', 'people/alice-example', 'companies/acme-example', 'fed/hub', 'idn/a', 'idn/b', 'hubs/people']) await put(engine, slug);
+  await put(engine, 'people/bob-example', 'default', 'person');
   for (const slug of ['fed/hub', ...TARGETS]) await put(engine, slug, 'second');
   await engine.addLinksBatch([
     ...fan('hubs/at-cap', LINK_READ_DEFAULT_LIMIT),
@@ -47,7 +48,10 @@ export async function seedLinkPagingFixture(engine: BrainEngine): Promise<void> 
     ...fan('hubs/many', 1203),
     ...fan('hubs/typed', 700),
     ...fan('hubs/backlinked', LINK_READ_DEFAULT_LIMIT + 1, { reverse: true }),
+    ...fan('hubs/people', LINK_READ_DEFAULT_LIMIT + 1, { reverse: true }),
   ]);
+  // One person backlink after 501 note backlinks: get_backlinks' type filter runs before the cap.
+  await engine.addLink('people/bob-example', 'hubs/people', 'bob', 'k000', 'manual');
   // Three 'cites' edges after 700 others: the link_type filter runs before the cap.
   await engine.addLinksBatch(TARGETS.slice(0, 3).map(t => ({ from_slug: 'hubs/typed', to_slug: t, link_type: 'cites', link_source: 'manual', from_source_id: 'default', to_source_id: 'default' })));
   await engine.addLink('hubs/wide', TARGETS[0], 'w'.repeat(10_000), 'k000', 'manual');
@@ -76,7 +80,8 @@ export async function seedLinkPagingFixture(engine: BrainEngine): Promise<void> 
 
 async function call(engine: BrainEngine, op: string, args: Record<string, unknown>, opts: Record<string, unknown> = LOCAL) {
   const r = await dispatchToolCall(engine, op, args, opts as never);
-  return { isError: r.isError === true, text: r.content[0].text, json: r.isError ? null : JSON.parse(r.content[0].text) as Row[], notices: r.content.slice(1).map(c => c.text) };
+  return { isError: r.isError === true, text: r.content[0].text, json: r.isError ? null : JSON.parse(r.content[0].text) as Row[], notices: r.content.slice(1).map(c => c.text),
+    pagination: (r as { _meta?: { pagination?: Row } })._meta?.pagination };
 }
 
 const key = (r: Row) => `${r.from_source_id}:${r.from_slug}->${r.to_source_id}:${r.to_slug}:${r.link_type}:${r.origin_slug ?? ''}`;
@@ -142,6 +147,24 @@ export function registerLinkPagingTests(getEngine: () => BrainEngine): void {
       const { json } = await call(getEngine(), 'get_links', { slug: 'hubs/typed', link_type: 'cites' });
       expect(json!.map(r => r.to_slug).sort()).toEqual(TARGETS.slice(0, 3));
       expect(json!.some(r => 'truncated' in r)).toBe(false);
+      const paged = await pages(getEngine(), 'get_links', { slug: 'hubs/typed', link_type: 'cites', limit: 2 });
+      expect(paged.map(p => p.length)).toEqual([2, 1]);
+      expect(paged.flat().map(r => r.to_slug).sort()).toEqual(TARGETS.slice(0, 3));
+    });
+
+    test('get_backlinks type filters in SQL before the cap: a hub\'s one person backlink is on the first page', async () => {
+      for (const opts of [LOCAL, REMOTE]) {
+        const first = await call(getEngine(), 'get_backlinks', { slug: 'hubs/people', type: 'person' }, opts);
+        expect(first.json!.map(r => r.from_slug)).toEqual(['people/bob-example']);
+        expect(first.json!.some(r => 'truncated' in r)).toBe(false);
+        expect(first.pagination).toEqual({ limit: LINK_READ_DEFAULT_LIMIT, returned: 1, truncated: false });
+      }
+      const notes = await pages(getEngine(), 'get_backlinks', { slug: 'hubs/people', type: 'note', limit: 200 });
+      expect(notes.map(p => p.length)).toEqual([200, 200, 101]);
+      expect(new Set(notes.flat().map(key)).size).toBe(LINK_READ_DEFAULT_LIMIT + 1);
+      expect(notes.flat().some(r => r.from_slug === 'people/bob-example')).toBe(false);
+      const cut = await call(getEngine(), 'get_backlinks', { slug: 'hubs/people', type: 'note', limit: 200 });
+      expect(cut.pagination).toEqual(expect.objectContaining({ returned: 200, truncated: true }));
     });
 
     test('a wide context is bounded in the op; the engine read stays complete', async () => {

@@ -57,12 +57,17 @@ function linkPageSql(opts?: LinkReadScope) {
       ? sqlFragment` ${temporalWalkFilter('l', { temporal: rel.policy, excludePrivate: opts?.excludePrivate })}`
       : sqlFragment` ${trustedSql(`AND NOT (${relationshipFilterSql('l', { ...rel.policy, excludePrivate: opts?.excludePrivate })})`)}`;
   const linkType = page.linkType !== undefined ? sqlFragment` AND l.link_type = ${page.linkType}` : sqlFragment``;
+  const ft = page.fromType;
+  const fromType = !ft
+    ? sqlFragment``
+    : sqlFragment` AND (f.type = ${ft.type}${ft.type === 'untyped' ? sqlFragment` OR f.type IS NULL OR f.type = ''` : sqlFragment``}
+        OR EXISTS (SELECT 1 FROM unnest(${ft.aliasSources}::text[], ${ft.aliases}::text[]) AS k(s, t) WHERE k.s = f.source_id AND k.t = f.type))`;
   const after = page.afterId !== undefined ? sqlFragment` AND l.id > ${page.afterId}` : sqlFragment``;
   const through = page.throughId !== undefined ? sqlFragment` AND l.id <= ${page.throughId}` : sqlFragment``;
   return {
     context,
     id: sqlFragment`, l.id AS link_id`,
-    where: sqlFragment`${linkType}${after}${through}${relationship}`,
+    where: sqlFragment`${linkType}${fromType}${after}${through}${relationship}`,
     limit: page.limit !== undefined ? sqlFragment` LIMIT ${page.limit}` : sqlFragment``,
   };
 }
