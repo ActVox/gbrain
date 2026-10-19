@@ -10,6 +10,21 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.312.0] - 2026-10-19
+
+**Unit shards in a full Test run cost about 29% less, the macOS 26 nightly typecheck no longer times out, and test paths survive a checkout directory with a space in it.** Each 4-vCPU runner now runs two unit shards at once (22 shards on 11 runners, re-mined from a green packed run, each within the unchanged 600 s budget). The `ci:ubicloud` gate plans its unit shards from the same partition, weights and budget.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The unit lane of a full Test run | 18 shards on 18 runners | 22 shards on 11 runners, two per runner (`scripts/test-shard-pack.sh`), each with its own coverage, receipts and log; lane names, coverage manifests and per-shard artifacts are unchanged in kind |
+| The `ci:ubicloud` unit check | its own 1,260 s budget against measured time, so a slow fleet failed a gate whose tests all passed | the same `unitShardPlan` and `UNIT_SHARD_BUDGET_MS` as GitHub; measured time is printed beside the plan for drift |
+| macOS 26 validation | typecheck ran inside verify and was killed at the 240 s cap (#6056) | typecheck has its own job with a measured 15-minute step timeout and its state saved on every outcome |
+| A test resolving a file URL with `.pathname` | broke in a checkout path containing a space (#6845) | 42 test files use `fileURLToPath`, and `check:file-url-pathname` fails verify on a new one |
+| An index-lock reclaim meeting this user's own exiting git | a cwd or environ read that failed while the git exited was taken for another user's process, so the reclaim refused | the read is re-checked within `RECLAIM_MIN_AGE_MS`; another user's git, or an alive one that stays unreadable, still fails the proof |
+| Tier 2 when provider keys aren't passed to the test process | the notice said it ran keyed | it says "provider keys not passed (GBRAIN_TEST_KEEP_PROVIDER_KEYS unset)" |
+
 ## [0.60.311.0] - 2026-10-19
 
 **The dream `consolidate` phase no longer silently supersedes a real fact when two typed statements of one metric share an effective time, and the facts an earlier run closed that way can be reopened.** Fixes the residual case of #6023.
