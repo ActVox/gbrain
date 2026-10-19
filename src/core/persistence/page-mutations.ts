@@ -37,7 +37,7 @@ import { decideUnboundWrite, isUnboundSourcePage } from './unbound-source.ts';
 import { assertRestoreOrigin } from './detached-pages.ts';
 import { colonSlugWindowsRefusal, isWindowsColonTarget } from './native-file-target.ts';
 import { publishesDatabaseOnly } from './page-prepare.ts';
-import { materializedSnapshot } from './segmented-apply.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { liveSearchable } from './searchable.ts';
 import { cachedPreadmitBrain, dropPreadmitCache, preadmitReads, preadmitRecheckFailed } from './preadmit-cache.ts';
 import { pipelined } from '../page-state/transactions.ts';
@@ -365,10 +365,17 @@ export async function preparePageAdmission(ctx: OperationContext,
     ? suffixedSlugAdmission(ctx, slug, !!snapshot && !snapshot.page.deleted_at) : null;
   // #5616: typed edit refusals before admission; publication repeats them on the locked snapshot.
   if (input.operation === 'edit_page') {
-    const { applyPageEdits, assertEditRevision, parsePageEdits } = await import('./page-edit.ts');
+    const { applyPageEdits, assertEditRevision, parseEditWithin, parsePageEdits } = await import('./page-edit.ts');
     if (!snapshot || snapshot.page.deleted_at) throw new OperationError('page_not_found', `Page not found: ${slug}`, 'edit_page changes an existing page; create it with put_page.');
     assertEditRevision(snapshot.revision, p.expected_revision);
-    applyPageEdits((await materializedSnapshot(ctx.engine, snapshot))!.page, snapshot.tags, ctx.remote !== false, parsePageEdits(p.edits));
+    const within = parseEditWithin(p.within);
+    // A segmented page is matched by its preparation, which streams the segments (spec 6.3): never read whole here.
+    if (!isSegmentedPage(snapshot.page)) applyPageEdits(snapshot.page, snapshot.tags, ctx.remote !== false, parsePageEdits(p.edits), within);
+    else parsePageEdits(p.edits);
+  }
+  // Wave B: an append names an existing page; its preconditions are checked when it is prepared, on the page it extends.
+  if (input.operation === 'append_page' && (!snapshot || snapshot.page.deleted_at)) {
+    throw new OperationError('page_not_found', `Page not found: ${slug}`, 'append_page adds to an existing page; create it with put_page.');
   }
   let binding = boundAtStart;
   const sandbox = ctx.viaSubagent === true && !(ctx.allowedSlugPrefixes?.length);

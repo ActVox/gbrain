@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 243872,
-    "stdoutSha256": "6ee4209e4e99064f148052de48a83f11e600ff47fc3bb720a6a9394bb59e2737",
+    "stdoutBytes": 246776,
+    "stdoutSha256": "0b1b2aa71cd142ac0f304d17e9b8eed82b477b5237dff59c059899276b3c9c5a",
     "toolNames": [
       "remember",
       "entity",
@@ -18,6 +18,7 @@
       "capture",
       "fetch",
       "edit_page",
+      "append_page",
       "put_pages",
       "get_write_request",
       "list_write_requests",
@@ -1017,7 +1018,8 @@
           "expected_revision": "string",
           "request_id": "string?",
           "slug": "string",
-          "source_id": "string?"
+          "source_id": "string?",
+          "within": "object?"
         },
         "required_scopes": [],
         "schema": {
@@ -1059,12 +1061,101 @@
             "source_id": {
               "description": "Write source.",
               "type": "string"
+            },
+            "within": {
+              "additionalProperties": false,
+              "description": "Match only in this stored-body range: edit_target's byte_start/byte_end from a get_page window read.",
+              "properties": {
+                "byte_end": {
+                  "description": "End stored byte (exclusive).",
+                  "type": "number"
+                },
+                "byte_start": {
+                  "description": "First stored byte.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "byte_start",
+                "byte_end"
+              ],
+              "type": "object"
             }
           },
           "required": [
             "slug",
             "expected_revision",
             "edits"
+          ],
+          "type": "object"
+        },
+        "scope": "write"
+      },
+      {
+        "description": "Add text to the end of a page, in time proportional to the text: use it for logs and conversations instead of re-putting a large page. request_id is required (a retry never appends twice). Optional expected_revision / expected_tail_sha256 (tail_sha256 from get_page body: 'none') refuse with revision_changed / tail_changed when the page moved.",
+        "idempotent": true,
+        "local_only": false,
+        "mutating": true,
+        "name": "append_page",
+        "parameters": {
+          "expected_revision": "string?",
+          "expected_tail_sha256": "string?",
+          "region": "string?",
+          "request_id": "string",
+          "separator": "string?",
+          "slug": "string",
+          "source_id": "string?",
+          "text": "string"
+        },
+        "required_scopes": [],
+        "schema": {
+          "properties": {
+            "expected_revision": {
+              "description": "Append only while the page is at this revision.",
+              "type": "string"
+            },
+            "expected_tail_sha256": {
+              "description": "Append only while the region's last 4096 bytes have this sha256 (get_page body: 'none' tail_sha256).",
+              "type": "string"
+            },
+            "region": {
+              "description": "auto (default): the last non-empty region.",
+              "enum": [
+                "auto",
+                "truth",
+                "timeline"
+              ],
+              "type": "string"
+            },
+            "request_id": {
+              "description": "A new UUID per append; reuse only to retry.",
+              "type": "string"
+            },
+            "separator": {
+              "description": "auto (default): one newline first when the tail lacks one.",
+              "enum": [
+                "auto",
+                "none"
+              ],
+              "type": "string"
+            },
+            "slug": {
+              "description": "Page slug (an existing page).",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "Write source.",
+              "type": "string"
+            },
+            "text": {
+              "description": "Text to add, at most 4194304 bytes; a larger append uses begin_page_upload mode 'append'.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug",
+            "text",
+            "request_id"
           ],
           "type": "object"
         },

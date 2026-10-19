@@ -46,6 +46,8 @@ import {
   markdownDigest, markdownHead, readViewLines, segmentedMarkdownDocument, segmentedOutline, segmentedReadDocument, tailDigest, type SegmentedDocument,
 } from '../page-window/segmented.ts';
 import { confirmBodyPin, openSegmentedBody, type BodyPin } from '../page-body/read-range.ts';
+import { inlineRegions, inlineTailDigest } from '../page-body/tail-digest.ts';
+import { TIMELINE_SEPARATOR } from '../page-window/document.ts';
 import { renderTrustedText, type TrustFields } from '../eligibility/labels.ts';
 import { pageTrustForRead, type QuarantinedView } from './get-page-projection.ts';
 import { chunkGenerationProbe, chunkManifestReads } from '../search/safe-chunks.ts';
@@ -379,6 +381,52 @@ async function segmentedWindows(ctx: OperationContext, input: PartialReadInput, 
   } };
 }
 
+/**
+ * Wave B (spec 6.3): the stored-body range under a read-view window, for edit_page's `within`. A row (or an inline
+ * region) whose read projection is its stored bytes maps byte for byte; any other widens to its stored bounds, so the
+ * range always covers the window. A remote caller gets it only while nothing hidden precedes the window's end: stored
+ * offsets would otherwise measure the hidden text.
+ */
+async function editTarget(ctx: OperationContext, page: Page, doc: WindowDocument, win: WindowSlice, revision: string):
+  Promise<{ revision: string; byte_start: number; byte_end: number } | undefined> {
+  const remote = ctx.remote !== false;
+  if (doc.segments) {
+    const seg = doc.segments;
+    const { rows, truthBytes, bodyBytes } = seg.body;
+    let hidden = false;
+    /** Stored offset of read-view byte `p`: a window start (the unit holding p) or end (the unit holding p - 1). */
+    const map = (p: number, side: 'start' | 'end') => {
+      if (p >= seg.total) return bodyBytes;
+      const u = seg.units[seg.unitAt(side === 'end' ? Math.max(0, p - 1) : p)];
+      if (!u) return 0;
+      if (u.row < 0) return truthBytes;
+      const row = rows[u.row]!;
+      if (u.bytes === row.byteLen && !row.hasFacts) return row.byteStart + Math.min(row.byteLen, p - u.start);
+      return side === 'start' ? row.byteStart : row.byteStart + row.byteLen;
+    };
+    for (const u of seg.units) {
+      if (u.start >= win.byte_end) break;
+      if (u.row < 0 ? u.text !== TIMELINE_SEPARATOR : (u.bytes !== rows[u.row]!.byteLen || rows[u.row]!.hasFacts)) hidden = true;
+    }
+    if (remote && hidden) return undefined;
+    const start = map(win.byte_start, 'start');
+    return { revision, byte_start: start, byte_end: Math.max(start, map(win.byte_end, 'end')) };
+  }
+  const { truth, timeline } = await inlineRegions(ctx.engine, page.id);
+  const truthBytes = Buffer.byteLength(truth, 'utf8'), bodyBytes = truthBytes + Buffer.byteLength(timeline, 'utf8');
+  const raw = timeline.trim() ? truth + TIMELINE_SEPARATOR + timeline : truth;
+  const bytes = doc.inline!.bytes;
+  if (bytes.equals(Buffer.from(raw, 'utf8'))) {
+    const at = (p: number) => p <= truthBytes ? p : p < truthBytes + Buffer.byteLength(TIMELINE_SEPARATOR) ? truthBytes : p - Buffer.byteLength(TIMELINE_SEPARATOR);
+    return { revision, byte_start: at(win.byte_start), byte_end: at(win.byte_end) };
+  }
+  if (remote) return undefined;
+  const timelineAt = doc.inline!.timelineByte;
+  const inTruth = timelineAt < 0 || win.byte_end <= timelineAt - Buffer.byteLength(TIMELINE_SEPARATOR);
+  const inTimeline = timelineAt >= 0 && win.byte_start >= timelineAt;
+  return { revision, byte_start: inTimeline ? truthBytes : 0, byte_end: inTruth ? truthBytes : bodyBytes };
+}
+
 /** next_cursor plus `next`, the exact call that reads on (the starter surface does not advertise `cursor`; dispatch accepts it). */
 function setNext(out: Record<string, unknown>, page: Page, cursor: string, markdown: boolean): void {
   out.next_cursor = cursor;
@@ -426,6 +474,7 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
       total_bytes: whole.bytes.length, total_lines: totalLines(whole.bytes),
       ...(whole.timelineByte >= 0 ? { timeline_byte_start: whole.timelineByte } : {}),
       ...(markdown ? { sha256: sha256Hex(whole.bytes) } : {}),
+      ...(mode === 'none' ? await inlineTailDigest(ctx.engine, page.id, ctx.remote !== false) : {}),
     };
     doc = inlineDocument(whole);
   }
@@ -491,6 +540,8 @@ export async function readPartialBody(ctx: OperationContext, input: PartialReadI
     const win = await select(maxBytes);
     if (!win) return confirmed({ ...out, truncated: true });
     out.window = { ...win, text: envelopeText(win.text, quarantined, trust) };
+    const target = markdown || typeof win.byte_start !== 'number' ? undefined : await editTarget(ctx, page, doc, win, revision);
+    if (target) out.edit_target = target; else delete out.edit_target;
     out.truncated = win.byte_start > 0 || win.byte_end < doc.total;
     if (win.byte_end < doc.total) setNext(out, page, encodeCursor({ page_id: page.id, revision, view: req.view, offset: win.byte_end, max_bytes: cursorMax }), markdown);
     else { delete out.next_cursor; delete out.next; }

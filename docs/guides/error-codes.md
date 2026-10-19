@@ -3803,6 +3803,14 @@ Reasons: `content_directory`.
 |---|---|---|---|---|---|---|
 | Sync stopped because gbrain would hold a file whose exact bytes imported before; this is a gbrain bug. | The upgrade invariant says a newer reader never refuses bytes an older one imported, so the run stops without advancing rather than hide a regression. | Report it with the gbrain version, the file and the code; upgrade, or set `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, and never pin a release older than 0.60.305.0; then run gbrain sync --source <id> --no-pull. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### tail_changed
+
+<a id="tail_changed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The end of the page no longer has the sha256 the append expected, so nothing was appended. | append_page's expected_tail_sha256 binds an append to the tail its caller read; another write changed it, and appending anyway could interleave text with a tail the caller never saw. | Read the page again (get_page body: 'none' returns tail_sha256), check whether the text is still missing, and append against the current tail with a new request_id. Run: gbrain get --source '{source_id}' -- '{slug}' | agent | `repeat the read that failed` | 1 | no |
+
 ### tail_exposure_approval
 
 <a id="tail_exposure_approval"></a>
