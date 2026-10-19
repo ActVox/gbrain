@@ -101,7 +101,7 @@ async function freshnessReported(engine: FreshnessExec): Promise<boolean> {
 
 /**
  * The freshness notice for search and query: one entry per source in the caller's scope, from the cached coverage
- * record, or none when the brain does not report freshness (freshnessReported). A brain without the v261 tables reports
+ * record, or none when the brain does not report freshness (freshnessReported). A brain without the v262 tables reports
  * none; another failed read answers unknown for the scope instead of failing the search.
  */
 export async function readSourceFreshness(engine: FreshnessExec, scope: { sourceId?: string; sourceIds?: string[] }, held: ReadonlyArray<{ source_id: string; missing: number; stale: number }> = []): Promise<SourceFreshness[]> {

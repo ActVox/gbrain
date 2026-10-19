@@ -1,5 +1,5 @@
 /**
- * GBRA-133 PR 2a: the commit notifier's durable state (migration v261).
+ * GBRA-133 PR 2a: the commit notifier's durable state (migration v262).
  *
  * - Wanted markers (`sync_wanted_markers`): one row per source and intent class.
  *   `freshness` asks for the checkout's HEAD to become searchable (never pulls);
@@ -16,7 +16,7 @@
  *   verified convergence, the last error with its trace file, the classic
  *   syncer host, and the observation the freshness notice reads.
  *
- * Callers on a brain whose schema predates v261 catch `missingTable` and treat
+ * Callers on a brain whose schema predates v262 catch `missingTable` and treat
  * it as "no markers, nothing monitored".
  */
 import type { BrainEngine } from '../engine.ts';
@@ -64,7 +64,7 @@ export interface NotifierSourceRow {
   owner_seen_at: string | null;
 }
 
-/** True when the error says a v261 table does not exist yet (a brain mid-upgrade). */
+/** True when the error says a v262 table does not exist yet (a brain mid-upgrade). */
 export function missingTable(error: unknown): boolean {
   const e = error as { code?: unknown; message?: unknown } | null;
   return e?.code === '42P01' || /relation "sync_(wanted_markers|notifier_leases|notifier_sources)" does not exist/.test(String(e?.message ?? ''));

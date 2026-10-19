@@ -3328,7 +3328,7 @@ DO \$rls\$ BEGIN
 END \$rls\$;
 -- END GENERATED from src/core/belief/schema.ts (BELIEF_LEDGER_SCHEMA_SQL)
 
--- GBRA-133 PR 2a (migration v261): commit notifier wanted markers, the
+-- GBRA-133 PR 2a (migration v262): commit notifier wanted markers, the
 -- per-host notifier lease and per-source notifier state + coverage record
 -- (src/core/notifier/store.ts).
 CREATE TABLE IF NOT EXISTS sync_wanted_markers (

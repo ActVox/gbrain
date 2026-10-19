@@ -30,7 +30,7 @@ The other changes:
 - **HEAD-driven autopilot.** The daemon dispatches when a checkout's HEAD moves past the last synced commit, with the wall-clock rule kept as a backstop. Its `--status` grades from a new heartbeat sidecar (#7003).
 - **Worker boot.** On Postgres, `gbrain jobs work` starts the persistence consumer at boot through the existing election (#7002). An idle worker wakes on a queued sync, using LISTEN on a direct session and a 1 s poll behind a pooler.
 - **Visibility.** `gbrain sync status` and the new doctor check `commit_notifier` name the resident that syncs each source, or say none is running and give the fix. Once a resident has run, or `sync.on_commit` is on, search and query responses carry a per-source `freshness` entry (current, behind, syncing, unknown or not_monitored).
-- **Upgrade.** Migration v261 adds `sync_wanted_markers`, `sync_notifier_sources` and `sync_notifier_leases`.
+- **Upgrade.** Migration v262 adds `sync_wanted_markers`, `sync_notifier_sources` and `sync_notifier_leases`.
 
 Docs: `docs/guides/on-commit-sync.md`. `GBRAIN_NOTIFIER=0` turns the notifier off for a process.
 
