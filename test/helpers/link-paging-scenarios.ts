@@ -224,6 +224,11 @@ export function registerLinkPagingTests(getEngine: () => BrainEngine): void {
       const first = await call(getEngine(), 'get_links', { slug: 'idx/hub', all_sources: true, limit: 2 }, GRANTED);
       expect(first.json!.length).toBeGreaterThan(0);
       expect(first.json![0]).toEqual(expect.objectContaining({ from_slug: 'idx/hub', to_slug: TARGETS[0] }));
+    });
+
+    test('an identity member read pins its source in SQL: a same-slug non-member never shortens a page', async () => {
+      const first = await call(getEngine(), 'get_links', { slug: 'idx/hub', all_sources: true, limit: 2 }, GRANTED);
+      expect(first.json!.map(r => r.to_slug)).toEqual([TARGETS[0], TARGETS[4]]);
       expect(first.pagination).toEqual(expect.objectContaining({ returned: first.json!.length, truncated: true }));
       const all = (await pages(getEngine(), 'get_links', { slug: 'idx/hub', all_sources: true, limit: 2 }, GRANTED)).flat();
       expect(all.map(r => `${r.from_source_id}:${r.from_slug}->${r.to_slug}`)).toEqual([

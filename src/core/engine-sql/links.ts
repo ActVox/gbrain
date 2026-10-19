@@ -43,7 +43,7 @@ function temporalWalkFilter(alias: string, opts?: LinkReadScope) {
  * every row. With one, link_type, the keyset bounds and the temporal policy
  * filter in SQL before LIMIT, and each row carries `link_id`.
  */
-function linkPageSql(opts?: LinkReadScope) {
+function linkPageSql(opts: LinkReadScope | undefined, near: 'from' | 'to') {
   const page = opts?.page;
   if (!page) return { context: sqlFragment`l.context`, id: sqlFragment``, where: sqlFragment``, limit: sqlFragment`` };
   const chars = page.contextChars;
@@ -62,12 +62,18 @@ function linkPageSql(opts?: LinkReadScope) {
     ? sqlFragment``
     : sqlFragment` AND (f.type = ${ft.type}${ft.type === 'untyped' ? sqlFragment` OR f.type IS NULL OR f.type = ''` : sqlFragment``}
         OR EXISTS (SELECT 1 FROM unnest(${ft.aliasSources}::text[], ${ft.aliases}::text[]) AS k(s, t) WHERE k.s = f.source_id AND k.t = f.type))`;
+  // A paged read pinned to one source inside a grant (an identity member's
+  // read) keeps only that source's page, so a same-slug page elsewhere in the
+  // grant never takes the member's LIMIT rows.
+  const pinned = opts?.sourceIds?.length && opts.sourceId !== undefined
+    ? (near === 'from' ? sqlFragment` AND f.source_id = ${opts.sourceId}` : sqlFragment` AND t.source_id = ${opts.sourceId}`)
+    : sqlFragment``;
   const after = page.afterId !== undefined ? sqlFragment` AND l.id > ${page.afterId}` : sqlFragment``;
   const through = page.throughId !== undefined ? sqlFragment` AND l.id <= ${page.throughId}` : sqlFragment``;
   return {
     context,
     id: sqlFragment`, l.id AS link_id`,
-    where: sqlFragment`${linkType}${fromType}${after}${through}${relationship}`,
+    where: sqlFragment`${linkType}${fromType}${pinned}${after}${through}${relationship}`,
     limit: page.limit !== undefined ? sqlFragment` LIMIT ${page.limit}` : sqlFragment``,
   };
 }
@@ -341,7 +347,7 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
     const tSel = opts?.temporal ? TEMPORAL_LINK_SELECT_SQL : '';
     const tJoin = opts?.temporal ? temporalLinkJoinSql('l', opts.excludePrivate) : '';
     const finish = (rows: unknown[]) => finishTemporal(rows, opts);
-    const page = linkPageSql(opts);
+    const page = linkPageSql(opts, 'from');
       // #2200: federated grant scopes ALL THREE page endpoints — from, to, AND
       // the origin (the page that authored the edge, surfaced as origin_slug).
       // Scoping only from+to would still leak an out-of-grant origin's slug; the
@@ -412,7 +418,7 @@ export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkRe
     const tSel = opts?.temporal ? TEMPORAL_LINK_SELECT_SQL : '';
     const tJoin = opts?.temporal ? temporalLinkJoinSql('l', opts.excludePrivate) : '';
     const finish = (rows: unknown[]) => finishTemporal(rows, opts);
-    const page = linkPageSql(opts);
+    const page = linkPageSql(opts, 'to');
       // #2200: federated grant scopes all three endpoints (mirrors getLinks) —
       // the referrer (from), the queried page (to), AND the origin — so neither
       // a foreign referrer nor a foreign origin slug is disclosed to the caller.
