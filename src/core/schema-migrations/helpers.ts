@@ -162,14 +162,13 @@ export async function analyzeYieldingToVacuum(engine: BrainEngine, table: string
  */
 export async function analyzeAfterIndexBuild(engine: BrainEngine, index: { name: string; table: string }): Promise<boolean> {
   const fix = PLANNER_REPAIR_TABLES.has(index.table) ? 'gbrain repair planner-stats --apply' : `ANALYZE ${index.table} as the table owner`;
+  let why: string;
   try {
     if (await analyzeYieldingToVacuum(engine, index.table, '', 60_000)) return true;
-    console.warn(`  [warn] ${index.name} is built and valid, but ANALYZE ${index.table} was deferred: another session (a vacuum, an ANALYZE `
-      + `or an index build) holds the table, and a migration never waits on it. The planner has no statistics for the index yet. Once it finishes, run on the brain host: ${fix}`);
-    return false;
+    why = 'another session (a vacuum, an ANALYZE or an index build) holds the table, and a migration never waits on it';
   } catch (err) {
-    console.warn(`  [warn] ${index.name} is built and valid, but ANALYZE ${index.table} failed `
-      + `(${err instanceof Error ? err.message : String(err)}); the planner has no statistics for it yet. Run on the brain host: ${fix}`);
-    return false;
+    why = err instanceof Error ? err.message : String(err);
   }
+  console.warn(`  [warn] ${index.name} is built and valid, but ANALYZE ${index.table} failed (${why}); the planner has no statistics for it yet. Run on the brain host: ${fix}`);
+  return false;
 }

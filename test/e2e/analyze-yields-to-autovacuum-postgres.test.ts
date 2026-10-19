@@ -22,6 +22,7 @@ import { analyzeDeferred } from '../../src/core/analyze-lock.ts';
 import { analyzeAfterIndexBuild, analyzeYieldingToVacuum } from '../../src/core/schema-migrations/helpers.ts';
 import { plannerStatsEntry } from '../../src/commands/doctor/checks/planner-stats.ts';
 import type { DoctorContext } from '../../src/commands/doctor/context.ts';
+import type { Check } from '../../src/commands/doctor.ts';
 import { hasDatabase } from './helpers.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
@@ -101,7 +102,7 @@ async function vacuumingPid(): Promise<number | null> {
     expect(starved.map(s => s.table)).toEqual(['content_chunks']);
     expect(starved[0]!.vacuumed_at).toBeNull();
     expect(starved[0]!.dead_rows).toBeGreaterThan(starved[0]!.threshold);
-    const [check] = await plannerStatsEntry.run({ engine, progress: { heartbeat: () => {} } } as unknown as DoctorContext);
+    const [check] = await plannerStatsEntry.run({ engine, progress: { heartbeat: () => {} } } as unknown as DoctorContext) as Check[];
     expect(check!.status).toBe('warn');
     expect(check!.message).toContain('Autovacuum is starved: content_chunks');
   }, 60_000);
