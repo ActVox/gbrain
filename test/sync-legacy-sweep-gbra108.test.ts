@@ -44,8 +44,11 @@ const setupNotes = (count: number) => ({ root }: { root: string }) => {
 };
 /** Statements a legacy page may add to its sweep: its own five reads (origin, snapshot, chunker fence, timeline, takes) plus headroom; about 18 before GBRA-108. */
 const PER_PAGE_BUDGET = 6;
-/** Reads every screened preparation repeats; the sweep answers each once per slice, never once per page. */
-const INVARIANT = [/\bFROM config\b/, /SELECT config FROM sources\b/, /FROM persistence_brain\b/, /FROM persistence_local_writers\b/, /FROM page_purges\b/,
+/**
+ * Reads every screened preparation repeats; the sweep answers each once per slice, never once per page. The config read is
+ * the plain `SELECT … FROM config`: the projection drain's statement, which also reads config, runs on its own timer.
+ */
+const INVARIANT = [/^\s*SELECT [\w, ]+ FROM config\b/, /SELECT config FROM sources\b/, /FROM persistence_brain\b/, /FROM persistence_local_writers\b/, /FROM page_purges\b/,
   /FROM shared_skill_packs\b/, /SELECT local_path FROM sources\b/, /FROM persistence_source_bindings s\b/];
 
 const passRow = async (engine: BrainEngine) => (await engine.executeRaw<{ value: any }>('SELECT completed_keys->0 AS value FROM op_checkpoints WHERE op=$1', [MANAGED_SYNC_PASS_OP]))[0]?.value ?? null;
