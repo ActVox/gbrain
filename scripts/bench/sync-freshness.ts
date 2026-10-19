@@ -370,8 +370,14 @@ async function embedAudit(tokens: string[]): Promise<{ per_rep: Array<{ token: s
   return ENGINE === 'postgres' ? admin(sql => run((s, p) => sql.unsafe(s, p as any[]) as any), dbName(MODE)) : withPglite(HOME, e => run((s, p) => e.executeRaw(s, p)));
 }
 
+const cellId = [ENGINE, MODE, PAGES, SOURCES > 1 ? 's' + SOURCES : '', MULTI ? SCENARIO + '-' + RESIDENTS.join('+') : COMMIT, MULTI ? '' : TRIGGER, RTT ? 'rtt' + RTT : '',
+  !MULTI && SCENARIO !== 'plain' ? SCENARIO : '', DETECTION === 'poll' ? 'poll' : '', EMBED === 'stub' ? 'embed' + EMBED_LATENCY_MS : EMBED === 'keyless-stub' ? 'keylessstub' : '',
+  STUB_FAIL_MS ? 'fail' + STUB_FAIL_MS : '', LABEL.replace(/[^\w.-]/g, '_')].filter(Boolean).join('-');
+const outDir = join(WORK, 'results');
+
 async function main(): Promise<void> {
   mkdirSync(WORK, { recursive: true });
+  if (has('skip-existing') && existsSync(join(outDir, cellId + '.json'))) { log('cell ' + cellId + ': result exists, skipped (--skip-existing)'); return; }
   if (ENGINE === 'postgres') harness = await startHarness({ pgPort: 55432, proxyPort: Number(flag('proxy-port', String(56000 + (process.pid % 1000)))), apiPort: 58474, keep: true });
   const seen = new Map<string, { first: number; texts: Set<string> }>();
   let failUntil = 0;
@@ -387,10 +393,6 @@ async function main(): Promise<void> {
   writeConfig(HOME, MODE, brainUrl);
   let measuredRtt: number | null = null;
   if (ENGINE === 'postgres') { await harness!.setRtt(RTT); measuredRtt = await measureRtt(brainUrl!); }
-  const cellId = [ENGINE, MODE, PAGES, SOURCES > 1 ? 's' + SOURCES : '', MULTI ? SCENARIO + '-' + RESIDENTS.join('+') : COMMIT, MULTI ? '' : TRIGGER, RTT ? 'rtt' + RTT : '',
-    !MULTI && SCENARIO !== 'plain' ? SCENARIO : '', DETECTION === 'poll' ? 'poll' : '', EMBED === 'stub' ? 'embed' + EMBED_LATENCY_MS : EMBED === 'keyless-stub' ? 'keylessstub' : '',
-    STUB_FAIL_MS ? 'fail' + STUB_FAIL_MS : '', LABEL.replace(/[^\w.-]/g, '_')].filter(Boolean).join('-');
-  const outDir = join(WORK, 'results');
   mkdirSync(join(outDir, 'logs'), { recursive: true });
   const logFile = join(outDir, 'logs', cellId + '-' + Date.now() + '.log');
   log('cell ' + cellId + ' (' + REPS + ' reps)');

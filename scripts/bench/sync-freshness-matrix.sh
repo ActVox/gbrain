@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # GBRA-133 lane A: the cell sets behind docs of scripts/bench/sync-freshness.ts.
 #   scripts/bench/sync-freshness-matrix.sh <core|rtt|pollers|extras|embed|big|backlog|noop|pr4b|pr2b6|pr2b6-before> [work-dir] [checkout]
+#   SKIP_EXISTING=1 resumes a set: cells whose result JSON exists are skipped.
 #   pr2b6 takes an engine in ENGINE=postgres|pglite (default both); pr2b6-before runs the comparison cells against [checkout]
 #   (the merge base before PR 2a) and then against this checkout, back to back on one machine.
 # Cells run one at a time (they share the CPU). Each writes <work-dir>/results/<cell>.json;
 # render the table with: bun scripts/bench/sync-freshness.ts --report <work-dir>/results
 set -uo pipefail
 SET=${1:?set}; W=${2:-$PWD/.context/bench/sync-freshness}; PR4B=${3:-}
-B="bun $(dirname "$0")/sync-freshness.ts --work-dir $W"
+B="bun $(dirname "$0")/sync-freshness.ts --work-dir $W ${SKIP_EXISTING:+--skip-existing}"
 run() { echo "== $*" >&2; $B "$@" 2>&1 | grep -E '^\[freshness' | grep -E 'wrote|ERROR|never|cell ' >&2 || true; }
 case "$SET" in
   core)
