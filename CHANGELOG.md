@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.310.0] - 2026-10-19
+
+**On Postgres, a brain no longer keeps a copy of its last big read in memory on every database connection.** After a query that returned a large row, such as a 1 MiB piece of a segmented page, each pooled connection held on to it until that connection ran another query. That was about 2 MiB of raw network buffer plus the query's whole result. A worker with a pool of 10 could sit on 30 MiB it no longer needed. Idle connections now hold nothing from their last query. PGLite brains were never affected.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A pooled Postgres connection after a query whose reply spanned several network reads | kept the joined receive buffer (about 2 MiB for a 1 MiB `bytea` row, which arrives as hex) until its next read | drops the buffer once every message in it is handled |
+| A pooled Postgres connection after any query | kept the whole query, and through it the query's full result rows, for the desync tripwire's diagnostic | keeps only the statement's text, which is all the diagnostic prints |
+| Reading a segmented page body on a pool of 4 | up to about 12 MiB held after the read finished (one segment's buffer and rows per connection) | about 1 MiB of ordinary heap noise |
+
+### For contributors
+
+- `vendor/postgres` (ESM, CommonJS and workerd copies) and `patches/postgres@3.4.9.patch` carry both changes; `bash vendor/update-postgres.sh --check` verifies them, and `vendor/README.md` describes them.
+- `test/large-pages/segmented-prior-view.test.ts` stops flaking on the Postgres arm. Its heap check failed in about one run in ten (5.8 MiB held against a 5.5 MiB bound) because the warm-up and the measured call left driver buffers on different pooled connections. The test now runs one small statement on every pooled connection before its baseline, so a driver that keeps a read fails it every run. The bound is unchanged.
+
 ## [0.60.309.0] - 2026-10-19
 
 **Classic sync no longer stops, or quietly drops a file, when one file is strange: it holds that file, names the fix, imports the rest and moves the bookmark.** Symlinks, unreadable files, FIFOs, files missing from a sparse checkout, names that aren't valid UTF-8 and renames whose old title the database can't compare each used to block a source for three runs or vanish without a word. A force-pushed upstream is now a typed refusal with a guarded fix instead of a raw Git error, and five smaller errors that stopped sync for good are fixed.
