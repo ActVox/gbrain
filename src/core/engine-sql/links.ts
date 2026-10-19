@@ -37,6 +37,36 @@ function temporalWalkFilter(alias: string, opts?: LinkReadScope) {
   return opts?.temporal ? trustedSql(`AND ${relationshipFilterSql(alias, { ...opts.temporal, excludePrivate: opts.excludePrivate })}`) : sqlFragment``;
 }
 
+/**
+ * SQL pieces of an opt-in keyset page (LinkReadScope.page, #6876). Without a
+ * page every piece renders master's statement text, so internal callers read
+ * every row. With one, link_type, the keyset bounds and the temporal policy
+ * filter in SQL before LIMIT, and each row carries `link_id`.
+ */
+function linkPageSql(opts?: LinkReadScope) {
+  const page = opts?.page;
+  if (!page) return { context: sqlFragment`l.context`, id: sqlFragment``, where: sqlFragment``, limit: sqlFragment`` };
+  const chars = page.contextChars;
+  const context = chars === undefined
+    ? sqlFragment`l.context`
+    : sqlFragment`CASE WHEN char_length(l.context) > ${chars} THEN left(l.context, ${chars - 1}) || '…' ELSE l.context END AS context`;
+  const rel = page.relationship;
+  const relationship = !rel
+    ? sqlFragment``
+    : rel.keep === 'match'
+      ? sqlFragment` ${temporalWalkFilter('l', { temporal: rel.policy, excludePrivate: opts?.excludePrivate })}`
+      : sqlFragment` ${trustedSql(`AND NOT (${relationshipFilterSql('l', { ...rel.policy, excludePrivate: opts?.excludePrivate })})`)}`;
+  const linkType = page.linkType !== undefined ? sqlFragment` AND l.link_type = ${page.linkType}` : sqlFragment``;
+  const after = page.afterId !== undefined ? sqlFragment` AND l.id > ${page.afterId}` : sqlFragment``;
+  const through = page.throughId !== undefined ? sqlFragment` AND l.id <= ${page.throughId}` : sqlFragment``;
+  return {
+    context,
+    id: sqlFragment`, l.id AS link_id`,
+    where: sqlFragment`${linkType}${after}${through}${relationship}`,
+    limit: page.limit !== undefined ? sqlFragment` LIMIT ${page.limit}` : sqlFragment``,
+  };
+}
+
 export async function addLink(
   exec: SqlExecutor,
     from: string,
@@ -306,6 +336,7 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
     const tSel = opts?.temporal ? TEMPORAL_LINK_SELECT_SQL : '';
     const tJoin = opts?.temporal ? temporalLinkJoinSql('l', opts.excludePrivate) : '';
     const finish = (rows: unknown[]) => finishTemporal(rows, opts);
+    const page = linkPageSql(opts);
       // #2200: federated grant scopes ALL THREE page endpoints — from, to, AND
       // the origin (the page that authored the edge, surfaced as origin_slug).
       // Scoping only from+to would still leak an out-of-grant origin's slug; the
@@ -316,16 +347,16 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
         const rows = (await exec.run(sqlFragment`
           SELECT f.slug as from_slug, f.source_id as from_source_id,
                  t.slug as to_slug, t.source_id as to_source_id,
-                 l.link_type, l.context, l.link_source,
+                 l.link_type, ${page.context}, l.link_source,
                  o.slug as origin_slug, o.source_id as origin_source_id,
-                 l.origin_field ${trustedSql(tSel)}
+                 l.origin_field ${trustedSql(tSel)}${page.id}
           FROM links l
           JOIN pages f ON f.id = l.from_page_id
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id AND o.source_id = ANY(${ids}::text[]) ${trustedSql(tJoin)}
           WHERE f.slug = ${slug} AND f.source_id = ANY(${ids}::text[]) AND t.source_id = ANY(${ids}::text[])
-            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
-          ORDER BY l.id
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}${page.where}
+          ORDER BY l.id${page.limit}
         `)).rows;
         return finish(rows);
       }
@@ -340,32 +371,32 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
         const rows = (await exec.run(sqlFragment`
           SELECT f.slug as from_slug, f.source_id as from_source_id,
                  t.slug as to_slug, t.source_id as to_source_id,
-                 l.link_type, l.context, l.link_source,
+                 l.link_type, ${page.context}, l.link_source,
                  o.slug as origin_slug, o.source_id as origin_source_id,
-                 l.origin_field ${trustedSql(tSel)}
+                 l.origin_field ${trustedSql(tSel)}${page.id}
           FROM links l
           JOIN pages f ON f.id = l.from_page_id
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
           WHERE f.slug = ${slug} AND f.source_id = ${opts.sourceId}
-            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
-          ORDER BY l.id
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}${page.where}
+          ORDER BY l.id${page.limit}
         `)).rows;
         return finish(rows);
       }
       const rows = (await exec.run(sqlFragment`
         SELECT f.slug as from_slug, f.source_id as from_source_id,
                t.slug as to_slug, t.source_id as to_source_id,
-               l.link_type, l.context, l.link_source,
+               l.link_type, ${page.context}, l.link_source,
                o.slug as origin_slug, o.source_id as origin_source_id,
-               l.origin_field ${trustedSql(tSel)}
+               l.origin_field ${trustedSql(tSel)}${page.id}
         FROM links l
         JOIN pages f ON f.id = l.from_page_id
         JOIN pages t ON t.id = l.to_page_id
         LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
         WHERE f.slug = ${slug}
-          AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
-        ORDER BY l.id
+          AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}${page.where}
+        ORDER BY l.id${page.limit}
       `)).rows;
       return finish(rows);
   }
@@ -376,6 +407,7 @@ export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkRe
     const tSel = opts?.temporal ? TEMPORAL_LINK_SELECT_SQL : '';
     const tJoin = opts?.temporal ? temporalLinkJoinSql('l', opts.excludePrivate) : '';
     const finish = (rows: unknown[]) => finishTemporal(rows, opts);
+    const page = linkPageSql(opts);
       // #2200: federated grant scopes all three endpoints (mirrors getLinks) —
       // the referrer (from), the queried page (to), AND the origin — so neither
       // a foreign referrer nor a foreign origin slug is disclosed to the caller.
@@ -384,16 +416,16 @@ export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkRe
         const rows = (await exec.run(sqlFragment`
           SELECT f.slug as from_slug, f.source_id as from_source_id,
                  t.slug as to_slug, t.source_id as to_source_id,
-                 l.link_type, l.context, l.link_source,
+                 l.link_type, ${page.context}, l.link_source,
                  o.slug as origin_slug, o.source_id as origin_source_id,
-                 l.origin_field ${trustedSql(tSel)}
+                 l.origin_field ${trustedSql(tSel)}${page.id}
           FROM links l
           JOIN pages f ON f.id = l.from_page_id
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id AND o.source_id = ANY(${ids}::text[]) ${trustedSql(tJoin)}
           WHERE t.slug = ${slug} AND t.source_id = ANY(${ids}::text[]) AND f.source_id = ANY(${ids}::text[])
-            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
-          ORDER BY l.id
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}${page.where}
+          ORDER BY l.id${page.limit}
         `)).rows;
         return finish(rows);
       }
@@ -403,32 +435,32 @@ export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkRe
         const rows = (await exec.run(sqlFragment`
           SELECT f.slug as from_slug, f.source_id as from_source_id,
                  t.slug as to_slug, t.source_id as to_source_id,
-                 l.link_type, l.context, l.link_source,
+                 l.link_type, ${page.context}, l.link_source,
                  o.slug as origin_slug, o.source_id as origin_source_id,
-                 l.origin_field ${trustedSql(tSel)}
+                 l.origin_field ${trustedSql(tSel)}${page.id}
           FROM links l
           JOIN pages f ON f.id = l.from_page_id
           JOIN pages t ON t.id = l.to_page_id
           LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
           WHERE t.slug = ${slug} AND t.source_id = ${opts.sourceId}
-            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
-          ORDER BY l.id
+            AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}${page.where}
+          ORDER BY l.id${page.limit}
         `)).rows;
         return finish(rows);
       }
       const rows = (await exec.run(sqlFragment`
         SELECT f.slug as from_slug, f.source_id as from_source_id,
                t.slug as to_slug, t.source_id as to_source_id,
-               l.link_type, l.context, l.link_source,
+               l.link_type, ${page.context}, l.link_source,
                o.slug as origin_slug, o.source_id as origin_source_id,
-               l.origin_field ${trustedSql(tSel)}
+               l.origin_field ${trustedSql(tSel)}${page.id}
         FROM links l
         JOIN pages f ON f.id = l.from_page_id
         JOIN pages t ON t.id = l.to_page_id
         LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
         WHERE t.slug = ${slug}
-          AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
-        ORDER BY l.id
+          AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}${page.where}
+        ORDER BY l.id${page.limit}
       `)).rows;
       return finish(rows);
   }
