@@ -248,11 +248,16 @@ export async function runJobsWork({ args, engine, queue }: JobsCommandContext): 
   // cannot exit(143) ahead of the drain and orphan in-flight jobs.
   const releaseSignalOwner = registerSignalOwner('jobs-work', () => worker.requestShutdown());
 
+  // GBRA-133 PR 2a.4: the worker is a resident; its notifier syncs this host's sources on commit (sync.on_commit) and
+  // drains wanted markers. One owner per host (the notifier lease); it never delays the first claim.
+  const { startResidentNotifier } = await import('../../core/notifier/resident.ts');
+  const notifier = startResidentNotifier(engine, { resident: 'jobs-worker', log: line => console.error(line) });
   try {
     reportWorkerStarting('worker_startup');
     worker.once('ready', () => reportWorkerReady(childIdentity));
     await worker.start();
   } finally {
+    await notifier?.stop().catch(() => undefined);
     unregisterWorker();
     releaseSignalOwner();
     if (worker.configurationError) {

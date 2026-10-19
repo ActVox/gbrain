@@ -175,7 +175,7 @@ export function residentNotifierOptions(engine: BrainEngine, opts: ResidentNotif
 }
 
 /**
- * Starts this process's notifier, or returns null when GBRAIN_NOTIFIER=0 (or --no-notifier) turned it off or one is
+ * Starts this process's notifier, or returns null when GBRAIN_NOTIFIER=0 turned it off or one is
  * the one started before it is replaced as this process's nudge target. Never awaits anything: the first pass runs in the background, so a resident's startup (an MCP
  * handshake, a worker's first claim) never waits on git or a catch-up sync.
  */

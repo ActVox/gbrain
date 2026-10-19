@@ -165,7 +165,7 @@ export const bounded = (raw: string | undefined, fallback: number, min: number, 
 };
 const short = (sha: string | null) => sha ? sha.slice(0, 8) : 'none';
 
-/** GBRAIN_NOTIFIER=0 (or --no-notifier, which residents map onto it) turns the notifier off for this process. */
+/** GBRAIN_NOTIFIER=0 turns the notifier off for this process. */
 export function notifierDisabledByEnv(env: Record<string, string | undefined> = process.env): boolean {
   return falsy(env.GBRAIN_NOTIFIER);
 }
@@ -187,7 +187,8 @@ export function resolveQuietMs(env: Record<string, string | undefined>): number 
   return bounded(env.GBRAIN_NOTIFIER_QUIET_MS ?? env.GBRAIN_SERVE_HEAD_DEBOUNCE_MS, QUIET_MS_DEFAULT, 0, 60_000);
 }
 
-export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier {
+/** The notifier's settings and its logging and decision helpers, resolved once from its options. */
+function notifierKit(opts: CommitNotifierOptions) {
   const env = opts.env ?? process.env;
   const pollMs = opts.pollMs ?? resolvePollMs(env);
   const quietMs = opts.quietMs ?? resolveQuietMs(env);
@@ -221,6 +222,71 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
     decisions.push({ at: now(), source, decision, ...extra });
     if (decisions.length > DECISIONS_CAP) decisions.splice(0, decisions.length - DECISIONS_CAP);
   };
+  return { pollMs, quietMs, heartbeatMs, leaseMs, cap, now, pid, ownerId, forcePoll, setTimer, clearTimer, log, logOnce, guard, decisions, decide };
+}
+
+const closeWatch = (rt: Rt) => { if (rt.watchClose) { try { rt.watchClose(); } catch { /* best effort */ } rt.watchClose = null; } };
+const mode = (rt: Rt): DetectionMode => rt.watchClose ? 'watch' : 'poll';
+const markerKey = (rt: Rt) => `${rt.head ?? ''}|${rt.markers.map(m => `${m.intent}:${m.generation}`).join(',')}`;
+const due = (rt: Rt) => (rt.watched && !!rt.head && rt.head !== rt.lastCommit) || rt.markers.length > 0;
+
+/** Merges a fresh source listing into the runtime map (a moved root starts over); returns the sources new to it. */
+function mergeListed(sources: Map<string, Rt>, rows: NotifierSource[]): Rt[] {
+  const seen = new Set<string>();
+  const fresh: Rt[] = [];
+  for (const s of rows) {
+    seen.add(s.sourceId);
+    const prior = sources.get(s.sourceId);
+    if (prior && prior.root === s.root) { prior.gitDir = s.gitDir; prior.commonDir = s.commonDir ?? null; prior.lastCommit = s.lastCommit; prior.kind = s.kind; continue; }
+    if (prior) closeWatch(prior);
+    const rt: Rt = { ...s, head: null, watched: false, watchClose: null, coverageKey: null, lastStartAt: -Infinity, forwarded: null,
+      state: 'idle', attempts: 0, nextRetryAt: 0, blockedKey: null, markers: [], started: false };
+    sources.set(s.sourceId, rt);
+    fresh.push(rt);
+  }
+  for (const [id, rt] of [...sources]) if (!seen.has(id)) { closeWatch(rt); sources.delete(id); }
+  return fresh;
+}
+
+/** The intent a start asks for (full over pull over freshness) and its time slice. */
+function startPlan(rt: Rt, candidates: number, opts: Pick<CommitNotifierOptions, 'firstSliceSeconds' | 'sliceSeconds'>): { intent: MarkerIntent; first: boolean; slice: number | null } {
+  const intent: MarkerIntent = rt.markers.some(m => m.intent === 'full') ? 'full' : rt.markers.some(m => m.intent === 'pull') ? 'pull' : 'freshness';
+  const first = !rt.started;
+  const slice = first && opts.firstSliceSeconds !== undefined && rt.kind !== 'classic' ? opts.firstSliceSeconds : candidates > 1 ? (opts.sliceSeconds ?? null) : null;
+  return { intent, first, slice };
+}
+
+/** The durable state survives the resident: a restart resumes attempts, the next retry and a blocked run. */
+function restoreStates(sources: Map<string, Rt>, states: NotifierSourceRow[], nowMs: number): void {
+  for (const row of states) {
+    const rt = sources.get(row.source_id);
+    if (!rt) continue;
+    rt.state = row.state === 'running' ? 'due' : row.state;
+    rt.attempts = row.attempts;
+    rt.nextRetryAt = row.next_retry_at ? Date.parse(row.next_retry_at) - Date.now() + nowMs : 0;
+  }
+}
+
+/** The capped backoff after a failure: progress resets the count; past the last tier with no progress it is stalled. */
+function retryPlan(priorAttempts: number, progressed: boolean): { attempts: number; wait: number; stalled: boolean } {
+  const attempts = progressed ? 1 : priorAttempts + 1;
+  return { attempts, wait: RETRY_BACKOFF_MS[Math.min(attempts - 1, RETRY_BACKOFF_MS.length - 1)]!, stalled: !progressed && attempts > RETRY_BACKOFF_MS.length };
+}
+
+async function settleWithin(p: Promise<void>, ms: number): Promise<void> {
+  let bound: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([p, new Promise<void>(resolve => { bound = setTimeout(resolve, ms); bound.unref?.(); })]);
+  clearTimeout(bound);
+}
+
+function snapshotSource(rt: Rt, now: number): NotifierSourceSnapshot {
+  return { source_id: rt.sourceId, kind: rt.kind ?? null, watched: rt.watched, mode: mode(rt), head: rt.head, last_commit: rt.lastCommit, state: rt.state,
+    attempts: rt.attempts, next_retry_in_ms: rt.nextRetryAt ? Math.max(0, rt.nextRetryAt - now) : null,
+    markers: rt.markers.map(m => ({ intent: m.intent, generation: m.generation })) };
+}
+
+export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier {
+  const { pollMs, quietMs, heartbeatMs, leaseMs, cap, now, pid, ownerId, forcePoll, setTimer, clearTimer, log, logOnce, guard, decisions, decide } = notifierKit(opts);
 
   let enabled = false;
   let excluded = new Set<string>();
@@ -257,10 +323,7 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
     if (nudgeTimer !== null) return;
     nudgeTimer = setTimer(() => { nudgeTimer = null; void tick(); }, NUDGE_MS);
   };
-  const closeWatch = (rt: Rt) => { if (rt.watchClose) { try { rt.watchClose(); } catch { /* best effort */ } rt.watchClose = null; } };
   const closeAllWatches = () => { for (const rt of sources.values()) closeWatch(rt); };
-  const mode = (rt: Rt): DetectionMode => rt.watchClose ? 'watch' : 'poll';
-  const markerKey = (rt: Rt) => `${rt.head ?? ''}|${rt.markers.map(m => `${m.intent}:${m.generation}`).join(',')}`;
 
   const transition = async (rt: Rt, patch: StatePatch) => {
     rt.state = patch.state;
@@ -279,29 +342,11 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
     const rows = Array.isArray(listed) ? listed : listed.sources;
     skipped = Array.isArray(listed) ? [] : listed.skipped;
     for (const s of skipped) logOnce(`skip\u0000${s.sourceId}\u0000${s.reason}`, `${s.sourceId}: not watched here: ${s.reason}`);
-    const seen = new Set<string>();
-    const fresh: Rt[] = [];
-    for (const s of rows) {
-      seen.add(s.sourceId);
-      const prior = sources.get(s.sourceId);
-      if (prior && prior.root === s.root) { prior.gitDir = s.gitDir; prior.commonDir = s.commonDir ?? null; prior.lastCommit = s.lastCommit; prior.kind = s.kind; continue; }
-      if (prior) closeWatch(prior);
-      const rt: Rt = { ...s, head: null, watched: false, watchClose: null, coverageKey: null, lastStartAt: -Infinity, forwarded: null,
-        state: 'idle', attempts: 0, nextRetryAt: 0, blockedKey: null, markers: [], started: false };
-      sources.set(s.sourceId, rt);
-      fresh.push(rt);
-    }
-    for (const [id, rt] of [...sources]) if (!seen.has(id)) { closeWatch(rt); sources.delete(id); }
+    const fresh = mergeListed(sources, rows);
     if (fresh.length) {
       // Restart: the durable state (attempts, next retry, a blocked run) survives the resident.
       const states = await guard('reading the notifier states', () => opts.store.readStates(fresh.map(r => r.sourceId)), [] as NotifierSourceRow[]);
-      for (const row of states) {
-        const rt = sources.get(row.source_id);
-        if (!rt) continue;
-        rt.state = row.state === 'running' ? 'due' : row.state;
-        rt.attempts = row.attempts;
-        rt.nextRetryAt = row.next_retry_at ? Date.parse(row.next_retry_at) - Date.now() + now() : 0;
-      }
+      restoreStates(sources, states, now());
     }
     for (const rt of sources.values()) rt.watched = enabled && !excluded.has(rt.sourceId);
     for (const rt of sources.values()) {
@@ -341,12 +386,8 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
     }
   };
 
-  const due = (rt: Rt) => (rt.watched && !!rt.head && rt.head !== rt.lastCommit) || rt.markers.length > 0;
-
   const failure = async (rt: Rt, code: string, message: string, progressed: boolean) => {
-    const attempts = progressed ? 1 : rt.attempts + 1;
-    const wait = RETRY_BACKOFF_MS[Math.min(attempts - 1, RETRY_BACKOFF_MS.length - 1)]!;
-    const stalled = !progressed && attempts > RETRY_BACKOFF_MS.length;
+    const { attempts, wait, stalled } = retryPlan(rt.attempts, progressed);
     const tracePath = trace(rt, { event: 'failure', code, error: message, attempts, next_retry_ms: wait, stalled });
     await transition(rt, { state: 'retry', reason: stalled ? 'notifier_stalled' : code, firstDue: 'keep', attempts, nextRetryInMs: wait, progress: progressed,
       error: { code: stalled ? 'notifier_stalled' : code, message, tracePath } });
@@ -428,10 +469,8 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
         log('the notifier lease moved to another resident before a start; forwarding instead');
         return;
       }
-      const intent: MarkerIntent = rt.markers.some(m => m.intent === 'full') ? 'full' : rt.markers.some(m => m.intent === 'pull') ? 'pull' : 'freshness';
+      const { intent, first, slice } = startPlan(rt, candidates.length, opts);
       const markers = [...rt.markers];
-      const first = !rt.started;
-      const slice = first && opts.firstSliceSeconds !== undefined && rt.kind !== 'classic' ? opts.firstSliceSeconds : candidates.length > 1 ? (opts.sliceSeconds ?? null) : null;
       rt.lastStartAt = t;
       rt.started = true;
       let start: StartResult | null;
@@ -525,15 +564,11 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
 
   const interval = (opts.setInterval ?? ((fn: () => void, ms: number) => { const h = setInterval(fn, ms); h.unref?.(); return h; }))(() => { void tick(); }, pollMs);
   return {
-    tick,
-    nudge,
+    tick, nudge,
     get enabled() { return enabled; },
     get owner() { return owner; },
     get decisions() { return decisions; },
-    snapshot: () => ({ resident: opts.resident, owner, enabled, skipped: [...skipped], sources: [...sources.values()].map(rt => ({
-      source_id: rt.sourceId, kind: rt.kind ?? null, watched: rt.watched, mode: mode(rt), head: rt.head, last_commit: rt.lastCommit, state: rt.state,
-      attempts: rt.attempts, next_retry_in_ms: rt.nextRetryAt ? Math.max(0, rt.nextRetryAt - now()) : null,
-      markers: rt.markers.map(m => ({ intent: m.intent, generation: m.generation })) })) }),
+    snapshot: () => ({ resident: opts.resident, owner, enabled, skipped: [...skipped], sources: [...sources.values()].map(rt => snapshotSource(rt, now())) }),
     stop: async () => {
       if (!stopped) {
         stopped = true;
@@ -543,9 +578,7 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
         closeAllWatches();
       }
       if (inflight) {
-        let bound: ReturnType<typeof setTimeout> | undefined;
-        await Promise.race([inflight, new Promise<void>(resolve => { bound = setTimeout(resolve, STOP_SETTLE_MS); bound.unref?.(); })]);
-        clearTimeout(bound);
+        await settleWithin(inflight, STOP_SETTLE_MS);
         closeAllWatches();
       }
       if (owner && leased) await guard('releasing the notifier lease', () => opts.store.releaseLease(opts.hostId, ownerId), undefined);

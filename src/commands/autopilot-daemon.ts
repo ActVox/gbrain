@@ -164,8 +164,13 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
   // a second call is a no-op (disconnect snapshots + nulls the handle), so
   // both paths firing is safe.
   const shutdownAbort = new AbortController();
+  // GBRA-133 PR 2a.4: the daemon is a resident; its notifier syncs this host's sources on commit (sync.on_commit) and
+  // drains wanted markers, between the wall-clock cycles. Stopped before the engine closes.
+  const { startResidentNotifier } = await import('../core/notifier/resident.ts');
+  const notifier = startResidentNotifier(engine, { resident: 'autopilot', log: line => console.log(line) });
   const closeEngine = async () => {
     shutdownAbort.abort(new Error('autopilot shutdown'));
+    await notifier?.stop().catch(() => undefined);
     if (state.inflightInlineCycle) {
       // ponytail: 2s cap keeps us inside process-cleanup's 3s deadline; a
       // between-phase abort resolves instantly, a mid-phase one may not.
