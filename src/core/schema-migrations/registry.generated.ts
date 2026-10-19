@@ -261,6 +261,7 @@ import { v257 } from './v257-pages-live-origin-key.ts';
 import { v258 } from './v258-pages-links-extract-failure.ts';
 import { v259 } from './v259-ingest-log-marked-index.ts';
 import { v260 } from './v260-segmented-page-size-index.ts';
+import { v261 } from './v261-persistence-request-transient-retries.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -520,4 +521,5 @@ export const MIGRATIONS: Migration[] = [
   v258,
   v259,
   v260,
+  v261,
 ];

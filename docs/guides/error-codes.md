@@ -3089,6 +3089,16 @@ More: [docs/guides/repair.md#recovery-prior-stage-unavailable](../../docs/guides
 |---|---|---|---|---|---|---|
 | An earlier write left state that must be inspected and recovered before new writes. | Details name the exit when there is one: physical_root_device_changed (the checkout's filesystem device number changed; re-stamped by itself when ownership verifies) and physical_root_directory_changed (the directory at the recorded path was recreated, or its birth time drifted beyond 1 µs; the relocated-root self-transfer, `transfer prepare/accept <source> --self-transfer --confirm-relocated-root`, re-stamps it). Both are explained in docs/guides/write-refusals.md. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### recovery_version_unsupported
+
+<a id="recovery_version_unsupported"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A newer gbrain wrote this recovery record (its version is unknown here), so this gbrain left the record, its staged files and the canonical file untouched; writes on that worktree wait for it. | A recovery record says how to finish an interrupted publication; reading a newer layout as an older one can publish wrong bytes, delete a staged file or clear the record. Only a gbrain that knows the version may recover it, so the fix is upgrading gbrain on the canonical owner host and restarting its writer processes. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#recovery_version_unsupported](../../docs/guides/write-refusals.md#recovery_version_unsupported)
+
 ### redirect_uri_mismatch
 
 <a id="redirect_uri_mismatch"></a>
@@ -3432,6 +3442,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | A search offset was over the 10,000 limit. | The request itself was wrong or no longer matches the brain; nothing was changed. | Page with match: "keyword" and the next object each response returns; a cursor has no depth limit. | agent | `repeat the read that failed` | 1 | no |
+
+### segmented_mirror_writer_gate
+
+<a id="segmented_mirror_writer_gate"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A withdrawal mirror of a page stored in segments waits because a gbrain that cannot read its recovery record, and that doctor segmented_storage still warns about, wrote to this brain in the last 7 days; the withdrawal is committed and the canonical file keeps the withdrawn row until the mirror runs. | The mirror's version 2 recovery record names a streamed staging file; a gbrain below the segmented writer floor (v0.60.290.0) misreads it and wedges the worktree, so no record is written while the segmented-storage writer gate sees such a live writer (this host's own pre-upgrade writes, superseded by the upgraded build, do not count). The mirror retries, parks, and runs again by itself once the gate clears. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#segmented_mirror_writer_gate](../../docs/guides/write-refusals.md#segmented_mirror_writer_gate)
 
 ### serve_build_drift
 
@@ -4179,7 +4199,7 @@ Reasons: `override`, `standing_instruction`, `exfiltration`, `credential`, `dete
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| The database ended this managed write's statements (SQLSTATE 57014, a statement timeout or cancel) persistence.max_preparation_attempts times (default 2), so the owner finished it failed instead of preparing it again; nothing was published. | Each cancelled statement throws the write's preparation away, and a write whose work outlasts the bound every time (a large page publishing under a 5 s statement bound on a loaded host) used to be released as database_contention and prepared again, its whole body streamed again, without limit. These cancellations now count with cut-off preparations. Contention with other transactions (lock timeout, serialization failure, deadlock), a dropped connection and a restarting database are never counted. The receipt names the attempts, the limit and the SQLSTATE. | Inspect the owner with gbrain sources writer status --source <id> --json (read-only), then submit the write again with a new request_id once the database is less loaded; a held sync file needs gbrain sources retry-held <id> and the same sync. If the same write ends this way again, report its request id with gbrain doctor --json. Run: gbrain sources writer status --source '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+| The database kept ending this managed write's statements (SQLSTATE 57014, a statement timeout or cancel), or its publication kept running past persistence.publication_ceiling_ms and was cancelled, after persistence.max_transient_retries retries with backoff (default 5), so the owner finished it failed instead of preparing it again; nothing was published. | Each such interruption throws the write's preparation away. It is load or latency, not the write's content, so it has its own retry budget: the request is claimed again after a backoff (1 s, 2 s, 4 s, 8 s, then 15 s; no claim is held while it waits) up to persistence.max_transient_retries times, and the next interruption ends it instead of preparing it again without limit. It never charges persistence.max_preparation_attempts, which preparations cut off at their deadline keep. Contention with other transactions (lock timeout, serialization failure, deadlock), a dropped connection and a restarting database are never counted. The receipt names the interruptions (attempts), the retry limit, the cause and the SQLSTATE. | Inspect the owner with gbrain sources writer status --source <id> --json (read-only), then submit the write again with a new request_id once the database is less loaded; a held sync file needs gbrain sources retry-held <id> and the same sync. If the same write ends this way again, report its request id with gbrain doctor --json. Run: gbrain sources writer status --source '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/write-refusals.md#write_interrupted](../../docs/guides/write-refusals.md#write_interrupted)
 
