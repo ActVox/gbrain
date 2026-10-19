@@ -6153,6 +6153,7 @@
           "private shutdownAbort",
           "private workerId",
           "rawListeners: <E extends string | symbol>(eventName: string | symbol) => ((...args: any[]) => void)[]",
+          "readonly idleWaiter: IdleWaiter",
           "register: (name: string, handler: MinionHandler) => void",
           "registeredNames: string[]",
           "removeAllListeners: <E extends string | symbol>(eventName?: string | symbol | undefined) => MinionWorker",
