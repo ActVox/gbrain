@@ -534,16 +534,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
   // them out of the engine try/catch is safe and unlocks routing.
   const params = parseOpArgs(op, subArgs);
 
-  // Wave B: `put --file` fills content from the file, or uploads a page larger than one request and is done.
-  if (op.name === 'put_page' && typeof params.file === 'string') {
-    const { runPutFile } = await import('./commands/append.ts');
-    try {
-      if (await runPutFile(params, { connect: () => connectEngine(), format: formatResult })) return;
-    } catch (e: unknown) {
-      exitCliError(e, command);
-    }
-  }
-
+  if (op.name === 'put_page' && typeof params.file === 'string' && await (await import('./commands/append.ts')).runPutFile(params, { connect: () => connectEngine(), format: formatResult }).catch((e: unknown) => exitCliError(e, command))) return; // Wave B: content from the file, or an upload over one request
   // #3513: stdin fill moved out of parseOpArgs so a non-TTY stdin with no
   // piped input can't block the parse forever — the bounded read leaves the
   // param unset on timeout and the required-param check below fails fast.
@@ -1377,8 +1368,7 @@ export function findUnknownOpFlag(op: OperationMeta, args: string[]): string | n
       const positive = rawKey.slice(3).replace(/-/g, '_');
       if (op.params[positive]?.type === 'boolean') continue;
     }
-    // Wave B: `put --file <path>` reads the page from a file (runPutFile), never a wire param.
-    if (rawKey === 'file' && op.name === 'put_page') { if (m[2] === undefined) i++; continue; }
+    if (rawKey === 'file' && op.name === 'put_page') { if (m[2] === undefined) i++; continue; } // Wave B: put --file (cli/commands/append.ts runPutFile), never a wire param
     const key = rawKey.replace(/-/g, '_');
     const paramDef = op.params[key];
     if (paramDef) {
@@ -2942,11 +2932,7 @@ async function completeEngineStartup(engine: BrainEngine): Promise<void> {
 
 /** CLI-only usage examples appended to `gbrain <command> --help`. */
 const OP_HELP_EXAMPLES: Record<string, string[]> = {
-  put_page: [
-    'gbrain put notes/acme-example < notes.md                 # content from stdin',
-    'gbrain put notes/acme-example --file notes.md            # content from a file; one larger than a request is uploaded in parts',
-    'gbrain append notes/acme-example --file next.md          # add to the end of a page instead of re-putting it',
-  ],
+  put_page: ['gbrain put notes/acme-example --file notes.md   # from a file (one over a request uploads in parts); to add to a page: gbrain append'],
   get_links: [
     'gbrain links people/alice-example                    # resolved source (every federated source when unpinned)',
     'gbrain links people/alice-example --source business  # one source',
