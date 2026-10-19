@@ -24,7 +24,10 @@
  *   `.code`; it now reaches the caller and the failure record as itself (red with the `sync:batch_entries` seam alone).
  * - S-7: a committed file whose name is not valid UTF-8 (a Latin-1 byte) was held `page_write_failed` with a Git error (and
  *   stopped the source before this lane); it is held `path_not_utf8` naming the rename, which clears the hold.
- * The deliberate-refusal, systemic and changing-message guards pass before and after.
+ * - Rename storm: a folder of more than 20 pages moved with git mv tripped the mass-delete valve, which withheld the
+ *   old paths' deletes in the first round, so each new path imported as a new page beside its old one ("shares
+ *   content_hash ... Indexing both") and the pages lost their ids; each is now a move that keeps its page.
+ * The deliberate-refusal, systemic, changing-message and mass-delete guards pass before and after.
  *
  * PGLite here; Postgres through test/e2e/sync-entry-faults-6712-postgres.test.ts.
  */
@@ -253,5 +256,44 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: one odd f
     await engine.setConfig('sync.holds', 'fail');
     writeFileSync(latin1(root), note('notes/cafe')); commit(root, 'odd');
     await expect(performManagedSync(engine, OPTS)).rejects.toMatchObject({ code: 'path_not_utf8' });
+  }), 240_000);
+  const ids = async (engine: BrainEngine, prefix: string) => (await engine.executeRaw<{ id: number | string; slug: string }>(
+    "SELECT id, slug FROM pages WHERE source_id='default' AND deleted_at IS NULL AND slug LIKE $1 ORDER BY slug", [`${prefix}/%`])).map(row => [Number(row.id), row.slug.slice(prefix.length + 1)]);
+  const folder = (root: string, name: string, n: number, body = (i: number) => `# Note ${i}\n\nSynthetic body number ${i}.\n`) => {
+    mkdirSync(join(root, name), { recursive: true });
+    for (let i = 0; i < n; i++) writeFileSync(join(root, `${name}/n${i}.md`), body(i));
+  };
+  test('rename storm: a folder of 30 pages moved with git mv keeps every page and indexes nothing twice', () => brain(async ({ engine, root }) => {
+    folder(root, 'bulk', 30); commit(root, 'bulk');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    const before = await ids(engine, 'bulk');
+    git(root, 'mv', 'bulk', 'moved'); commit(root, 'mv');
+    const warned: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array, ...rest: never[]) => { warned.push(String(chunk)); return write(chunk, ...rest); }) as typeof process.stderr.write;
+    const moved = await performManagedSync(engine, OPTS).finally(() => { process.stderr.write = write; });
+    expect(moved).toMatchObject({ status: 'synced', renamed: 30, added: 0, deleted: 0 });
+    expect(warned.filter(line => line.includes('shares content_hash'))).toEqual([]);
+    expect(await ids(engine, 'moved')).toEqual(before);
+    expect(await ids(engine, 'bulk')).toEqual([]);
+    expect(await atHead(engine, root)).toBe(true);
+  }), 240_000);
+
+  test('rename storm guard: 30 pages deleted with nothing arriving is still a withheld mass delete', () => brain(async ({ engine, root }) => {
+    folder(root, 'bulk', 30); commit(root, 'bulk');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    git(root, 'rm', '-rq', 'bulk'); commit(root, 'rm');
+    await performManagedSync(engine, OPTS);
+    expect((await ids(engine, 'bulk')).length).toBe(30);
+    const convergence = (await readSyncStatus(engine, 'default')).convergence;
+    expect(convergence && 'deletes_withheld' in convergence ? convergence.deletes_withheld?.count : null).toBe(30);
+  }), 240_000);
+
+  test('rename storm guard: 30 pages deleted while 30 different files arrive are deletes and adds, never renames', () => brain(async ({ engine, root }) => {
+    folder(root, 'bulk', 30); commit(root, 'bulk');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    git(root, 'rm', '-rq', 'bulk'); folder(root, 'other', 30, i => `# Other ${i}\n\nA different synthetic body ${i}.\n`); commit(root, 'swap');
+    expect(await performManagedSync(engine, OPTS)).toMatchObject({ renamed: 0, added: 30 });
+    expect((await ids(engine, 'other')).length).toBe(30);
   }), 240_000);
 });
