@@ -50,7 +50,7 @@ import { resolveCandidateSources, resolveLinkFallbackDefault, loadLinkPageMetada
 import { collectWantedLinks, isWantedPagesEnabled } from '../core/wanted-links.ts';
 import { readLineGrammarSettings, statedRelationTypes } from '../core/line-grammar.ts';
 import { effectiveLinkExtractorWatermark, linkExtractorWatermarkFor } from '../core/link-extraction-watermark.ts';
-import { concurrentWriteSkipLine, replaceDerivedLinksBatchOrReplay, replaceDerivedLinksDeferringConflicts, settingsChangedSkipLine, type DerivedLinkBatchItem } from '../core/derived-links.ts';
+import { concurrentWriteSkipLine, replaceDerivedLinksBatchOrReplay, replaceDerivedLinksDeferringConflicts, settingsChangedSkipLine, unknownSourceSkipLine, type DerivedLinkBatchItem, type UnknownSourceSkip } from '../core/derived-links.ts';
 import { pageSnapshotKey } from '../core/page-snapshot-batch.ts';
 import type { PageSnapshot } from '../core/page-state/types.ts';
 export { reconcileSourceLinks, type SourceLinkReconciliationResult } from '../core/link-reconciliation.ts';
@@ -277,6 +277,9 @@ interface ExtractResult {
   skipped_cross_source?: number;
   /** #6272: pages a concurrent writer changed mid-run, left unstamped (DB links path, present when non-zero). */
   skipped_concurrent_write?: number;
+  /** #6808: pages whose source (or a link target's) has no sources row, left unstamped; the first 20 named (DB paths, present when non-zero). */
+  skipped_unknown_source?: number;
+  unknown_source_pages?: UnknownSourceSkip[];
   /** #5904: timeline writes the writer refused or left pending (DB path); the command exits non-zero. */
   timeline_refused?: number;
 }
@@ -918,6 +921,7 @@ async function extractFromDB(engine: BrainEngine, result: ExtractResult, subcomm
       result.skipped_cross_source = r.skippedCrossSource;
       if (r.skippedAttendanceIncomplete) result.skipped_attendance_incomplete = r.skippedAttendanceIncomplete;
       if (r.skippedConcurrentWrite) result.skipped_concurrent_write = r.skippedConcurrentWrite;
+      if (r.unknownSource.length) { result.skipped_unknown_source = r.unknownSource.length; result.unknown_source_pages = r.unknownSource.slice(0, 20); }
     }
     if (subcommand === 'timeline' || subcommand === 'all') {
       const r = await (await import('./extract-timeline-db.ts')).extractTimelineFromDB(engine, { ...o, completed: completed?.timeline });
@@ -1834,7 +1838,7 @@ async function extractLinksFromDB(
   typeFilter: PageType | undefined,
   since: string | undefined,
   opts?: { includeFrontmatter?: boolean; sourceIdFilter?: string; completed?: Set<string> },
-): Promise<{ created: number; pages: number; unresolved: UnresolvedFrontmatterRef[]; skippedMissingTarget: number; skippedCrossSource: number; skippedAttendanceIncomplete: number; skippedConcurrentWrite?: number }> {
+): Promise<{ created: number; pages: number; unresolved: UnresolvedFrontmatterRef[]; skippedMissingTarget: number; skippedCrossSource: number; skippedAttendanceIncomplete: number; skippedConcurrentWrite?: number; unknownSource: UnknownSourceSkip[] }> {
   const includeFrontmatter = opts?.includeFrontmatter ?? false;
   const sourceIdFilter = opts?.sourceIdFilter;
   // C3 (D6) + S4 (P2.18): the links_extracted_at watermark covers links AND timeline, so this phase never stamps it;
@@ -1912,6 +1916,7 @@ async function extractLinksFromDB(
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   const grammar = await readLineGrammarSettings(engine), lineGrammar = { enabled: grammar.enabled, allowUndeclaredTypes: grammar.allowUndeclaredTypes };
   let skippedSettingsChanged = 0, skippedConcurrentWrite = 0;
+  const unknownSource: UnknownSourceSkip[] = [];
   progress.start('extract.links_db', walkRefs.length);
   const plannerTick = dryRun ? async () => {} : await plannerStatsForLinkDrain(engine, async () => walkRefs.length);
 
@@ -1931,6 +1936,7 @@ async function extractLinksFromDB(
       const written = results[i];
       if (written === 'settings_changed') skippedSettingsChanged++;
       else if (written === 'concurrent_write') skippedConcurrentWrite++;
+      else if ('unknownSource' in written) unknownSource.push({ slug, source_id, missing_source: written.unknownSource });
       else { created += written.created; processed++; if (!dryRun) opts?.completed?.add(extractCompletionKey(source_id, slug, item.origin.expectedRevision)); }
       progress.tick(1);
     });
@@ -2041,6 +2047,7 @@ async function extractLinksFromDB(
     if (skippedAttendanceIncomplete) console.log(`Skipped ${skippedAttendanceIncomplete} page(s) with unresolved attendance; prior links and extraction watermarks were preserved.`);
     if (skippedSettingsChanged) console.log(settingsChangedSkipLine(skippedSettingsChanged));
     if (skippedConcurrentWrite) console.log(concurrentWriteSkipLine(skippedConcurrentWrite));
+    if (unknownSource.length) console.log(unknownSourceSkipLine(unknownSource));
     if (skippedMissingTarget > 0) {
       console.log(`Skipped ${skippedMissingTarget} candidate(s) whose target page doesn't exist (references to non-pages are never persisted).`);
     }
@@ -2065,7 +2072,7 @@ async function extractLinksFromDB(
   // #2589: the counters ride the return value so machine consumers (and the
   // --json path, which has no summary event on this path) can see the drops —
   // "counted, never silent" must hold beyond human-mode console lines.
-  return { created, pages: processed, unresolved, skippedMissingTarget, skippedCrossSource, skippedAttendanceIncomplete, ...(skippedSettingsChanged ? { skippedSettingsChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}) };
+  return { created, pages: processed, unresolved, skippedMissingTarget, skippedCrossSource, skippedAttendanceIncomplete, ...(skippedSettingsChanged ? { skippedSettingsChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), unknownSource };
 }
 
 /**
@@ -2104,7 +2111,7 @@ export async function extractStaleFromDB(
     timeBudgetMs?: number;
     /** GBRA-130 A-1 (managed brains): clear held link-extraction failures first. */ retryHeld?: boolean;
   },
-): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; mentions?: MentionPassResult;
+): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; skippedUnknownSource?: number; mentions?: MentionPassResult;
   linkFailed?: number; linkFailures?: LinkExtractionFailure[]; linkSystemic?: LinkExtractionSystemic[] }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
@@ -2194,6 +2201,7 @@ export async function extractStaleFromDB(
   // design (source isolation) unless the #3908 flag is on, but distinct
   // from a genuinely missing target.
   let skippedCrossSource = 0, skippedChanged = 0, skippedConcurrentWrite = 0;
+  const unknownSource: UnknownSourceSkip[] = [];
 
   const wantedEnabled = await isWantedPagesEnabled(engine);
   const plannerTick = await plannerStatsForLinkDrain(engine, async () => totalStale);
@@ -2272,6 +2280,7 @@ export async function extractStaleFromDB(
         // Settings moved, or a concurrent writer moved the page or an endpoint (#6272): not stamped, re-extracts next run.
         if (written === 'settings_changed') { skippedChanged++; continue; }
         if (written === 'concurrent_write') { skippedConcurrentWrite++; continue; }
+        if ('unknownSource' in written) { unknownSource.push({ slug: page.slug, source_id: page.source_id, missing_source: written.unknownSource }); continue; }
         linksCreated += written.created;
         const timelineText = fullContent ?? await segmentedTimelineText(engine, snapshot.page);
         await retractRemovedTimelineEntries(engine, page.slug, page.source_id, timelineText);
@@ -2332,6 +2341,7 @@ export async function extractStaleFromDB(
     if (skippedAttendanceIncomplete) log(`Skipped ${skippedAttendanceIncomplete} page(s) with unresolved attendance; prior links and extraction watermarks were preserved.`);
     if (skippedChanged) log(settingsChangedSkipLine(skippedChanged));
     if (skippedConcurrentWrite) log(concurrentWriteSkipLine(skippedConcurrentWrite));
+    if (unknownSource.length) log(unknownSourceSkipLine(unknownSource));
     if (skippedMissingTarget > 0) {
       log(`Skipped ${skippedMissingTarget} candidate(s) whose target page doesn't exist (references to non-pages are never persisted).`);
     }
@@ -2348,11 +2358,12 @@ export async function extractStaleFromDB(
       pages_processed: pagesProcessed, stale_remaining: staleRemaining, budget_hit: budgetHit,
       skipped_missing_target: skippedMissingTarget, skipped_cross_source: skippedCrossSource,
       ...(skippedAttendanceIncomplete ? { skipped_attendance_incomplete: skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skipped_changed: skippedChanged } : {}),
-      ...(skippedConcurrentWrite ? { skipped_concurrent_write: skippedConcurrentWrite } : {}), ...mentionJsonFields(mentions), ...counts,
+      ...(skippedConcurrentWrite ? { skipped_concurrent_write: skippedConcurrentWrite } : {}),
+      ...(unknownSource.length ? { skipped_unknown_source: unknownSource.length, unknown_source_pages: unknownSource.slice(0, 20) } : {}), ...mentionJsonFields(mentions), ...counts,
     }) + '\n');
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource,
-    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skippedChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), mentions };
+    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skippedChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), ...(unknownSource.length ? { skippedUnknownSource: unknownSource.length } : {}), mentions };
 }
 
 /**

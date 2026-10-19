@@ -644,6 +644,8 @@ export interface FactListOpts {
    * semantics only.
    */
   grep?: string;
+  /** Intersect entity reads with this exact source_session before LIMIT/OFFSET. Also honored by listFactsSince. */
+  sessionId?: string;
   /**
    * When true, `listFactsSince`'s `since` comparison and ORDER BY use
    * COALESCE(valid_from, created_at) — event time — instead of creation
@@ -2284,12 +2286,12 @@ export interface BrainEngine {
    * delta's facts arm: facts strictly after a `(created_at, id)` keyset
    * (`id: null` = strictly after the timestamp), OLDEST first, each row with
    * `created_at_iso` at column precision. Honors activeOnly, visibility,
-   * fingerprint and limit only.
+   * fingerprint, limit, and opt-in entitySlug / sessionId / grep / excludeAuditRows filters (recall paging).
    */
   listFactsKeyset(
     source_id: string,
     after: { createdAt: string; id: number | null } | null,
-    opts?: FactListOpts,
+    opts?: FactListOpts & { entitySlug?: string; sessionId?: string },
   ): Promise<FactRow[]>;
 
   /** List facts captured under a session id within a source. */

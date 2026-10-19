@@ -154,7 +154,7 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
@@ -949,6 +949,7 @@
           "effective_after?: string | undefined",
           "effective_before?: string | undefined",
           "excludePrivate?: boolean | undefined",
+          "excludeSlugPrefixes?: string[] | undefined",
           "includeDeleted?: boolean | undefined",
           "limit?: number | undefined",
           "listColumnsOnly?: boolean | undefined",
@@ -1155,7 +1156,7 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
@@ -1736,6 +1737,7 @@
         "members": [
           "blocks: ChatBlock[]",
           "fallbackFrom?: string | undefined",
+          "fallbackReason?: string | undefined",
           "model: string",
           "providerId: string",
           "providerMetadata?: Record<string, any> | undefined",
@@ -3443,7 +3445,7 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
@@ -3633,6 +3635,7 @@
           "kinds?: FactKind[] | undefined",
           "limit?: number | undefined",
           "offset?: number | undefined",
+          "sessionId?: string | undefined",
           "unconsolidatedOnly?: boolean | undefined",
           "visibility?: FactVisibility[] | undefined"
         ],
@@ -4434,7 +4437,7 @@
         "kind": "function",
         "name": "extractStaleFromDB",
         "signature": [
-          "(engine: BrainEngine, opts: { dryRun: boolean; jsonMode: boolean; quiet?: boolean; includeFrontmatter?: boolean; sourceIdFilter?: string; catchUp: boolean; timeBudgetMs?: number; retryHeld?: boolean; }) => Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; mentions?: MentionPassResult; linkFailed?: number; linkFailures?: LinkExtractionFailure[]; linkSystemic?: LinkExtractionSystemic[]; }>"
+          "(engine: BrainEngine, opts: { dryRun: boolean; jsonMode: boolean; quiet?: boolean; includeFrontmatter?: boolean; sourceIdFilter?: string; catchUp: boolean; timeBudgetMs?: number; retryHeld?: boolean; }) => Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; skippedUnknownSource?: number; mentions?: MentionPassResult; linkFailed?: number; linkFailures?: LinkExtractionFailure[]; linkSystemic?: LinkExtractionSystemic[]; }>"
         ]
       },
       {
@@ -6712,7 +6715,7 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
@@ -8293,6 +8296,7 @@
           "evidence_delivery?: DeliveryMeta | undefined",
           "evidence_truncated?: boolean | undefined",
           "extractive?: ExtractiveFallback | undefined",
+          "fallback_reason?: string | undefined",
           "feedback_evidence?: { source_id: string; slug: string; content_hash: string | null; }[] | undefined",
           "gaps: string[]",
           "graphHits: number",
@@ -8301,6 +8305,7 @@
           "persist?: { answer: string; unverified_claims: Array<{ text: string; reason: string; detail: string; }>; } | undefined",
           "question: string",
           "quote_check?: { grounded: number; repaired: number; unverified: number; } | undefined",
+          "requested_model?: string | undefined",
           "rounds: number",
           "savedSlug?: string | undefined",
           "synthesisOk?: boolean | undefined",
@@ -8326,7 +8331,7 @@
         "kind": "variable",
         "name": "__thinkAdapter",
         "signature": [
-          "{ tryBuildGatewayClient: (modelUsed: string, opts?: { explicitModel?: boolean; allowFallback?: boolean; }) => Promise<ThinkLLMClient | null>; chatResultToMessage: (result: ChatResult, modelStr: string) => { id: string; type: \"message\"; role: \"assistant\"; model: string; content: Array<{ type: \"text\"; text: string; }>; usage: { input_tokens: number; output_tokens: number; }; stop_reason: \"end_turn\" | \"max_tokens\" | \"tool_use\" | \"stop_sequence\"; }; mapStopReason: (s: ChatResult[\"stopReason\"]) => \"end_turn\" | \"max_tokens\" | \"tool_use\" | \"stop_sequence\"; buildGracefulMessage: (modelStr: string, err?: AIConfigError) => { id: string; type: \"message\"; role: \"assistant\"; model: string; content: Array<{ type: \"text\"; text: string; }>; usage: { input_tokens: number; output_tokens: number; }; stop_reason: \"end_turn\"; }; hasAnthropicKey: () => boolean; }"
+          "{ tryBuildGatewayClient: (modelUsed: string, opts?: { explicitModel?: boolean; allowFallback?: boolean; }) => Promise<ThinkLLMClient | null>; chatResultToMessage: (result: ChatResult, modelStr: string) => { id: string; type: \"message\"; role: \"assistant\"; model: string; fallback?: { answered_by: string; reason?: string; }; content: Array<{ type: \"text\"; text: string; }>; usage: { input_tokens: number; output_tokens: number; }; stop_reason: \"end_turn\" | \"max_tokens\" | \"tool_use\" | \"stop_sequence\"; }; mapStopReason: (s: ChatResult[\"stopReason\"]) => \"end_turn\" | \"max_tokens\" | \"tool_use\" | \"stop_sequence\"; buildGracefulMessage: (modelStr: string, err?: AIConfigError) => { id: string; type: \"message\"; role: \"assistant\"; model: string; content: Array<{ type: \"text\"; text: string; }>; usage: { input_tokens: number; output_tokens: number; }; stop_reason: \"end_turn\"; }; hasAnthropicKey: () => boolean; }"
         ]
       },
       {
@@ -9178,6 +9183,7 @@
           "effective_after?: string | undefined",
           "effective_before?: string | undefined",
           "excludePrivate?: boolean | undefined",
+          "excludeSlugPrefixes?: string[] | undefined",
           "includeDeleted?: boolean | undefined",
           "limit?: number | undefined",
           "listColumnsOnly?: boolean | undefined",

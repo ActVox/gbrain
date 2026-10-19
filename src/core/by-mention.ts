@@ -542,16 +542,16 @@ export async function buildGazetteer(
     if (tokens.length === 0) continue;
     if (tokens[0]!.length < MIN_NAME_LENGTH && tokens.length === 1) { drop({ ...base, reason: 'below_min_length' }); continue; }
     if (userIgnore.has(tokens.join(' '))) { drop({ ...base, reason: 'ignored' }); continue; }
-    // #4222: a single-generic-token PERSON title ("Will", "Chief") is a
+    // #4222: a single-generic-token title ("Will", "Chief", "Info") is a
     // junk-hub magnet — every prose occurrence of the word would accrete
     // another mention edge onto a near-empty page. Dropped from the gazetteer
     // even though the page exists (unlike the CK12 ignore-list rule above,
     // which trusts user-created pages: these titles are overwhelmingly
     // extractor-minted, and the page itself stays intact — only the
-    // auto-link accretion stops). Multi-token titles ("Will Smith") and
-    // non-person titles are unaffected; aliases of every type are checked
-    // below.
-    if (tokens.length === 1 && row.type === 'person' && isGenericEntityToken(tokens[0]!)) { drop({ ...base, reason: 'generic_token' }); continue; }
+    // auto-link accretion stops). #6958: every page type, not only person
+    // (a company titled "Info" magnetized the same way). Multi-token titles
+    // ("Will Smith") are unaffected; aliases of every type are checked below.
+    if (tokens.length === 1 && isGenericEntityToken(tokens[0]!)) { drop({ ...base, reason: 'generic_token' }); continue; }
     noteFirstWord(src, tokens);
     add({ slug: row.slug, source_id: src, title: row.title, tokens, origin: 'title', matchText: row.title, ...stubFlag(src, row.slug) });
   }
