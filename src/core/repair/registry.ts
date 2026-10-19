@@ -57,6 +57,7 @@ import { capturedFactsRepair } from './captured-facts.ts';
 import { loopFactsRepair } from './loop-facts.ts';
 import { ontologyFactsRepair } from './ontology-facts.ts';
 import { factsRehomeRepair } from './facts-rehome.ts';
+import { consolidateTiesRepair } from './consolidate-ties.ts';
 import { orphanChildrenRepair } from './orphan-children.ts';
 import { failedWritesRepair } from './failed-writes.ts';
 import { frontmatterRepair } from './frontmatter.ts';
@@ -246,6 +247,14 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'page-less slug with its class; ambiguous, unverified, unresolved and fence-owned slugs are listed and never moved. Preview-bound: --apply '
       + '--expect <hash> moves exactly the previewed database-only facts; a slug that gained a page, lost its target or whose facts changed reports '
       + 'changed_since_preview. Database-only; no page is rewritten.',
+  },
+  'consolidate-ties': {
+    handler: consolidateTiesRepair, embeds: 'none', checks: [], explicit_only: true, preview_bound: true,
+    summary: 'Reopen typed facts that dream consolidation closed at their own effective time (#6023): before this release a cluster whose typed claims '
+      + 'stated one metric, unit and period for the same instant was promoted anyway, and the fact that lost the confidence tie got a zero-length '
+      + 'validity. The preview lists each such fact with its tied partners and take. Preview-bound: --apply --expect <hash> sets exactly the previewed '
+      + 'facts back to open validity and keeps their consolidation mark; a fact that was expired, edited or reopened reports changed_since_preview. '
+      + 'Database-only; no page is rewritten.',
   },
   'orphan-children': {
     handler: orphanChildrenRepair, embeds: 'none', checks: ['child_table_orphans'], explicit_only: true,
