@@ -143,6 +143,20 @@ describe('queue_health — unreadable worker registry', () => {
     });
     expect(check.message).toContain('unreadable (EACCES at /home/alice-example/.gbrain/workers)');
   });
+
+  it('withholds the registry path from a remote caller; the local caller keeps it', async () => {
+    await seed('default', 'embed-backfill', 'waiting', { createdAtSql: "now() - interval '3 hours'" });
+    const { WorkerRegistryUnreadableError } = await import('../src/core/minions/worker-registry.ts');
+    const readWorkers = () => { throw new WorkerRegistryUnreadableError('/home/alice-example/.gbrain/workers', 'EACCES', null); };
+    const remote = await computeQueueHealthCheck(pgLike, { readWorkers, remote: true });
+    expect(JSON.stringify(remote)).not.toContain('/home/alice-example');
+    expect(remote.details).toMatchObject({ worker_alive: null, worker_registry_unreadable: true, worker_registry_errno: 'EACCES', worker_registry_path_redacted: true });
+    expect(remote.details).not.toHaveProperty('worker_registry_path');
+    expect(remote.message).toContain('unreadable (EACCES; path withheld from remote callers');
+    const local = await computeQueueHealthCheck(pgLike, { readWorkers, remote: false });
+    expect(local.details?.worker_registry_path).toBe('/home/alice-example/.gbrain/workers');
+    expect(local.message).toContain('unreadable (EACCES at /home/alice-example/.gbrain/workers)');
+  });
 });
 
 describe('malformed_path_pages discovery check (buildChecks seam)', () => {
