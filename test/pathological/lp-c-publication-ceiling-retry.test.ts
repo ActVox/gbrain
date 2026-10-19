@@ -23,7 +23,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -32,6 +32,7 @@ import { operations, type OperationContext } from '../../src/core/operations.ts'
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
+import { importManagedFiles } from '../../src/core/persistence/import-mutations.ts';
 import * as publicationDeadline from '../../src/core/persistence/publication-deadline.ts';
 import { resetWriteSwitches } from '../../src/core/persistence/switches.ts';
 import { _resetWriteThroughCacheForTest } from '../../src/core/write-through.ts';
@@ -68,7 +69,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
 
   /** Every publication of claims `overruns(k)` parks past the ceiling and then fails as a discarded connection. */
   function overrun(requestId: string, overruns: (claim: number) => boolean) {
-    const seen = { claims: 0, transient: [] as number[], preparation: [] as number[] };
+    const seen = { claims: 0, publications: 0, transient: [] as number[], preparation: [] as number[] };
     installFaultHook(async (point, detail) => {
       if (detail.requestId !== requestId) return;
       if (point === 'consumer:preparing') {
@@ -79,10 +80,13 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
         return;
       }
       if (point === 'persistence:interruption_charged' || point === 'persistence:recovery_interruption_charged') {
-        await engine.executeRaw('UPDATE persistence_requests SET next_attempt_at=now() WHERE request_id=$1::uuid', [requestId]).catch(() => undefined);
+        // Only a released row: one still held (the recovery route charges before it requeues) keeps its backoff, which the
+        // owner's reclaim of a row it released itself must honour.
+        await engine.executeRaw("UPDATE persistence_requests SET next_attempt_at=now() WHERE request_id=$1::uuid AND state='queued'", [requestId]).catch(() => undefined);
         return;
       }
       if (point === 'publication:before_commit' && seen.claims <= GUARD && overruns(seen.claims)) {
+        seen.publications++;
         await new Promise(resolve => setTimeout(resolve, PARK_MS));
         throw discarded();
       }
@@ -114,6 +118,8 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
     const outcome = await call({ slug, content: page(`Overrun ${n}`), request_id: requestId }).catch(error => error as { code?: string });
     installFaultHook(undefined);
     expect(seen.claims).toBe(6);
+    // One publication per claim: on Postgres a cancelled group of one is never published again under the same claim.
+    expect(seen.publications).toBe(6);
     expect((outcome as { code?: string }).code).toBe('write_interrupted');
     expect(seen.transient).toEqual([0, 1, 2, 3, 4, 5]);
     expect(seen.preparation).toEqual([0, 0, 0, 0, 0, 0]);
@@ -166,6 +172,44 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
         error_detail: expect.objectContaining({ cause: 'publication_ceiling', attempts: 3, limit: 2 }) });
       expect(readFileSync(path).equals(bytes)).toBe(true);
       expect(await engine.readPageSnapshot(slug, { sourceId })).toEqual(before);
+    }, 180_000);
+
+    test('a grouped import whose group publication overruns every time charges each member once per publication and ends write_interrupted after the cap', async () => {
+      await engine.setConfig('persistence.max_transient_retries', '2');
+      resetWriteSwitches();
+      const dir = `grp-${++n}`;
+      mkdirSync(join(brainDir, dir), { recursive: true });
+      const files = ['a', 'b'].map(name => {
+        const sourcePath = `${dir}/${name}.md`;
+        writeFileSync(join(brainDir, sourcePath), page(`Group ${name} ${n}`));
+        return { filePath: join(brainDir, sourcePath), sourcePath };
+      });
+      // Every publication in this source parks past the ceiling, then fails as a discarded connection; each is one interruption.
+      const publications: string[] = [], claims = new Map<string, number>();
+      installFaultHook(async (point, detail) => {
+        if (detail.sourceId !== sourceId) return;
+        if (point === 'consumer:preparing') { claims.set(detail.requestId!, (claims.get(detail.requestId!) ?? 0) + 1); return; }
+        if (point === 'publication:before_commit' && publications.length < GUARD) {
+          publications.push(detail.requestId!);
+          await new Promise(resolve => setTimeout(resolve, PARK_MS));
+          throw discarded();
+        }
+      });
+      const results = await withEnv({ GBRAIN_HOME: home }, () => importManagedFiles(engine, files, { sourceId, noEmbed: true }));
+      installFaultHook(undefined);
+      expect(results.map(result => result.status === 'rejected' ? (result.reason as { code?: string }).code : result.status)).toEqual(['write_interrupted', 'write_interrupted']);
+      const rows = await engine.executeRaw<{ request_id: string; state: string; error_code: string | null; transient_interruptions: number; detail: Record<string, unknown> | string }>(
+        "SELECT request_id::text AS request_id,state,error_code,transient_interruptions,error_detail AS detail FROM persistence_requests WHERE source_id=$1 AND intent->>'import_batch' IS NOT NULL ORDER BY sequence", [sourceId]);
+      expect(rows.length).toBe(2);
+      for (const member of rows) {
+        expect(member).toMatchObject({ state: 'failed', error_code: 'write_interrupted', transient_interruptions: 3 });
+        expect(typeof member.detail === 'string' ? JSON.parse(member.detail) : member.detail).toMatchObject({ cause: 'publication_ceiling', attempts: 3, limit: 2 });
+        // One claim per interruption: a cancelled group publication is never published again under the same claim.
+        expect(claims.get(member.request_id)).toBe(3);
+      }
+      // Every publication was charged: each member took part in at most its three charged interruptions.
+      expect(publications.length).toBeLessThanOrEqual(6);
+      for (const { sourcePath } of files) expect(await engine.readPageSnapshot(sourcePath.replace(/\.md$/, ''), { sourceId })).toBeNull();
     }, 180_000);
 
     test('a single overrun is retried, never a terminal storage_error (on Postgres the retried publish surfaces as a bare AbortError), and commits', async () => {

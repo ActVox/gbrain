@@ -882,12 +882,13 @@ export async function clearResolvedRecoveries(engine: BrainEngine, rows: WriteRe
   for (const row of resolved) if (!cleared.has(row.id)) await clearResolvedRecovery(engine, row.id);
 }
 
-/** #6007: claims again a request this owner pass released to the queue itself, while it still holds the worktree's native lock. */
+/** #6007: claims again a request this owner pass released to the queue itself, while it still holds the worktree's native lock; never before its backoff (LPH b). */
 export async function reclaimReleasedWrite(engine: BrainEngine, id: string, leaseMs = 30_000): Promise<WriteRequest | null> {
   const token = randomUUID();
   const [claimed] = await engine.executeRawDirect<WriteRequest>(`UPDATE persistence_requests SET state='running',execution_token=$2::uuid,
     claim_expires_at=now()+($3::double precision*interval '1 millisecond'),updated_at=now(),blocked_reason=NULL,claim_phase=$4::text::jsonb
-    WHERE id=$1::uuid AND state='queued' AND recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING *`, [id, token, leaseMs, claimPhaseStamp(startClaimPhase(), token)]);
+    WHERE id=$1::uuid AND state='queued' AND recovery IS NULL AND ${BACKOFF_ELAPSED('persistence_requests')} AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING *`,
+  [id, token, leaseMs, claimPhaseStamp(startClaimPhase(), token)]);
   return claimed ?? null;
 }
 

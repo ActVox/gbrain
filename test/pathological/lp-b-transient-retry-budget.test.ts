@@ -34,7 +34,7 @@ import { operations, type OperationContext } from '../../src/core/operations.ts'
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { installFaultHook } from '../../src/core/persistence/fault-points.ts';
 import { resetWriteSwitches } from '../../src/core/persistence/switches.ts';
-import { hasClaimableWrite } from '../../src/core/persistence/journal.ts';
+import { hasClaimableWrite, reclaimReleasedWrite, releaseUnpublishedClaim } from '../../src/core/persistence/journal.ts';
 import { readHeadBlockers } from '../../src/core/persistence/head-blocker.ts';
 import { localHostId } from '../../src/core/persistence/identity.ts';
 import * as budget from '../../src/core/persistence/preparation-budget.ts';
@@ -152,6 +152,28 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
     expect(receipt).toMatchObject({ state: 'failed', write_error: 'write_interrupted' });
     // The source keeps moving.
     expect(await call({ slug: `db/after-${n}`, content: page(`After ${n}`), request_id: randomUUID() })).toMatchObject({ state: 'committed' });
+  }, 180_000);
+
+  test('an owner pass never reclaims a released row before its backoff (reclaimReleasedWrite); once it elapses it does', async () => {
+    const slug = `db/reclaim-${++n}`, requestId = randomUUID();
+    const observed: { early?: unknown; due?: string | null } = {};
+    let claims = 0;
+    installFaultHook(async (point, detail) => {
+      if (detail.requestId !== requestId) return;
+      if (point === 'consumer:preparing' && ++claims === 1) throw interruption('57014');
+      if (point === 'persistence:interruption_charged') {
+        const [queued] = await engine.executeRaw<{ id: string }>('SELECT id::text AS id FROM persistence_requests WHERE request_id=$1::uuid', [requestId]);
+        observed.early = await reclaimReleasedWrite(engine, queued!.id);
+        await engine.executeRaw('UPDATE persistence_requests SET next_attempt_at=now() WHERE id=$1::uuid', [queued!.id]);
+        const due = await reclaimReleasedWrite(engine, queued!.id);
+        observed.due = due?.state ?? null;
+        if (due) await releaseUnpublishedClaim(engine, due, 'database_contention');
+      }
+    });
+    expect(await call({ slug, content: page(`Reclaim ${n}`), request_id: requestId })).toMatchObject({ state: 'committed' });
+    expect(observed.early).toBeNull();
+    expect(observed.due).toBe('running');
+    expect(claims).toBe(2);
   }, 180_000);
 
   test('the backoff holds no claim: until next_attempt_at the row is not claimable and its head blocker says transient_backoff; then it is claimed and commits', async () => {
