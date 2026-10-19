@@ -17,7 +17,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
-import type { MinionWorker } from './worker.ts';
+import type { IdleWaiter } from './idle-wait.ts';
 import { consumerConnectionRoute } from '../persistence/consumer-lane.ts';
 
 export const SYNC_WAKE_CHANNEL = 'minion_jobs';
@@ -66,8 +66,8 @@ async function listenSql(engine: BrainEngine, reason: SyncQueueWakeChoice['reaso
   return routed.sql as ListenSql;
 }
 
-/** Start the wake for one worker and log one line naming the mode. Never throws: a failed or unverified LISTEN polls instead. */
-export async function startSyncQueueWake(engine: BrainEngine, worker: Pick<MinionWorker, 'wake' | 'idle'>,
+/** Start the wake for one worker's idle waiter and log one line naming the mode. Never throws: a failed or unverified LISTEN polls instead. */
+export async function startSyncQueueWake(engine: BrainEngine, waiter: Pick<IdleWaiter, 'wake' | 'idle'>,
   opts: { queue: string; env?: Record<string, string | undefined>; log?: (line: string) => void }): Promise<SyncQueueWake> {
   const env = opts.env ?? process.env;
   const log = opts.log ?? ((line: string) => console.log(line));
@@ -86,7 +86,7 @@ export async function startSyncQueueWake(engine: BrainEngine, worker: Pick<Minio
       });
       const listener = await sql.listen(SYNC_WAKE_CHANNEL, payload => {
         if (payload === probe) { probed(); return; }
-        if (!stopped && isSyncWakePayload(payload, opts.queue)) worker.wake('sync_queue_notify');
+        if (!stopped && isSyncWakePayload(payload, opts.queue)) waiter.wake('sync_queue_notify');
       });
       await engine.executeRaw('SELECT pg_notify($1, $2)', [SYNC_WAKE_CHANNEL, probe]);
       if (await arrived) {
@@ -108,10 +108,10 @@ export async function startSyncQueueWake(engine: BrainEngine, worker: Pick<Minio
   log(`[gbrain jobs] sync-queue wake: poll every ${pollMs} ms (${choice.reason})`);
   let inflight: Promise<void> | null = null;
   const timer = setInterval(() => {
-    if (stopped || inflight || !worker.idle) return;
+    if (stopped || inflight || !waiter.idle) return;
     inflight = engine.executeRaw<{ one: number }>(
       `SELECT 1 AS one FROM minion_jobs WHERE queue = $1 AND name = 'sync' AND status = 'waiting' LIMIT 1`, [opts.queue])
-      .then(rows => { if (!stopped && rows.length > 0) worker.wake('sync_queue_poll'); }, () => { /* the claim loop's own poll is the backstop */ })
+      .then(rows => { if (!stopped && rows.length > 0) waiter.wake('sync_queue_poll'); }, () => { /* the claim loop's own poll is the backstop */ })
       .finally(() => { inflight = null; });
   }, pollMs);
   timer.unref?.();

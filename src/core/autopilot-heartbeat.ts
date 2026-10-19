@@ -12,8 +12,8 @@
  * - no sidecar, one written by another pid than the lock holder, or one older than the lock (a daemon binary that
  *   does not write it): the caller's flag, as before.
  */
-import { readFileSync, renameSync, writeFileSync } from 'fs';
-import { autopilotHeartbeatPath } from './autopilot-paths.ts';
+import { readFileSync, renameSync, statSync, writeFileSync } from 'fs';
+import { autopilotHeartbeatPath, autopilotLockPath } from './autopilot-paths.ts';
 
 export interface AutopilotHeartbeat {
   pid: number;
@@ -63,4 +63,12 @@ export function daemonStaleAfterSeconds(heartbeat: AutopilotHeartbeat | null, lo
   const nextMs = heartbeat.next_tick_at ? Date.parse(heartbeat.next_tick_at) : NaN;
   if (!Number.isFinite(nextMs)) return null;
   return { staleAfter: Math.max(0, Math.ceil((nextMs - lock.mtimeMs) / 1000)) + Math.max(base, 120), nextTickAt: heartbeat.next_tick_at };
+}
+
+/** The live daemon's threshold for `gbrain autopilot --status`: its sidecar graded against the lock's mtime and holder pid. */
+export function readDaemonStaleAfter(lockPath = autopilotLockPath(), heartbeatPath = autopilotHeartbeatPath()): { staleAfter: number; nextTickAt: string | null } | null {
+  let lock: { mtimeMs: number; pid: number | null };
+  try { lock = { mtimeMs: statSync(lockPath).mtimeMs, pid: null }; } catch { return null; }
+  try { const n = parseInt(readFileSync(lockPath, 'utf-8').trim(), 10); lock.pid = Number.isFinite(n) ? n : null; } catch { /* unreadable: pid unknown */ }
+  return daemonStaleAfterSeconds(readAutopilotHeartbeat(heartbeatPath), lock);
 }

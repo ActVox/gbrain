@@ -11,7 +11,7 @@
  * Fails when: --status ignores the daemon's schedule, trusts a foreign or outdated sidecar, or the daemon writes none.
  * Real daemon processes for the write side (PGLite inline; Postgres dispatch with --no-worker).
  */
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -79,43 +79,49 @@ function cliEnv(home: string): Record<string, string> {
 }
 
 for (const { backend, databaseUrl } of pathologicalArms()) {
-  test('#7003 a running daemon writes its next tick and --status --json grades from it (' + backend + ')', async () => {
-    const db = databaseUrl ? await isolatedPersistencePostgres(databaseUrl) : null;
-    const { home, repo } = daemonHome(db ? { engine: 'postgres', database_url: db.databaseUrl } : { engine: 'pglite', database_path: '' });
-    const dbPath = join(home, '.gbrain', 'brain.pglite');
-    if (!db) {
+  describe('#7003 the daemon side (' + backend + ')', () => {
+    let db: Awaited<ReturnType<typeof isolatedPersistencePostgres>> | null = null;
+    let home = '';
+    let repo = '';
+    beforeAll(async () => {
+      db = databaseUrl ? await isolatedPersistencePostgres(databaseUrl) : null;
+      ({ home, repo } = daemonHome(db ? { engine: 'postgres', database_url: db.databaseUrl } : { engine: 'pglite', database_path: '' }));
+      if (db) return;
+      const dbPath = join(home, '.gbrain', 'brain.pglite');
       writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', database_path: dbPath, embedding_disabled: true, self_upgrade: { mode: 'off' } }));
       const engine = new PGLiteEngine();
       await engine.connect({ database_path: dbPath });
       await engine.initSchema();
       await engine.disconnect();
-    }
-    const sidecarPath = join(home, '.gbrain', 'autopilot.heartbeat.json');
-    const args = ['autopilot', '--repo', repo, '--interval', '1500', ...(db ? ['--no-worker'] : ['--inline'])];
-    const daemon = Bun.spawn({ cmd: [process.execPath, '--no-env-file', CLI, ...args], env: cliEnv(home), stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
-    let output = '';
-    const drain = async (s: ReadableStream<Uint8Array>) => { for await (const c of s) output += new TextDecoder().decode(c); };
-    const drained = Promise.all([drain(daemon.stdout), drain(daemon.stderr)]);
-    try {
-      let sidecar: { pid: number; phase: string; next_tick_at: string | null; base_interval_s: number } | null = null;
-      for (let i = 0; i < 2_400 && daemon.exitCode === null; i++) {
-        if (existsSync(sidecarPath)) { sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8')); if (sidecar?.phase === 'sleep') break; }
-        await Bun.sleep(50);
+    }, 120_000);
+    afterAll(async () => { await db?.close(); if (home) rmSync(home, { recursive: true, force: true }); });
+
+    test('#7003 a running daemon writes its next tick and --status --json grades from it (' + backend + ')', async () => {
+      const sidecarPath = join(home, '.gbrain', 'autopilot.heartbeat.json');
+      const args = ['autopilot', '--repo', repo, '--interval', '1500', ...(db ? ['--no-worker'] : ['--inline'])];
+      const daemon = Bun.spawn({ cmd: [process.execPath, '--no-env-file', CLI, ...args], env: cliEnv(home), stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+      let output = '';
+      const drain = async (s: ReadableStream<Uint8Array>) => { for await (const c of s) output += new TextDecoder().decode(c); };
+      const drained = Promise.all([drain(daemon.stdout), drain(daemon.stderr)]);
+      try {
+        let sidecar: { pid: number; phase: string; next_tick_at: string | null; base_interval_s: number } | null = null;
+        for (let i = 0; i < 2_400 && daemon.exitCode === null; i++) {
+          if (existsSync(sidecarPath)) { sidecar = JSON.parse(readFileSync(sidecarPath, 'utf8')); if (sidecar?.phase === 'sleep') break; }
+          await Bun.sleep(50);
+        }
+        expect(sidecar?.phase, output.slice(-3000)).toBe('sleep');
+        expect(sidecar!.pid).toBe(daemon.pid);
+        expect(sidecar!.base_interval_s).toBe(1500);
+        const lockMtime = statSync(join(home, '.gbrain', 'autopilot.lock')).mtimeMs;
+        const status = Bun.spawnSync({ cmd: [process.execPath, '--no-env-file', CLI, 'autopilot', '--status', '--json'], env: cliEnv(home), stdout: 'pipe', stderr: 'pipe' });
+        const report = JSON.parse(status.stdout.toString().trim().split('\n').reverse().find(l => l.startsWith('{'))!);
+        expect({ source: report.stale_after_source, next: report.next_tick_at }).toEqual({ source: 'daemon', next: sidecar!.next_tick_at });
+        expect(report.stale_after_seconds).toBe(Math.ceil((Date.parse(sidecar!.next_tick_at!) - lockMtime) / 1000) + 1500);
+      } finally {
+        daemon.kill('SIGTERM');
+        const killer = setTimeout(() => daemon.kill('SIGKILL'), 45_000);
+        await daemon.exited; clearTimeout(killer); await drained;
       }
-      expect(sidecar?.phase, output.slice(-3000)).toBe('sleep');
-      expect(sidecar!.pid).toBe(daemon.pid);
-      expect(sidecar!.base_interval_s).toBe(1500);
-      const lockMtime = statSync(join(home, '.gbrain', 'autopilot.lock')).mtimeMs;
-      const status = Bun.spawnSync({ cmd: [process.execPath, '--no-env-file', CLI, 'autopilot', '--status', '--json'], env: cliEnv(home), stdout: 'pipe', stderr: 'pipe' });
-      const report = JSON.parse(status.stdout.toString().trim().split('\n').reverse().find(l => l.startsWith('{'))!);
-      expect({ source: report.stale_after_source, next: report.next_tick_at }).toEqual({ source: 'daemon', next: sidecar!.next_tick_at });
-      expect(report.stale_after_seconds).toBe(Math.ceil((Date.parse(sidecar!.next_tick_at!) - lockMtime) / 1000) + 1500);
-    } finally {
-      daemon.kill('SIGTERM');
-      const killer = setTimeout(() => daemon.kill('SIGKILL'), 45_000);
-      await daemon.exited; clearTimeout(killer); await drained;
-      await db?.close();
-      rmSync(home, { recursive: true, force: true });
-    }
-  }, 240_000);
+    }, 240_000);
+  });
 }

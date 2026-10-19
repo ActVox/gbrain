@@ -22,11 +22,7 @@ import {
 } from './autopilot-remediation-policy.ts';
 import type { AutopilotDaemonState } from './autopilot-daemon.ts';
 import { logError } from './autopilot.ts';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { execFileBounded } from '../core/bounded-child-exec.ts';
-import { gitChildEnv } from '../core/git-env.ts';
-import { GIT_OPERATION_MARKERS } from '../core/git/commit-push.ts';
+import { readCheckoutHead } from '../core/checkout-head.ts';
 import { SYNC_ON_COMMIT_KEY } from '../core/sync-config-keys.ts';
 import { autopilotPaused } from '../core/autopilot-paths.ts';
 
@@ -269,15 +265,6 @@ export interface FreshnessDecision {
   job_id?: number;
 }
 
-/** A checkout's HEAD and whether a rebase, merge, cherry-pick or revert is mid-flight there. Async and bounded; null when git cannot read it. */
-export async function readCheckoutHead(root: string): Promise<{ head: string; operation: string | null } | null> {
-  const r = await execFileBounded('git', ['-C', root, 'rev-parse', '--absolute-git-dir', 'HEAD'], { timeout: 5_000, env: gitChildEnv({ GIT_OPTIONAL_LOCKS: '0' }) });
-  if (r.error) return null;
-  const [gitDir, head] = r.stdout.trim().split('\n');
-  if (!gitDir || !head || !/^[0-9a-f]{40,64}$/.test(head)) return null;
-  return { head, operation: GIT_OPERATION_MARKERS.find(marker => existsSync(join(gitDir, marker))) ?? null };
-}
-
 /**
  * GBRA-133 2a.4: why a checkout source is due a freshness sync. HEAD-driven first: HEAD differs from the source's last
  * synced commit and this daemon has not already dispatched (or decided) for that HEAD; no ancestry assumption. The
@@ -292,10 +279,25 @@ export function freshnessTrigger(input: { head: { head: string; operation: strin
   return 'head';
 }
 
+/** Whether a checkout source is due a freshness sync: its trigger and HEAD, or why not (fresh, or a live sync job). */
+async function checkoutFreshness(engine: BrainEngine, src: SourceRow, root: string, input: { ageMs: number; intervalMs: number; decidedHead?: string }):
+  Promise<{ trigger: 'head' | 'interval'; head: { head: string; operation: string | null } | null } | { decision: FreshnessDecision }> {
+  const head = await readCheckoutHead(root);
+  const trigger = freshnessTrigger({ head, lastCommit: src.last_commit, ...input });
+  if (!trigger) return { decision: { source_id: src.id, outcome: 'fresh', head: head?.head ?? null } };
+  // #6706: a live sync job (any submitter) is already draining this source; coalescing into another submitter's row is refused.
+  if (await (await import('../core/persistence/sync-movement.ts')).liveSyncJob(engine, src.id) !== null) {
+    return { decision: { source_id: src.id, outcome: 'live_job', trigger, head: head?.head ?? null } };
+  }
+  return { trigger, head };
+}
+
 /**
  * v0.40 D17 freshness: runs first each tick, independent of the score gate.
  * `freshnessHeads` (the daemon's per-source map of the HEAD it last dispatched or decided for) keeps a HEAD-driven
  * dispatch to one per HEAD; `onlySourceIds` narrows the pass to the sources the between-tick HEAD probe saw move.
+ * A HEAD-driven job is keyed on its HEAD, never the wall-clock slot, so a new commit cannot coalesce into the slot's
+ * completed job. A source with a live sync job keeps its HEAD undecided; the next tick or probe dispatches it.
  */
 export async function dispatchFreshnessSyncs(
   engine: BrainEngine,
@@ -337,7 +339,8 @@ export async function dispatchFreshnessSyncs(
         // reason is stated once per source and reason, and an explicit `gbrain sync --source <id>` is unaffected.
         const skip = await automaticSyncSkip(engine, src, activationPending);
         if (skip?.reason !== 'sync_disabled') reportAutomaticSyncSkip(src.id, skip, 'freshness_sync_skipped', jsonMode, (l) => process.stderr.write(l + '\n'));
-        if (skip) { decisions.push({ source_id: src.id, outcome: 'skipped' }); continue; }
+        if (skip) decisions.push({ source_id: src.id, outcome: 'skipped' });
+        if (skip) continue;
         // A local_path this machine cannot use — relative (#3696: cwd is
         // launchd's, not the registering shell's) or absent on disk and
         // not a managed clone sync can re-create — would sync a phantom
@@ -354,15 +357,9 @@ export async function dispatchFreshnessSyncs(
         }
         const lastSyncMs = src.last_sync_at ? new Date(src.last_sync_at).getTime() : 0;
         const ageMs = now - lastSyncMs;
-        const head = await readCheckoutHead(src.local_path);
-        const trigger = freshnessTrigger({ head, lastCommit: src.last_commit, ageMs, intervalMs, decidedHead: freshnessHeads.get(src.id) });
-        if (!trigger) { decisions.push({ source_id: src.id, outcome: 'fresh', head: head?.head ?? null }); continue; }
-        // #6706: a live sync job (any submitter) is already draining this source; coalescing into another submitter's row
-        // is refused. The HEAD stays undecided, so the next tick or HEAD probe dispatches it once that job ends.
-        if (await (await import('../core/persistence/sync-movement.ts')).liveSyncJob(engine, src.id) !== null) {
-          decisions.push({ source_id: src.id, outcome: 'live_job', trigger, head: head?.head ?? null });
-          continue;
-        }
+        const due = await checkoutFreshness(engine, src, src.local_path, { ageMs, intervalMs, decidedHead: freshnessHeads.get(src.id) });
+        if ('decision' in due) { decisions.push(due.decision); continue; }
+        const { trigger, head } = due;
         try {
           const job = await queue.add(
             'sync',
@@ -375,9 +372,7 @@ export async function dispatchFreshnessSyncs(
             },
             {
               queue: 'default',
-              // A HEAD-driven sync is keyed on the HEAD, never on the wall-clock slot: a slot key would coalesce a new commit
-              // into the slot's completed job and drop it until the next slot.
-              idempotency_key: trigger === 'head' ? `autopilot-sync:${src.id}:head:${head!.head}` : `autopilot-sync:${src.id}:${slot}`,
+              idempotency_key: `autopilot-sync:${src.id}:${trigger === 'head' ? `head:${head!.head}` : slot}`,
               max_attempts: 2,
               timeout_ms: timeoutMs,
               // #6706: single-flight per source. A sync job drains until synced or its deadline, so a tick while one runs

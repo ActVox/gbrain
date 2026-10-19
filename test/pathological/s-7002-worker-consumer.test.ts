@@ -11,7 +11,7 @@
  * stopped worker leaves its row. Real `gbrain jobs work` processes; asserts on the consumer rows (states), never on
  * elapsed time. PGLite always, Postgres when DATABASE_URL is set.
  */
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -50,26 +50,31 @@ async function stop(child: Subprocess): Promise<number | null> {
 for (const { backend, databaseUrl } of pathologicalArms()) {
   describe('#7002 a resident jobs worker joins the persistence-consumer election at boot (' + backend + ')', () => {
     if (backend === 'pglite') {
-      test('PGLite: jobs work drains the queue in the foreground and exits; no consumer is left behind', async () => {
-        const home = brainHome({ engine: 'pglite', database_path: '' });
+      // The whole run happens in beforeAll so each PGLite open sits beside the hook that owns it; the test asserts.
+      let home = '';
+      let run: { code: number | null; text: string; rows: ConsumerRow[] } | null = null;
+      beforeAll(async () => {
+        home = brainHome({ engine: 'pglite', database_path: '' });
         const path = join(home, '.gbrain', 'brain.pglite');
         writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite', database_path: path, embedding_disabled: true }));
         const engine = new PGLiteEngine();
         await engine.connect({ database_path: path });
         await engine.initSchema();
         await engine.disconnect();
-        try {
-          const { child, output } = spawnWorker(home);
-          const code = await stop_after_exit(child);
-          const text = await output();
-          expect(code, text).toBe(0);
-          expect(text).toContain('drained');
-          const after = new PGLiteEngine();
-          await after.connect({ database_path: path });
-          try { expect(await after.executeRaw<ConsumerRow>("SELECT pid, kind, mode FROM persistence_consumers WHERE kind='jobs'")).toEqual([]); }
-          finally { await after.disconnect(); }
-        } finally { rmSync(home, { recursive: true, force: true }); }
+        const { child, output } = spawnWorker(home);
+        const code = await stop_after_exit(child);
+        const after = new PGLiteEngine();
+        await after.connect({ database_path: path });
+        try { run = { code, text: await output(), rows: await after.executeRaw<ConsumerRow>("SELECT pid, kind, mode FROM persistence_consumers WHERE kind='jobs'") }; }
+        finally { await after.disconnect(); }
       }, 180_000);
+      afterAll(() => { if (home) rmSync(home, { recursive: true, force: true }); });
+
+      test('PGLite: jobs work drains the queue in the foreground and exits; no consumer is left behind', () => {
+        expect(run!.code, run!.text).toBe(0);
+        expect(run!.text).toContain('drained');
+        expect(run!.rows).toEqual([]);
+      });
       return;
     }
 

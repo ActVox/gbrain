@@ -88,6 +88,7 @@ import { EventEmitter } from 'events';
 import { evaluateQuietHours, type QuietHoursConfig } from './quiet-hours.ts';
 import { endedByShutdown, releaseUndrainedClaims, settleShutdownInterruptedJob } from './worker-shutdown.ts';
 import { isWatchdogSuspect, settleWatchdogAbort } from './watchdog-attribution.ts';
+import { IdleWaiter } from './idle-wait.ts';
 import { readFileSync } from 'fs';
 
 /**
@@ -190,9 +191,6 @@ interface InFlightJob {
   shared: boolean;
 }
 
-/** One idle poll wait of the claim loop and how it ended (waiting while in progress). */
-export interface IdleWait { ms: number; ended: 'waiting' | 'timer' | 'wake' | 'skipped' | 'stop'; reason?: string }
-
 export interface ConfigurationReleaseResult {
   jobId: number | null;
   lockToken: string;
@@ -221,12 +219,8 @@ export class MinionWorker extends EventEmitter {
   private running = false;
   /** Log the pause/resume transition once each, not every poll. */
   private pausedByMarkerAnnounced = false;
-  /** The idle poll wait in progress, which wake() ends early; null while the loop is not idle-waiting. */
-  private idleWaiting: { entry: IdleWait; timer: ReturnType<typeof setTimeout>; resolve: () => void } | null = null;
-  /** A wake that arrived while the loop was claiming: the next idle wait is skipped so the claim runs again at once. */
-  private wakePending = false;
-  /** The newest idle poll waits and how each ended (bounded): the recorded decisions the sync-queue wake tests read. */
-  readonly idleWaits: IdleWait[] = [];
+  /** The idle poll wait a sync-queue wake ends early (minions/idle-wait.ts). */
+  readonly idleWaiter = new IdleWaiter();
   private inFlight = new Map<number, InFlightJob>();
   private executions = new Map<string, OwnedExecution>();
   private pendingClaim: { lockToken: string; promise: Promise<MinionJob | null> } | null = null;
@@ -852,7 +846,7 @@ export class MinionWorker extends EventEmitter {
         }
         if (this.inFlight.size < this.opts.concurrency && ![...this.inFlight.values()].some(f => isWatchdogSuspect(f.job))) {
           const lockToken = `${this.workerId}:${randomUUID()}`;
-          this.wakePending = false;
+          this.idleWaiter.claimStarted();
           let job: MinionJob | null;
           try {
             const claim = this.queue.claim(
@@ -924,7 +918,7 @@ export class MinionWorker extends EventEmitter {
             }
           } else if (this.inFlight.size === 0) {
             // No jobs and nothing in flight, poll (a sync-queue wake ends the wait early)
-            await this.idleWait(this.opts.pollInterval);
+            await this.idleWaiter.wait(this.opts.pollInterval);
           } else {
             // Jobs are running but no new ones available, brief pause before re-checking
             await new Promise(resolve => setTimeout(resolve, 100));
@@ -1060,47 +1054,14 @@ export class MinionWorker extends EventEmitter {
   requestShutdown(): void {
     if (this.running) console.log('Minion worker shutting down...');
     this.running = false;
-    this.wake('stop');
+    this.idleWaiter.wake('stop');
     if (!this.shutdownAbort.signal.aborted) this.shutdownAbort.abort(new Error('shutdown'));
-  }
-
-  /**
-   * End the idle poll wait now so the loop claims at once (GBRA-133 2a.4 sync-queue wake,
-   * src/core/minions/sync-queue-wake.ts). A wake while the loop is claiming makes the next idle wait a no-op, so a job
-   * inserted between an empty claim and the wait is never left for the full poll interval.
-   */
-  wake(reason = 'wake'): void {
-    const waiting = this.idleWaiting;
-    if (!waiting) { if (reason !== 'stop') this.wakePending = true; return; }
-    this.idleWaiting = null;
-    clearTimeout(waiting.timer);
-    waiting.entry.ended = reason === 'stop' ? 'stop' : 'wake';
-    waiting.entry.reason = reason;
-    waiting.resolve();
-  }
-
-  /** True while the claim loop waits out an idle poll (nothing claimed, nothing in flight). */
-  get idle(): boolean { return this.idleWaiting !== null; }
-
-  private idleWait(ms: number): Promise<void> {
-    if (this.idleWaits.length >= 100) this.idleWaits.shift();
-    if (this.wakePending) {
-      this.wakePending = false;
-      this.idleWaits.push({ ms, ended: 'skipped' });
-      return Promise.resolve();
-    }
-    const entry: IdleWait = { ms, ended: 'waiting' };
-    this.idleWaits.push(entry);
-    return new Promise<void>(resolve => {
-      const timer = setTimeout(() => { this.idleWaiting = null; entry.ended = 'timer'; resolve(); }, ms);
-      this.idleWaiting = { entry, timer, resolve };
-    });
   }
 
   /** Stop the worker gracefully. */
   stop(): void {
     this.running = false;
-    this.wake('stop');
+    this.idleWaiter.wake('stop');
     try { this.eldHistogram?.disable(); } catch { /* fail-open */ }
   }
 

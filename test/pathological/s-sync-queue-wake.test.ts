@@ -12,7 +12,7 @@
  * on elapsed time. PGLite always, Postgres when DATABASE_URL is set (the E2E backend matrix also runs it through
  * PgBouncer: GBRAIN_TEST_BACKEND=pgbouncer).
  */
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
@@ -28,12 +28,6 @@ const until = async (what: string, check: () => boolean | Promise<boolean>) => {
   throw new Error('timed out waiting for ' + what);
 };
 
-async function withEngine(databaseUrl: string | undefined, run: (engine: BrainEngine) => Promise<void>): Promise<void> {
-  const engine: BrainEngine = databaseUrl ? new PostgresEngine() : new PGLiteEngine();
-  await engine.connect(databaseUrl ? { database_url: databaseUrl, poolSize: 3 } : {});
-  try { await engine.initSchema(); await run(engine); } finally { await engine.disconnect(); }
-}
-
 async function withIdleWorker(engine: BrainEngine, run: (w: { worker: MinionWorker; queue: MinionQueue; queueName: string; ran: number[] }) => Promise<void>) {
   const queueName = 'wake-' + randomUUID().slice(0, 8);
   const queue = new MinionQueue(engine);
@@ -42,7 +36,7 @@ async function withIdleWorker(engine: BrainEngine, run: (w: { worker: MinionWork
   worker.register('sync', async job => { ran.push(job.id); return { ok: true }; });
   const running = worker.start();
   try {
-    await until('the worker to go idle', () => (worker as unknown as { idle?: boolean }).idle === true);
+    await until('the worker to go idle', () => (worker as unknown as { idleWaiter?: { idle: boolean } }).idleWaiter?.idle === true);
     await run({ worker, queue, queueName, ran });
   } finally { worker.stop(); await running; }
 }
@@ -51,48 +45,53 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
   /** The E2E backend matrix's PgBouncer pass hands this arm a transaction-pooler URL (it must carry prepare=false). */
   const pooled = databaseUrl !== undefined && resolvePrepare(databaseUrl) === false;
   describe('sync-queue wake for the jobs worker (' + (pooled ? 'pgbouncer' : backend) + ')', () => {
+    let engine: BrainEngine;
+    beforeAll(async () => {
+      if (databaseUrl) { const pg = new PostgresEngine(); await pg.connect({ database_url: databaseUrl, poolSize: 3 }); engine = pg; }
+      else { engine = new PGLiteEngine(); await engine.connect({}); }
+      await engine.initSchema();
+    });
+    afterAll(async () => { await engine?.disconnect(); });
+
     test('a sync job queued beside an idle worker ends its idle wait and runs (no 10-minute poll)', async () => {
-      await withEngine(databaseUrl, engine => withIdleWorker(engine, async ({ worker, queue, queueName, ran }) => {
+      await withIdleWorker(engine, async ({ worker, queue, queueName, ran }) => {
         const { startSyncQueueWake } = await import('../../src/core/minions/sync-queue-wake.ts');
         const lines: string[] = [];
-        const wake = await startSyncQueueWake(engine, worker, { queue: queueName, log: line => lines.push(line) });
+        const wake = await startSyncQueueWake(engine, worker.idleWaiter, { queue: queueName, log: line => lines.push(line) });
         try {
-          const expected = backend === 'pglite' ? { mode: 'off', reason: 'not_postgres' }
-            : pooled ? { mode: 'poll', reason: 'transaction_pooler' } : { mode: 'listen', reason: 'direct_session' };
-          expect({ mode: wake.mode, reason: wake.reason }).toEqual(expected);
+          const expected = backend === 'pglite' ? 'off/not_postgres' : pooled ? 'poll/transaction_pooler' : 'listen/direct_session';
+          expect(wake.mode + '/' + wake.reason).toBe(expected);
           // PGLite has no resident worker to wake; its \`jobs work\` drains in the foreground. The primitive still works there.
           const job = await queue.add('sync', { sourceId: 'acme-example', noPull: true }, { queue: queueName });
-          if (backend === 'pglite') worker.wake('test');
+          if (backend === 'pglite') worker.idleWaiter.wake('test');
           await until('the job to run', () => ran.includes(job.id));
-          const ended = worker.idleWaits.filter(w => w.ended === 'wake').map(w => w.reason);
+          const ended = worker.idleWaiter.history.filter(w => w.ended === 'wake').map(w => w.reason);
           expect(ended).toContain(backend === 'pglite' ? 'test' : pooled ? 'sync_queue_poll' : 'sync_queue_notify');
-          expect(worker.idleWaits.every(w => w.ms === IDLE_POLL_MS)).toBe(true);
+          expect(worker.idleWaiter.history.every(w => w.ms === IDLE_POLL_MS)).toBe(true);
           if (wake.mode !== 'off') expect(lines).toEqual(['[gbrain jobs] sync-queue wake: ' + (wake.mode === 'listen' ? 'listen (direct_session)' : 'poll every 1000 ms (transaction_pooler)')]);
         } finally { await wake.stop(); }
-      }));
+      });
     }, 120_000);
 
     test('a wake that lands while the loop is claiming skips the next idle wait instead of being lost', async () => {
-      await withEngine(databaseUrl, engine => withIdleWorker(engine, async ({ worker }) => {
+      await withIdleWorker(engine, async ({ worker }) => {
         // The next claim finds nothing, and a notification arrives while it runs (after its SELECT, before the wait).
         const queue = (worker as unknown as { queue: { claim: (...args: unknown[]) => Promise<unknown> } }).queue;
         const claim = queue.claim.bind(queue);
         let claims = 0;
-        queue.claim = async (...args: unknown[]) => { const found = await claim(...args); if (claims++ === 0) worker.wake('during_claim'); return found; };
-        const before = worker.idleWaits.length;
-        worker.wake('first');
-        await until('two more claims', () => claims >= 2 && worker.idle);
-        expect(worker.idleWaits.slice(before - 1).map(w => [w.ended, w.reason ?? null])).toEqual([['wake', 'first'], ['skipped', null], ['waiting', null]]);
-      }));
+        queue.claim = async (...args: unknown[]) => { const found = await claim(...args); if (claims++ === 0) worker.idleWaiter.wake('during_claim'); return found; };
+        const before = worker.idleWaiter.history.length;
+        worker.idleWaiter.wake('first');
+        await until('two more claims', () => claims >= 2 && worker.idleWaiter.idle);
+        expect(worker.idleWaiter.history.slice(before - 1).map(w => [w.ended, w.reason ?? null])).toEqual([['wake', 'first'], ['skipped', null], ['waiting', null]]);
+      });
     }, 120_000);
 
     if (backend !== 'pglite') {
       test('behind a transaction pooler the wake never LISTENs; on a direct session it LISTENs (detection from the connection, not the arm)', async () => {
         const { chooseSyncQueueWake } = await import('../../src/core/minions/sync-queue-wake.ts');
-        await withEngine(databaseUrl, async engine => {
-          expect(chooseSyncQueueWake(engine, {}).mode).toBe(pooled ? 'poll' : 'listen');
-          expect(chooseSyncQueueWake(engine, { GBRAIN_WORKER_SYNC_WAKE: '0' })).toEqual({ mode: 'off', reason: 'disabled' });
-        });
+        expect(chooseSyncQueueWake(engine, {}).mode).toBe(pooled ? 'poll' : 'listen');
+        expect(chooseSyncQueueWake(engine, { GBRAIN_WORKER_SYNC_WAKE: '0' })).toEqual({ mode: 'off', reason: 'disabled' });
       }, 60_000);
     }
   });

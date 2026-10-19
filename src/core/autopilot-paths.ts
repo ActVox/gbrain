@@ -37,7 +37,7 @@ export function autopilotLockPath(): string {
 
 /**
  * #7003: the daemon's heartbeat sidecar beside the lock. It records the daemon's own next tick (its adaptive interval),
- * so `--status` grades staleness from what the daemon scheduled rather than the caller's `--interval`
+ * so autopilot status grades staleness from what the daemon scheduled rather than the caller's interval flag
  * (src/core/autopilot-heartbeat.ts). The lock mtime stays the liveness signal.
  */
 export function autopilotHeartbeatPath(): string {

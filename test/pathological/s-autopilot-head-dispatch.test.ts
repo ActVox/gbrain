@@ -124,7 +124,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
           const deps = {
             env: { GBRAIN_AUTOPILOT_HEAD_PROBE_MS: '3000' }, now: () => clock,
             sleep: async (ms: number) => { clock += ms; },
-            readHead: async (root: string) => { reads++; return (await import('../../src/commands/autopilot-dispatch.ts')).readCheckoutHead(root); },
+            readHead: async (root: string) => { reads++; return (await import('../../src/core/checkout-head.ts')).readCheckoutHead(root); },
           };
           const state = { stopping: false, freshnessHeads: new Map<string, string>() };
           const off = await quietly(() => sleepWatchingHeads(r.engine, state, { sleepMs: 30_000, baseInterval: 300, jsonMode: true }, deps));

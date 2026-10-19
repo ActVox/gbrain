@@ -20,7 +20,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, chmodSync, statSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { readGlobalMaintenanceVerdict } from '../core/minions/global-maintenance-stall.ts';
-import { daemonStaleAfterSeconds, readAutopilotHeartbeat } from '../core/autopilot-heartbeat.ts';
+import { readDaemonStaleAfter } from '../core/autopilot-heartbeat.ts';
 import { detectExecutionEnvironment } from '../core/execution-env.ts';
 import { join, dirname, isAbsolute, resolve as resolvePath } from 'path';
 import { execSync } from '../core/spawn.ts';
@@ -1483,9 +1483,8 @@ export interface AutopilotStatusReport {
   paused_reason: string | null;
   heartbeat_age_seconds: number | null;
   stale_after_seconds: number;
-  /** #7003: `daemon` when the threshold comes from the running daemon's heartbeat sidecar, `flag` when from --interval. */
+  /** #7003: threshold from the running daemon's heartbeat sidecar or the --interval flag; its next tick while it sleeps. */
   stale_after_source: 'daemon' | 'flag';
-  /** #7003: the daemon's own next tick (its adaptive interval), when its sidecar says it is sleeping. */
   next_tick_at: string | null;
   last_log: string;
 }
@@ -1590,13 +1589,9 @@ function showStatus(json: boolean, intervalSeconds: number) {
   const pausedReason = autopilotPauseReason();
 
   let heartbeatAgeSeconds: number | null = null;
-  let lock: { mtimeMs: number; pid: number | null } | null = null;
   try {
     const { mtimeMs } = statSync(autopilotLockPath());
     heartbeatAgeSeconds = Math.max(0, Math.floor((Date.now() - mtimeMs) / 1000));
-    let pid: number | null = null;
-    try { const n = parseInt(readFileSync(autopilotLockPath(), 'utf-8').trim(), 10); pid = Number.isFinite(n) ? n : null; } catch { /* unreadable: pid unknown */ }
-    lock = { mtimeMs, pid };
   } catch { /* never ran, or already cleaned up */ }
 
   const jobStatus = autopilotJobStatus(job);
@@ -1608,7 +1603,7 @@ function showStatus(json: boolean, intervalSeconds: number) {
     pausedReason,
     heartbeatAgeSeconds,
     intervalSeconds,
-    daemon: daemonStaleAfterSeconds(readAutopilotHeartbeat(), lock),
+    daemon: readDaemonStaleAfter(),
     lastLog: lastLine,
   });
   const processing = readAutopilotProcessingStatus();

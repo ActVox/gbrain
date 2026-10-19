@@ -252,7 +252,7 @@ export async function runJobsWork({ args, engine, queue }: JobsCommandContext): 
 
   // GBRA-133 2a.4: a queued sync job wakes the idle claim loop (LISTEN on a direct session, a short poll otherwise).
   const { startSyncQueueWake } = await import('../../core/minions/sync-queue-wake.ts');
-  const syncQueueWake = await startSyncQueueWake(engine, worker, { queue: queueName });
+  const syncQueueWake = await startSyncQueueWake(engine, worker.idleWaiter, { queue: queueName });
   startWorkerPersistenceConsumer(engine);
 
   try {
