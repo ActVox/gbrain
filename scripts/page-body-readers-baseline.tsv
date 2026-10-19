@@ -594,3 +594,4 @@ src/core/persistence/page-append.ts	prepareAppendMutation	sql	META	body_bytes, e
 src/core/persistence/page-edit.ts	applyPageEdits	call:serializePageToMarkdown	SEGW	within's stored-offset mapping on the materialized snapshot, as pageSegments; a segmented page takes prepareSegmentedEditMutation first
 src/core/persistence/page-edit.ts	applyPageEdits	field	SEGW	within's stored-offset mapping on the materialized snapshot, as pageSegments; a segmented page takes prepareSegmentedEditMutation first
 src/core/persistence/page-edit.ts	prepareSegmentedEditMutation	call:serializePageToMarkdown	NONE	serializes the frontmatter head with an empty body; the body streams from the segments
+src/core/persistence/page-edit.ts	assertSegmentedFencesCompile	field	NONE	the fields hold only the stored fence text laid out at its lines (scanCanonicalFences input); no page body is read

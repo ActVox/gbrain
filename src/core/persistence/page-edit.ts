@@ -467,6 +467,52 @@ async function viewNewlinesBefore(engine: BrainEngine, input: { sourceId: string
   return lines;
 }
 
+/**
+ * #6188 (D19) on a segmented page: scanCanonicalFences over the stored fence text (facts, takes, an unclosed tail's
+ * first piece, stray markers), each piece at its own line of its section, so the refusal is the whole-body scan's,
+ * location included. Only segments holding fence text are read. With `within`, only the fences in the segments it
+ * touches and those crossing into them are checked.
+ */
+async function assertSegmentedFencesCompile(engine: BrainEngine, input: { sourceId: string; slug: string }, rows: readonly ManifestRow[], within?: EditWithin): Promise<void> {
+  let pieces = rows.flatMap(row => (row.protectedRegions as StoredRegion[]).filter(r => PROTECTED_KINDS.has(r.kind))
+    .map(r => ({ row, kind: r.kind, start: Number(row.byteStart) + r.start, end: Number(row.byteStart) + r.end }))).sort((x, y) => x.start - y.start);
+  const firstTail = pieces.findIndex(p => p.kind === 'tail');
+  if (firstTail !== -1) pieces = pieces.filter((p, i) => p.kind !== 'tail' || i === firstTail);
+  if (within) {
+    const touched = rows.filter(row => Number(row.byteStart) < within.byte_end && Number(row.byteStart) + row.byteLen > within.byte_start);
+    if (!touched.length) return;
+    const lo = Math.min(...touched.map(row => Number(row.byteStart))), hi = Math.max(...touched.map(row => Number(row.byteStart) + row.byteLen));
+    const runs: Array<typeof pieces> = [];
+    for (const piece of pieces) {
+      const run = runs[runs.length - 1];
+      if (run && piece.start <= run[run.length - 1]!.end) run.push(piece); else runs.push([piece]);
+    }
+    pieces = runs.filter(run => run[0]!.start < hi && run[run.length - 1]!.end > lo).flat();
+  }
+  if (!pieces.length) return;
+  const count = (b: Uint8Array) => { let n = 0; for (let i = b.indexOf(0x0a); i !== -1; i = b.indexOf(0x0a, i + 1)) n++; return n; };
+  const texts = new Map<number, Uint8Array>();
+  for await (const [row, text] of rowTexts(engine, input.sourceId, [...new Set(pieces.map(p => p.row))])) texts.set(Number(row.byteStart), text);
+  const sections = { truth: { text: [] as Buffer[], lines: 0, first: 0 }, timeline: { text: [] as Buffer[], lines: 0, first: 0 } };
+  for (const region of ['truth', 'timeline'] as const) sections[region].first = rows.find(row => row.region === region)?.lineStart ?? 0;
+  for (const piece of pieces) {
+    const section = sections[piece.row.region === 'timeline' ? 'timeline' : 'truth'];
+    const text = texts.get(Number(piece.row.byteStart))!, at = piece.start - Number(piece.row.byteStart);
+    const line = piece.row.lineStart - section.first + count(text.subarray(0, at));
+    if (line > section.lines) { section.text.push(Buffer.from('\n'.repeat(line - section.lines))); section.lines = line; }
+    const bytes = Buffer.from(text.subarray(at, piece.end - Number(piece.row.byteStart)));
+    section.text.push(bytes);
+    section.lines += count(bytes);
+  }
+  const [defect] = scanCanonicalFences({ compiled_truth: Buffer.concat(sections.truth.text).toString('utf8'), timeline: Buffer.concat(sections.timeline.text).toString('utf8') }).defects;
+  if (defect) throw targetFenceRefusal(defect, input.slug, input.sourceId);
+}
+
+/** Submission's fence check of a segmented page's live body, as applyPageEdits refuses an inline one before admission; preparation repeats it. */
+export async function assertSegmentedEditFences(engine: BrainEngine, page: { id?: number | null; slug: string; source_id: string }, within?: EditWithin): Promise<void> {
+  await assertSegmentedFencesCompile(engine, { sourceId: page.source_id, slug: page.slug }, await engine.readManifest(Number(page.id)), within);
+}
+
 function protectedSpans(rows: readonly ManifestRow[], markers = true): Array<{ start: number; end: number }> {
   return rows.flatMap(row => (row.protectedRegions as StoredRegion[]).filter(r => PROTECTED_KINDS.has(r.kind) && (markers || r.kind !== 'marker'))
     .map(r => ({ start: Number(row.byteStart) + r.start, end: Number(row.byteStart) + r.end })));
@@ -491,6 +537,7 @@ export async function locateSegmentedEdits(engine: BrainEngine, input: { sourceI
   const { page, within } = input;
   const rows = await engine.readManifest(page.id, { generation: page.generation });
   spliceWork.rows += rows.length;
+  await assertSegmentedFencesCompile(engine, input, rows, within);
   const guarded = protectedSpans(rows);
   const regions = [{ lo: 0, hi: page.truthBytes, rows: rows.filter(r => r.region === 'truth') },
     { lo: page.truthBytes, hi: page.bodyBytes, rows: rows.filter(r => r.region === 'timeline') }];
