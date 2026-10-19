@@ -9,7 +9,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { testBackends } from './helpers/test-backends.ts';
@@ -18,6 +18,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 import { normalizeForHash } from '../src/core/capture-content.ts';
+import { registerLocalWriter } from '../src/core/persistence/identity.ts';
+import { activatePersistence } from '../src/core/persistence/activation.ts';
 
 const CLI = join(import.meta.dir, '../src/cli.ts');
 /** Quotes, backslashes, tabs and other control characters, multi-byte and astral text. */
@@ -71,8 +73,8 @@ for (const backend of testBackends()) {
         pg = isolated.engine;
         const [database] = await pg.executeRaw<{ name: string }>('SELECT current_database() AS name');
         const url = new URL(process.env.DATABASE_URL!); url.pathname = `/${database.name}`;
-        mkdirSync(join(home, '.gbrain'), { recursive: true });
-        writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'postgres', database_url: url.toString(), embedding_disabled: true }));
+        const init = await cli(['init', '--url', url.toString(), '--non-interactive', '--no-embedding']);
+        expect(init.code, init.stderr).toBe(0);
       } else {
         pglite = new PGLiteEngine();
         const init = await cli(['init', '--pglite', '--no-embedding']);
@@ -141,7 +143,12 @@ for (const backend of testBackends()) {
     }, 300_000);
 
     test('local put --file over the page ceiling on a managed brain goes through an upload session, byte-identical', async () => {
-      expect((await sql<{ enabled: boolean }>('SELECT enabled FROM persistence_brain'))[0]!.enabled).toBe(true);
+      const managed = async () => (await sql<{ enabled: boolean }>('SELECT enabled FROM persistence_brain'))[0]!.enabled;
+      if (!await managed()) {
+        await registerLocalWriter(pg!, 'cli');
+        expect((await activatePersistence(pg!, { confirmQuiesced: true })).enabled).toBe(true);
+      }
+      expect(await managed()).toBe(true);
       const body = hugeBody('Managed huge');
       const put = await cli(['put', 'notes/managed-huge', '--file', file('managed-huge.md', body)]);
       expect(put.code, put.stderr).toBe(0);
