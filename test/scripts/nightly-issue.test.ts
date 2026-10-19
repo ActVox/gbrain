@@ -283,6 +283,10 @@ class World {
   jobs = new Map<string, { jobs: JobInfo[]; total_count: number }>();
   annotations = new Map<number, unknown[]>();
   manifests = new Map<string, unknown>();
+  /** Raw reuse.json text of a push run's `reused-full-suite` artifact, by run id. */
+  reuse = new Map<number, string>();
+  attempts = new Map<string, RunInfo>();
+  trees = new Map<string, string>();
   issues: WorldIssue[] = [];
   timeline = new Map<number, unknown[]>();
   compares = new Map<string, unknown>();
@@ -294,6 +298,7 @@ class World {
 
   addRun(run: RunInfo, jobsFile?: string, manifest: unknown | null = completeManifest(run)) {
     this.runs.set(run.id, run);
+    this.attempts.set(`${run.id}/${run.run_attempt}`, run);
     const jobs = jobsFile ? mr<{ jobs: JobInfo[]; total_count: number }>(jobsFile) : { total_count: 1, jobs: [{ id: run.id + 1, name: 'test (1)', conclusion: run.conclusion === 'success' ? 'success' : 'failure', steps: [] }] };
     this.jobs.set(`${run.id}/${run.run_attempt}`, jobs);
     for (const j of jobs.jobs) {
@@ -338,6 +343,12 @@ class World {
           return world.issues.filter(i => labelNames(i).includes(label) && (m![2] === 'all' || i.state === m![2])).sort((x, y) => y.number - x.number).map(i => ({ ...i })) as R;
         }
         if ((m = /^repos\/\{repo\}\/actions\/runs\/(\d+)$/.exec(path))) { const r = world.runs.get(Number(m[1])); if (!r) throw Object.assign(new Error('404'), { status: 404 }); return r as R; }
+        if ((m = /^repos\/\{repo\}\/actions\/runs\/(\d+)\/attempts\/(\d+)$/.exec(path))) { const r = world.attempts.get(`${m[1]}/${m[2]}`); if (!r) throw Object.assign(new Error('404'), { status: 404 }); return r as R; }
+        if ((m = /^repos\/\{repo\}\/git\/commits\/(\w+)$/.exec(path))) return { tree: { sha: world.trees.get(m[1]!) ?? `tree-of-${m[1]}` } } as R;
+        if ((m = /^repos\/\{repo\}\/actions\/runs\/(\d+)\/artifacts\?name=reused-full-suite/.exec(path))) {
+          const id = Number(m[1]);
+          return { artifacts: world.reuse.has(id) ? [{ id: id * 10, name: 'reused-full-suite', expired: false }] : [] } as R;
+        }
         if ((m = /^repos\/\{repo\}\/actions\/runs\/(\d+)\/attempts\/(\d+)\/jobs/.exec(path))) return (world.jobs.get(`${m[1]}/${m[2]}`) ?? { jobs: [], total_count: 0 }) as R;
         if ((m = /^repos\/\{repo\}\/check-runs\/(\d+)\/annotations/.exec(path))) return (world.annotations.get(Number(m[1])) ?? []) as R;
         if ((m = /^repos\/\{repo\}\/actions\/runs\/(\d+)\/artifacts\?name=ci-manifest/.exec(path))) {
@@ -360,6 +371,7 @@ class World {
       async download(path: string): Promise<Uint8Array> {
         world.calls.push({ method: 'DOWNLOAD', path });
         const id = Number(/artifacts\/(\d+)\/zip/.exec(path)![1]);
+        if (id % 10 === 0) return zipOf('reuse.json', world.reuse.get(id / 10)!);
         const run = world.runs.get(Math.floor(id / 10))!;
         return zipOf('ci-manifest.json', JSON.stringify(world.manifests.get(`${run.id}/${id % 10}`)));
       },
@@ -569,6 +581,55 @@ describe('master-red: push-to-master runs', () => {
     expect(r.masterRed!.action).toBe('update');
     expect(blind.labeled('master-red').map(i => [i.number, i.state])).toEqual([[90, 'closed']]);
     expect(mrState(blind.issue(90))).toMatchObject({ status: 'green', first_red: null, open_jobs: [], evaluated: { run_id: RR.g10289.id } });
+  });
+
+  // Recorded API JSON: push run 10229 (39174731800, f1d90931) reused the Test full suite of the
+  // workflow_dispatch 39170735990 (13366cde, the merged PR head; same tree 5d6ec794). Its jobs are the cheap
+  // tier plus a succeeded `reused-full-suite` job, it has no ci-manifest, and its reuse.json is verbatim.
+  // The dispatch's ci-manifest is complete (trimmed to the segmented-prior-view rows of 5034 files).
+  const reuseRuns = mr<{ workflow_runs: RunInfo[] }>('runs-test-reuse.json').workflow_runs;
+  const RU = { push10229: reuseRuns.find(r => r.run_number === 10229)!, dispatch10224: reuseRuns.find(r => r.run_number === 10224)! };
+  const REUSED_TREE = '5d6ec794768a1d240bfc0b79deb74b938b8894f2';
+  const reuseWatch = async (tweak: (w: World) => void = () => {}) => {
+    const w = new World();
+    w.addRun(RR.g10213).addRun(RR.r10222, `jobs-${RR.r10222.id}.json`, redManifest(RR.r10222));
+    expect((await go(w, RR.r10222)).masterRed!.action).toBe('create');
+    w.addRun(RU.dispatch10224, `jobs-${RU.dispatch10224.id}.json`, mr('ci-manifest-39170735990.json'));
+    w.addRun(RU.push10229, `jobs-${RU.push10229.id}.json`, null);
+    w.reuse.set(RU.push10229.id, readFileSync(join(MR, 'reuse-39174731800.json'), 'utf8'));
+    w.trees.set(RU.push10229.head_sha, REUSED_TREE).set(RU.dispatch10224.head_sha, REUSED_TREE);
+    tweak(w);
+    const incident = masterIssue(w)!;
+    return { incident, r: await go(w, RU.push10229) };
+  };
+
+  test('a push run that reused a full-suite run is judged by that run: run 10229 reused complete green dispatch 39170735990 (same tree) and closes the incident', async () => {
+    const { incident, r } = await reuseWatch();
+    expect(r.masterRed!.evaluated).toEqual([RU.push10229.id]);
+    expect(r.masterRed!.action).toBe('close');
+    expect(incident.state).toBe('closed');
+    expect(mrState(incident)).toMatchObject({ status: 'green', open_jobs: [], blocked: [], last_green: { run_id: RU.push10229.id }, evidence: { run_id: RU.push10229.id, complete: true, problems: [] } });
+    expect(incident.comments.at(-1)).toContain('Green:');
+  });
+
+  test('a reused run that cannot prove its source keeps the incident open: tree mismatch, incomplete or missing source manifest, unreadable or missing reuse.json', async () => {
+    const cases: Array<[string, (w: World) => void, string]> = [
+      ['tree mismatch', w => { w.trees.set(RU.dispatch10224.head_sha, 'f'.repeat(40)); }, `but push ${RU.push10229.head_sha.slice(0, 12)} has tree ${REUSED_TREE}`],
+      ['incomplete source manifest', w => { w.manifests.set(`${RU.dispatch10224.id}/1`, { ...mr<CiManifest>('ci-manifest-39170735990.json'), complete: false, problems: ['receipts-unit-3 is missing'] }); }, 'the ci-manifest artifact is incomplete: receipts-unit-3 is missing'],
+      ['source without a manifest', w => { w.manifests.delete(`${RU.dispatch10224.id}/1`); }, `run ${RU.dispatch10224.id} has no 'ci-manifest' artifact`],
+      ['unreadable reuse.json', w => { w.reuse.set(RU.push10229.id, '{"reuse": true, "workflow"'); }, `reading run ${RU.push10229.id}'s 'reused-full-suite' artifact failed`],
+      ['missing reuse artifact', w => { w.reuse.delete(RU.push10229.id); }, `run ${RU.push10229.id} has no 'reused-full-suite' artifact`],
+      ['record for another push', w => { w.reuse.set(RU.push10229.id, JSON.stringify({ ...mr<Record<string, unknown>>('reuse-39174731800.json'), push_sha: 'e'.repeat(40) })); }, `reuse.json is for push ${'e'.repeat(40)}`],
+    ];
+    for (const [name, tweak, problem] of cases) {
+      const { incident, r } = await reuseWatch(tweak);
+      expect([name, r.masterRed!.action]).toEqual([name, 'update']);
+      expect([name, incident.state]).toEqual([name, 'open']);
+      const state = mrState(incident);
+      expect([name, state.status, state.blocked]).toEqual([name, 'red', [PG_JOB]]);
+      expect([name, state.evidence!.complete]).toEqual([name, false]);
+      expect([name, state.evidence!.problems.join(' | ')]).toEqual([name, expect.stringContaining(problem)]);
+    }
   });
 
   test('a green run where a previously failing job did not run keeps the issue open and names the manual-close step', async () => {
