@@ -102,6 +102,35 @@ a sync is finishing is still served.
 | GBRAIN_NOTIFIER_HEARTBEAT_MS | Lease heartbeat (default 10000) |
 | GBRAIN_NOTIFIER_CLASSIC_SOURCES | Classic source ids this host syncs without a recorded run |
 
+## Autopilot and the jobs worker
+
+The autopilot daemon reads every checkout's HEAD at each tick and queues a
+sync when it differs from the commit the source last synced, once per HEAD,
+never in the middle of a rebase or merge; a source whose last sync is older
+than `--interval` is still synced as a backstop. With `sync.on_commit` on, the
+daemon also reads HEADs between ticks (every 3 s, git only;
+`GBRAIN_AUTOPILOT_HEAD_PROBE_MS`, 1 to 30 s), so a commit is queued within
+seconds instead of at the next tick (150 to 600 s).
+
+A `gbrain jobs work` worker picks up a queued sync job at once: it LISTENs for
+queued sync jobs when its database URL is a direct session, and reads the sync
+queue every second (`GBRAIN_WORKER_SYNC_WAKE_POLL_MS`, 250 ms to 5 s) behind a
+transaction pooler (port 6543 or `?prepare=false`), where LISTEN does not
+work. Its startup line names the mode (`sync-queue wake: listen (direct_session)`
+or `sync-queue wake: poll every 1000 ms (transaction_pooler)`);
+`GBRAIN_WORKER_SYNC_WAKE=0` turns the wake off and leaves the 5 s idle poll.
+
+On Postgres an idle worker also starts its persistence consumer at boot (#7002).
+With `persistence.single_consumer` off, a worker beside a `serve` runs its own
+full consumer, as every resident process does, and doctor lists the pair as
+`two_consumers_on_host`.
+
+`gbrain autopilot --status` grades the daemon from its own next tick, written
+to `autopilot.heartbeat.json` beside the lock (#7003); `--status --json`
+names the source of the threshold in `stale_after_source` (`daemon`, or `flag`
+when the sidecar is missing or from an older daemon, which falls back to
+6 x `--interval`).
+
 ## Check it
 
 ```bash
