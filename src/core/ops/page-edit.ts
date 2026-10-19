@@ -11,7 +11,7 @@ const edit_page: Operation = {
   name: 'edit_page',
   idempotent: true,
   outputRedaction: { exempt: "the diff is the caller's own authorized view of the page it just edited (the get_page boundary), secret-redacted when created because the receipt retains it" },
-  description: 'Change part of a page: prefer this over put_page for small changes. expected_revision is the revision from get_page include_content:true. Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.',
+  description: 'Change part of a page: prefer this over put_page for small changes. expected_revision: from get_page include_content:true. Each old_text must match exactly once (in `within` if set); applied in order, all or none. Stale revision: revision_conflict.',
   params: {
     slug: { type: 'string', description: 'Page slug.', required: true },
     expected_revision: { type: 'string', required: true, description: 'From get_page include_content:true.' },

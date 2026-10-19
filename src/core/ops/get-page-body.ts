@@ -64,7 +64,7 @@ const AUTO_WINDOW_BYTES = 16_000;
 export const LARGE_PAGES_CAPABILITY = 'large_pages_v1';
 
 export const GET_PAGE_BODY_PARAMS: Record<string, ParamDef> = {
-  body: { type: 'string', enum: [...BODY_MODES], description: 'auto: whole up to 256 KB, else outline + window. none: revision + size.', fullSurfaceOnly: true },
+  body: { type: 'string', enum: [...BODY_MODES], description: 'auto: whole up to 256 KB, else outline + window; a window\'s edit_target is edit_page `within`. none: revision + size + tail_sha256 (append_page expected_tail_sha256).', fullSurfaceOnly: true },
   lines: { type: 'object', description: 'Window: 1-based lines.', properties: { from: { type: 'number', required: true }, count: { type: 'number', required: true } }, fullSurfaceOnly: true },
   bytes: { type: 'object', description: 'Window: UTF-8 bytes of size.total_bytes, not body_bytes (snapped to a line start).', properties: { offset: { type: 'number', required: true }, length: { type: 'number', required: true } }, fullSurfaceOnly: true },
   around_chunk_id: { type: 'number', description: 'Window around a search hit chunk_id.', fullSurfaceOnly: true },

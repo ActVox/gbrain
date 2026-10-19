@@ -401,7 +401,11 @@ export async function runCapture(engine: BrainEngine | null, args: string[], opt
     requestId = precondition.request_id ?? randomUUID();
     const params = captureParams(parsed, rawBody, { ...precondition, request_id: requestId }, isThinClient(cfg));
     let result: Record<string, unknown>;
-    if (isThinClient(cfg)) {
+    // Wave B: a file larger than one request goes through an upload session (src/cli/commands/append.ts).
+    const upload = parsed.filePath ? await import('../cli/commands/append.ts') : null;
+    if (upload?.captureNeedsUpload(params, isThinClient(cfg))) {
+      result = await upload.uploadCapture(rawBody, parsed, requestId, async () => engine ?? await options.getEngine!());
+    } else if (isThinClient(cfg)) {
       const raw = await callRemoteTool(cfg!, 'capture', params, { timeoutMs: getCliOptions().timeoutMs ?? 30_000, writeWaitMs: currentCliWriteWait().waitMs });
       result = unpackToolResult<Record<string, unknown>>(raw);
     } else {

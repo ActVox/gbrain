@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 243872,
-    "stdoutSha256": "6ee4209e4e99064f148052de48a83f11e600ff47fc3bb720a6a9394bb59e2737",
+    "stdoutBytes": 244059,
+    "stdoutSha256": "83a6204893b0f8284046d66bd6be5a75ff72816cf448a3f054879eb63591c8d0",
     "toolNames": [
       "remember",
       "entity",
@@ -439,7 +439,7 @@
               "type": "number"
             },
             "body": {
-              "description": "auto: whole up to 256 KB, else outline + window. none: revision + size.",
+              "description": "auto: whole up to 256 KB, else outline + window; a window's edit_target is edit_page `within`. none: revision + size + tail_sha256 (append_page expected_tail_sha256).",
               "enum": [
                 "auto",
                 "full",
@@ -568,7 +568,7 @@
         "scope": "read"
       },
       {
-        "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
+        "description": "Complete content REPLACES the whole page: read get_page include_content:true; its revision is expected_revision. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps later, `gbrain serve --http` does not self-sweep). Edits: edit_page; appends: append_page; >3 pages: put_pages.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,
@@ -593,11 +593,11 @@
         "schema": {
           "properties": {
             "allow_empty": {
-              "description": "Allow emptying the page.",
+              "description": "Allow an empty page.",
               "type": "boolean"
             },
             "allow_shrink": {
-              "description": "Allow content under half a >256 KB page.",
+              "description": "Allow content under half a >256 KB page. To add text use append_page, not a re-put; a page over one request goes by begin_page_upload.",
               "type": "boolean"
             },
             "content": {
@@ -626,7 +626,7 @@
               "type": "boolean"
             },
             "ingested_via": {
-              "description": "Server-stamped remotely.",
+              "description": "Server-set remotely.",
               "type": "string"
             },
             "request_id": {
@@ -642,11 +642,11 @@
               "type": "string"
             },
             "source_kind": {
-              "description": "Server-stamped remotely.",
+              "description": "Server-set remotely.",
               "type": "string"
             },
             "source_uri": {
-              "description": "Server-stamped remotely.",
+              "description": "Server-set remotely.",
               "type": "string"
             },
             "wait_ms": {
@@ -1007,7 +1007,7 @@
         "scope": "read"
       },
       {
-        "description": "Change part of a page: prefer this over put_page for small changes. expected_revision is the revision from get_page include_content:true. Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
+        "description": "Change part of a page: prefer this over put_page for small changes. expected_revision: from get_page include_content:true. Each old_text must match exactly once (in `within` if set); applied in order, all or none. Stale revision: revision_conflict.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,

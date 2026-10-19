@@ -260,7 +260,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "outline",
           "window"
         ],
-        "description": "auto: whole up to 256 KB, else outline + window. none: revision + size.",
+        "description": "auto: whole up to 256 KB, else outline + window; a window's edit_target is edit_page `within`. none: revision + size + tail_sha256 (append_page expected_tail_sha256).",
         "fullSurfaceOnly": true
       },
       "lines": {
@@ -381,7 +381,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "put_page",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Complete content REPLACES the whole page: read get_page include_content:true; send its revision as expected_revision. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps them later, `gbrain serve --http` does not self-sweep). Edits: edit_page; >3 pages: put_pages.",
+    "description": "Complete content REPLACES the whole page: read get_page include_content:true; its revision is expected_revision. Keep a request_id UUID; retry with identical arguments. Remote callers: existing-page [[links]] become mentions; typed links are skipped (stdio `gbrain serve` sweeps later, `gbrain serve --http` does not self-sweep). Edits: edit_page; appends: append_page; >3 pages: put_pages.",
     "params": {
       "source_id": {
         "type": "string",
@@ -422,12 +422,12 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "allow_empty": {
         "type": "boolean",
         "required": false,
-        "description": "Allow emptying the page."
+        "description": "Allow an empty page."
       },
       "allow_shrink": {
         "type": "boolean",
         "required": false,
-        "description": "Allow content under half a >256 KB page.",
+        "description": "Allow content under half a >256 KB page. To add text use append_page, not a re-put; a page over one request goes by begin_page_upload.",
         "fullSurfaceOnly": true
       },
       "drop_timeline": {
@@ -441,17 +441,17 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "source_kind": {
         "type": "string",
-        "description": "Server-stamped remotely.",
+        "description": "Server-set remotely.",
         "required": false
       },
       "source_uri": {
         "type": "string",
-        "description": "Server-stamped remotely.",
+        "description": "Server-set remotely.",
         "required": false
       },
       "ingested_via": {
         "type": "string",
-        "description": "Server-stamped remotely.",
+        "description": "Server-set remotely.",
         "required": false
       }
     },
@@ -785,7 +785,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "the diff is the caller's own authorized view of the page it just edited (the get_page boundary), secret-redacted when created because the receipt retains it"
     },
-    "description": "Change part of a page: prefer this over put_page for small changes. expected_revision is the revision from get_page include_content:true. Each old_text must match exactly once; edits apply in order, all or none. Stale revision: revision_conflict.",
+    "description": "Change part of a page: prefer this over put_page for small changes. expected_revision: from get_page include_content:true. Each old_text must match exactly once (in `within` if set); applied in order, all or none. Stale revision: revision_conflict.",
     "params": {
       "slug": {
         "type": "string",
