@@ -4099,10 +4099,10 @@
       {
         "handler": "absent",
         "idempotent": true,
-        "name": "commit_notifier",
+        "name": "persistence_request_transient_retries",
         "sql": {
-          "length": 1716,
-          "sha256": "92b10ec00767e181fc76c3e945a9085e37c16f06ba6235512ae6b55c409ba695"
+          "length": 208,
+          "sha256": "3ab9a442fb2e2c6999cbca77df5bf5acf77aed37cf3c3de8547becbd7addeff0"
         },
         "sqlFor": "absent",
         "transaction": "absent",
