@@ -18,6 +18,7 @@ Under contract v1 an `error` value never changes. Where a surface sends a legacy
 | `invalid_params` | `fact_withdrawn` | `remember` refused a claim that was explicitly forgotten for this subject (wire `invalid_params`, message prefix `fact_withdrawn:`); nothing was saved. |
 | `permission_denied` | `insufficient_scope` | The connection lacks the OAuth scope the operation requires. |
 | `invalid_params` | `invalid_fence` | A facts or takes fence in the page cannot be imported without dropping or guessing rows, so the page (or the file) was not written. |
+| `invalid_params` | `link_cursor_invalid` | A get_links / get_backlinks cursor was not one this listing returned: it belongs to another slug, direction, source scope or filter set, or is not a cursor. |
 | `invalid_params` | `not_found` | The requested resource does not exist or is not visible to this caller. |
 | `page_identity_changed` | `page_not_found` | No page with that slug exists in the selected source. |
 | `invalid_params` | `page_too_large_for_inline` | The whole page does not fit one result on this connection, so get_page did not return its body. |
@@ -171,6 +172,38 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The change needs the owner's explicit approval before it can proceed. | The step needs the user's decision before it runs. | Stop and ask the user; re-run only with the authorization the message names. | user | `repeat the read that failed` | 1 | no |
+
+### atom_drain_incomplete
+
+<a id="atom_drain_incomplete"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An atom drain (`gbrain dream --drain`) stopped with atoms still to extract, or with its backlog count unknown; the batches it finished stay committed and running it again continues. | The drain is bounded by its window, batch cap, per-run budget, job deadline and the cycle lock, and a backlog count that fails is never read as drained; each of these stops can clear on the next run. | Run the printed resume_command again (a budget stop also names the cap it hit). Run: gbrain doctor --only extract_atoms_backlog --json | agent | `gbrain doctor --only extract_atoms_backlog --json` | 11 | yes |
+
+Reasons: `window`, `deadline`, `lock_lost`, `aborted`, `max_batches`, `budget`, `count_unavailable`.
+
+### atom_drain_no_progress
+
+<a id="atom_drain_no_progress"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An atom drain batch extracted nothing and the backlog count did not fall, so the drain stopped instead of spending in a loop; batches it finished earlier stay committed. | What is left is failing, skipped or ineligible, so running the drain unchanged repeats the same empty batch. | Do not rerun this drain unchanged. Run gbrain doctor --json on the brain host and ask the operator to resolve the reported extraction blocker; earlier successful batches remain committed. Run: gbrain doctor --json | host_admin | `gbrain doctor --only extract_atoms_backlog --json` | 1 | no |
+
+### atom_drain_provider_failure
+
+<a id="atom_drain_provider_failure"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Every item an atom drain batch attempted failed at the model provider, so the drain stopped; batches it finished earlier stay committed. | An auth, billing, unknown-model or content-block failure repeats on every retry until someone changes the key, plan, model or content, so it is not retryable. A rate limit or a transient failure (5xx, timeout, network, or a cause the provider did not name) can clear by itself, so those reasons stay retryable on exit 11. | For auth, billing or model_not_found, ask the operator to fix the provider key, plan or model named in last_error, then run the drain again; content_block items are skipped once they fail repeatedly. For rate_limit or transient, run the drain again later. Run: gbrain models --json | agent | `gbrain doctor --only extract_atoms_backlog --json` | 1 | no |
+
+Reasons: `auth`, `billing`, `model_not_found`, `content_block`, `rate_limit`, `transient`.
+
+Override: reason `rate_limit`: retryable, exit 11, retryable.
+
+Override: reason `transient`: retryable, exit 11, retryable.
 
 ### autopilot_job_owned_by_other_brain
 
@@ -543,6 +576,14 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Google connect credential error: client json wrong type. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
+
+### client_not_found
+
+<a id="client_not_found"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| No OAuth client with this id is registered on this brain, so nothing was read or changed. | A client id is matched exactly; a revoked, deleted or mistyped id has no grant to read or edit. | List the clients with `gbrain auth clients --json` and retry with an existing client id. Do not register a replacement client or rotate credentials for a lookup miss. Run: gbrain auth clients --json | agent | `gbrain auth clients --json` | 1 | no |
 
 ### client_shape_invalid
 
@@ -1215,6 +1256,14 @@ More: [docs/guides/move-to-postgres.md#graduated-datastore](../../docs/guides/mo
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | This migration is bounded to 5,000 active pages per source; split or use a reviewed bulk export. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### extract_write_lost
+
+<a id="extract_write_lost"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A link or timeline write lost during extraction (after the engine's own retries) left its pages unstamped, so they stay due; pages whose writes landed were stamped. | Stamping links_extracted_at for a page whose rows were dropped would hide the loss from every later extraction; leaving it due lets extract --stale, or the cycle's stale drain, write it again. | Run the retry command the message names (gbrain extract --stale with the source id); it re-extracts only the pages still due. Run: gbrain doctor --only links_extraction_lag --json | agent | `gbrain doctor --only links_extraction_lag --json` | 1 | yes |
 
 ### extraction_failed
 
@@ -2142,6 +2191,14 @@ Reasons: `live_holder`, `network_filesystem`, `filesystem_unverified`.
 
 More: [docs/ENGINES.md#legacy-pglite-lock](../../docs/ENGINES.md#legacy-pglite-lock)
 
+### link_cursor_invalid
+
+<a id="link_cursor_invalid"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A get_links / get_backlinks cursor was not one this listing returned: it belongs to another slug, direction, source scope or filter set, or is not a cursor. | A cursor is a link-id position bound to the exact listing that issued it; continuing a different listing from it could skip or repeat edges without saying so. Nothing was read. | Restart the listing with the same slug and filters and no cursor, then pass each next_cursor unchanged. Run: gbrain links '{slug}' | agent | `repeat the read that failed` | 1 | no |
+
 ### local_conflict
 
 <a id="local_conflict"></a>
@@ -2304,6 +2361,16 @@ More: [docs/guides/write-refusals.md#merge_recommended](../../docs/guides/write-
 
 Reasons: `orchestrator_failed`, `orchestrator_threw`, `ledger_write_failed`, `preview_failed`, `schema_failed`.
 
+### migration_host_work_pending
+
+<a id="migration_host_work_pending"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A migration's mechanical checkpoint is recorded, but its stored report still names host work (for v0.53.0 a source's inventory, writer, projection or publication-policy stage, or a brain-level pending action); apply-migrations --list shows it applied_pending_host_work. | The ledger row is complete so the schema work never reruns, and v0.53.0 records apply_migrations_pending on every run because member enrollment is never verified, so the stored report decides (#6796): unenrolled members and sources that opted out are not host work. The next apply-migrations --yes re-check rewrites the report once the work is done. | Run the read-only inventory `gbrain apply-migrations --migration <version> --dry-run --json` on the brain host, do each source's next step it names (ask the user before publishing or activating), then run `gbrain apply-migrations --yes`. Run: gbrain apply-migrations --list --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/shared-brain-skills.md#migrate-an-existing-brain](../../docs/guides/shared-brain-skills.md#migrate-an-existing-brain)
+
 ### migration_lease_lost
 
 <a id="migration_lease_lost"></a>
@@ -2373,6 +2440,16 @@ More: [docs/guides/troubleshooting.md#managed-sync-not-moving](../../docs/guides
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | No brain is configured on this machine. | The request itself was wrong or no longer matches the brain; nothing was changed. | Run `gbrain init --pglite --no-embedding` to create a local keyless brain (or `gbrain init --help` for hosted and Postgres options). | agent | `repeat the read that failed` | 1 | no |
+
+### no_context_ceiling
+
+<a id="no_context_ceiling"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The model has a known price but no known context-token ceiling, so a user-set cost cap cannot bound one call; the job stopped before any provider call. | A user cap is enforced per provider attempt by reserving the most that attempt could cost: its input ceiling times the input price plus its output ceiling times the output price. Some providers (OpenRouter) declare no ceiling for their models, so the reservation has no bound even though the price is registered. | Do not retry unchanged and do not re-register the price. Ask the user whether to rerun without the user cap (the model then runs unmetered under the default cap), or to give the model's context size to the brain-host operator. Run: gbrain pricing list --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#no_context_ceiling](../../docs/guides/write-refusals.md#no_context_ceiling)
 
 ### no_pricing
 
