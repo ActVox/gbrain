@@ -1,26 +1,42 @@
 /**
- * Wave B write operations from the local CLI (spec 6.1, 6.2, 6.5):
- * `gbrain put <slug> --file` reads the page from a file (no stdin), and over
- * one request uploads it in parts; `gbrain append` adds text with
- * append_page, idempotent by --request-id, through an upload session when the
- * text is over one request. Runs the real CLI on PGLite and on Postgres.
+ * Wave B write operations from the local CLI (spec 3.1, 6.1, 6.2, 6.5):
+ * `gbrain put <slug> --file` and `gbrain capture --file` read the page from a
+ * file (no stdin); over the page ceiling the trusted local CLI streams it
+ * through the import's two-pass reader, with no upload session.
+ * `gbrain append` adds text with append_page, idempotent by --request-id,
+ * through an upload session when the text is over one request. Runs the real
+ * CLI on PGLite and on Postgres.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { testBackends } from './helpers/test-backends.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
+import { normalizeForHash } from '../src/core/capture-content.ts';
 
 const CLI = join(import.meta.dir, '../src/cli.ts');
 /** Quotes, backslashes, tabs and other control characters, multi-byte and astral text. */
 const ESCAPE_HEAVY = 'said "hi" \\ path\\to\\x \t tab \u0007 bell é 中文 😀 🧠';
+const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+/** The body `gbrain get` prints after the page's frontmatter block. */
+const printedBody = (stdout: string) => stdout.slice(stdout.indexOf('\n---\n\n') + 6);
+/** A page just over the single-string ceiling. */
+const hugeBody = (title: string) => {
+  const line = `- ${ESCAPE_HEAVY} row\n`;
+  return `# ${title}\n\n` + line.repeat(Math.ceil((PAGE_MAX_BYTES + 1024 * 1024) / Buffer.byteLength(line)));
+};
 
 for (const backend of testBackends()) {
   describe(`CLI page writes (${backend})`, () => {
     let home: string;
     let close: (() => Promise<void>) | undefined;
+    let pg: BrainEngine | undefined;
+    let pglite: PGLiteEngine | undefined;
 
     async function cli(args: string[], stdin?: string) {
       const child = Bun.spawn([process.execPath, '--no-env-file', CLI, ...args], {
@@ -35,19 +51,30 @@ for (const backend of testBackends()) {
       expect(read.code, read.stderr).toBe(0);
       return JSON.parse(read.stdout);
     }
+    /** Reads the brain directly between CLI runs (the PGLite lock is free once the CLI exits). */
+    async function sql<T>(text: string, params: unknown[] = []): Promise<T[]> {
+      if (pg) return pg.executeRaw<T>(text, params);
+      const { database_path } = JSON.parse(readFileSync(join(home, '.gbrain', 'config.json'), 'utf8'));
+      await pglite!.connect({ database_path });
+      try { return await pglite!.executeRaw<T>(text, params); } finally { await pglite!.disconnect(); }
+    }
+    const uploads = async () => (await sql<{ n: number }>("SELECT count(*)::int AS n FROM page_body_stagings WHERE kind = 'upload'"))[0]!.n;
+    const stored = async (slug: string) => (await sql<{ body_storage: string; source_path: string | null; source_uri: string | null; knowledge_revision: string }>(
+      'SELECT body_storage, source_path, source_uri, knowledge_revision FROM pages WHERE slug = $1', [slug]))[0]!;
     const file = (name: string, content: string | Buffer) => { const path = join(home, name); writeFileSync(path, content); return path; };
 
     beforeAll(async () => {
       home = mkdtempSync(join(tmpdir(), `gbrain-cli-page-writes-${backend}-`));
       if (backend === 'postgres') {
-        const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
-        close = pg.close;
-        const [database] = await pg.engine.executeRaw<{ name: string }>('SELECT current_database() AS name');
+        const isolated = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
+        close = isolated.close;
+        pg = isolated.engine;
+        const [database] = await pg.executeRaw<{ name: string }>('SELECT current_database() AS name');
         const url = new URL(process.env.DATABASE_URL!); url.pathname = `/${database.name}`;
-        await pg.engine.disconnect();
         mkdirSync(join(home, '.gbrain'), { recursive: true });
         writeFileSync(join(home, '.gbrain', 'config.json'), JSON.stringify({ engine: 'postgres', database_url: url.toString(), embedding_disabled: true }));
       } else {
+        pglite = new PGLiteEngine();
         const init = await cli(['init', '--pglite', '--no-embedding']);
         expect(init.code, init.stderr).toBe(0);
       }
@@ -113,15 +140,56 @@ for (const backend of testBackends()) {
       expect((await page('notes/big-append')).compiled_truth).toBe(`# Big append\n\nstart\n${text}`.trimEnd());
     }, 300_000);
 
-    test('put --file over the page ceiling streams through an upload session', async () => {
-      const line = `- ${ESCAPE_HEAVY} row\n`;
-      const body = '# Huge\n\n' + line.repeat(Math.ceil((25 * 1024 * 1024) / Buffer.byteLength(line)));
-      const path = file('huge.md', body);
-      const put = await cli(['put', 'notes/huge', '--file', path]);
+    test('local put --file over the page ceiling on a managed brain goes through an upload session, byte-identical', async () => {
+      expect((await sql<{ enabled: boolean }>('SELECT enabled FROM persistence_brain'))[0]!.enabled).toBe(true);
+      const body = hugeBody('Managed huge');
+      const put = await cli(['put', 'notes/managed-huge', '--file', file('managed-huge.md', body)]);
       expect(put.code, put.stderr).toBe(0);
+      expect(await stored('notes/managed-huge')).toMatchObject({ body_storage: 'segmented' });
+      expect(await uploads()).toBeGreaterThan(0);
+      expect(sha(printedBody((await cli(['get', 'notes/managed-huge'])).stdout))).toBe(sha(body));
+    }, 600_000);
+
+    test('local put --file over the page ceiling on an unmanaged brain streams in segmented and byte-identical, with no upload session', async () => {
+      await sql('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      const before = await uploads();
+      const body = hugeBody('Huge');
+      const put = await cli(['put', 'notes/huge', '--file', file('huge.md', body)]);
+      expect(put.code, put.stderr).toBe(0);
+      expect(await stored('notes/huge')).toMatchObject({ body_storage: 'segmented', source_path: null, source_uri: null });
+      expect(await uploads()).toBe(before);
       const read = await cli(['get', 'notes/huge']);
       expect(read.code, read.stderr).toBe(0);
-      expect(createHash('sha256').update(read.stdout).digest('hex')).toBe(createHash('sha256').update(body).digest('hex'));
+      expect(sha(printedBody(read.stdout))).toBe(sha(body));
+      const replacement = file('huge-2.md', hugeBody('Huge v2'));
+      const unconditional = await cli(['put', 'notes/huge', '--file', replacement]);
+      expect(unconditional.code).not.toBe(0);
+      expect(unconditional.stderr).toContain('revision');
+      const replaced = await cli(['put', 'notes/huge', '--file', replacement, '--expected-revision', (await stored('notes/huge')).knowledge_revision]);
+      expect(replaced.code, replaced.stderr).toBe(0);
+      expect(sha(printedBody((await cli(['get', 'notes/huge'])).stdout))).toBe(sha(hugeBody('Huge v2')));
+      expect(await uploads()).toBe(before);
+    }, 600_000);
+
+    test('local capture --file over the page ceiling on an unmanaged brain streams in under the capture slug and frontmatter once the write gate allows it, with no upload session', async () => {
+      const before = await uploads();
+      const raw = hugeBody('Captured');
+      const path = file('captured.md', raw);
+      const gated = await cli(['capture', '--file', path]);
+      expect(gated.code).toBe(1);
+      expect(gated.stderr).toContain('the write gate scans the whole body of a agent_written page');
+      expect((await cli(['config', 'set', 'write_gate.agent_mode', 'off'])).code).toBe(0);
+      const capture = await cli(['capture', '--file', path, '--json']);
+      expect(capture.code, capture.stderr).toBe(0);
+      const receipt = JSON.parse(capture.stdout);
+      const hash = sha(normalizeForHash(raw));
+      expect(receipt).toMatchObject({ content_hash: hash, source_kind: 'capture-cli', slug: `inbox/${new Date().toISOString().slice(0, 10)}-${hash.slice(0, 8)}` });
+      expect(await stored(receipt.slug)).toMatchObject({ body_storage: 'segmented', source_path: null, source_uri: 'cli-file' });
+      expect(await uploads()).toBe(before);
+      const read = await cli(['get', receipt.slug]);
+      expect(read.code, read.stderr).toBe(0);
+      expect(read.stdout).toContain('captured_via: capture-cli');
+      expect(sha(printedBody(read.stdout))).toBe(sha(raw));
     }, 600_000);
   });
 }

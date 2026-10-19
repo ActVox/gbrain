@@ -7,25 +7,31 @@
  * `append` calls append_page with a generated request_id (`--request-id`
  * replays one); text whose append_page request would not fit the smallest
  * transport cap goes through an upload session with mode `append`.
- * `put --file` sends put_page while the page fits one request (the trusted
- * local CLI: the page ceiling; a thin client: the smallest transport cap) and
- * otherwise streams the file through an upload session, never holding it as
- * one string. Every call goes where any other CLI write goes: the remote
- * brain on a thin client, the resident owner when a serve holds the brain,
- * else this process's engine.
+ * `put --file` (and `capture --file`) send one request while the page fits
+ * it (the trusted local CLI: the page ceiling; a thin client: the smallest
+ * transport cap). A larger file on the trusted local CLI streams through the
+ * import's two-pass reader into this process's engine (spec 3.1); a thin
+ * client, a managed brain or one a serve holds takes it through an upload
+ * session. Neither holds the file as one string. Every other call goes where
+ * any CLI write goes: the remote brain on a thin client, the resident owner
+ * when a serve holds the brain, else this process's engine.
  */
 import { createReadStream, readFileSync, statSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import type { BrainEngine } from '../../core/engine.ts';
 import type { CliDispatchContext } from '../command-table.ts';
 import { loadConfig, isThinClient } from '../../core/config.ts';
 import { getCliOptions } from '../../core/cli-options.ts';
 import { currentCliWriteWait } from '../../core/persistence/write-wait.ts';
-import { maybeDelegateLocalOperation } from '../../core/persistence/local-client.ts';
 import { RemoteMcpError } from '../../core/remote-mcp-error.ts';
 import { OperationError, opError } from '../../core/ops/contract.ts';
 import { PAGE_MAX_BYTES } from '../../core/page-size-policy.ts';
+import type { ImportResult } from '../../core/import-file.ts';
+import { FRONTMATTER_HEAD_MAX_BYTES } from '../../core/page-body/limits.ts';
+import { maybeDelegateLocalOperation, residentPersistenceConfig } from '../../core/persistence/local-client.ts';
+import { inspectLockHolder } from '../../core/pglite-lock.ts';
 import { detectBinaryNullByte, detectBinarySignature } from '../../core/capture-content.ts';
 import { readStdinPayload } from '../../core/stdin-read.ts';
 import { finishCliTeardown, setCliExitVerdict, writeStdoutFinal } from '../../core/cli-force-exit.ts';
@@ -279,41 +285,76 @@ export async function run(args: string[], ctx: CliDispatchContext): Promise<void
   }
 }
 
+/** `--file PATH` / `--file=PATH` taken out of put's argv (before a bare `--`), and the args left. */
+function takeFileArg(args: string[]): { path: string | undefined; rest: string[] } {
+  const rest = [...args];
+  for (let i = 0; i < rest.length && rest[i] !== '--'; i++) {
+    if (rest[i] === '--file') return { path: rest[i + 1]?.startsWith('--') ? undefined : rest[i + 1], rest: [...rest.slice(0, i), ...rest.slice(i + 2)] };
+    if (rest[i]!.startsWith('--file=')) return { path: rest[i]!.slice('--file='.length) || undefined, rest: [...rest.slice(0, i), ...rest.slice(i + 1)] };
+  }
+  return { path: undefined, rest };
+}
+
+/** Flags whose put_page semantics need the whole page as one request (or, for dry_run, write nothing). */
+const ONE_REQUEST_ONLY = ['allow_empty', 'allow_shrink', 'drop_timeline', 'dry_run'] as const;
+
 /**
- * `gbrain put <slug> --file PATH`: `params` are put's parsed CLI params with
- * `file`. Returns false after filling `content` from the file when the page
- * fits one put_page request, so the ordinary put dispatch sends it; returns
- * true after uploading a larger file through an upload session and printing
- * the receipt with `format`.
+ * `gbrain put <slug> --file PATH` (main.ts runs it before parsing put's args).
+ * A page that fits one put_page request (the page ceiling locally, the
+ * smallest transport cap on a thin client) returns false with `args` now
+ * carrying `--content=<file>`, so the ordinary put dispatch sends it. A larger
+ * file returns true after writing: on the trusted local CLI it streams through
+ * the import's two-pass reader into this process's engine (spec 3.1), never
+ * held as one string, when the brain is unmanaged; a thin client, a managed
+ * brain (its coordinator admits a file only from the source root) or one a
+ * serve holds takes it through an upload session, still streamed in parts.
+ * Failures are rendered here, so true also means "done".
  */
-export async function runPutFile(params: Record<string, unknown>, opts: {
+export async function runPutFile(op: { name: string }, args: string[], opts: {
+  parse: (op: never, args: string[]) => Record<string, unknown>;
   connect: () => Promise<BrainEngine>;
   format: (op: string, result: unknown, params: Record<string, unknown>) => string;
 }): Promise<boolean> {
-  const path = String(params.file);
-  delete params.file;
-  let size: number;
-  try { size = statSync(path).size; } catch (error) {
-    throw usageError(`Cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`, 'Pass --file a readable text file.');
-  }
-  const thin = isThinClient(loadConfig());
-  if (size <= PAGE_MAX_BYTES) {
-    const content = decodeTextInput(readFileSync(path), path);
-    const fitsOneRequest = !thin || toolCallFrameBytes('put_page', { ...params, content }) <= DIRECT_FRAME_MAX_BYTES;
-    if (fitsOneRequest) { params.content = content; return false; }
-  }
-  const json = params.json === true;
-  const requestId = typeof params.request_id === 'string' ? params.request_id : randomUUID();
-  const source = typeof params.source === 'string' ? params.source : typeof params.source_id === 'string' ? params.source_id : null;
-  const caller = pageWriteCaller(opts.connect, source);
+  const { path, rest } = takeFileArg(args);
+  let params: Record<string, unknown> = {};
+  let caller: PageWriteCaller | undefined;
+  let engine: Promise<BrainEngine> | undefined;
+  const connect = () => engine ??= opts.connect();
   try {
-    const oneRequestOnly = ['allow_empty', 'allow_shrink', 'drop_timeline', 'force', 'dry_run'].filter(key => params[key] !== undefined && params[key] !== false);
-    if (oneRequestOnly.length) {
-      throw usageError(`${oneRequestOnly.map(key => `--${key.replace(/_/g, '-')}`).join(', ')} apply only to a page that fits one put_page request.`,
-        `${path} is larger than one request, so it goes through an upload session, which replaces a page only with --expected-revision. Drop those flags.`);
+    if (!path) throw usageError('--file requires a value.', 'Pass --file a readable text file.');
+    params = opts.parse(op as never, rest);
+    let size: number;
+    try { size = statSync(path).size; } catch (error) {
+      throw usageError(`Cannot read ${path}: ${error instanceof Error ? error.message : String(error)}`, 'Pass --file a readable text file.');
     }
+    const thin = isThinClient(loadConfig());
+    if (size <= PAGE_MAX_BYTES) {
+      const content = decodeTextInput(readFileSync(path), path);
+      if (!thin || toolCallFrameBytes('put_page', { ...params, content }) <= DIRECT_FRAME_MAX_BYTES) {
+        args.splice(0, args.length, `--content=${content}`, ...rest);
+        return false;
+      }
+    }
+    const flags = ONE_REQUEST_ONLY.filter(key => params[key] !== undefined && params[key] !== false);
+    if (flags.length) {
+      throw usageError(`${flags.map(key => `--${key.replace(/_/g, '-')}`).join(', ')} apply only to a page that fits one put_page request.`, `${path} is larger than one request. Drop those flags.`);
+    }
+    const source = typeof params.source === 'string' ? params.source : typeof params.source_id === 'string' ? params.source_id : null;
+    if (!thin) {
+      const streamed = await streamLocalPage(connect, path, String(params.slug), source, params);
+      if (streamed) {
+        const output = opts.format('put_page', streamed, params);
+        if (output) await writeStdoutFinal(output);
+        return true;
+      }
+    }
+    if (params.force === true && typeof params.expected_revision !== 'string') {
+      throw usageError('--force applies only to a page that fits one put_page request or streams locally.', `${path} goes through an upload session, which replaces a page only with --expected-revision. Pass the page's revision (gbrain get --json).`);
+    }
+    caller = pageWriteCaller(connect, source, { teardown: false });
     const result = await uploadPageBody(caller.call, {
-      slug: params.slug, mode: typeof params.expected_revision === 'string' ? 'replace' : 'create', request_id: requestId,
+      slug: params.slug, mode: typeof params.expected_revision === 'string' ? 'replace' : 'create',
+      request_id: typeof params.request_id === 'string' ? params.request_id : (params.request_id = randomUUID()),
       ...(typeof params.expected_revision === 'string' ? { expected_revision: params.expected_revision } : {}),
     }, await fileUploadBody(path), {
       transient: caller.transient,
@@ -322,11 +363,124 @@ export async function runPutFile(params: Record<string, unknown>, opts: {
     const output = opts.format('put_page', result, params);
     if (output) await writeStdoutFinal(output);
   } catch (error) {
-    await reportFailure(error, 'put', json, requestId);
+    await reportFailure(error, 'put', params.json === true, typeof params.request_id === 'string' ? params.request_id : undefined);
   } finally {
-    await caller.close();
+    await caller?.close();
+    if (engine) await finishCliTeardown({ engine: await engine, drainTimeoutMs: 1000 });
   }
   return true;
+}
+
+/**
+ * A local file over the page ceiling written as page `slug` by the import's
+ * two-pass streamed reader (spec 3.1) in this process's engine, with put's
+ * revision precondition (`expected_revision` / `force` in `params`; a new
+ * page needs neither). `head` replaces the file's first `skip` bytes
+ * (capture's merged frontmatter). Returns null when this process cannot be the
+ * writer: a serve holds the PGLite brain, or the brain is managed (its
+ * coordinator takes a file outside the source root only through an upload
+ * session).
+ */
+async function streamLocalPage(connect: () => Promise<BrainEngine>, path: string, slug: string, source: string | null, params: Record<string, unknown>,
+  content: { head?: { skip: number; bytes: Uint8Array }; provenance?: { source_kind: string | null; source_uri: string | null; ingested_via: string | null } } = {}): Promise<ImportResult | null> {
+  const resident = residentPersistenceConfig(loadConfig());
+  if (resident?.engine === 'pglite' && resident.database_path && !resident.database_url) {
+    const holder = inspectLockHolder(resident.database_path);
+    if (holder.held && holder.pid !== process.pid) return null;
+  }
+  const engine = await connect();
+  const [{ readManagedMode }, { readPageBodyPolicy }, { slugifyPath }, { resolveSourceWithTier }, { assertPageRevision }, { engineMutationPrecondition, parseMutationPrecondition }, { importStreamedMarkdownFile }] = await Promise.all([
+    import('../../core/persistence/managed-mode.ts'), import('../../core/page-body/limits.ts'), import('../../core/sync.ts'), import('../../core/source-resolver.ts'),
+    import('../../core/page-state/types.ts'), import('../../core/persistence/preconditions.ts'), import('../../core/page-body/streamed-import.ts')]);
+  if (await readManagedMode(engine)) return null;
+  const policy = await readPageBodyPolicy(engine);
+  const stat = statSync(path);
+  if (!policy.segmented || stat.size > policy.maxBytes) {
+    throw opError('invalid_params', `File too large (${stat.size} bytes, max ${policy.segmented ? policy.maxBytes : PAGE_MAX_BYTES}).`,
+      `${path} is over the single-string page ceiling and ${policy.segmented ? 'over pages.max_bytes' : 'segmented page storage (pages.segmented_storage) is off'}, so nothing was written. Split the file into smaller pages.`);
+  }
+  const relativePath = `${slug}.md`;
+  if (!slug || slugifyPath(relativePath) !== slug) {
+    throw usageError(`'${slug}' is not a canonical page slug.`, `A page over the single-string ceiling is written under its canonical slug; use '${slugifyPath(relativePath)}'.`);
+  }
+  const { source_id: sourceId } = await resolveSourceWithTier(engine, source);
+  assertPageRevision(await engine.readPageSnapshot(slug, { sourceId, includeDeleted: true }), engineMutationPrecondition(parseMutationPrecondition(params)));
+  const result = await importStreamedMarkdownFile(engine, resolve(path), relativePath, { sourceId, inferFrontmatter: false, content }, stat, policy);
+  if (result.status === 'skipped' && result.error) {
+    throw opError(result.refusal?.code === 'invalid_frontmatter' ? 'invalid_frontmatter' : 'invalid_params', result.error,
+      `${path} was not written as ${slug}: fix what the message names (or split the file into smaller pages) and run the command again.`);
+  }
+  return result;
+}
+
+/**
+ * `computeContentHash(normalizeForHash(text))` of a UTF-8 file without holding
+ * it: the BOM and surrounding whitespace dropped, CRLF folded, NFKC applied per
+ * run of whole lines (a newline is a normalization boundary). Null when the
+ * normalized text is empty.
+ */
+export async function normalizedFileHash(path: string): Promise<string | null> {
+  const hasher = createHash('sha256');
+  const decoder = utf8();
+  let pending = '';
+  let started = false;
+  const take = (final: boolean) => {
+    pending = pending.replace(/\r\n/g, '\n');
+    if (!started) { pending = pending.replace(/^\s+/, ''); if (!pending) return; started = true; }
+    const end = pending.search(/\s*$/);
+    const cut = final ? end : pending.lastIndexOf('\n', end - 1) + 1;
+    if (cut > 0) hasher.update(pending.slice(0, cut).normalize('NFKC'));
+    pending = final ? '' : pending.slice(cut);
+  };
+  try {
+    for await (const chunk of createReadStream(path)) { pending += decoder.decode(chunk as Buffer, { stream: true }); take(false); }
+    pending += decoder.decode();
+  } catch (error) {
+    if (error instanceof TypeError) throw notUtf8(path);
+    throw error;
+  }
+  take(true);
+  return started ? hasher.digest('hex') : null;
+}
+
+/** A capture's receipt fields, for capture.ts printReceipt. */
+export interface StreamedCapture { slug: string; status?: string; chunks?: number; content_hash: string }
+
+/**
+ * `gbrain capture --file` over the page ceiling on the trusted local CLI:
+ * the capture op's slug (from the normalized content hash) and frontmatter
+ * merge are computed from a streamed hash and the file head, and the body
+ * streams through the import's reader (spec 3.1). Null when this process
+ * cannot be the writer (a serve holds the brain, or it is managed): the caller
+ * reads the file and takes the upload path.
+ */
+export async function streamLocalCapture(path: string, input: CaptureUploadInput & { request_id?: string }, connect: () => Promise<BrainEngine>): Promise<StreamedCapture | null> {
+  const handle = await open(path, 'r');
+  let head: Buffer;
+  try {
+    head = Buffer.alloc(Math.min(FRONTMATTER_HEAD_MAX_BYTES, (await handle.stat()).size));
+    head = head.subarray(0, (await handle.read(head, 0, head.length, 0)).bytesRead);
+  } finally { await handle.close(); }
+  assertTextHead(head.subarray(0, 8192), path);
+  const bom = head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf ? 3 : 0;
+  const lineEnd = head.lastIndexOf(0x0a);
+  if (lineEnd < bom) throw opError('invalid_params', `${path} has no line break in its first ${FRONTMATTER_HEAD_MAX_BYTES} bytes.`, 'A capture this large is written by its head and its streamed body; add line breaks to the file and capture it again.');
+  let headText: string;
+  try { headText = utf8().decode(head.subarray(bom, lineEnd + 1)); } catch { throw notUtf8(path); }
+  if (/^---\r?\n/.test(headText) && !/\n---\r?\n/.test(headText)) {
+    throw opError('invalid_frontmatter', `${path}'s frontmatter does not close within its first ${FRONTMATTER_HEAD_MAX_BYTES} bytes.`, 'Close the frontmatter block with a --- line near the top of the file, then capture it again.');
+  }
+  const contentHash = await normalizedFileHash(path);
+  if (!contentHash) throw opError('invalid_params', 'Capture requires nonempty text.', `${path} is empty or whitespace, so nothing was captured.`);
+  const { explicitCaptureType, mergeCaptureFrontmatter, slugPrefixForType } = await import('../../core/capture-content.ts');
+  const type = explicitCaptureType(headText, input.type) ?? 'note';
+  const slug = input.slug?.toLowerCase() ?? `${slugPrefixForType(type)}/${new Date().toISOString().slice(0, 10)}-${contentHash.slice(0, 8)}`;
+  const merged = mergeCaptureFrontmatter(headText, { type, capturedVia: 'capture-cli',
+    ...Object.fromEntries((['who', 'what', 'where', 'kind', 'depth'] as const).filter(key => input[key] !== undefined).map(key => [key, input[key]])) });
+  const result = await streamLocalPage(connect, path, slug, input.source ?? null,
+    { ...(input.expected_revision ? { expected_revision: input.expected_revision } : {}), ...(input.force ? { force: true } : {}) },
+    { head: { skip: lineEnd + 1 - bom, bytes: Buffer.from(merged, 'utf8') }, provenance: { source_kind: null, source_uri: 'cli-file', ingested_via: null } });
+  return result && { slug: result.slug, status: result.status, chunks: result.chunks, content_hash: contentHash };
 }
 
 /** The capture options an upload of a large capture honors (capture.ts RunOpts). */

@@ -529,12 +529,11 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
 
   // v0.31.1 (Issue #734, CDX-1): parse CLI args BEFORE engine connect so
   // the routing seam below can decide local-vs-remote without paying a
-  // PGLite migration replay on thin-client installs. The arg parser, image
-  // transform, and required-param check are all engine-free; refactoring
-  // them out of the engine try/catch is safe and unlocks routing.
+  // PGLite migration replay on thin-client installs. The arg parser, image transform and required-param
+  // check are engine-free, so they run outside the engine try/catch. Wave B: put --file runs first (cli/commands/append.ts).
+  if (op.name === 'put_page' && subArgs.some(a => /^--file(=|$)/.test(a)) && await (await import('./commands/append.ts')).runPutFile(op, subArgs, { parse: parseOpArgs, connect: () => connectEngine(), format: formatResult })) return;
   const params = parseOpArgs(op, subArgs);
 
-  if (op.name === 'put_page' && typeof params.file === 'string' && await (await import('./commands/append.ts')).runPutFile(params, { connect: () => connectEngine(), format: formatResult }).catch((e: unknown) => exitCliError(e, command))) return; // Wave B: content from the file, or an upload over one request
   // #3513: stdin fill moved out of parseOpArgs so a non-TTY stdin with no
   // piped input can't block the parse forever — the bounded read leaves the
   // param unset on timeout and the required-param check below fails fast.
@@ -1061,7 +1060,6 @@ export function parseOpArgs(op: Operation, args: string[]): Record<string, unkno
           params[key] = arg.slice(eq + 1) !== 'false';
           continue;
         }
-        if (key === 'file' && op.name === 'put_page') { params.file = arg.slice(eq + 1); continue; }
         const def = op.params[key];
         if (def) {
           const raw = arg.slice(eq + 1);
@@ -1307,7 +1305,7 @@ export function validateCommandFlags(command: string, subArgs: string[]): string
     return findUnknownFlag(subArgs, new Set(legal));
   }
   const op = cliOps.get(command) ?? cliAliases.get(command);
-  if (op) return findUnknownOpFlag(op, subArgs);
+  if (op) return findUnknownOpFlag(op, op.name === 'put_page' ? subArgs.filter((a, i) => !/^--file(=|$)/.test(a) && subArgs[i - 1] !== '--file') : subArgs); // put --file: cli/commands/append.ts
   return null; // unknown command — the dispatcher's own error handles it
 }
 
@@ -1368,7 +1366,6 @@ export function findUnknownOpFlag(op: OperationMeta, args: string[]): string | n
       const positive = rawKey.slice(3).replace(/-/g, '_');
       if (op.params[positive]?.type === 'boolean') continue;
     }
-    if (rawKey === 'file' && op.name === 'put_page') { if (m[2] === undefined) i++; continue; } // Wave B: put --file (cli/commands/append.ts runPutFile), never a wire param
     const key = rawKey.replace(/-/g, '_');
     const paramDef = op.params[key];
     if (paramDef) {
@@ -2932,7 +2929,6 @@ async function completeEngineStartup(engine: BrainEngine): Promise<void> {
 
 /** CLI-only usage examples appended to `gbrain <command> --help`. */
 const OP_HELP_EXAMPLES: Record<string, string[]> = {
-  put_page: ['gbrain put notes/acme-example --file notes.md   # from a file (one over a request uploads in parts); to add to a page: gbrain append'],
   get_links: [
     'gbrain links people/alice-example                    # resolved source (every federated source when unpinned)',
     'gbrain links people/alice-example --source business  # one source',
