@@ -12,7 +12,7 @@ import { gbrainPath as gbrainHomePath, loadConfig, loadConfigFileOnly } from '..
 import { join } from 'path';
 import { loadPreferences } from '../core/preferences.ts';
 import { registerCleanup } from '../core/process-cleanup.ts';
-import { dispatchAutopilotTick } from './autopilot-dispatch.ts';
+import { dispatchAutopilotTick, sleepWatchingHeads } from './autopilot-dispatch.ts';
 import { runNightlyQualityProbeStep, runParserProbeStep } from './autopilot-probes.ts';
 import { resolveChildCliInvocation } from '../core/minions/job-isolation.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
@@ -63,6 +63,8 @@ export interface AutopilotDaemonState {
   lastFullCycleAt: number;
   /** Log the pause/resume transition once each, not every poll. */
   pausedAnnounced: boolean;
+  /** GBRA-133 2a.4: per source, the checkout HEAD this daemon last dispatched (or decided) a freshness sync for. */
+  freshnessHeads: Map<string, string>;
 }
 
 export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): Promise<void> {
@@ -141,6 +143,7 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
     noWorkerConsecutiveIdle: 0,
     lastFullCycleAt: 0,
     pausedAnnounced: false,
+    freshnessHeads: new Map(),
   };
   let childSupervisor: ChildWorkerSupervisor | null = null;
   const processingState = spawnManagedWorker ? new OwnerProcessingState('autopilot', 'default') : null;
@@ -338,8 +341,9 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
     await runNightlyQualityProbeStep(engine, cfg);
     await runParserProbeStep(engine, cfg);
 
-    // Wait for next cycle
-    await new Promise(r => setTimeout(r, interval * 1000));
+    // Wait for next cycle (HEAD-driven between ticks when sync.on_commit is on).
+    if (useMinionsDispatch) await sleepWatchingHeads(engine, state, { sleepMs: interval * 1000, baseInterval, jsonMode });
+    else await new Promise(r => setTimeout(r, interval * 1000));
   }
 }
 
