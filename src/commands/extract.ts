@@ -1817,10 +1817,11 @@ export async function extractTimelineForSlugs(
       const content = readFileSync(filePath, 'utf-8');
       const entries = extractTimelineFromContent(content, slug);
       await retractRemovedTimelineEntries(engine, slug, opts?.sourceId ?? 'default', content);
-      processed.push(slug);
       for (const entry of entries) {
-        try { await addProjectedTimelineEntry(engine, entry.slug, { date: entry.date, source: entry.source, summary: entry.summary, detail: entry.detail }, entryOpts); created++; } catch { /* skip */ }
+        await addProjectedTimelineEntry(engine, entry.slug, { date: entry.date, source: entry.source, summary: entry.summary, detail: entry.detail }, entryOpts);
+        created++;
       }
+      processed.push(slug);
     } catch (e) { errors.push({ slug, error: e instanceof Error ? e.message : String(e) }); }
   }
   return { created, processed, ...(errors.length ? { errors } : {}) };
