@@ -11,7 +11,9 @@
  *                      `ubi-runner.sh usage`; 4 when the quota is busy)
  *   --size SIZE        Ubicloud size (default standard-16)
  *   --slots N          concurrent work slots per VM (default: half of --size's vCPUs)
- *   --location LOC     Ubicloud location (default eu-central-h1)
+ *   --location LOC     Ubicloud location (default eu-central-h1). A full gate
+ *                      runs only there; another location needs --lanes and
+ *                      is a diagnostic run, never gate evidence
  *   --image IMAGE      boot image (default: UBI_CI_IMAGE, else stock Ubuntu 24.04);
  *                      gbrain-ci@latest is the prebaked machine image
  *                      scripts/ubicloud/build-ci-image.sh builds
@@ -40,7 +42,8 @@
  * file in test/postgres-unit-arms.txt with DATABASE_URL set, the way
  * persistence-validation's unit-postgres-arms job does, and fails the run when
  * a shard of that job's partition measures over its step timeout; with the unit
- * and slow lanes it does the same for test.yml's unit shards. Durations of every run are
+ * and slow lanes it fails a test.yml unit shard whose mined weight is over
+ * UNIT_SHARD_BUDGET_MS (unitShardCheck) and reports each shard's measured time. Durations of every run are
  * merged into .context/ci-ubicloud/weights.json, which weights the next run.
  *
  * VMs are named ubirun-<owner>-<epoch>-x<expiry epoch>-ciNN<hex> (owner:
@@ -74,7 +77,7 @@ import { runScript, type RunScriptOpts } from "./ubicloud/run-script.ts";
 import { expiringVmName } from "./ubicloud/reap-expired.ts";
 import { buildTypecheckState, portableBuildInfo, typecheckBuildInfo } from "./ubicloud/typecheck-state.ts";
 import { ARM_SHARDS, ARM_STEP_TIMEOUT_MS, ARM_WEIGHTS, ARM_WORKERS, armMakespan, armShards, readArmsList } from "./postgres-unit-arms.ts";
-import { UNIT_JOB_TIMEOUT_MS, UNIT_SETUP_ALLOWANCE_MS, UNIT_SHARDS, unitShards } from "./sharding.ts";
+import { UNIT_SHARD_BUDGET_MS, UNIT_SHARDS, unitShardPlan } from "./sharding.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const RUNNER = join(ROOT, "scripts/ubicloud/ubi-runner.sh");
@@ -86,6 +89,8 @@ const COMMITTED_WEIGHTS = join(ROOT, "scripts/ubicloud/weights.json");
 const LOCAL_WEIGHTS = join(ROOT, ".context/ci-ubicloud/weights.json");
 const ALL_LANES = ["gitleaks", "verify", "serial", "slow", "unit", "pg-arms", "e2e"] as const;
 const BATCH_TIMEOUT_MS = 20 * 60 * 1000;
+// Test timeouts and the mined shard weights are calibrated on this location's VMs.
+const GATE_LOCATION = "eu-central-h1";
 // Items this heavy are the run's long poles: spread them one per VM so two of
 // them never compete for the same VM's CPUs.
 const HEAVY_MS = 60_000;
@@ -122,7 +127,7 @@ function parseArgs(argv: string[]): Opts {
     vms: 0,
     size: "standard-16",
     slots: 0,
-    location: "eu-central-h1",
+    location: GATE_LOCATION,
     image: process.env.UBI_CI_IMAGE || "stock",
     lanes: new Set(ALL_LANES),
     diff: false,
@@ -150,6 +155,7 @@ function parseArgs(argv: string[]): Opts {
     else usage(`unknown argument ${arg}`);
   }
   for (const lane of opts.lanes) if (!(ALL_LANES as readonly string[]).includes(lane)) usage(`unknown lane ${lane}`);
+  if (opts.location !== GATE_LOCATION && !argv.includes("--lanes")) usage(`a full gate runs only in ${GATE_LOCATION}. Test timeouts and the mined shard weights are calibrated there; on 2026-10-19 us-east-a2 ran about half as fast and timed out tests that pass in ${GATE_LOCATION}, so a full run in ${opts.location} is not gate evidence. Wait for ${GATE_LOCATION} capacity or run bun run ci:local (and report it as local). To run a diagnostic subset in ${opts.location}, pass --lanes.`);
   if (!Number.isInteger(opts.ttlHours) || opts.ttlHours < 0 || opts.ttlHours > 8760) usage("--ttl-hours must be a whole number of hours from 0 (no expiry) to 8760");
   if (!Number.isInteger(opts.vms) || opts.vms < 0 || (opts.vms === 0 && argv.includes("--vms"))) usage("--vms must be a positive integer");
   // One slot per two vCPUs: the whole corpus still fits inside the longest
@@ -556,20 +562,16 @@ async function main() {
     for (const s of armShardReport) console.log(`    ${s.shard}/${ARM_SHARDS}: ${Math.round(s.ms / 1000)}s across ${s.files} files`);
   }
   const overBudget = armShardReport.filter((s) => s.ms > ARM_STEP_TIMEOUT_MS);
-  // The same proof for test.yml's unit shards: test-shard.sh's own partition,
-  // summed from this run's measured unit and slow file durations.
-  const unitShardRoomMs = UNIT_JOB_TIMEOUT_MS - UNIT_SETUP_ALLOWANCE_MS;
-  const unitShardReport = opts.lanes.has("unit") && opts.lanes.has("slow")
-    ? unitShards(ROOT).map((files, i) => {
-      const measured = files.map((file) => results.get(weightKey("unit", file))?.ms ?? results.get(weightKey("slow", file))?.ms);
-      return { shard: i + 1, files: files.length, unmeasured: measured.filter((ms) => ms === undefined).length, ms: measured.reduce<number>((sum, ms) => sum + (ms ?? 0), 0) };
-    })
-    : [];
+  // test.yml's unit shards: the plan test/scripts/unit-shard-budget.test.ts holds (unitShardCheck).
+  const unitCheck = opts.lanes.has("unit") && opts.lanes.has("slow")
+    ? unitShardCheck(ROOT, (file) => results.get(weightKey("unit", file))?.ms ?? results.get(weightKey("slow", file))?.ms)
+    : null;
+  const unitShardReport = unitCheck?.shards ?? [];
+  const unitOverBudget = unitCheck?.overBudget ?? [];
   if (unitShardReport.length) {
-    console.log(`  unit shards (test.yml partition, ${UNIT_SHARDS} shards, ${unitShardRoomMs / 1000}s each after setup):`);
-    for (const s of unitShardReport) console.log(`    ${s.shard}/${UNIT_SHARDS}: ${Math.round(s.ms / 1000)}s across ${s.files} files${s.unmeasured ? ` (${s.unmeasured} not run by this gate)` : ""}`);
+    console.log(`  unit shards (test.yml partition, ${UNIT_SHARDS} shards, mined weight at most ${UNIT_SHARD_BUDGET_MS / 1000}s each; measured here for drift only):`);
+    for (const s of unitShardReport) console.log(`    ${s.shard}/${UNIT_SHARDS}: mined ${Math.round(s.mined / 1000)}s, measured ${Math.round(s.ms / 1000)}s across ${s.files} files${s.unmeasured ? ` (${s.unmeasured} not run by this gate)` : ""}`);
   }
-  const unitOverBudget = unitShardReport.filter((s) => s.ms > unitShardRoomMs);
 
   const timings: Record<string, number> = {};
   for (const r of all) if (r.rc === 0 && r.file !== "-") timings[weightKey(r.lane as Lane, r.file)] = r.ms;
@@ -607,7 +609,7 @@ async function main() {
     exitCode = 1;
   }
   if (unitOverBudget.length) {
-    console.log(`\nunit: ${unitOverBudget.map((s) => `shard ${s.shard}/${UNIT_SHARDS} measured ${Math.round(s.ms / 1000)}s`).join(", ")}, over the ${unitShardRoomMs / 1000}s a test.yml unit shard has inside its job timeout after setup, which would cancel that shard mid-list. Fix: raise UNIT_SHARDS (and both workflow matrices) or speed up the heaviest files, then re-mine scripts/test-weights.json. Docs: docs/TESTING.md#keeping-ci-partitions-balanced`);
+    console.log(`\nunit: ${unitOverBudget.map((s) => `shard ${s.shard}/${UNIT_SHARDS} mined ${Math.round(s.mined / 1000)}s`).join(", ")}, over UNIT_SHARD_BUDGET_MS (${UNIT_SHARD_BUDGET_MS / 1000}s), which test/scripts/unit-shard-budget.test.ts also enforces. Fix: re-mine scripts/test-weights.json, then raise UNIT_SHARDS (and both workflow matrices) or speed up the heaviest files. Docs: docs/TESTING.md#keeping-ci-partitions-balanced`);
     exitCode = 1;
   }
   const expected = totalItems;
@@ -616,7 +618,23 @@ async function main() {
     exitCode = 1;
   }
   console.log(exitCode === 0 ? `\n[ci-ubicloud] All checks passed in ${clock()}.` : `\n[ci-ubicloud] FAILED after ${clock()}.`);
+  if (opts.location !== GATE_LOCATION) console.log(`[ci-ubicloud] diagnostic run in ${opts.location}: not gate evidence (a full gate runs only in ${GATE_LOCATION}).`);
   process.exit(exitCode);
+}
+
+/**
+ * test.yml's unit shards as this gate checks them: the partition and mined weights of unitShardPlan, failing a
+ * shard over UNIT_SHARD_BUDGET_MS exactly as test/scripts/unit-shard-budget.test.ts does. `measured` (this run's
+ * per-file durations) is reported beside the plan and never gates: each item here is its own wrapper and Bun
+ * process (~0.6 s of startup per file) on a shared 16-vCPU VM, not one Bun process per shard on a 4-vCPU runner,
+ * so recent gates measured the same partition at 1.2-2.5x its mined weight.
+ */
+export function unitShardCheck(root: string, measured: (file: string) => number | undefined) {
+  const shards = unitShardPlan(root).map(({ shard, files, ms }) => {
+    const times = files.map(measured);
+    return { shard, files: files.length, mined: ms, unmeasured: times.filter((t) => t === undefined).length, ms: times.reduce<number>((sum, t) => sum + (t ?? 0), 0) };
+  });
+  return { budgetMs: UNIT_SHARD_BUDGET_MS, shards, overBudget: shards.filter((s) => s.mined > UNIT_SHARD_BUDGET_MS) };
 }
 
 function sortedObject(obj: Record<string, number>): Record<string, number> {
