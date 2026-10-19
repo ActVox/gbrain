@@ -29,7 +29,7 @@ import { screeningRequest } from './noop-kernel.ts';
 import { prepareManagedSyncMutation, type SyncIntent } from './sync-prepare.ts';
 import { sha256 } from './digest.ts';
 import { preparationReads } from './group-publish.ts';
-import { importGroupReads } from './import-reads.ts';
+import { importGroupReads, sliceReads } from './import-reads.ts';
 import { PAGE_PURGE_TOMBSTONES_SQL } from './page-purge.ts';
 import { WORKTREE_BINDING_SQL } from './ownership.ts';
 import { SOURCE_TRUST_CONFIG_SQL } from '../trust/channel.ts';
@@ -199,11 +199,17 @@ export function readOnlySameContentScreen(engine: BrainEngine, context: ManagedS
     const authority = await managedSyncAuthority(engine, context.sourceId, context.incarnation, context.root);
     const committed = level.mode === 'committed' ? await readBlobs(level.gitRoot, [...new Set(paths.map(entry => entry.state.level!).filter(Boolean))], 8 * 1024 * 1024) : new Map<string, Buffer>();
     const runId = randomUUID();
-    const pages = importGroupReads(engine, paths.flatMap(entry => entry.slug ? [{ slug: entry.slug, source_id: level.sourceId }] : []));
-    const reads = preparationReads(engine, { snapshot: pages.snapshot, findDuplicate: (sourceId, input) => engine.findDuplicatePage?.(sourceId, input) ?? Promise.resolve(null) }, SCREEN_STABLE_READS);
+    const pages = importGroupReads(engine, paths.flatMap(entry => entry.slug ? [{ slug: entry.slug, source_id: level.sourceId }] : []), { reread: true });
+    const relative = (entry: ShadowPath) => level.scope ? entry.path.slice(level.scope.length + 1) : entry.path;
+    const origins = paths.flatMap(entry => {
+      const origin = level.slugMode === 'source-root' ? relative(entry) : entry.path;
+      return level.slugMode === 'source-root' && level.scope ? [origin, `${level.scope}/${origin}`] : [origin];
+    });
+    const reads = sliceReads(preparationReads(engine, { snapshot: pages.snapshot, findDuplicate: (sourceId, input) => engine.findDuplicatePage?.(sourceId, input) ?? Promise.resolve(null) },
+      SCREEN_STABLE_READS), { sourceId: level.sourceId, pageIds: paths.flatMap(entry => entry.pageId === null ? [] : [entry.pageId]), origins });
     for (const entry of paths) {
       try {
-        const sourceRelative = level.scope ? entry.path.slice(level.scope.length + 1) : entry.path;
+        const sourceRelative = relative(entry);
         const disk = readSyncFile(level.root, sourceRelative);
         const bytes = level.mode === 'committed' ? committed.get(entry.state.level!) ?? null : disk;
         if (!bytes || !entry.slug || entry.pageId === null || entry.revision === null || entry.state.page?.live !== true) { verdicts.set(entry.path, 'unknown'); continue; }

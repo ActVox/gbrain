@@ -7,9 +7,9 @@
  * next pass started the sweep over.
  *
  * Protects:
- * - the sweep's statements grow by a bounded number per legacy page (its pages' own reads and record writes), and no
- *   pass-invariant read (config, source config, binding, root, writer, managed mode, shared packs, purge tombstones)
- *   runs more often for more pages;
+ * - within a slice the sweep's statements do not grow with its legacy pages: each kind of page read (snapshot, origin,
+ *   timeline, takes, chunker fence) and the record writes run once a slice, and no pass-invariant read (config, source
+ *   config, binding, root, writer, managed mode, shared packs, purge tombstones) runs more often for more pages;
  * - a pass stopped mid-sweep keeps the records of the slices it finished: the next pass screens only the rest, records
  *   the first full sweep and leaves no legacy page unverified.
  *
@@ -27,6 +27,11 @@ import { drainProjections } from '../src/core/page-state/projections.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
 import { LEGACY_SWEEP_SLICE } from '../src/core/persistence/sync-pass-apply.ts';
+import { sliceReads } from '../src/core/persistence/import-reads.ts';
+import { STORED_TIMELINE_SQL, TAKE_COLLISIONS_SQL } from '../src/core/persistence/canonical-projections.ts';
+import { SYNC_ORIGIN_PAGES_SQL } from '../src/core/persistence/sync-origin.ts';
+import { SAFE_FENCE_SQL } from '../src/core/page-state/projections.ts';
+import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../src/core/takes-fence.ts';
 import { MANAGED_SYNC_PASS_OP } from '../src/core/persistence/sync-pass-row.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
@@ -42,8 +47,12 @@ const setupNotes = (count: number) => ({ root }: { root: string }) => {
   for (const name of names(count)) writeFileSync(join(root, `notes/${name}.md`), `---\ntype: concept\ntitle: notes/${name}\n---\n\nThe committed body of notes/${name}.\n`);
   git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'notes');
 };
-/** Statements a legacy page may add to its sweep: its own five reads (origin, snapshot, chunker fence, timeline, takes) plus headroom; about 18 before GBRA-108. */
-const PER_PAGE_BUDGET = 6;
+/**
+ * Statements a legacy page may add to its sweep: none. Its slice reads each kind once (snapshot, origin, timeline, takes,
+ * chunker fence) and writes its records together, so a slice costs a constant; the half statement a page is headroom for
+ * the background work the counter also sees. A read per page coming back costs at least one a page (about 18 before GBRA-108).
+ */
+const PER_PAGE_BUDGET = 0.5;
 /**
  * Reads every screened preparation repeats; the sweep answers each once per slice, never once per page. The config read is
  * the plain `SELECT … FROM config`: the projection drain's statement, which also reads config, runs on its own timer.
@@ -143,5 +152,28 @@ for (const backend of testBackends()) {
       expect(row.telemetry.summary.legacy_unverified).toBe(0);
       expect(await recorded(engine)).toBe(total);
     }, { databaseUrl, setup: setupNotes(LEGACY_SWEEP_SLICE + 20) }), 300_000);
+
+    test('a slice read answers each page read as the page\'s own statement does, and a read it does not cover runs its own', () => managedBrain(async ({ engine }) => {
+      expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+      const pages = await engine.executeRaw<{ id: number; source_path: string }>("SELECT id, source_path FROM pages WHERE source_id='default' ORDER BY id");
+      const [taken, plain, outside] = [pages.find(p => p.source_path === 'notes/n000.md')!, pages.find(p => p.source_path === 'notes/n001.md')!, pages.find(p => p.source_path === 'notes/n002.md')!];
+      expect(await engine.executeRaw('SELECT 1 FROM takes WHERE page_id=$1', [taken.id])).not.toEqual([]);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      for (const [date, summary] of [['2024-03-02', 'second'], ['2024-01-05', 'first']]) await engine.executeRaw('INSERT INTO timeline_entries(page_id,date,summary) VALUES($1,$2,$3)', [plain.id, date, summary]);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      const slice = sliceReads(engine, { sourceId: 'default', pageIds: [taken.id, plain.id], origins: ['notes/n000.md', 'notes/n001.md'] });
+      const collide = JSON.stringify([{ row_num: 1, claim: 'another claim', kind: 'take', holder: 'brain' }]);
+      const reads: Array<[string, unknown[]]> = [
+        [SYNC_ORIGIN_PAGES_SQL, ['default', ['notes/n000.md']]], [SYNC_ORIGIN_PAGES_SQL, ['default', ['notes/n000.md', 'notes/n001.md']]], [SYNC_ORIGIN_PAGES_SQL, ['default', ['notes/n002.md']]],
+        ...[taken, plain, outside].flatMap(page => [[STORED_TIMELINE_SQL, [page.id]], [SAFE_FENCE_SQL, [page.id]], [TAKE_COLLISIONS_SQL, [page.id, collide, 50]]] as Array<[string, unknown[]]>)];
+      const byId = (rows: unknown[]) => [...rows].sort((a, b) => Number((a as { id?: number }).id ?? 0) - Number((b as { id?: number }).id ?? 0));
+      for (const [sql, params] of reads) expect(byId(await slice.executeRaw(sql, params))).toEqual(byId(await engine.executeRaw(sql, params)));
+      expect((await slice.executeRaw<{ row_num: number }>(TAKE_COLLISIONS_SQL, [taken.id, collide, 50])).map(row => Number(row.row_num))).toEqual([1]);
+      expect((await slice.executeRaw(STORED_TIMELINE_SQL, [plain.id])).map(row => (row as { summary: string }).summary)).toEqual(['first', 'second']);
+    }, { databaseUrl, setup: ({ root }) => {
+      setupNotes(3)({ root });
+      writeFileSync(join(root, 'notes/n000.md'), `---\ntype: concept\ntitle: notes/n000\n---\n\nA page with a take.\n\n${TAKES_FENCE_BEGIN}\n| # | claim | kind | who | weight | since | source |\n|---|---|---|---|---|---|---|\n| 1 | a durable hunch | take | brain | 0.8 | 2026-04 | note |\n${TAKES_FENCE_END}\n`);
+      git(root, 'add', '-A'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'take');
+    } }), 300_000);
   });
 }
