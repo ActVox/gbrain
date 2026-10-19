@@ -73,7 +73,7 @@ import {
 import { runScript, type RunScriptOpts } from "./ubicloud/run-script.ts";
 import { expiringVmName } from "./ubicloud/reap-expired.ts";
 import { buildTypecheckState, portableBuildInfo, typecheckBuildInfo } from "./ubicloud/typecheck-state.ts";
-import { ARM_SHARDS, ARM_STEP_TIMEOUT_MS, ARM_WEIGHTS, armShards, readArmsList } from "./postgres-unit-arms.ts";
+import { ARM_SHARDS, ARM_STEP_TIMEOUT_MS, ARM_WEIGHTS, ARM_WORKERS, armMakespan, armShards, readArmsList } from "./postgres-unit-arms.ts";
 import { UNIT_JOB_TIMEOUT_MS, UNIT_SETUP_ALLOWANCE_MS, UNIT_SHARDS, unitShards } from "./sharding.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
@@ -542,16 +542,17 @@ async function main() {
   for (const r of [...all].sort((a, b) => b.ms - a.ms).slice(0, 8)) console.log(`    ${Math.round(r.ms / 1000)}s ${r.lane} ${r.file}`);
 
   // The pg-arms lane's proof that unit-postgres-arms fits: each shard of the
-  // workflow's own partition, summed from this run's measured file durations.
+  // workflow's own partition, its ARM_WORKERS workers' makespan over this run's
+  // measured file durations (both arms, as the Bun 1.4.0 cell runs them).
   const armShardReport = opts.lanes.has("pg-arms")
     ? armShards(ROOT, arms.files, ARM_SHARDS).map((files, i) => ({
       shard: i + 1,
       files: files.length,
-      ms: files.reduce((sum, file) => sum + (results.get(weightKey("pg-arms", file))?.ms ?? 0), 0),
+      ms: armMakespan(files, (file) => results.get(weightKey("pg-arms", file))?.ms ?? 0),
     }))
     : [];
   if (armShardReport.length) {
-    console.log(`  pg-arms shards (unit-postgres-arms partition, ${ARM_SHARDS} shards, step timeout ${ARM_STEP_TIMEOUT_MS / 1000}s each):`);
+    console.log(`  pg-arms shards (unit-postgres-arms partition, ${ARM_SHARDS} shards of ${ARM_WORKERS} workers, step timeout ${ARM_STEP_TIMEOUT_MS / 1000}s each):`);
     for (const s of armShardReport) console.log(`    ${s.shard}/${ARM_SHARDS}: ${Math.round(s.ms / 1000)}s across ${s.files} files`);
   }
   const overBudget = armShardReport.filter((s) => s.ms > ARM_STEP_TIMEOUT_MS);

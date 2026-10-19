@@ -10,30 +10,18 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.309.0] - 2026-10-19
+## [0.60.308.0] - 2026-10-19
 
-**Classic sync no longer stops, or quietly drops a file, when one file is strange: it holds that file, names the fix, imports the rest and moves the bookmark.** Symlinks, unreadable files, FIFOs, files missing from a sparse checkout, names that aren't valid UTF-8 and renames whose old title the database can't compare each used to block a source for three runs or vanish without a word. A force-pushed upstream is now a typed refusal with a guarded fix instead of a raw Git error, and five smaller errors that stopped sync for good are fixed.
+**The PostgreSQL arms lane of a full Test run costs about 43% less, and every listed test file still runs on PostgreSQL.** Each arms job now runs two files at once, each against its own Postgres service (11 shards instead of 19). The Bun 1.4.3 cell runs only the PostgreSQL side of files that use `testBackends()`, because their PGLite side already runs in the unit and serial lanes on that Bun.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| A symlink, FIFO, device, unreadable (EACCES/EPERM) file or symlink loop in a classic source | blocked the source for three runs, then auto-skipped it, or dropped it silently | held `file_unreadable` with a typed reason and fix; the rest imports and the bookmark advances; re-screened every run |
-| A committed file missing from the checkout (sparse checkout, deletion not committed) | treated as deleted after the pin and dropped silently | held `absent_from_worktree` (`skip_worktree` or `deleted_locally`) |
-| A file name that isn't valid UTF-8 or holds a tab or newline | decoded lossily and checkpointed as deleted, or skipped with a log line naming no path | read as bytes and held `unsupported_path`; the fix renames it without putting the name in an argv |
-| A gitlink (submodule) in the range | left unindexed with nothing said | reported once as `gitlink_not_followed` |
-| A rename whose old title or id holds a NUL byte or broken Unicode | stopped the source | held `rename_identity_unreadable`; an old page that can't be removed is held `rename_reconcile_failed` |
-| A force-pushed or diverged upstream on a classic pull | a raw Git error on every run | `upstream_rewritten` or `upstream_diverged` with both commits, and `gbrain sources reset-upstream <id> --expect-local <sha> --expect-upstream <sha>`, which acts only while both still match |
-| A stored page an older gbrain validated that expands past the S-47 alias bound | stopped its source as `sync_parser_regression`; advice said to pin the last good version | held alone as `frontmatter_alias_limit`; advice never suggests pinning a release older than 0.60.305.0 |
-| A keyless brain | queued embed-backfill jobs that failed | queues none; one already queued ends once as `embed_backfill_skipped` |
-| A managed sync job submitted without pull options | failed permanently | imports HEAD |
-| A mention whose target isn't a valid slug (#7008) | failed the links effect | skipped before locking |
-| `gbrain backup check` on a big dirty tree or slow remote (#6907) | over 1 MiB of status read `probe_failed`; a fixed 2 s remote timeout looked like a missing backup | reads dirty; `backup.remote_timeout_ms` (0.5–30 s); a timeout is counted in `totals.remote_timeouts` and named as one |
-| Managed dream synthesis after upgrading from pre-managed mode (#6924) | re-synthesised old transcripts | counts a completion while its dream-generated page still exists in the same source |
-
-`sync.holds=fail` keeps the old fail-closed classic behaviour. Docs: `docs/guides/write-refusals.md`, `docs/guides/sync-unblock-runbook.md`.
-
-Contributed by @tarush1989, whose #6950 and #6951 found the pre-managed synthesis gap.
+| An arms job | one file at a time, 19 shards per Bun cell | two files at a time on separate Postgres services, heaviest first, 11 shards; each file's output prints whole in its own group with an `ARM_FILE … ms=` line the weight miner reads |
+| The Bun 1.4.3 arms cell | both backends of every listed file | the PostgreSQL side of `testBackends()` files (`--postgres-only`); files that read `DATABASE_URL` directly keep both; the Bun 1.4.0 cell is unchanged |
+| Proving a test still ran after moving lanes | receipts tagged only the arm, so a PGLite test leaving a cell looked like a drop | identities carry the backend the test pins; a PGLite test may move to another arm, a PostgreSQL test only to another database arm; receipts carry the real shard count (shards 9–19 were never checked) |
+| A test that restored a saved `process.exitCode` of `undefined` | the earlier exit code stayed set, so a run could exit 1 with every test passing | 24 sites restore `?? 0`, and a scan fails on a bare restore |
 
 ## [0.60.307.0] - 2026-10-18
 
