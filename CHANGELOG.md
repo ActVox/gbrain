@@ -10,6 +10,19 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.308.0] - 2026-10-19
+
+**The PostgreSQL arms lane of a full Test run costs about 43% less, and every listed test file still runs on PostgreSQL.** Each arms job now runs two files at once, each against its own Postgres service (11 shards instead of 19). The Bun 1.4.3 cell runs only the PostgreSQL side of files that use `testBackends()`, because their PGLite side already runs in the unit and serial lanes on that Bun.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An arms job | one file at a time, 19 shards per Bun cell | two files at a time on separate Postgres services, heaviest first, 11 shards; each file's output prints whole in its own group with an `ARM_FILE … ms=` line the weight miner reads |
+| The Bun 1.4.3 arms cell | both backends of every listed file | the PostgreSQL side of `testBackends()` files (`--postgres-only`); files that read `DATABASE_URL` directly keep both; the Bun 1.4.0 cell is unchanged |
+| Proving a test still ran after moving lanes | receipts tagged only the arm, so a PGLite test leaving a cell looked like a drop | identities carry the backend the test pins; a PGLite test may move to another arm, a PostgreSQL test only to another database arm; receipts carry the real shard count (shards 9–19 were never checked) |
+| A test that restored a saved `process.exitCode` of `undefined` | the earlier exit code stayed set, so a run could exit 1 with every test passing | 24 sites restore `?? 0`, and a scan fails on a bare restore |
+
 ## [0.60.307.0] - 2026-10-18
 
 **A token scoped to one source can no longer read other sources' data through `gbrain remote doctor`.** Fifteen remote doctor checks ignored the caller's source grant, so a source-bound token saw other sources' ids, names, sync lag, embed coverage, failed jobs and page counts (directly, or by subtracting its own share from a brain-wide total). Every check now reads only the sources the token is granted. Local `gbrain doctor` and unscoped admin callers see exactly what they saw before.
