@@ -1547,6 +1547,40 @@ gained a page, lost its target or whose facts changed since the preview reports
 the target is merged rather than copied. It writes the database only; no page is
 rewritten.
 
+<a id="consolidate-ties"></a>
+### Facts consolidation closed at their own effective time
+
+Before this release, when two typed facts stated the same metric, unit and
+period for the same effective time (an amount and its correction recorded on
+one day, or one statement stored twice), the dream `consolidate` phase still
+merged them: the take kept the higher-confidence statement and the other got
+a `valid_until` equal to its own `valid_from`, a zero-length validity that
+quietly marked a real fact superseded (#6023). The phase now leaves such a
+cluster unchanged and reports it under `details.same_instant_clusters` with a
+next step. `gbrain repair consolidate-ties` finds the facts an earlier run
+closed this way and reopens them. It is explicit-only and preview-bound, and it
+never runs on upgrade.
+
+**Say to your agent:** *"Preview the facts consolidation closed at their own
+effective time, then reopen them after I agree."* The agent runs
+`gbrain repair consolidate-ties` and, after you agree, the printed apply command.
+
+```bash
+gbrain repair consolidate-ties                      # preview: one line per closed fact
+gbrain repair consolidate-ties --apply --expect <hash>
+```
+
+A candidate is an active typed fact consolidated into a take whose
+`valid_until` equals its `valid_from`, where another fact in the same take
+states the same metric, unit and period at the same instant. The preview names
+the fact, its tied partners and the take. The apply sets exactly the previewed
+facts back to open validity (consolidation only touched facts that were
+current) and keeps their consolidation mark; a fact that was expired, edited or
+reopened since the preview reports `changed_since_preview` and is kept. The
+take is not changed: if it holds the wrong statement, decide which one is
+current and `gbrain forget` the other. It writes the database only; no page is
+rewritten.
+
 <a id="failed-writes"></a>
 ### Failed writes
 
@@ -1808,7 +1842,18 @@ refuses [`ghost_mass_delete_refused`](error-codes.md#ghost_mass_delete_refused)
 unless `GBRAIN_ALLOW_MASS_RECONCILE=1`). `gbrain sources reconcile --preview` on
 such a page refuses and names the same route, and a held deletion's next step
 in `gbrain sources status` is the `--prefer database` preview. `--all-drifted`
-does not select missing files.
+does not select missing files: it lists each one as `unknown`
+(`unknown_canonical_file_missing`), to preview alone with `--slug`.
+
+<a id="file-drift-unknown"></a>**Pages the live check cannot classify** (#6991). A conflicted page whose
+live file/database comparison returns no verdict (this host is not the
+source's active canonical owner, the page or its canonical file is gone, or
+the check refused or failed) is never repaired and never counted as clean.
+`--all-drifted` and the bare `gbrain repair file-drift` survey list it with
+class `unknown`, count it as `unknown_<reason>`, and say what to do for that
+reason (run on the owner host, decide the content by hand, preview it alone
+with `--slug`, or rerun the conflict audit). No `--class` preview command is
+printed for unknown pages.
 
 The audit gives every drifted page one class: `structurally_additive`,
 `additive_with_suggestions`, `review_required`, `formatting_only` or `error`.

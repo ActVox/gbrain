@@ -2934,6 +2934,7 @@ const OP_HELP_EXAMPLES: Record<string, string[]> = {
     'gbrain links people/alice-example                    # resolved source (every federated source when unpinned)',
     'gbrain links people/alice-example --source business  # one source',
     'gbrain links people/alice-example --all-sources      # every source',
+    'gbrain links people/alice-example --limit 100        # 500 rows per call by default; --cursor <next_cursor> continues, --all reads every row',
   ],
   get_backlinks: [
     'gbrain backlinks companies/acme-example',
