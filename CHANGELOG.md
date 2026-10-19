@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.316.0] - 2026-10-19
+
+**A managed `gbrain sync` of an ordinary (non-company) source now compares the files at HEAD with what the brain holds, instead of replaying commits, so a reset, a revert, a rewritten history or a lost run can no longer leave pages behind, and one bad file holds only itself.** Each pass reads the committed tree, the index and the database, admits only the files whose page differs, proves nothing moved underneath it, and records the checkpoint inside the last import's own transaction. An idle sync with nothing new returns in well under a second.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| History rewritten, reset or reverted, or a sync interrupted | replayed `last_commit..HEAD`; pages could be missed or resurrected | every file at HEAD is compared with its page and import record; what differs is admitted |
+| An idle sync with nothing new | about 3 s on a large Postgres brain (57 ms round trips) | about 0.75 s: no level read at all |
+| One odd file (unreadable, a NUL byte, a broken alias list, a page whose identity changed, a write that fails) | stopped the whole source | that file alone is held with its own code and fix; the rest syncs |
+| The checkpoint after an import | its own write request and transactions | carried by the round's last import publication (fewer statements and transactions per run) |
+| First sync after activating a classic brain with 100k pages on Postgres | did not finish | converges in one pass (about 45 s) |
+| A sync that would delete more than half of a source's pages | ran | refused until confirmed, as `repair ghost-pages` already does |
+
+### New for operators
+
+- `gbrain repair file-drift --held --side <side> [--state <state>]` resolves held file-drift pages one decision at a time.
+- `gbrain repair legacy-twins --source <id>` merges page pairs an older gbrain forked from one file (preview first, then `--apply --expect <hash>`).
+- `sync.admission` (`normal`, `imports_only`, `classify_only`) narrows what a managed sync admits; doctor warns while it is restricted.
+- `gbrain sync status --json` reports `convergence` for a managed source.
+
+No schema migration. Company-brain sources keep their existing sync path.
+
 ## [0.60.314.0] - 2026-10-19
 
 **A master-red incident closed by hand stays closed, and a master push that reused a full run is judged by that run.** Nightly-watch opened a false master-red (#7056) after a maintainer closed the real one by hand: the incident's newest block was still red, a re-run-failed-jobs attempt left an incomplete manifest, and pushes that reused a full run carried no manifest of their own, so nothing could ever clear it. A full `ci:ubicloud` gate now runs only in `eu-central-h1`, where test timeouts and shard weights are calibrated.
