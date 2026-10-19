@@ -1070,8 +1070,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       // A managed import batch also groups on PGLite: its members share one transaction's guards there too.
       if (!group || this.engine.kind !== 'postgres' && !group.startsWith('import:')) return this.execute(row, root);
       // #6007: a put_pages or import batch publishes in groups of at most PAGE_BATCH_GROUP_MAX pages.
-      const followers = (row.transient_interruptions ?? 0) > 0 ? [] : await claimGroupFollowers(this.engine, row, group, syncGroup(group) ? 63 : PAGE_BATCH_GROUP_MAX - 1);
-      if (!followers.length && !lane) return this.execute(row, root);
+      const charged = (row.transient_interruptions ?? 0) > 0;
+      const followers = charged ? [] : await claimGroupFollowers(this.engine, row, group, syncGroup(group) ? 63 : PAGE_BATCH_GROUP_MAX - 1);
+      if (!followers.length && !lane && !charged) return this.execute(row, root);
       claimed.push(...followers);
       const rows = [row, ...followers];
       for (const member of rows) this.executing.add(member.id);
