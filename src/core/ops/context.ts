@@ -460,6 +460,7 @@ export const CLIENT_FENCED_WRITE_OPS: ReadonlySet<string> = new Set([
   'append_page',
   // #6007: put_pages fences every page as the put_page it is submitted as.
   'put_pages',
+  'begin_page_upload', 'upload_page_part', 'get_page_upload', 'commit_page_upload', 'abort_page_upload',
   'put_raw_data', 'think',
   // submit_agent enforces bound_slug_prefixes itself (it is the op the column
   // was introduced for — see its bound_* binding check), so denying it here
