@@ -28,6 +28,18 @@ Under contract v1 an `error` value never changes. Where a surface sends a legacy
 
 ## Codes
 
+### absent_from_worktree
+
+<a id="absent_from_worktree"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Sync held one file that is committed at HEAD but missing from the working tree (a sparse checkout or a skip-worktree bit, or a local deletion that is not committed); the rest of the source synced. | Sync imports from the working tree, so it cannot import a file that is not on disk, and treating it as deleted would drop a committed file silently. Whether the file comes back or its deletion is committed is the user's choice; classic sync re-screens the hold on every run. | Restore the file (git restore -- <path>, or widen the sparse checkout) and the next sync imports it; or commit the deletion with gbrain git commit-push -m <msg> -- <path> and the next sync clears the hold. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `skip_worktree`, `deleted_locally`.
+
+More: [docs/guides/write-refusals.md#absent_from_worktree](../../docs/guides/write-refusals.md#absent_from_worktree)
+
 ### access_command_failed
 
 <a id="access_command_failed"></a>
@@ -1424,6 +1436,18 @@ More: [docs/guides/repair.md#file-removed-during-scan](../../docs/guides/repair.
 
 More: [docs/guides/write-refusals.md#file_too_large](../../docs/guides/write-refusals.md#file_too_large)
 
+### file_unreadable
+
+<a id="file_unreadable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Sync held one file because it is not a readable regular file inside the source root (a symlink, a non-regular file or a permission error); the rest of the source synced. | Sync reads only regular files inside the source root and never follows a symlink, which can point anywhere on the host. The file waits in the hold store instead of failing the run, so it never blocks the source, and classic sync re-screens it on every run. | Replace the symlink with the regular file (or delete it), make the file readable to the account gbrain runs as, or leave it out with sync.exclude; the next gbrain sync --source <source> --no-pull re-screens it. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `symlink_in_repo`, `symlink_outside_root`, `symlink_dangling`, `symlink_loop`, `permission_denied`, `not_regular_file`.
+
+More: [docs/guides/write-refusals.md#file_unreadable](../../docs/guides/write-refusals.md#file_unreadable)
+
 ### fix_not_writable
 
 <a id="fix_not_writable"></a>
@@ -1607,6 +1631,16 @@ More: [docs/guides/shared-checkout-git.md#stuck-rebase](../../docs/guides/shared
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | A git command did not complete. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
+
+### gitlink_not_followed
+
+<a id="gitlink_not_followed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic sync range added a gitlink (a submodule or an embedded repository); sync does not follow it, so the linked repository's files are not indexed. | A gitlink records another repository's commit, not files, and that repository may be absent or uninitialized. The rest of the source syncs; the notice (`gitlinks_not_followed` in the result and one stderr line) comes once, in the run that passes the gitlink. | Nothing is blocked. To index the linked repository, check it out and add the checkout as its own source (gbrain sources add <name> --path <checkout>). | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#gitlink_not_followed](../../docs/guides/write-refusals.md#gitlink_not_followed)
 
 ### graduation_drain_timeout
 
@@ -3218,6 +3252,22 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 Reasons: `rename_source_changed`.
 
+### rename_identity_unreadable
+
+<a id="rename_identity_unreadable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A renamed file is held because the database refused to compare its title or frontmatter id (SQLSTATE 22021/22P05), so sync could not tell whether it is the page it replaces. | Which page a file is cannot be decided without comparing its identity; the old page keeps its id, links, facts and timeline and the rest of the source keeps syncing. | Remove the NUL byte or broken Unicode character from the file title and id, commit, and sync again; the pair is decided again when the file changes. | agent | `repeat the read that failed` | 1 | no |
+
+### rename_reconcile_failed
+
+<a id="rename_reconcile_failed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A renamed file imported, but removing the page of its old name failed unexpectedly, so that page was kept and may be a duplicate. | An unexpected error is deterministic, so a blocking marker would stop the source on every run; the rename is held instead and the rest of the source keeps syncing. | Ask the user before a full sync of the source (gbrain sync --source <source> --full --no-pull), which removes pages whose file is gone, or remove the old page with gbrain delete. | agent | `repeat the read that failed` | 1 | no |
+
 ### request_already_submitted
 
 <a id="request_already_submitted"></a>
@@ -3249,6 +3299,22 @@ Reasons: `rename_source_changed`.
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | This command needs the brain's local database, and this install is a thin client of a remote brain. | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
+
+### reset_upstream_refused
+
+<a id="reset_upstream_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain sources reset-upstream changed nothing: the checkout moved since the reset was proposed, has no upstream, has uncommitted tracked edits, or has local commits that were never on the upstream (named, with the backup ref a reset would create). | The reset is bound to the HEAD and upstream the user agreed to and drops only commits the upstream once had; anything else needs the user's decision first. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `expect_mismatch`, `no_upstream`, `dirty_tree`, `local_commits`.
+
+Override: reason `dirty_tree`: consent, exit 1, not retryable.
+
+Override: reason `local_commits`: consent, exit 1, not retryable.
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
 
 ### response_too_large
 
@@ -4008,6 +4074,18 @@ More: [docs/guides/system-one.md#unpriced_model](../../docs/guides/system-one.md
 |---|---|---|---|---|---|---|
 | Prepared mutation does not match its accepted target. | A capability this request needs is not configured or not reachable on this brain. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. | agent | `gbrain doctor --json` | 1 | no |
 
+### unsupported_path
+
+<a id="unsupported_path"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Classic sync held a file whose name is not valid UTF-8 or contains a control character, so it cannot be a page path; the rest of the source synced. | Git stores a name as bytes and a page path is text, so importing a lossy decoding would store a path no file has. The hold key spells the exact bytes (`/gbrain-bytes/` plus %XX escapes), the message names an item id bound to them, and the hold re-screens on every sync and clears once the name leaves the tree. | Rename the file to a valid UTF-8 name without control characters (the hold's fix spells the old name with printf escapes, never raw bytes), commit, then run gbrain sync --source <source> --no-pull. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `not_utf8`, `control_character`.
+
+More: [docs/guides/write-refusals.md#unsupported_path](../../docs/guides/write-refusals.md#unsupported_path)
+
 ### upstream
 
 <a id="upstream"></a>
@@ -4017,6 +4095,36 @@ More: [docs/guides/system-one.md#unpriced_model](../../docs/guides/system-one.md
 | Google connect credential error: upstream. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
+
+### upstream_diverged
+
+<a id="upstream_diverged"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic source's pull cannot fast-forward: the checkout has commits that are not on the upstream and the upstream moved forward; local HEAD keeps syncing. | The upstream still contains the commit this checkout last pulled, so nothing was force-pushed: bringing the upstream in beside the local commits loses nothing. | Run gbrain git commit-push --pull --path <checkout>, then gbrain sync --source <id>. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
+
+### upstream_rewritten
+
+<a id="upstream_rewritten"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic source's upstream was force-pushed: the upstream commit the checkout last contained is not in the new upstream history, so the pull cannot fast-forward; local HEAD keeps syncing. | Merging would bring back the commits the force-push removed, so the fix resets the checkout to the new upstream after the user agrees, keeping the old history under a backup ref. | Ask the user, then run the gbrain sources reset-upstream <id> --expect-local <sha> --expect-upstream <sha> command doctor sync_failures prints (preview with --dry-run), then gbrain sync --source <id>. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
+
+### upstream_unknown
+
+<a id="upstream_unknown"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A classic source's checkout and upstream diverged and gbrain has no record of the upstream before the fetch (first pull after an upgrade, or the recorded commit is gone), so it cannot tell a force-push from local commits; local HEAD keeps syncing. | Merging could bring back commits a force-push removed; the reset preview names any local commit that was never on the upstream before anything moves. | Ask the user, then preview the gbrain sources reset-upstream command doctor sync_failures prints with --dry-run. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#upstream-rewritten](../../docs/guides/troubleshooting.md#upstream-rewritten)
 
 ### verification_failed
 
