@@ -1399,6 +1399,8 @@ async function runPhaseExtract(
     }
     // Incremental path: if sync told us which slugs changed, only extract those.
     // On a 54K-page brain this turns a 10-minute full walk into a sub-second pass.
+    // PR #6954: a lost link/timeline write leaves its pages unstamped (still due), so the stale drain below retries them; warn, like A-1.
+    let lostWrites: string | null = null;
     const result = await runExtractCore(engine, {
       mode: 'all',
       jsonMode: false, // batch errors stay human-readable on stderr, as in a plain `gbrain extract`
@@ -1408,7 +1410,7 @@ async function runPhaseExtract(
       signal,
       sourceId,
       includeFrontmatter,  // honored on the incremental (slugs) path only
-    });
+    }).catch((e: unknown) => { if ((e as { code?: unknown } | null)?.code !== 'extract_write_lost') throw e; lostWrites = `; ${(e as Error).message}`; return null; });
     const linksCreated = result?.links_created ?? 0;
     const timelineCreated = result?.timeline_entries_created ?? 0;
     const incremental = changedSlugs !== undefined;
@@ -1458,11 +1460,11 @@ async function runPhaseExtract(
     staleDetails = { ...staleDetails, ...(await (await import('./belief/coverage-report.ts')).cycleBeliefReconcile(engine, sourceId)) };
     return {
       phase: 'extract',
-      status: staleWarning ? 'warn' : 'ok',
+      status: staleWarning || lostWrites ? 'warn' : 'ok',
       duration_ms: 0,
       summary: (incremental
         ? `${linksCreated} link(s), ${timelineCreated} timeline entries (incremental: ${changedSlugs.length} slugs)`
-        : `${linksCreated} link(s), ${timelineCreated} timeline entries`) + (staleWarning ?? ''),
+        : `${linksCreated} link(s), ${timelineCreated} timeline entries`) + (lostWrites ?? '') + (staleWarning ?? ''),
       details: {
         linksCreated, timelineCreated,
         pages_processed: result?.pages_processed ?? 0,
