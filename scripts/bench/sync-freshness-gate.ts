@@ -49,8 +49,7 @@ for (const name of names) {
 
 const run = { schema: 'gbrain-sync-freshness-gate/1', at: new Date().toISOString(), machine: machineInfo(), procedure: 'p50 of reps 1..10 of 11 (rep 0 discarded), 50 ms probe, 10k pages', cells: results };
 const out = flag('out', '');
-if (out) writeFileSync(resolve(out), JSON.stringify(run, null, 2) + '
-');
+if (out) writeFileSync(resolve(out), JSON.stringify(run, null, 2) + '\n');
 if (WRITE) {
   if (results.some(r => r.p50_ms === null)) { console.error('not writing a baseline: ' + results.filter(r => r.p50_ms === null).map(r => r.cell + ' (' + r.reason + ')').join(', ')); process.exit(1); }
   writeFileSync(WRITE, JSON.stringify({ schema: 'gbrain-sync-freshness-baseline/1', machine_class: flag('machine-class', 'unspecified'), measured_at: run.at, machine: run.machine,
