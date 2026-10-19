@@ -77,10 +77,10 @@ case "$SET" in
         for D in watch poll; do run --engine $E --mode $M --pages 10000 --commit single --trigger serve --detection $D --jitter-ms 3000 --reps 40; done
         run --engine $E --mode $M --pages 10000 --commit single --trigger serve --embed stub --embed-latency-ms 200 --reps 20
         run --engine $E --mode $M --pages 10000 --commit single --trigger serve-boot --reps 20
-        run --engine $E --mode $M --pages 10000 --scenario embed-drain --trigger serve --embed stub --embed-latency-ms 200 --reps 10
+        run --engine $E --mode $M --pages 10000 --scenario embed-drain --trigger serve --embed stub --embed-latency-ms 50 --reps 10
         run --engine $E --mode $M --pages 10000 --sources 3 --scenario fairness --residents serve --reps 10
       done
-      run --engine $E --mode managed --pages 10000 --scenario embed-drain --trigger serve --embed stub --embed-latency-ms 200 --stub-fail-ms 30000 --reps 10
+      run --engine $E --mode managed --pages 10000 --scenario embed-drain --trigger serve --embed stub --embed-latency-ms 50 --stub-fail-ms 30000 --reps 10
       run --engine $E --mode managed --pages 10000 --scenario embed-drain --trigger serve --embed keyless-stub --reps 10
       run --engine $E --mode managed --pages 10000 --sources 5 --scenario fairness --residents serve --reps 10
       run --engine $E --mode managed --pages 10000 --scenario idle --residents serve

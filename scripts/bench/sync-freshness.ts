@@ -9,7 +9,8 @@
  *   bun scripts/bench/sync-freshness.ts --report <results dir>   # markdown table of every cell JSON
  *
  * GBRA-133 PR 2b.6 cells:
- *   --embed stub [--embed-latency-ms 200]   loopback OpenAI-compatible stub (keys stripped, never a paid call); records
+ *   --embed stub [--embed-latency-ms 200]   loopback OpenAI-compatible stub (keys stripped, never a paid call; the brain build
+ *                                           embeds at --build-embed-latency-ms, default 5); records
  *                                           commit -> every chunk embedded, and on Postgres a vector-search hit aimed at the chunk
  *   --embed keyless-stub                    keyless brain with OPENAI_BASE_URL pointed at the stub: any request is a failure
  *   --stub-fail-ms MS                       the stub answers 500 for MS after each commit (provider outage, then recovery)
@@ -374,12 +375,14 @@ async function main(): Promise<void> {
   if (ENGINE === 'postgres') harness = await startHarness({ pgPort: 55432, proxyPort: Number(flag('proxy-port', String(56000 + (process.pid % 1000)))), apiPort: 58474, keep: true });
   const seen = new Map<string, { first: number; texts: Set<string> }>();
   let failUntil = 0;
-  const stub = EMBED !== 'off' ? await startEmbeddingStub({ latencyMs: EMBED_LATENCY_MS, maxConcurrent: 8, dims: 1536, failWhile: () => now() < failUntil,
+  const stubOpts = { latencyMs: Number(flag('build-embed-latency-ms', '5')), maxConcurrent: 8, dims: 1536 };
+  const stub = EMBED !== 'off' ? await startEmbeddingStub({ ...stubOpts, get latencyMs() { return stubOpts.latencyMs; }, failWhile: () => now() < failUntil,
     onInputs: xs => { const t = now(); for (const x of xs) for (const m of x.matchAll(/zq[a-z]{10}/g)) { const e = seen.get(m[0]) ?? { first: t, texts: new Set<string>() }; e.texts.add(x); seen.set(m[0], e); } } }) : null;
   if (stub) stubUrl = stub.url;
   if (SOURCES > 1 && !(await brainBuilt('classic', 1))) await ensureBrain('classic', 1);
   if (MODE === 'managed' && !(await brainBuilt('classic')) && (PAGES >= 10000 || SOURCES > 1)) await ensureBrain('classic');
   const build = await ensureBrain(MODE);
+  stubOpts.latencyMs = EMBED_LATENCY_MS;
   const brainUrl = ENGINE === 'postgres' ? (RTT ? harness!.proxyUrl(dbName(MODE)) : directUrl()) : undefined;
   writeConfig(HOME, MODE, brainUrl);
   let measuredRtt: number | null = null;
