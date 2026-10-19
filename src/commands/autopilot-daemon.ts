@@ -13,6 +13,7 @@ import { join } from 'path';
 import { loadPreferences } from '../core/preferences.ts';
 import { registerCleanup } from '../core/process-cleanup.ts';
 import { dispatchAutopilotTick, sleepWatchingHeads } from './autopilot-dispatch.ts';
+import { writeAutopilotHeartbeat } from '../core/autopilot-heartbeat.ts';
 import { runNightlyQualityProbeStep, runParserProbeStep } from './autopilot-probes.ts';
 import { resolveChildCliInvocation } from '../core/minions/job-isolation.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
@@ -238,6 +239,7 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
     // Refresh the lock mtime so another cron-fired autopilot doesn't
     // declare the instance stale after 10 minutes (Codex C).
     try { utimesSync(lockPath, new Date(), new Date()); } catch { /* best-effort */ }
+    writeAutopilotHeartbeat({ phase: 'cycle', interval_s: null, base_interval_s: baseInterval, next_tick_at: null });
 
     if (processingState && !processingState.snapshot.processing_ready) {
       await new Promise(r => setTimeout(r, 250));
@@ -341,7 +343,8 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
     await runNightlyQualityProbeStep(engine, cfg);
     await runParserProbeStep(engine, cfg);
 
-    // Wait for next cycle (HEAD-driven between ticks when sync.on_commit is on).
+    // Wait for next cycle; #7003: --status grades staleness from this daemon's own next tick.
+    writeAutopilotHeartbeat({ phase: 'sleep', interval_s: interval, base_interval_s: baseInterval, next_tick_at: new Date(Date.now() + interval * 1000).toISOString() });
     if (useMinionsDispatch) await sleepWatchingHeads(engine, state, { sleepMs: interval * 1000, baseInterval, jsonMode });
     else await new Promise(r => setTimeout(r, interval * 1000));
   }
