@@ -46,6 +46,7 @@ import { isUnboundSourcePage } from './unbound-source.ts';
 import { isOriginTwinPage } from './origin-twins.ts';
 import { sealImportedPage, sealPageTextProjection } from '../page-state/projections.ts';
 import { materializedSnapshot, sealSegmentedPage } from './segmented-apply.ts';
+import { isStagingBodyRef, prepareStagedUpload } from './page-upload.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { overlayCanonicalBodies } from '../page-state/snapshot.ts';
 import { segmentedRevertRefusal } from '../page-state/versions.ts';
@@ -652,6 +653,9 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
   preparedIntent?: { content: string; expectedRevision: string; tags?: string[] }, signal?: AbortSignal,
   options: { allowMissingFile?: boolean; coordinated?: boolean; clock?: ClaimPhaseClock } = {}): Promise<PreparedMutation> {
   signal?.throwIfAborted();
+  if (row.operation === 'put_page' && isStagingBodyRef(row.intent?.body_ref)) {
+    return prepareStagedUpload(unbounded, row, staged => preparePageMutation(unbounded, staged, _config, preparedIntent, signal, options));
+  }
   const clock = options.clock;
   const engine = boundedReads(unbounded, clock);
   enterClaimStep(clock, 'page_snapshot', undefined, 'db');
