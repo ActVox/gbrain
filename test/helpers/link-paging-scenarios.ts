@@ -17,6 +17,7 @@ const config = { engine: 'pglite' } as never;
 const LOCAL = { remote: false, sourceId: 'default', config };
 const REMOTE = { remote: true, transport: 'stdio' as const, sourceId: 'default', takesHoldersAllowList: ['world'], config };
 const FEDERATED = { ...LOCAL, localFederatedSourceIds: ['default', 'second'] };
+const GRANTED = { ...REMOTE, auth: { allowedSources: ['default', 'second'] } };
 const TARGETS = Array.from({ length: 12 }, (_, i) => `targets/t${String(i).padStart(2, '0')}`);
 
 /** N edges from `from` spread over the 12 targets (distinct link types keep each row unique). */
@@ -65,7 +66,22 @@ export async function seedLinkPagingFixture(engine: BrainEngine): Promise<void> 
     ...TARGETS.slice(0, 5).map(t => ({ from_slug: 'idn/a', to_slug: t, link_type: 'i', link_source: 'manual', from_source_id: 'default', to_source_id: 'default' })),
     ...TARGETS.slice(5, 10).map(t => ({ from_slug: 'idn/b', to_slug: t, link_type: 'i', link_source: 'manual', from_source_id: 'default', to_source_id: 'default' })),
   ]);
+  // Identity across sources: default:idx/hub and second:idx/alias are one
+  // entity; default:idx/alias is a same-slug non-member. links.id order:
+  // 3 non-member edges, the hub's first edge, 3 more non-member edges, the
+  // hub's last two, the member's edge.
+  await put(engine, 'idx/hub');
+  await put(engine, 'idx/alias');
+  await put(engine, 'idx/alias', 'second');
+  const edge = (from: string, sourceId: string, to: string) => ({ from_slug: from, to_slug: to, link_type: 'x', link_source: 'manual', from_source_id: sourceId, to_source_id: sourceId });
+  await engine.addLinksBatch(TARGETS.slice(1, 4).map(t => edge('idx/alias', 'default', t)));
+  await engine.addLinksBatch([edge('idx/hub', 'default', TARGETS[0])]);
+  await engine.addLinksBatch(TARGETS.slice(7, 10).map(t => edge('idx/alias', 'default', t)));
+  await engine.addLinksBatch(TARGETS.slice(4, 6).map(t => edge('idx/hub', 'default', t)));
+  await engine.addLinksBatch([edge('idx/alias', 'second', TARGETS[6])]);
   await engine.setConfig(ENTITY_IDENTITY_UNION_CONFIG_KEY, 'true');
+  await linkEntityIdentity(engine, { entityId: 'thing/idx', slug: 'idx/hub', sourceId: 'default' });
+  await linkEntityIdentity(engine, { entityId: 'thing/idx', slug: 'idx/alias', sourceId: 'second' });
   await linkEntityIdentity(engine, { entityId: 'thing/idn', slug: 'idn/a', sourceId: 'default' });
   await linkEntityIdentity(engine, { entityId: 'thing/idn', slug: 'idn/b', sourceId: 'default' });
   // Temporal: a live reference edge, then an ENDED works_at (hidden by the
@@ -202,6 +218,16 @@ export function registerLinkPagingTests(getEngine: () => BrainEngine): void {
       const rows = all.flat();
       expect(new Set(rows.map(key)).size).toBe(10);
       expect(rows.filter(r => r.from_slug === 'idn/b').length).toBe(5);
+    });
+
+    test('a page the identity union filters empty never ends the listing', async () => {
+      const first = await call(getEngine(), 'get_links', { slug: 'idx/hub', all_sources: true, limit: 2 }, GRANTED);
+      expect(first.json!.length).toBeGreaterThan(0);
+      expect(first.json![0]).toEqual(expect.objectContaining({ from_slug: 'idx/hub', to_slug: TARGETS[0] }));
+      expect(first.pagination).toEqual(expect.objectContaining({ returned: first.json!.length, truncated: true }));
+      const all = (await pages(getEngine(), 'get_links', { slug: 'idx/hub', all_sources: true, limit: 2 }, GRANTED)).flat();
+      expect(all.map(r => `${r.from_source_id}:${r.from_slug}->${r.to_slug}`)).toEqual([
+        `default:idx/hub->${TARGETS[0]}`, `default:idx/hub->${TARGETS[4]}`, `default:idx/hub->${TARGETS[5]}`, `second:idx/alias->${TARGETS[6]}`]);
     });
 
     test('a legacy call without limit keeps its plain array', async () => {

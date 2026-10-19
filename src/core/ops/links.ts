@@ -328,7 +328,10 @@ async function readLinkEdges(
     return { streams, rows: [...merged.values()].sort((a, b) => linkId(a) - linkId(b)) };
   };
   const base: LinkReadPage = { ...(linkType ? { linkType } : {}), ...(fromType ? { fromType } : {}), contextChars: LINK_READ_CONTEXT_MAX_CHARS };
-  const out: Link[] = [];
+  // A page every row of which a JS filter dropped (the identity union's
+  // member pin, the temporal shape check) is never returned while the
+  // listing continues: a bare empty array cannot carry its cursor.
+  const kept: Link[] = [];
   let hidden = 0;
   let afterId = listing.afterId;
   let nextId: number | undefined;
@@ -336,13 +339,14 @@ async function readLinkEdges(
     const { streams, rows } = await read({ ...base, afterId, limit: listing.limit + 1, ...(filtering ? { relationship: { policy: temporal, keep: 'match' as const } } : {}) });
     const page = cutLinkPage(streams, rows, listing.limit);
     if (filtering) hidden += (await read({ ...base, afterId, throughId: page.nextId, relationship: { policy: temporal, keep: 'hidden' } })).rows.length;
-    out.push(...page.rows);
+    const shaped = filterTemporalLinks(page.rows, temporal);
+    kept.push(...shaped.kept);
+    hidden += shaped.hidden;
     nextId = page.nextId;
     afterId = nextId;
-  } while (listing.all && nextId !== undefined);
-  const { kept, hidden: hiddenAfterRead } = filterTemporalLinks(out, temporal);
-  reportTemporal(ctx, opName, p, temporal, hidden + hiddenAfterRead);
-  if (out.length === 0 && hidden === 0 && listing.afterId === undefined && !fromType) await hintScopedLinkMiss(ctx, p, requested, policy, direction);
+  } while ((listing.all || kept.length === 0) && nextId !== undefined);
+  reportTemporal(ctx, opName, p, temporal, hidden);
+  if (kept.length === 0 && hidden === 0 && listing.afterId === undefined && !fromType) await hintScopedLinkMiss(ctx, p, requested, policy, direction);
   return { links: kept, nextCursor: reportLinkPage(ctx, opName, p, listing, { returned: kept.length, nextId }) };
 }
 
