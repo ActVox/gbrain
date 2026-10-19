@@ -114,16 +114,24 @@ export async function ownWritebackCommit(engine: Pick<BrainEngine, 'executeRaw'>
   return [...blobs].every(([path, oid]) => { const content = sized.get(path)?.oid === oid && bytes.get(oid); return !!content && fileContentHash(content) === want.get(path); });
 }
 
-/** Publishes the stamp in `tx` when its checks hold; else why not (`error`: a statement failed, rolled back to the savepoint). */
+/** A stamp whose checks did not hold: its savepoint rolls back, and the reason is returned. */
+class StampSkipped extends Error { constructor(readonly reason: string) { super(reason); } }
+
+/**
+ * Publishes the stamp in `tx` when its checks hold; else why not (`error`: a statement failed). The stamp runs in a nested
+ * transaction, so whatever it skips or fails rolls back to its savepoint and the import publishes alone. A raw SAVEPOINT is
+ * not enough on Postgres: postgres.js rethrows a failed statement when its transaction scope ends even after the caller
+ * caught it, so a stamp's checkpoint validation timeout would fail the whole import (#5762 recovery journey).
+ */
 async function foldedStamp(tx: BrainEngine, input: { row: WriteRequest; p: SyncIntent; root: string }, outcome: Record<string, unknown>, writeback?: string): Promise<string | null> {
-  await tx.executeRaw('SAVEPOINT gbrain_pass_stamp_fold');
   try {
-    const skipped = await provenStamp(tx, input, outcome, writeback);
-    await tx.executeRaw(skipped ? 'ROLLBACK TO SAVEPOINT gbrain_pass_stamp_fold' : 'RELEASE SAVEPOINT gbrain_pass_stamp_fold');
-    return skipped;
-  } catch {
-    await tx.executeRaw('ROLLBACK TO SAVEPOINT gbrain_pass_stamp_fold');
-    return 'error';
+    await tx.transaction(async stamp => {
+      const skipped = await provenStamp(stamp, input, outcome, writeback);
+      if (skipped) throw new StampSkipped(skipped);
+    });
+    return null;
+  } catch (error) {
+    return error instanceof StampSkipped ? error.reason : 'error';
   }
 }
 

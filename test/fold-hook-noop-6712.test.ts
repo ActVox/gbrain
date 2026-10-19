@@ -27,11 +27,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { OPEN_PASS_WORK_SQL } from '../src/core/persistence/checkpoint-validation.ts';
 import { admitWrite } from '../src/core/persistence/journal.ts';
 import { preparePageAdmission } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
+import { FOLD_PASS_ROW_WRITE } from './helpers/managed-import-budget.ts';
 import { countPgliteStatements, readSqlTrace, type StatementRecord } from './helpers/statement-counter.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { waitFor } from './helpers/wait-for.ts';
@@ -88,7 +90,7 @@ async function sequences(engine: BrainEngine, ctx: Parameters<typeof preparePage
   expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
   writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a, canonical');
   const canonicalImport = await recorded(engine, trace, async () => { expect((await performManagedSync(engine, OPTS)).status).toBe('synced'); },
-    sql => sql === 'SAVEPOINT gbrain_pass_stamp_fold');
+    sql => sql === normalize(OPEN_PASS_WORK_SQL));
   const putPage = await recorded(engine, trace, async () => {
     const prepared = await preparePageAdmission(ctx, { operation: 'put_page', params: { slug: 'notes/new', request_id: randomUUID(), content: note('notes/new', 'An agent page.') } });
     const { request_id } = await admitWrite(engine, prepared.admission!);
@@ -113,7 +115,7 @@ for (const backend of testBackends()) {
         expect(got.put_page!.length).toBeGreaterThan(5);
         expect(got.canonical_import!.length).toBeGreaterThan(5);
         const want = process.env.CAPTURE_FOLD_NOOP === '1' ? got : golden[backend]!;
-        const tailFrom = (sequence: string[]) => { const at = sequence.findLastIndex(sql => sql.startsWith('INSERT INTO persistence_effects (') || sql === 'RELEASE SAVEPOINT gbrain_pass_stamp_fold'); expect(at).toBeGreaterThan(0); return at; };
+        const tailFrom = (sequence: string[]) => { const at = sequence.findLastIndex(sql => sql.startsWith('INSERT INTO persistence_effects (') || FOLD_PASS_ROW_WRITE.test(sql)); expect(at).toBeGreaterThan(0); return at; };
         const shape = (sequences: Record<string, string[]>) => backend === 'pglite' ? sequences : Object.fromEntries(Object.entries(sequences).map(([write, sequence]) =>
           [write, { statements: [...sequence].sort(), tail: sequence.slice(tailFrom(sequence)) }]));
         expect(shape(got)).toEqual(shape(want));

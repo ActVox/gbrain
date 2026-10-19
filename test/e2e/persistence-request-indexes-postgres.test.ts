@@ -149,13 +149,17 @@ test('#5762 recovery journey: a checkpoint timeout with a dropped index is fixed
   const f = await fixture();
   await engine.executeRaw('DROP INDEX persistence_requests_sync_run_committed');
   const transaction = engine.transaction;
+  // The validation statement times out in every transaction, nested ones included (the folded stamp runs in its own savepoint).
+  const slowed = (tx: PostgresEngine): PostgresEngine => new Proxy(tx, { get(target, property) {
+    if (property === 'executeRaw') return (sql: string, params?: unknown[]) => sql === OPEN_PASS_WORK_SQL
+      ? target.executeRaw('SELECT pg_sleep(8)::text AS request_id') : target.executeRaw(sql, params);
+    if (property === 'transaction') return <T>(run: (child: PostgresEngine) => Promise<T>, opts?: Parameters<PostgresEngine['transaction']>[1]) =>
+      target.transaction(child => run(slowed(child as PostgresEngine)), opts);
+    const value = Reflect.get(target, property);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
   engine.transaction = async function<T>(this: PostgresEngine, run: (tx: PostgresEngine) => Promise<T>): Promise<T> {
-    return transaction.call(this, tx => run(new Proxy(tx, { get(target, property) {
-      if (property === 'executeRaw') return (sql: string, params?: unknown[]) => sql === OPEN_PASS_WORK_SQL
-        ? target.executeRaw('SELECT pg_sleep(8)::text AS request_id') : target.executeRaw(sql, params);
-      const value = Reflect.get(target, property);
-      return typeof value === 'function' ? value.bind(target) : value;
-    } }) as PostgresEngine)) as Promise<T>;
+    return transaction.call(this, tx => run(slowed(tx as PostgresEngine))) as Promise<T>;
   } as PostgresEngine['transaction'];
   let result: Awaited<ReturnType<typeof performManagedSync>>;
   try {
