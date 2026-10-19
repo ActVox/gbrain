@@ -248,6 +248,10 @@ export async function runJobsWork({ args, engine, queue }: JobsCommandContext): 
   // cannot exit(143) ahead of the drain and orphan in-flight jobs.
   const releaseSignalOwner = registerSignalOwner('jobs-work', () => worker.requestShutdown());
 
+  // GBRA-133 2a.4: a queued sync job wakes the idle claim loop (LISTEN on a direct session, a short poll otherwise).
+  const { startSyncQueueWake } = await import('../../core/minions/sync-queue-wake.ts');
+  const syncQueueWake = await startSyncQueueWake(engine, worker, { queue: queueName });
+
   try {
     reportWorkerStarting('worker_startup');
     worker.once('ready', () => reportWorkerReady(childIdentity));
@@ -255,6 +259,7 @@ export async function runJobsWork({ args, engine, queue }: JobsCommandContext): 
   } finally {
     unregisterWorker();
     releaseSignalOwner();
+    await syncQueueWake.stop();
     if (worker.configurationError) {
       const releases = worker.configurationReleaseResults;
       const unconfirmed = releases.filter(result => result.outcome === 'unconfirmed').length;
