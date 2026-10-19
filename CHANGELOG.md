@@ -34,6 +34,27 @@ identifiers and attribution are available in the pre-removal Git revision
 
 No schema migration. Company-brain sources keep their existing sync path.
 
+## [0.60.315.0] - 2026-10-19
+
+**Large pages stored in segments get the last of their hardening: a repair for canonical files older versions left holding withdrawn rows, a bounded retry budget for writes the database interrupts under load, and purges that leave no segment text behind.** Brains that ran a gbrain older than v0.60.299.0 with `pages.segmented_storage` on can now find and rewrite canonical files that still hold a withdrawn or purged row with `gbrain repair segmented-mirror`, preview first. A write the database cancels at a statement timeout, or that the owner cancels past the publication ceiling, now retries with backoff against its own budget instead of failing at the second interruption or retrying without limit. Upgrading adds two columns to `persistence_requests` (migration v261, no rewrite of existing rows). Nothing runs on upgrade.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A segmented page's canonical file still holds a row an older gbrain withdrew (the mirror skipped it with `page_body_segmented`) | nothing found or fixed it; upgrading did not rewrite the file | `gbrain repair segmented-mirror [--source <id>]` lists each such file with its SHA-256 and the page's canonical render, `--apply --expect <hash> --yes` rewrites it through the withdrawal mirror with a receipt per page; a file or page that changed since the preview refuses `preview_changed` and is left as it is |
+| A statement the database cancels (57014), or a publication cancelled past `persistence.publication_ceiling_ms` | failed `write_interrupted` at the second cancel, or (ceiling) was published again without limit | counted against `persistence.max_transient_retries` (default 5, 0 to 20) with a 1 s, 2 s, 4 s, 8 s, then 15 s backoff stored on the request; `gbrain sources writer status` names the waiting head `transient_backoff`; past the limit it ends `write_interrupted` with the cause and SQLSTATE in its receipt |
+| A grouped publication (`put_pages` batch, managed import batch, sync lane group) interrupted as a whole | every member re-formed the same group and could fail together | each member is charged, and a member already charged publishes on its own from then on, so the batch still commits page by page |
+| A publication or withdrawal-mirror recovery record of a version this gbrain does not know | could be read as an older record: a mirror recovery published its bytes and cleared the record | refused `recovery_version_unsupported` before anything reads it; the record and files stay as they are and the fix is `gbrain upgrade` on the owner host |
+| A withdrawal on a segmented page while a gbrain below the segmented writer floor still writes to the brain | the mirror wrote a version 2 recovery record the older gbrain cannot read, which could wedge the worktree | the mirror refuses `segmented_mirror_writer_gate` and parks; it runs again by itself once the older writer is upgraded and out of the 7-day window |
+| A withdrawal in a facts fence of more than 16,384 rows that crosses a forced segment cut | refused `withdrawal_capacity` with a generic message | still refused (the bound is unchanged), with reason `split_fence_rows`, the page, the row count and a fix to split the fence |
+| `delete_page purge: true` of a segmented page after a withdrawal and another write | left the old fence text in `page_segment_texts` until the hourly sweep, and the receipt said done | deletes every unreferenced segment text holding one of the page's claims, plain or as a fence cell stores it, in the purge; `purge_fact` of a claim containing `|` does the same; a text an unpublished write still needs is kept |
+
+### For contributors
+
+- New pathological regressions in `test/pathological/`: `lp-a` through `lp-h` and `c22-stuck-recovery-large-file` (the C-22 todo in `inventory-deferred.test.ts` is now a real test), each run on PGLite and Postgres.
+- `test/e2e/publication-deadline-group-postgres.test.ts` now waits out the charged backoff before it publishes the cancelled group again.
+
 ## [0.60.314.0] - 2026-10-19
 
 **A master-red incident closed by hand stays closed, and a master push that reused a full run is judged by that run.** Nightly-watch opened a false master-red (#7056) after a maintainer closed the real one by hand: the incident's newest block was still red, a re-run-failed-jobs attempt left an incomplete manifest, and pushes that reused a full run carried no manifest of their own, so nothing could ever clear it. A full `ci:ubicloud` gate now runs only in `eu-central-h1`, where test timeouts and shard weights are calibrated.

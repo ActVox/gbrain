@@ -270,6 +270,7 @@ test/pathological/c-23-override-and-doctor-fixes.test.ts
 test/pathological/c-9-facts-absorb-dead.test.ts
 test/pathological/c1-effect-stuck-recovery.test.ts
 test/pathological/c2-url-clone-fences.test.ts
+test/pathological/c22-stuck-recovery-large-file.test.ts
 test/pathological/c4-bundle-stuck-recovery.test.ts
 test/pathological/c5-writer-transfer-cancel.test.ts
 test/pathological/c7-content-receipt-root.test.ts
@@ -301,6 +302,14 @@ test/pathological/h2-git-effect-moved-remote.test.ts
 test/pathological/h3-chronicle-partial-generation.test.ts
 test/pathological/h4-conversation-facts-zero-yield.test.ts
 test/pathological/h5-atoms-restore.test.ts
+test/pathological/lp-a-segmented-mirror.test.ts
+test/pathological/lp-b-transient-retry-budget.test.ts
+test/pathological/lp-c-publication-ceiling-retry.test.ts
+test/pathological/lp-d-recovery-version.test.ts
+test/pathological/lp-d-segmented-mirror-gate.test.ts
+test/pathological/lp-f-split-fence-withdrawal-capacity.test.ts
+test/pathological/lp-g-file-digest-fence-bound.test.ts
+test/pathological/lp-h-purge-orphan-segment-text.test.ts
 test/pathological/w1-write-through-staging-window.serial.test.ts
 test/persistence-background-pause.test.ts
 test/persistence-bounded-read-session.test.ts
