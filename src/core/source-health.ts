@@ -22,6 +22,7 @@
  *      local_path (preserves the v0.41.27.0 trust boundary).
  */
 import { execFileSync } from './spawn.ts';
+import { execFileBounded } from './bounded-child-exec.ts';
 import type { BrainEngine } from './engine.ts';
 import { parseSourceConfig, type SourceRow } from './sources-load.ts';
 import { isSourceUnchangedSinceSync } from './git-head.ts';
@@ -152,22 +153,33 @@ export function newestCommitMs(localPath: string | null): number | null {
 export function commitTimeMs(localPath: string | null, sha: string | null): number | null {
   if (!localPath || !sha) return null;
   try {
-    const out = execFileSync('git', ['-C', localPath, 'show', '-s', '--format=%ct', sha], {
+    return parseCommitTime(execFileSync('git', ['-C', localPath, 'show', '-s', '--format=%ct', sha], {
       env: gitChildEnv(),
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    if (!out) return null;
-    // `git show -s --format=%ct <sha>` prints only the committer epoch for the
-    // resolved commit; take the first line in case the sha resolves to an
-    // annotated-tag-ish ref that prints extra lines.
-    const first = out.split('\n')[0]?.trim();
-    const ms = Number(first) * 1000;
-    return Number.isFinite(ms) ? ms : null;
+    }));
   } catch {
     return null; // not a git repo / unknown sha / git unavailable / timeout
   }
+}
+
+/** GBRA-133 2b.3: `commitTimeMs` without blocking the event loop (the classic sync's anchor write in a resident). */
+export async function commitTimeMsAsync(localPath: string | null, sha: string | null): Promise<number | null> {
+  if (!localPath || !sha) return null;
+  const r = await execFileBounded('git', ['-C', localPath, 'show', '-s', '--format=%ct', sha], { env: gitChildEnv(), timeout: 10_000 });
+  return r.error ? null : parseCommitTime(r.stdout);
+}
+
+function parseCommitTime(stdout: string): number | null {
+  const out = stdout.trim();
+  if (!out) return null;
+  // `git show -s --format=%ct <sha>` prints only the committer epoch for the
+  // resolved commit; take the first line in case the sha resolves to an
+  // annotated-tag-ish ref that prints extra lines.
+  const first = out.split('\n')[0]?.trim();
+  const ms = Number(first) * 1000;
+  return Number.isFinite(ms) ? ms : null;
 }
 
 /**
