@@ -4,7 +4,7 @@
  * processes with per-line arrival timestamps, and the statistics. Everything
  * binds loopback and runs keyless.
  */
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { cpus, totalmem } from 'node:os';
@@ -79,10 +79,10 @@ export function readState(dir: string): CorpusState { return JSON.parse(readFile
 export function writeState(dir: string, s: CorpusState): void { writeFileSync(join(dir, 'corpus-state.json'), JSON.stringify(s)); }
 
 export type CommitKind = 'single' | 'batch' | 'backlog';
-export interface Change { kind: CommitKind; token: string; sha: string; t_commit: number; t_commit_start: number; edited: string[]; added: string[]; deleted: string[] }
+export interface Change { kind: CommitKind; token: string; sha: string; t_commit: number; t_commit_start: number; edited: string[]; added: string[]; deleted: string[]; source: string }
 
 /** Writes and commits one change. single: 1 edit; batch: 50 edits + 5 adds + 5 deletes; backlog: 1000 edits. */
-export function makeChange(root: string, dir: string, kind: CommitKind): Change {
+export function makeChange(root: string, dir: string, kind: CommitKind, source = 'bench'): Change {
   const st = readState(dir);
   const dead = new Set(st.deleted);
   const tok = token();
@@ -112,7 +112,7 @@ export function makeChange(root: string, dir: string, kind: CommitKind): Change 
   const sha = commit(root, 'bench ' + kind + ' ' + tok, [...edited, ...added, ...deleted]);
   const t_commit = now();
   writeState(dir, st);
-  return { kind, token: tok, sha, t_commit, t_commit_start, edited, added, deleted };
+  return { kind, token: tok, sha, t_commit, t_commit_start, edited, added, deleted, source };
 }
 
 // Child processes with per-line arrival timestamps.
@@ -201,7 +201,15 @@ export class McpClient {
 }
 
 // Probes: has the change become visible?
-export interface ProbeResult { getOk: boolean; searchHits: number; searchOk: boolean; partial: boolean; embedded?: boolean }
+export interface ProbeResult { getOk: boolean; searchHits: number; searchOk: boolean; partial: boolean; embedded?: boolean; vectorHit?: boolean; embeddedChunks?: number }
+
+/** The vector the bench embedding stub returns for a text (managed-sync-catchup-lib.ts startEmbeddingStub), so a vector search can be aimed at a chunk. */
+export function stubVector(text: string, dims: number): number[] {
+  const v = new Array<number>(dims).fill(0);
+  for (let i = 0; i < text.length; i++) v[(text.charCodeAt(i) * 31 + i) % dims] += 1;
+  const norm = Math.sqrt(v.reduce((a, b) => a + b * b, 0)) || 1;
+  return v.map(x => x / norm);
+}
 export interface Prober { check(c: Change): Promise<ProbeResult>; close(): Promise<void>; kind: string }
 
 export const expectedHits = (c: Change) => c.edited.length + c.added.length;
@@ -210,7 +218,11 @@ export function getTargets(c: Change): { present: string[]; gone: string[] } {
   return { present: [[...c.edited].sort().at(-1)!, ...(c.added.length ? [c.added.at(-1)!] : [])], gone: c.deleted.slice(0, 1) };
 }
 
-export async function engineProber(gbrainRoot: string, databaseUrl: string, embed = false): Promise<Prober> {
+/**
+ * `embeddedText` returns the input the embedding stub embedded for a token (the chunk text plus the context header gbrain
+ * adds), so the vector check queries searchVector with exactly the vector the provider returned for that chunk.
+ */
+export async function engineProber(gbrainRoot: string, databaseUrl: string, embed = false, embeddedText?: (token: string) => string | undefined): Promise<Prober> {
   const { PostgresEngine } = await import(join(gbrainRoot, 'src/core/postgres-engine.ts'));
   const engine = new PostgresEngine();
   await engine.connect({ database_url: databaseUrl, poolSize: 2 });
@@ -220,27 +232,41 @@ export async function engineProber(gbrainRoot: string, databaseUrl: string, embe
       const { present, gone } = getTargets(c);
       const want = expectedHits(c);
       let getOk = true;
+      const src = c.source;
       for (const path of present) {
-        const p = await engine.getPage(slugOf(path), { sourceId: 'bench' }).catch(() => null);
+        const p = await engine.getPage(slugOf(path), { sourceId: src }).catch(() => null);
         if (!p || !String(p.compiled_truth ?? '').includes(c.token)) { getOk = false; break; }
       }
-      if (getOk) for (const path of gone) if (await engine.getPage(slugOf(path), { sourceId: 'bench' }).catch(() => null)) { getOk = false; break; }
-      const hits = await engine.searchKeyword(c.token, { limit: 100, sourceId: 'bench' }).catch(() => []);
+      if (getOk) for (const path of gone) if (await engine.getPage(slugOf(path), { sourceId: src }).catch(() => null)) { getOk = false; break; }
+      const hits = await engine.searchKeyword(c.token, { limit: 100, sourceId: src }).catch(() => []);
       const slugs = new Set((hits as Array<{ slug: string }>).map(h => h.slug));
       let embedded: boolean | undefined;
+      let vectorHit: boolean | undefined;
+      let embeddedChunks: number | undefined;
       if (embed) {
-        const [{ total, done }] = await engine.executeRaw("SELECT count(*)::int AS total, count(*) FILTER (WHERE c.embedding IS NOT NULL)::int AS done FROM content_chunks c JOIN pages p ON p.id=c.page_id WHERE p.source_id='bench' AND p.deleted_at IS NULL AND c.chunk_text LIKE $1", ['%' + c.token + '%']);
-        embedded = total >= Math.min(want, 1) && done === total && total > 0;
+        const [{ total, done }] = await engine.executeRaw("SELECT count(*)::int AS total, count(*) FILTER (WHERE c.embedding IS NOT NULL)::int AS done FROM content_chunks c JOIN pages p ON p.id=c.page_id WHERE p.source_id=$2 AND p.deleted_at IS NULL AND c.chunk_text LIKE $1", ['%' + c.token + '%', src]);
+        embedded = total >= Math.min(want, 1) && done === total && total > 0 && (want <= 100 || total >= want);
+        embeddedChunks = done;
+        const text = embeddedText?.(c.token);
+        if (embedded && want <= 100 && text) {
+          const target = slugOf([...c.edited].sort().at(-1)!);
+          const vhits = await engine.searchVector(new Float32Array(stubVector(text, 1536)), { limit: 5, sourceId: src }).catch(() => []);
+          vectorHit = (vhits as Array<{ slug: string }>).some(h => h.slug === target);
+        }
       }
-      if (want <= 100) return { getOk, searchHits: slugs.size, searchOk: slugs.size >= want, partial: slugs.size > 0, embedded };
-      const [{ n }] = await engine.executeRaw("SELECT count(*)::int AS n FROM content_chunks c JOIN pages p ON p.id=c.page_id WHERE p.source_id='bench' AND p.deleted_at IS NULL AND c.chunk_text LIKE $1", ['%' + c.token + '%']);
-      return { getOk, searchHits: n, searchOk: slugs.size >= 100 && n >= want, partial: slugs.size > 0 };
+      if (want <= 100) return { getOk, searchHits: slugs.size, searchOk: slugs.size >= want, partial: slugs.size > 0, embedded, vectorHit, embeddedChunks };
+      const [{ n }] = await engine.executeRaw("SELECT count(*)::int AS n FROM content_chunks c JOIN pages p ON p.id=c.page_id WHERE p.source_id=$2 AND p.deleted_at IS NULL AND c.chunk_text LIKE $1", ['%' + c.token + '%', src]);
+      return { getOk, searchHits: n, searchOk: slugs.size >= 100 && n >= want, partial: slugs.size > 0, embedded, embeddedChunks };
     },
     async close() { await engine.disconnect(); },
   };
 }
 
-export function mcpProber(client: McpClient): Prober {
+/**
+ * Probes through a serve's MCP stdio. With `embedSeen` (the embedding stub returned a vector for an input carrying the
+ * token) a single-file change also counts as embedded once get_page body:none reports every chunk embedded.
+ */
+export function mcpProber(client: McpClient, embedSeen?: (token: string) => boolean): Prober {
   return {
     kind: 'mcp',
     async check(c) {
@@ -248,27 +274,37 @@ export function mcpProber(client: McpClient): Prober {
       const want = expectedHits(c);
       let getOk = true;
       for (const path of present) {
-        const text = await client.call('get_page', { slug: slugOf(path), source_id: 'bench' }).catch(e => String(e));
+        const text = await client.call('get_page', { slug: slugOf(path), source_id: c.source }).catch(e => String(e));
         if (!text.includes(c.token)) { getOk = false; break; }
       }
       if (getOk) for (const path of gone) {
-        const text = await client.call('get_page', { slug: slugOf(path), source_id: 'bench' }).catch(e => String(e));
+        const text = await client.call('get_page', { slug: slugOf(path), source_id: c.source }).catch(e => String(e));
         if (text.includes('Status: baseline')) { getOk = false; break; }
       }
-      const text = await client.call('search', { query: c.token, limit: 100, source_id: 'bench', match: 'keyword' }).catch(e => String(e));
+      const text = await client.call('search', { query: c.token, limit: 100, source_id: c.source, match: 'keyword' }).catch(e => String(e));
       const slugs = new Set([...text.matchAll(/notes\/(?:d\d{3}\/n-\d{6}|added\/a-\d{6})/g)].map(m => m[0]));
-      return { getOk, searchHits: slugs.size, searchOk: slugs.size >= Math.min(want, 100), partial: slugs.size > 0 };
+      let embedded: boolean | undefined;
+      if (embedSeen && want <= 100) {
+        embedded = false;
+        if (getOk && embedSeen(c.token)) {
+          const none = await client.call('get_page', { slug: slugOf(present[0]!), source_id: c.source, body: 'none' }).catch(e => String(e));
+          const m = /"chunks"\s*:\s*\{\s*"total"\s*:\s*(\d+)\s*,\s*"embedded"\s*:\s*(\d+)/.exec(none);
+          embedded = !!m && Number(m[1]) > 0 && m[1] === m[2];
+        }
+      }
+      return { getOk, searchHits: slugs.size, searchOk: slugs.size >= Math.min(want, 100), partial: slugs.size > 0, embedded };
     },
     async close() { /* the serve owns it */ },
   };
 }
 
-export interface Visibility { t_get: number | null; t_search: number | null; t_first_hit: number | null; t_embedded?: number | null; probes: number; probe_ms_mean: number }
+export interface Visibility { t_get: number | null; t_search: number | null; t_first_hit: number | null; t_embedded?: number | null; t_vector?: number | null; probes: number; probe_ms_mean: number }
 /** Polls until both get_page and search see the change, or the deadline. */
 export async function pollVisible(prober: Prober, c: Change, deadline: number, everyMs: number): Promise<Visibility> {
-  let t_get: number | null = null, t_search: number | null = null, t_first: number | null = null, t_emb: number | null = null;
-  let probes = 0, probeMs = 0, wantEmb = false;
-  while (now() < deadline && (t_get === null || t_search === null || (wantEmb && t_emb === null))) {
+  let t_get: number | null = null, t_search: number | null = null, t_first: number | null = null, t_emb: number | null = null, t_vec: number | null = null;
+  let probes = 0, probeMs = 0, wantEmb = false, wantVec = false;
+  const pending = () => t_get === null || t_search === null || (wantEmb && t_emb === null) || (wantVec && t_vec === null);
+  while (now() < deadline && pending()) {
     const t0 = now();
     const r = await prober.check(c);
     const t1 = now();
@@ -277,9 +313,31 @@ export async function pollVisible(prober: Prober, c: Change, deadline: number, e
     if (r.searchOk && t_search === null) t_search = t1;
     if (r.partial && t_first === null) t_first = t1;
     if (r.embedded !== undefined) { wantEmb = true; if (r.embedded && t_emb === null) t_emb = t1; }
-    if (t_get === null || t_search === null || (wantEmb && t_emb === null)) await sleep(Math.max(0, everyMs - (now() - t0)));
+    if (r.vectorHit !== undefined) { wantVec = true; if (r.vectorHit && t_vec === null) t_vec = t1; }
+    if (pending()) await sleep(Math.max(0, everyMs - (now() - t0)));
   }
-  return { t_get, t_search, t_first_hit: t_first, t_embedded: wantEmb ? t_emb : undefined, probes, probe_ms_mean: probes ? round1(probeMs / probes) : 0 };
+  return { t_get, t_search, t_first_hit: t_first, t_embedded: wantEmb ? t_emb : undefined, t_vector: wantVec ? t_vec : undefined, probes, probe_ms_mean: probes ? round1(probeMs / probes) : 0 };
+}
+
+/** CPU seconds (user + system, reaped children included) of a process and every live descendant, from /proc (Linux). */
+export function treeCpuSeconds(pid: number): number {
+  const tck = Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim()) || 100;
+  const procs = new Map<number, { ppid: number; ticks: number }>();
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const stat = readFileSync('/proc/' + name + '/stat', 'utf8');
+      const f = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      procs.set(Number(name), { ppid: Number(f[1]), ticks: Number(f[11]) + Number(f[12]) + Number(f[13]) + Number(f[14]) });
+    } catch { /* exited while listing */ }
+  }
+  let ticks = 0;
+  const queue = [pid];
+  for (let q = queue.shift(); q !== undefined; q = queue.shift()) {
+    ticks += procs.get(q)?.ticks ?? 0;
+    for (const [child, p] of procs) if (p.ppid === q) queue.push(child);
+  }
+  return ticks / tck;
 }
 
 export function copyDir(from: string, to: string): void { rmSync(to, { recursive: true, force: true }); cpSync(from, to, { recursive: true }); }
