@@ -1,5 +1,5 @@
 import { coordinatedManualLinkWrite } from '../persistence/manual-links.ts';
-import { filterBacklinkRows, readBacklinkPage, withLinkPageStatus } from './backlinks-paged.ts';
+import { backlinkTypeFilter, readBacklinkPage, withLinkPageStatus } from './backlinks-paged.ts';
 import { cutLinkPage, finishLinkPage, linkId, parseLinkListing, reportLinkPage } from './link-paging.ts';
 /**
  * Links + graph operation cluster — pure move from operations.ts (v0.46.x
@@ -277,8 +277,8 @@ const linkIdentity = (l: Link) => JSON.stringify([
  * merges, de-duplicated on link identity: the scalar branch keeps the
  * cross-source far-endpoint view local callers rely on, which the
  * all-endpoints branch would drop for far pages in non-federated sources.
- * Every other caller runs one read. Each read is a keyset page with link_type
- * and the temporal policy in SQL; the cap applies after the merge and the
+ * Every other caller runs one read. Each read is a keyset page with link_type,
+ * get_backlinks' referrer type and the temporal policy in SQL; the cap applies after the merge and the
  * identity union, and hidden former relationships never count toward it.
  */
 async function readLinkEdges(
@@ -292,6 +292,7 @@ async function readLinkEdges(
   const temporal = await resolveEdgeTemporal(ctx, p, opName);
   const listing = parseLinkListing(ctx, opName, p, policy);
   const linkType = typeof p.link_type === 'string' && p.link_type ? p.link_type : undefined;
+  const fromType = direction === 'in' ? await backlinkTypeFilter(ctx, p, policy) : undefined;
   // Rows come back annotated with their relationship status; the policy
   // itself runs in SQL (and a second read counts what it hid).
   const annotate = temporal.disabled ? undefined : { ...temporal, status: 'all' as const, during: undefined };
@@ -326,8 +327,11 @@ async function readLinkEdges(
     }
     return { streams, rows: [...merged.values()].sort((a, b) => linkId(a) - linkId(b)) };
   };
-  const base: LinkReadPage = { ...(linkType ? { linkType } : {}), contextChars: LINK_READ_CONTEXT_MAX_CHARS };
-  const out: Link[] = [];
+  const base: LinkReadPage = { ...(linkType ? { linkType } : {}), ...(fromType ? { fromType } : {}), contextChars: LINK_READ_CONTEXT_MAX_CHARS };
+  // A page every row of which a JS filter dropped (the identity union's
+  // member pin, the temporal shape check) is never returned while the
+  // listing continues: a bare empty array cannot carry its cursor.
+  const kept: Link[] = [];
   let hidden = 0;
   let afterId = listing.afterId;
   let nextId: number | undefined;
@@ -335,13 +339,14 @@ async function readLinkEdges(
     const { streams, rows } = await read({ ...base, afterId, limit: listing.limit + 1, ...(filtering ? { relationship: { policy: temporal, keep: 'match' as const } } : {}) });
     const page = cutLinkPage(streams, rows, listing.limit);
     if (filtering) hidden += (await read({ ...base, afterId, throughId: page.nextId, relationship: { policy: temporal, keep: 'hidden' } })).rows.length;
-    out.push(...page.rows);
+    const shaped = filterTemporalLinks(page.rows, temporal);
+    kept.push(...shaped.kept);
+    hidden += shaped.hidden;
     nextId = page.nextId;
     afterId = nextId;
-  } while (listing.all && nextId !== undefined);
-  const { kept, hidden: hiddenAfterRead } = filterTemporalLinks(out, temporal);
-  reportTemporal(ctx, opName, p, temporal, hidden + hiddenAfterRead);
-  if (out.length === 0 && hidden === 0 && listing.afterId === undefined) await hintScopedLinkMiss(ctx, p, requested, policy, direction);
+  } while ((listing.all || kept.length === 0) && nextId !== undefined);
+  reportTemporal(ctx, opName, p, temporal, hidden);
+  if (kept.length === 0 && hidden === 0 && listing.afterId === undefined && !fromType) await hintScopedLinkMiss(ctx, p, requested, policy, direction);
   return { links: kept, nextCursor: reportLinkPage(ctx, opName, p, listing, { returned: kept.length, nextId }) };
 }
 
@@ -435,8 +440,7 @@ const get_backlinks: Operation = {
     if (p.group !== undefined) return readBacklinkPage(ctx, p, (await resolveLinkReadScope(ctx, p, 'get_backlinks')).policy);
     const { links, nextCursor } = await readLinkEdges(ctx, p, 'get_backlinks', 'in');
     const policy = async () => (await resolveLinkReadScope(ctx, p, 'get_backlinks')).policy;
-    const typed = p.type !== undefined ? await filterBacklinkRows(ctx, p, await policy(), links) : links;
-    return finishLinkPage(await withLinkPageStatus(ctx, policy, typed), nextCursor);
+    return finishLinkPage(await withLinkPageStatus(ctx, policy, links), nextCursor);
   },
   scope: 'read',
   cliHints: { name: 'backlinks', positional: ['slug'] },

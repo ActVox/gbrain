@@ -12,7 +12,8 @@
 
 import { opError, type OperationContext } from './contract.ts';
 import type { Link, PageReadPolicy } from '../types.ts';
-import { canonicalTypeOf, loadSourcePack } from '../mentions/policy.ts';
+import { canonicalTypeOf, loadSourcePack, typeAliasPairs } from '../mentions/policy.ts';
+import type { LinkReadPage } from '../link-validity.ts';
 import {
   canonicalRecordTypes, decodeCursor, readPageStatusByRef, readReferrerPage, referrerTypes, PAGE_DEFAULT_LIMIT, PAGE_MAX_LIMIT, type ReferenceRow, type ReferrerScope,
 } from '../mentions/referrers.ts';
@@ -117,26 +118,25 @@ export async function withLinkPageStatus(ctx: OperationContext, policy: () => Pr
 }
 
 /**
- * Array mode with `type`: one page of link rows (ops/links.ts, #6876 keyset
- * paging), kept when the referring page has that type. The page is cut before
- * this filter, so a page can hold fewer rows than `limit`; the cursor still
- * continues the same listing.
+ * Array mode with `type`: the referring-page type filter for the keyset page
+ * SQL (ops/links.ts, #6876), so LIMIT counts only rows of that type. A row is
+ * kept when its referrer's stored type is `type` (`untyped` for none) or a
+ * stored alias its own source's pack maps to `type`.
  */
-export async function filterBacklinkRows(ctx: OperationContext, p: Record<string, unknown>, policy: PageReadPolicy, links: Link[]): Promise<Link[]> {
+export async function backlinkTypeFilter(ctx: OperationContext, p: Record<string, unknown>, policy: PageReadPolicy): Promise<LinkReadPage['fromType']> {
   const type = typeof p.type === 'string' && p.type ? p.type : undefined;
-  if (!type) return links;
+  if (!type) return undefined;
   const resolved = await referrerScope(ctx, String(p.slug), policy);
   if (resolved) await assertKnownType(ctx, resolved.scope, type);
-  const keys = [...new Set(links.map(l => `${l.from_source_id}\0${l.from_slug}`))];
-  const types = new Map((await ctx.engine.executeRaw<{ source_id: string; slug: string; type: string | null }>(
-    `SELECT p.source_id, p.slug, p.type FROM pages p JOIN unnest($1::text[], $2::text[]) AS k(s, g) ON p.source_id = k.s AND p.slug = k.g`,
-    [keys.map(k => k.split('\0')[0]), keys.map(k => k.split('\0')[1])])).map(r => [`${r.source_id}\0${r.slug}`, r.type]));
-  const packs = new Map<string, Awaited<ReturnType<typeof loadSourcePack>>>();
-  const filtered: Link[] = [];
-  for (const l of links) {
-    if (!packs.has(l.from_source_id)) packs.set(l.from_source_id, await loadSourcePack(ctx.engine, l.from_source_id));
-    const stored = types.get(`${l.from_source_id}\0${l.from_slug}`) ?? null;
-    if (stored === type || canonicalTypeOf(stored, packs.get(l.from_source_id) ?? null) === type) filtered.push(l);
+  const aliasSources: string[] = [];
+  const aliases: string[] = [];
+  for (const { id } of await ctx.engine.executeRaw<{ id: string }>('SELECT id FROM sources ORDER BY id')) {
+    const pairs = typeAliasPairs(await loadSourcePack(ctx.engine, id));
+    pairs.stored.forEach((stored, i) => {
+      if (pairs.canonical[i] !== type) return;
+      aliasSources.push(id);
+      aliases.push(stored);
+    });
   }
-  return filtered;
+  return { type, aliasSources, aliases };
 }

@@ -392,6 +392,8 @@ export interface LinkReadPage {
   throughId?: number;
   limit?: number;
   linkType?: string;
+  /** Only rows whose from page has `type` (stored, `untyped` for none, or a stored alias `aliases[i]` that source `aliasSources[i]` maps to it). */
+  fromType?: { type: string; aliasSources: string[]; aliases: string[] };
   /** Keep the rows that match the temporal policy, or only the rows it hides. */
   relationship?: { policy: EdgeTemporalOpts; keep: 'match' | 'hidden' };
   /** Context longer than this is cut, ending in an ellipsis. */
