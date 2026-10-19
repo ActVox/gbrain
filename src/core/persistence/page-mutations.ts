@@ -365,13 +365,13 @@ export async function preparePageAdmission(ctx: OperationContext,
     ? suffixedSlugAdmission(ctx, slug, !!snapshot && !snapshot.page.deleted_at) : null;
   // #5616: typed edit refusals before admission; publication repeats them on the locked snapshot.
   if (input.operation === 'edit_page') {
-    const { applyPageEdits, assertEditRevision, parseEditWithin, parsePageEdits } = await import('./page-edit.ts');
+    const { applyPageEdits, assertEditRevision, assertSegmentedEditFences, parseEditWithin, parsePageEdits } = await import('./page-edit.ts');
     if (!snapshot || snapshot.page.deleted_at) throw new OperationError('page_not_found', `Page not found: ${slug}`, 'edit_page changes an existing page; create it with put_page.');
     assertEditRevision(snapshot.revision, p.expected_revision);
     const within = parseEditWithin(p.within);
     // A segmented page is matched by its preparation, which streams the segments (spec 6.3): never read whole here.
     if (!isSegmentedPage(snapshot.page)) applyPageEdits(snapshot.page, snapshot.tags, ctx.remote !== false, parsePageEdits(p.edits), within);
-    else parsePageEdits(p.edits);
+    else { parsePageEdits(p.edits); await assertSegmentedEditFences(ctx.engine, snapshot.page, within); }
   }
   // Wave B: an append names an existing page; its preconditions are checked when it is prepared, on the page it extends.
   if (input.operation === 'append_page' && (!snapshot || snapshot.page.deleted_at)) {

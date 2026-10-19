@@ -28,6 +28,8 @@ const FENCED = 'notes/edit-fenced';
 const INLINE = 'notes/edit-inline';
 const HIDDEN_A = 'notes/edit-hidden-a';
 const HIDDEN_B = 'notes/edit-hidden-b';
+const MALFORMED = 'notes/edit-malformed';
+const INLINE_MALFORMED = 'notes/edit-malformed-inline';
 const fm = (title: string) => `---\ntitle: ${title}\ntype: note\n---\n\n`;
 
 for (const kind of testBackends()) {
@@ -146,6 +148,31 @@ for (const kind of testBackends()) {
       expect(addedLine(trusted.body.diff, 'TRUSTED-EDIT')).toBeGreaterThan(newlines(prefix));
       expect(addedLine(trusted.body.diff, 'TRUSTED-EDIT') - addedLine(remote.body.diff, 'REMOTE-EDIT')).toBe(newlines(prefix) - newlines(view(prefix)));
       expect(newlines(prefix) - newlines(view(prefix))).toBeGreaterThan(0);
+    }, 600_000);
+
+    test('a stored fence that does not compile refuses the edit as the whole-body path does', async () => {
+      const bad = '<!--- gbrain:facts:begin -->\n| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |\n|---|---|---|---|---|---|---|---|---|---|\n'
+        + '| 1 | a synthetic claim | fact | 1.0 | blorp | medium | 2026-01-01 |  | chat |  |\n<!--- gbrain:facts:end -->\n';
+      const tail = conversationBody(1_200_000, { seed: 10 });
+      await brain.seed(MALFORMED, fm('Malformed') + 'Intro.\n\n' + bad + '\n' + tail + '\n');
+      expect((await brain.body(MALFORMED)).storage).toBe('segmented');
+      const truth = (await brain.body(MALFORMED)).truth;
+      const far = truth.slice(truth.length - 5000, truth.length - 4940);
+      const near = truth.slice(truth.indexOf(tail), truth.indexOf(tail) + 60);
+      for (const old of [far, near]) expect(truth.indexOf(old)).toBe(truth.lastIndexOf(old));
+      const rev = await revision(MALFORMED);
+      const refused = (res: { body: Record<string, any> }) => ({ error: res.body.error, code: res.body.code, reason: res.body.reason, fence: res.body.fence });
+      // The whole-body path's refusal, on an inline page holding the same fence.
+      expect(await brain.call('put_page', { slug: INLINE_MALFORMED, content: fm('Inline') + 'Intro.\n\nSynthetic prose.\n', request_id: randomUUID() })).toMatchObject({ isError: false });
+      await brain.engine.executeRaw("UPDATE pages SET compiled_truth=$2 WHERE source_id='default' AND slug=$1", [INLINE_MALFORMED, 'Intro.\n\n' + bad + '\nSynthetic prose.\n']);
+      const expected = refused(await edit(INLINE_MALFORMED, await revision(INLINE_MALFORMED), 'Synthetic prose.', 'x'));
+      expect(expected).toMatchObject({ error: 'invalid_params', code: 'invalid_fence', reason: 'target_fence_malformed', fence: { fence: 'facts', section: 'body', rows: [1], line: 6 } });
+      // No within: the whole page is checked, so an edit far from the fence refuses.
+      expect(refused(await edit(MALFORMED, rev, far, 'x'))).toEqual(expected);
+      // within: the touched segments and the fences crossing into them are checked.
+      const at = Buffer.byteLength(truth.slice(0, truth.indexOf(near)));
+      expect(refused(await edit(MALFORMED, rev, near, 'x', { byte_start: 0, byte_end: at + 60 }))).toEqual(expected);
+      expect(await revision(MALFORMED)).toBe(rev);
     }, 600_000);
 
     test('within on an inline page and from a remote writer', async () => {
