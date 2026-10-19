@@ -42,7 +42,8 @@
  * file in test/postgres-unit-arms.txt with DATABASE_URL set, the way
  * persistence-validation's unit-postgres-arms job does, and fails the run when
  * a shard of that job's partition measures over its step timeout; with the unit
- * and slow lanes it does the same for test.yml's unit shards. Durations of every run are
+ * and slow lanes it fails a test.yml unit shard whose mined weight is over
+ * UNIT_SHARD_BUDGET_MS (unitShardCheck) and reports each shard's measured time. Durations of every run are
  * merged into .context/ci-ubicloud/weights.json, which weights the next run.
  *
  * VMs are named ubirun-<owner>-<epoch>-x<expiry epoch>-ciNN<hex> (owner:
@@ -76,7 +77,7 @@ import { runScript, type RunScriptOpts } from "./ubicloud/run-script.ts";
 import { expiringVmName } from "./ubicloud/reap-expired.ts";
 import { buildTypecheckState, portableBuildInfo, typecheckBuildInfo } from "./ubicloud/typecheck-state.ts";
 import { ARM_SHARDS, ARM_STEP_TIMEOUT_MS, ARM_WEIGHTS, ARM_WORKERS, armMakespan, armShards, readArmsList } from "./postgres-unit-arms.ts";
-import { UNIT_JOB_TIMEOUT_MS, UNIT_SETUP_ALLOWANCE_MS, UNIT_SHARDS, unitShards } from "./sharding.ts";
+import { UNIT_SHARD_BUDGET_MS, UNIT_SHARDS, unitShardPlan } from "./sharding.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const RUNNER = join(ROOT, "scripts/ubicloud/ubi-runner.sh");
@@ -561,20 +562,16 @@ async function main() {
     for (const s of armShardReport) console.log(`    ${s.shard}/${ARM_SHARDS}: ${Math.round(s.ms / 1000)}s across ${s.files} files`);
   }
   const overBudget = armShardReport.filter((s) => s.ms > ARM_STEP_TIMEOUT_MS);
-  // The same proof for test.yml's unit shards: test-shard.sh's own partition,
-  // summed from this run's measured unit and slow file durations.
-  const unitShardRoomMs = UNIT_JOB_TIMEOUT_MS - UNIT_SETUP_ALLOWANCE_MS;
-  const unitShardReport = opts.lanes.has("unit") && opts.lanes.has("slow")
-    ? unitShards(ROOT).map((files, i) => {
-      const measured = files.map((file) => results.get(weightKey("unit", file))?.ms ?? results.get(weightKey("slow", file))?.ms);
-      return { shard: i + 1, files: files.length, unmeasured: measured.filter((ms) => ms === undefined).length, ms: measured.reduce<number>((sum, ms) => sum + (ms ?? 0), 0) };
-    })
-    : [];
+  // test.yml's unit shards: the plan test/scripts/unit-shard-budget.test.ts holds (unitShardCheck).
+  const unitCheck = opts.lanes.has("unit") && opts.lanes.has("slow")
+    ? unitShardCheck(ROOT, (file) => results.get(weightKey("unit", file))?.ms ?? results.get(weightKey("slow", file))?.ms)
+    : null;
+  const unitShardReport = unitCheck?.shards ?? [];
+  const unitOverBudget = unitCheck?.overBudget ?? [];
   if (unitShardReport.length) {
-    console.log(`  unit shards (test.yml partition, ${UNIT_SHARDS} shards, ${unitShardRoomMs / 1000}s each after setup):`);
-    for (const s of unitShardReport) console.log(`    ${s.shard}/${UNIT_SHARDS}: ${Math.round(s.ms / 1000)}s across ${s.files} files${s.unmeasured ? ` (${s.unmeasured} not run by this gate)` : ""}`);
+    console.log(`  unit shards (test.yml partition, ${UNIT_SHARDS} shards, mined weight at most ${UNIT_SHARD_BUDGET_MS / 1000}s each; measured here for drift only):`);
+    for (const s of unitShardReport) console.log(`    ${s.shard}/${UNIT_SHARDS}: mined ${Math.round(s.mined / 1000)}s, measured ${Math.round(s.ms / 1000)}s across ${s.files} files${s.unmeasured ? ` (${s.unmeasured} not run by this gate)` : ""}`);
   }
-  const unitOverBudget = unitShardReport.filter((s) => s.ms > unitShardRoomMs);
 
   const timings: Record<string, number> = {};
   for (const r of all) if (r.rc === 0 && r.file !== "-") timings[weightKey(r.lane as Lane, r.file)] = r.ms;
@@ -612,7 +609,7 @@ async function main() {
     exitCode = 1;
   }
   if (unitOverBudget.length) {
-    console.log(`\nunit: ${unitOverBudget.map((s) => `shard ${s.shard}/${UNIT_SHARDS} measured ${Math.round(s.ms / 1000)}s`).join(", ")}, over the ${unitShardRoomMs / 1000}s a test.yml unit shard has inside its job timeout after setup, which would cancel that shard mid-list. Fix: raise UNIT_SHARDS (and both workflow matrices) or speed up the heaviest files, then re-mine scripts/test-weights.json. Docs: docs/TESTING.md#keeping-ci-partitions-balanced`);
+    console.log(`\nunit: ${unitOverBudget.map((s) => `shard ${s.shard}/${UNIT_SHARDS} mined ${Math.round(s.mined / 1000)}s`).join(", ")}, over UNIT_SHARD_BUDGET_MS (${UNIT_SHARD_BUDGET_MS / 1000}s), which test/scripts/unit-shard-budget.test.ts also enforces. Fix: re-mine scripts/test-weights.json, then raise UNIT_SHARDS (and both workflow matrices) or speed up the heaviest files. Docs: docs/TESTING.md#keeping-ci-partitions-balanced`);
     exitCode = 1;
   }
   const expected = totalItems;
@@ -623,6 +620,21 @@ async function main() {
   console.log(exitCode === 0 ? `\n[ci-ubicloud] All checks passed in ${clock()}.` : `\n[ci-ubicloud] FAILED after ${clock()}.`);
   if (opts.location !== GATE_LOCATION) console.log(`[ci-ubicloud] diagnostic run in ${opts.location}: not gate evidence (a full gate runs only in ${GATE_LOCATION}).`);
   process.exit(exitCode);
+}
+
+/**
+ * test.yml's unit shards as this gate checks them: the partition and mined weights of unitShardPlan, failing a
+ * shard over UNIT_SHARD_BUDGET_MS exactly as test/scripts/unit-shard-budget.test.ts does. `measured` (this run's
+ * per-file durations) is reported beside the plan and never gates: each item here is its own wrapper and Bun
+ * process (~0.6 s of startup per file) on a shared 16-vCPU VM, not one Bun process per shard on a 4-vCPU runner,
+ * so recent gates measured the same partition at 1.2-2.5x its mined weight.
+ */
+export function unitShardCheck(root: string, measured: (file: string) => number | undefined) {
+  const shards = unitShardPlan(root).map(({ shard, files, ms }) => {
+    const times = files.map(measured);
+    return { shard, files: files.length, mined: ms, unmeasured: times.filter((t) => t === undefined).length, ms: times.reduce<number>((sum, t) => sum + (t ?? 0), 0) };
+  });
+  return { budgetMs: UNIT_SHARD_BUDGET_MS, shards, overBudget: shards.filter((s) => s.mined > UNIT_SHARD_BUDGET_MS) };
 }
 
 function sortedObject(obj: Record<string, number>): Record<string, number> {

@@ -36,7 +36,7 @@ test/book-mirror.test.ts	gbrain book-mirror — source file invariants	2	readFil
 test/bootstrap-codex-door.test.ts	Codex door — rendered AGENTS.md pull protocol (Gate 3)	2	readFileSync
 test/bootstrap-contract.test.ts	bootstrap same-turn write-back contract	6	readFileSync
 test/bootstrap-opencode-door.serial.test.ts	opencode door — rendered AGENTS.md pull protocol	1	readFileSync
-test/bootstrap-shared-skills.test.ts	(file-level)	18	readFileSync
+test/bootstrap-shared-skills.test.ts	(file-level)	19	readFileSync
 test/brain-durability-hook.serial.test.ts	#4682 — push-lock timeout is fail-loud for the helper only	1	readFileSync
 test/brain-durability-hook.serial.test.ts	brain-commit-push.sh (D13 guarantee)	4	readFileSync
 test/brain-durability-hook.serial.test.ts	durability push remote confirmation (#5138)	9	readFileSync
@@ -123,6 +123,7 @@ test/doctor-skills-dir.test.ts	doctor --skills-dir (#4673)	6	readFileSync
 test/doctor-supervisor-singleton-pidfile.test.ts	doctor supervisor_singleton — honors the recorded pid_file (custom --pid-file)	2	doctor-source-helper
 test/doctor-supervisor-singleton-pidfile.test.ts	doctor supervisor_singleton — pid_file fallback (source-grep)	1	doctor-source-helper
 test/doctor-volunteer-channels.test.ts	checkVolunteerChannels	9	doctor-source-helper,readFileSync,source-surface-helper
+test/doctor-wedged-queue.test.ts	issue #1801 fix #3 — computeWedgedQueueCheck	14	doctor-source-helper
 test/doctor-wedged-queue.test.ts	issue #1801 fix #3 — remote queue_health state→status regression	1	doctor-source-helper
 test/doctor.test.ts	BUG 4 — in-progress sync via live lock, not stale freshness	8	doctor-source-helper
 test/doctor.test.ts	doctor command	35	doctor-source-helper
@@ -289,7 +290,7 @@ test/scripts/check-item-allowlist-catches.test.ts	CLI	2	readFileSync
 test/scripts/chunk-visibility-ratchet.test.ts	check-chunk-visibility.ts	6	readFileSync
 test/scripts/ci-bounded-run.test.ts	(file-level)	7	readFileSync
 test/scripts/ci-executed-counts.test.ts	CLI	2	readFileSync
-test/scripts/ci-gates.test.ts	CI execution evidence	9	readFileSync
+test/scripts/ci-gates.test.ts	CI execution evidence	11	readFileSync
 test/scripts/ci-gates.test.ts	test:full exit status	0	readFileSync
 test/scripts/ci-hydrate-admin-dist.test.ts	#6756 ci:local hydrates the admin/dist volume from the worktree	7	readFileSync
 test/scripts/ci-local-rendering.test.ts	ci-local command rendering	1	readFileSync
@@ -306,6 +307,7 @@ test/scripts/data-safety-native-workflow.test.ts	data-safety native CI coverage	
 test/scripts/e2e-backend-matrix.test.ts	scripts/e2e-backend-matrix.txt	3	readFileSync
 test/scripts/e2e-live-key-only.test.ts	shared live-key E2E exclusion list	4	readFileSync
 test/scripts/e2e-matrix.test.ts	frozen E2E matrix	9	readFileSync
+test/scripts/e2e-provider-key-notice.test.ts	scripts/e2e-provider-key-notice.sh	3	readFileSync
 test/scripts/e2e-runner.test.ts	second	5	readFileSync
 test/scripts/e2e-runner.test.ts	sequential E2E runner (GITHUB_ACTIONS=${githubActions})	9	readFileSync
 test/scripts/e2e-wiring.test.ts	(file-level)	12	readFileSync

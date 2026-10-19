@@ -1842,7 +1842,18 @@ refuses [`ghost_mass_delete_refused`](error-codes.md#ghost_mass_delete_refused)
 unless `GBRAIN_ALLOW_MASS_RECONCILE=1`). `gbrain sources reconcile --preview` on
 such a page refuses and names the same route, and a held deletion's next step
 in `gbrain sources status` is the `--prefer database` preview. `--all-drifted`
-does not select missing files.
+does not select missing files: it lists each one as `unknown`
+(`unknown_canonical_file_missing`), to preview alone with `--slug`.
+
+<a id="file-drift-unknown"></a>**Pages the live check cannot classify** (#6991). A conflicted page whose
+live file/database comparison returns no verdict (this host is not the
+source's active canonical owner, the page or its canonical file is gone, or
+the check refused or failed) is never repaired and never counted as clean.
+`--all-drifted` and the bare `gbrain repair file-drift` survey list it with
+class `unknown`, count it as `unknown_<reason>`, and say what to do for that
+reason (run on the owner host, decide the content by hand, preview it alone
+with `--slug`, or rerun the conflict audit). No `--class` preview command is
+printed for unknown pages.
 
 The audit gives every drifted page one class: `structurally_additive`,
 `additive_with_suggestions`, `review_required`, `formatting_only` or `error`.

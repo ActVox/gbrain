@@ -10,6 +10,48 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.313.0] - 2026-10-19
+
+**Unit shards in a full Test run cost about 29% less, the macOS 26 nightly typecheck no longer times out, and test paths survive a checkout directory with a space in it.** Each 4-vCPU runner now runs two unit shards at once (22 shards on 11 runners, re-mined from a green packed run, each within the unchanged 600 s budget). The `ci:ubicloud` gate plans its unit shards from the same partition, weights and budget.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The unit lane of a full Test run | 18 shards on 18 runners | 22 shards on 11 runners, two per runner (`scripts/test-shard-pack.sh`), each with its own coverage, receipts and log; lane names, coverage manifests and per-shard artifacts are unchanged in kind |
+| The `ci:ubicloud` unit check | its own 1,260 s budget against measured time, so a slow fleet failed a gate whose tests all passed | the same `unitShardPlan` and `UNIT_SHARD_BUDGET_MS` as GitHub; measured time is printed beside the plan for drift |
+| macOS 26 validation | typecheck ran inside verify and was killed at the 240 s cap (#6056) | typecheck has its own job with a measured 15-minute step timeout and its state saved on every outcome |
+| A test resolving a file URL with `.pathname` | broke in a checkout path containing a space (#6845) | 42 test files use `fileURLToPath`, and `check:file-url-pathname` fails verify on a new one |
+| An index-lock reclaim meeting this user's own exiting git | a cwd or environ read that failed while the git exited was taken for another user's process, so the reclaim refused | the read is re-checked within `RECLAIM_MIN_AGE_MS`; another user's git, or an alive one that stays unreadable, still fails the proof |
+| Tier 2 when provider keys aren't passed to the test process | the notice said it ran keyed | it says "provider keys not passed (GBRAIN_TEST_KEEP_PROVIDER_KEYS unset)" |
+
+## [0.60.312.0] - 2026-10-19
+
+**Fix wave 20: about thirty answers that were quietly wrong are now right.** Recall honours every filter you give it, think names the model that actually answered, doctor and the advisor stop calling stale or failed checks healthy, `embed --max-usd` respects your own prices, Katakana names stop matching inside longer words, `get_links` pages instead of returning everything, and a disabled Gmail API is reported as what it is. Thirty-one contributor fixes were rewritten on master and credited. Nothing here adds a paid call or a migration.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `recall --entity X --session Y` without `--since` | the session filter was dropped | both filters apply before the limit |
+| `recall --since <garbage>` or an empty `--session` | silently recalled everything | refused `invalid_params` with the accepted forms |
+| `recall --since-last-run` with more new facts than `--limit` | the overflow was never shown | the next run continues where the last one stopped |
+| `think` answered by a `chat_fallback_chain` model | reported, priced and saved the model that failed | names the model that answered, plus `requested_model` |
+| advisor backup coverage with expired or future-dated evidence; a collector that fails to read | read healthy | warns, or reports `collector_failed` |
+| `embed --max-usd` with a model priced by `gbrain pricing set` | stopped with `no_pricing` | uses your price |
+| A known price with no context ceiling | `no_pricing` | `no_context_ceiling`, naming the model |
+| `config set chat_model` while config.json or an env var pins it | said it worked | warns that the write is shadowed; `config unset <key> --file` clears the pin |
+| A Katakana alias inside a longer Katakana word; a page titled with one generic word | created a mention link | no link; `MENTION_EXTRACTOR_VERSION` 7 rescans mentions once |
+| `get_links` / `get_backlinks` on a hub page | every row, unbounded | 500 by default (max 5000) with `truncated` and `next_cursor`; `--all` on the CLI |
+| Gmail API disabled in the OAuth project | `connector_account_changed` | the credential refusal with its fix |
+| `dream --drain` stopped by a provider outage | exit 11, help said 3 | transient failures retry (11); permanent ones and no progress exit 1 naming the blocker |
+| `extract links --source db` reaching a page whose source has no row | aborted the run | defers and names the page; the run continues |
+| Codex "always allow" on a gbrain tool, then `connect --install --fresh-token` | refused `configuration_conflict` | keeps your approvals |
+| A meeting that hasn't happened yet | got "Discussed in" timeline rows | rows are added once it has ended |
+| A fact longer than the embedding input | coverage claimed for text never embedded | reported as partially embedded; nothing re-embeds |
+
+Every user-visible change is listed in the upgrade notice. Contributed by @javieraldape, @tarush1989, @spiky02plateau, @akinduroifedayo, @johnerik, @troyhoffman-oss, @Masashi-Ono0611 and @Kkkkkuro.
+
 ## [0.60.311.0] - 2026-10-19
 
 **The dream `consolidate` phase no longer silently supersedes a real fact when two typed statements of one metric share an effective time, and the facts an earlier run closed that way can be reopened.** Fixes the residual case of #6023.
