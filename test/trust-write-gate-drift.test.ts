@@ -78,7 +78,6 @@ const EXEMPT: Record<string, string> = {
   'src/core/trust/owner-actions.ts': 'owner release publishes a held row the owner confirmed (CEO-9); the gate already held it',
   'src/core/trust/supersede-handlers.ts': 'owner accept/undo re-tiers existing rows inside the checked supersede',
   'src/core/repair/conversation-labels.ts': 'owner repair of existing conversation labels',
-  'src/core/repair/legacy-twins.ts': 'owner repair moving existing rows of a twin page onto its legacy page; it writes no new content',
   'src/core/facts/conversation-relink.ts': 'free conversation relink sets entity_slug and a context note on existing derived rows; no claim text is written, so there is nothing for the gate to judge',
   'src/core/cycle/dream-taint.ts': 'the dream summary index page lists the run\'s output pages (gbrain-generated), stamped at their taint',
   'src/core/facts/fence-write.ts': 'callers decide the gate (backstop, loops-extract) and pass the decision; it records the flag receipt on the new row',
