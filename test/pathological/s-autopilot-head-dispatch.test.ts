@@ -115,7 +115,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         });
       }, 240_000);
 
-      test('between ticks, with sync.on_commit on, the HEAD probe dispatches a new commit at its first pass; with it off nothing is read', async () => {
+      test('between ticks, with sync.on_commit on, the HEAD probe dispatches a new commit at its first pass; with it off, or while a resident notifier runs in the process, nothing is read', async () => {
         const { sleepWatchingHeads } = await import('../../src/commands/autopilot-dispatch.ts');
         await withRepo(async r => {
           const head = await syncedThenCommitted(r, 'between-ticks');
@@ -131,6 +131,10 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
           expect({ off, reads, jobs: await syncJobs(r.engine, r.sourceId) }).toEqual({ off: [], reads: 0, jobs: [] });
 
           await r.engine.setConfig('sync.on_commit', 'true');
+          clock = 1_500_000;
+          const deferred = await quietly(() => sleepWatchingHeads(r.engine, state, { sleepMs: 30_000, baseInterval: 300, jsonMode: true }, { ...deps, notifierActive: () => true }));
+          expect({ deferred, reads, jobs: await syncJobs(r.engine, r.sourceId) }).toEqual({ deferred: [], reads: 0, jobs: [] });
+
           clock = 2_000_000;
           const on = await quietly(() => sleepWatchingHeads(r.engine, state, { sleepMs: 30_000, baseInterval: 300, jsonMode: true }, deps));
           expect(on.length).toBe(1);

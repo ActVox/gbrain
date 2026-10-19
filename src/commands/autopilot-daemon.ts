@@ -350,7 +350,7 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
 
     // Wait for next cycle; #7003: --status grades staleness from this daemon's own next tick.
     writeAutopilotHeartbeat({ phase: 'sleep', interval_s: interval, base_interval_s: baseInterval, next_tick_at: new Date(Date.now() + interval * 1000).toISOString() });
-    if (useMinionsDispatch) await sleepWatchingHeads(engine, state, { sleepMs: interval * 1000, baseInterval, jsonMode });
+    if (useMinionsDispatch) await sleepWatchingHeads(engine, state, { sleepMs: interval * 1000, baseInterval, jsonMode }, { notifierActive: () => notifier !== null });
     else await new Promise(r => setTimeout(r, interval * 1000));
   }
 }

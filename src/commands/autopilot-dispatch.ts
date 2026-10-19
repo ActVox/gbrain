@@ -412,6 +412,8 @@ export interface HeadProbeDeps {
   sleep?: (ms: number) => Promise<void>;
   readHead?: (root: string) => Promise<{ head: string; operation: string | null } | null>;
   dispatch?: typeof dispatchFreshnessSyncs;
+  /** True while this process runs a resident commit notifier (lane 2a.1): it, or the host's notifier owner, syncs on commit, so the probe stands down. */
+  notifierActive?: () => boolean;
 }
 
 /** One probe pass's record: the sources whose HEAD moved past what was synced or decided, and what the dispatch decided. */
@@ -422,7 +424,8 @@ export interface HeadProbeRecord { at: number; moved: string[]; decisions: Fresh
  * HEAD every `GBRAIN_AUTOPILOT_HEAD_PROBE_MS` (default 3 s, 1 to 30 s; git only, no database read) and runs the freshness
  * dispatch for the sources whose HEAD moved past both their last synced commit and the HEAD this daemon last decided
  * for, so a commit is queued within seconds instead of at the next tick (150 to 600 s). The flag is re-read every 30 s
- * and the source list every 60 s. With the flag off it only sleeps, and the tick's HEAD check stays the trigger.
+ * and the source list every 60 s. With the flag off, or while this process runs a resident commit notifier (which owns
+ * on-commit syncs for the host), it only sleeps, and the tick's HEAD check stays the trigger.
  * Returns each pass that saw a move (the recorded decisions the tests read).
  */
 export async function sleepWatchingHeads(
@@ -450,7 +453,7 @@ export async function sleepWatchingHeads(
         flagReadAt = now();
         enabled = /^(1|true|on|yes)$/i.test((await engine.getConfig(SYNC_ON_COMMIT_KEY))?.trim() ?? '');
       }
-      if (!enabled || autopilotPaused()) continue;
+      if (!enabled || autopilotPaused() || deps.notifierActive?.()) continue;
       if (now() - listedAt >= HEAD_PROBE_LIST_EVERY_MS) {
         listedAt = now();
         sources = (await loadAllSources(engine)).filter(s => !s.archived && s.local_path && !isConnectorSourceKind(parseSourceConfig(s.config).kind))
