@@ -3,13 +3,14 @@
  * subject (the pack's person type and its alias closure, per source) and an
  * employer target, before grouping and LIMIT. The judge prompt is unchanged
  * (D7). PGLite here; Postgres through test/e2e/edge-employment-roles-postgres.test.ts.
+ * Imports only APIs that predate the fix, so on an unfixed tree the assertions
+ * run and fail (personTypesFromPack is tested in schema-pack-person-types-6953).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _resetPackCacheForTests } from '../src/core/schema-pack/registry.ts';
-import { personTypesFromPack } from '../src/core/schema-pack/entity-types.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { PACKS, writeEntityTypePacks } from './helpers/entity-types-pack-fixture.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -134,15 +135,6 @@ for (const backend of testBackends()) describe(`employment role admission (${bac
 });
 
 describe('employment inference and evidence policy', () => {
-  test('person-like types are person plus its alias closure, not primitive siblings', () => {
-    const pack = { page_types: [
-      { name: 'person', primitive: 'entity', aliases: [] },
-      { name: 'researcher', primitive: 'entity', aliases: ['person'] },
-      { name: 'lab', primitive: 'entity', aliases: [] },
-    ] } as never;
-    expect(personTypesFromPack(pack)).toEqual(['person', 'researcher']);
-    expect(personTypesFromPack({ page_types: [] } as never)).toEqual(['person']);
-  });
   test('real link extraction keeps document mentions without inventing employment', async () => {
     for (const type of ['conversation', 'email', 'source', 'note', 'inbox']) {
       const { candidates } = await extractPageLinks('people/alice-example',
