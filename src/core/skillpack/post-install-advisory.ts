@@ -70,6 +70,7 @@ function scaffoldedSlugs(skillsDir: string): Set<string> {
   }
   for (const slug of entries) {
     try {
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- slug is a readdirSync entry of skillsDir (one name, no separators or ..), and both lstat calls refuse symlinks
       if (lstatSync(join(skillsDir, slug)).isDirectory() && lstatSync(join(skillsDir, slug, 'SKILL.md')).isFile()) {
         slugs.add(slug);
       }
