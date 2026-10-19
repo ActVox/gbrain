@@ -238,4 +238,25 @@ describe('actual remote source selection', () => {
       expect(result.localStoreCreated).toBe(false);
     }
   }, 60_000);
+
+  test('#6945 thin --since-last-run warns to raise --limit when the window is full, and only then', async () => {
+    const entity = 'people/thin-window-example';
+    for (const fact of ['thin window fact one', 'thin window fact two', 'thin window fact three']) {
+      await remote.insertFact({ fact, source: 'synthetic', entity_slug: entity, visibility: 'world' }, { source_id: 'default' });
+    }
+    const dispatch = (args: Record<string, unknown>) => dispatchToolCall(remote, 'recall', args, {
+      remote: true, sourceId: 'default', config: { engine: 'pglite' },
+    });
+    const full = await thinCall('postgres', [entity, '--since-last-run', '--limit', '2', '--source', 'default', '--json'], { dispatch });
+    expect({ code: full.exitCode, stderr: full.stderr }).toMatchObject({ code: 0 });
+    expect(JSON.parse(full.stdout).facts).toHaveLength(2);
+    expect(full.stderr).toContain('2 facts filled the --limit window; older facts since the last run may not be shown');
+    expect(full.stderr).toContain('(thin-client recall cannot page the cursor). Re-run with a larger --limit.');
+    expect(full.localStoreCreated).toBe(false);
+
+    const roomy = await thinCall('postgres', [entity, '--since-last-run', '--limit', '5', '--source', 'default', '--json'], { dispatch });
+    expect({ code: roomy.exitCode, stderr: roomy.stderr }).toMatchObject({ code: 0 });
+    expect(JSON.parse(roomy.stdout).facts).toHaveLength(3);
+    expect(roomy.stderr).not.toContain('filled the --limit window');
+  }, 60_000);
 });
