@@ -27,6 +27,7 @@ import {
   HOOK_EVENTS,
   type HookHeartbeatEntry,
 } from '../src/commands/hook.ts';
+import { writeHeartbeat } from '../src/core/context/hook-heartbeat.ts';
 import { pushStatusPathForRoot } from '../src/core/workspace-push.ts';
 import {
   ensureIpcSecret,
@@ -1121,6 +1122,17 @@ describe('heartbeat', () => {
     expect(lines.length).toBe(HEARTBEAT_MAX_LINES);
     // The newest entry survived the compaction.
     expect(JSON.parse(lines[lines.length - 1]).event).toBe('stop');
+  });
+
+  test('#6794: every allowlisted key round-trips through writeHeartbeat', async () => {
+    const entry: Record<string, string | number> = {};
+    HEARTBEAT_ALLOWED_KEYS.forEach((key, i) => {
+      entry[key] = key === 'outcome' ? 'ok' : key === 'duration_ms' ? i : `v-${key}`;
+    });
+    await writeHeartbeat(entry as unknown as HookHeartbeatEntry);
+    const [written] = await readHeartbeatTail(1);
+    expect(Object.keys(written).sort()).toEqual([...HEARTBEAT_ALLOWED_KEYS].sort());
+    expect(written).toEqual(entry as unknown as HookHeartbeatEntry);
   });
 
   test('readHeartbeatTail returns the last n entries oldest→newest', async () => {
