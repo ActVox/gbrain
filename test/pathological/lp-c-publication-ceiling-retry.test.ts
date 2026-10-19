@@ -315,6 +315,12 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
           if (charged!.grp === second) releaseFirst();
           return;
         }
+        // The second group is admitted before any page prepares, so the first group's parked transaction never holds up its
+        // admission (the drain admits the next group only as the run moves on).
+        if (point === 'consumer:preparing') {
+          for (let i = 0; i < 150 && (await groupOf(detail.requestId!)).second === undefined; i++) await new Promise(resolve => setTimeout(resolve, 100));
+          return;
+        }
         if (point !== 'lane:applied') return;
         const group = await groupOf(detail.requestId!);
         if (!group?.grp) return;
