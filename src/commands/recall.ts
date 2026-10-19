@@ -38,7 +38,7 @@ import { effectiveConfidence } from '../core/facts/decay.ts';
 import { resolveEntitySlug } from '../core/entities/resolve.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult } from '../core/mcp-client.ts';
-import { readCursorPosition, writeCursor, positionFromTime, type CursorPosition } from '../core/recall-cursor-state.ts';
+import { readRecallCursor, writeCursor, writePagedCursor, type RecallCursor } from '../core/recall-cursor-state.ts';
 import { resolveSourceId, resolveSourceIdEngineFree, SourceTargetError } from '../core/source-resolver.ts';
 import { usageError } from '../cli/cli-error.ts';
 import { parseSinceParam, SINCE_GRAMMAR } from '../core/facts/since-parse.ts';
@@ -506,23 +506,19 @@ async function runRecallOnce(
   sourceId: string,
   thinClient: boolean,
   cursorVariant: 'briefing' | 'watch',
-  cursorOverride?: CursorPosition | null,
-): Promise<CursorPosition> {
+  cursorOverride?: RecallCursor | null,
+): Promise<RecallCursor> {
   // Codex round 1 #2: T_start is captured BEFORE the first read SQL fires.
   // Facts inserted during render/write get included by the next run.
   const tStart = new Date();
 
-  let resolvedSince: Date | null = flags.since;
-  let position: CursorPosition | null = null;
-  if (flags.sinceLastRun) {
-    position = (cursorOverride !== undefined ? cursorOverride : readCursorPosition(sourceId, cursorVariant))
-      ?? positionFromTime(new Date(Date.now() - DEFAULT_FALLBACK_HOURS * 60 * 60 * 1000));
-    resolvedSince = new Date(position.createdAt);
-  }
-  // The local cursor arm pages oldest-first through a (created_at, id)
-  // keyset; thin-client and --supersessions have no keyset read and keep the
-  // newest-N window.
-  const paged = flags.sinceLastRun && !thinClient && !flags.supersessions;
+  const cursor: RecallCursor | null = flags.sinceLastRun
+    ? (cursorOverride !== undefined ? cursorOverride : readRecallCursor(sourceId, cursorVariant)) ?? wallClockCursor(defaultCursorStart())
+    : null;
+  const resolvedSince: Date | null = cursor ? cursor.since : flags.since;
+  // #6945: only the local cursor read can page (oldest first, by keyset);
+  // thin-client and --supersessions keep the newest-N window.
+  const pageable = cursor !== null && !thinClient && !flags.supersessions;
 
   let rows: FactRow[];
   let pendingCount: number | undefined;
@@ -574,10 +570,10 @@ async function runRecallOnce(
       }
     }
   } else {
-    rows = paged
-      ? await fetchRowsSinceCursor(engine, flags, sourceId, position!)
+    rows = pageable
+      ? await fetchCursorPage(engine, flags, sourceId, cursor!)
       : await fetchRowsLocal(engine, flags, sourceId, resolvedSince);
-    if (rows.length === 0 && cursorVariant === 'briefing' && await keylessQuestionFallback(engine, flags, sourceId)) return positionFromTime(tStart);
+    if (rows.length === 0 && cursorVariant === 'briefing' && await keylessQuestionFallback(engine, flags, sourceId)) return wallClockCursor(tStart);
     if (flags.pending) {
       pendingCount = await engine.countUnconsolidatedFacts(sourceId);
     }
@@ -615,63 +611,74 @@ async function runRecallOnce(
     }
   }
 
-  if (flags.sinceLastRun) {
-    // A full window may have left older unseen rows behind. Paged: resume
-    // strictly after the newest DELIVERED row instead of jumping to tStart,
-    // which would skip them for good. Caught up: tStart, as before.
-    const windowFull = rows.length >= clampSearchLimit(flags.limit, 50);
-    if (paged && windowFull) {
-      const newest = rows[0];
-      const next = { createdAt: newest.created_at_iso ?? newest.created_at.toISOString(), id: newest.id };
-      writeCursor(sourceId, newest.created_at, cursorVariant, next);
-      return next;
-    }
-    if (windowFull) {
-      process.stderr.write(
-        `[recall] ${rows.length} facts filled the --limit window; older facts since the last run may not be shown` +
-        `${thinClient ? ' (thin-client recall cannot page the cursor)' : ''}. Re-run with a larger --limit.\n`,
-      );
-    }
-    writeCursor(sourceId, tStart, cursorVariant);
-  }
+  return cursor ? advanceCursor(sourceId, cursorVariant, rows, flags.limit, pageable, thinClient, tStart) : wallClockCursor(tStart);
+}
 
-  return positionFromTime(tStart);
+function wallClockCursor(since: Date): RecallCursor {
+  return { since, resumeAfter: null };
+}
+
+function defaultCursorStart(): Date {
+  return new Date(Date.now() - DEFAULT_FALLBACK_HOURS * 60 * 60 * 1000);
 }
 
 /**
- * `--since-last-run` on the local engine: the OLDEST `limit` rows strictly
- * after the cursor position, returned newest-first for rendering. Same
- * filters as fetchRowsLocal's cursor arms (entity + text fallback, session,
- * grep, audit rows), applied in SQL before LIMIT.
+ * Move the --since-last-run cursor past what this run showed. A run that
+ * filled its --limit window may have older unseen facts behind it: a pageable
+ * run resumes strictly after the newest fact it delivered (moving to tStart
+ * would skip the rest for good); any other full run warns. A run with room to
+ * spare is caught up and records tStart.
  */
-async function fetchRowsSinceCursor(
-  engine: BrainEngine,
-  flags: ParsedFlags,
+function advanceCursor(
   sourceId: string,
-  position: CursorPosition,
-): Promise<FactRow[]> {
-  const opts = {
+  variant: 'briefing' | 'watch',
+  rows: FactRow[],
+  limit: number,
+  pageable: boolean,
+  thinClient: boolean,
+  tStart: Date,
+): RecallCursor {
+  const windowFull = rows.length >= clampSearchLimit(limit, 50);
+  if (windowFull && pageable) {
+    const newest = rows[0];
+    const resumeAfter = { createdAt: newest.created_at_iso ?? newest.created_at.toISOString(), id: newest.id };
+    writePagedCursor(sourceId, variant, resumeAfter);
+    return { since: new Date(Date.parse(resumeAfter.createdAt)), resumeAfter };
+  }
+  if (windowFull) {
+    process.stderr.write(
+      `[recall] ${rows.length} facts filled the --limit window; older facts since the last run may not be shown` +
+      `${thinClient ? ' (thin-client recall cannot page the cursor)' : ''}. Re-run with a larger --limit.\n`,
+    );
+  }
+  writeCursor(sourceId, tStart, variant);
+  return wallClockCursor(tStart);
+}
+
+/**
+ * One --since-last-run page from the local engine: the oldest `limit` facts
+ * after the cursor (inclusive of `since` when there is no keyset; id 0 sorts
+ * before every fact), rendered newest-first. Entity with its text fallback,
+ * session, --grep and audit rows narrow in SQL before LIMIT, as in
+ * fetchRowsLocal's cursor arms.
+ */
+async function fetchCursorPage(engine: BrainEngine, flags: ParsedFlags, sourceId: string, cursor: RecallCursor): Promise<FactRow[]> {
+  const after = cursor.resumeAfter ?? { createdAt: cursor.since.toISOString(), id: 0 };
+  const page = (narrow: { entitySlug?: string; grep?: string }) => engine.listFactsKeyset(sourceId, after, {
     activeOnly: !flags.includeExpired,
     limit: flags.limit,
-    grep: flags.grep ?? undefined,
     excludeAuditRows: true,
+    grep: flags.grep ?? undefined,
     sessionId: flags.sessionId || undefined,
-  };
-  let rows: FactRow[];
-  if (flags.entity) {
-    const slug = (await resolveEntitySlug(engine, sourceId, flags.entity)) ?? flags.entity;
-    rows = await engine.listFactsKeyset(sourceId, position, { ...opts, entitySlug: slug });
-    if (entityTextFallbackApplies(flags, rows.length)) {
-      const textRows = await engine.listFactsKeyset(sourceId, position, { ...opts, grep: flags.entity.toLowerCase() });
-      if (textRows.length > 0) {
-        noteEntityTextFallback(flags.entity, textRows.length);
-        rows = textRows;
-      }
-    }
-  } else {
-    rows = await engine.listFactsKeyset(sourceId, position, opts);
-  }
-  return rows.reverse();
+    ...narrow,
+  });
+  if (!flags.entity) return (await page({})).reverse();
+  const entityRows = await page({ entitySlug: (await resolveEntitySlug(engine, sourceId, flags.entity)) ?? flags.entity });
+  if (!entityTextFallbackApplies(flags, entityRows.length)) return entityRows.reverse();
+  const textRows = await page({ grep: flags.entity.toLowerCase() });
+  if (textRows.length === 0) return entityRows.reverse();
+  noteEntityTextFallback(flags.entity, textRows.length);
+  return textRows.reverse();
 }
 
 async function fetchRowsLocal(
@@ -836,8 +843,7 @@ async function runWatchLoop(
   }
 
   try {
-    let priorTickStart: CursorPosition = readCursorPosition(sourceId, 'watch')
-      ?? positionFromTime(new Date(Date.now() - DEFAULT_FALLBACK_HOURS * 60 * 60 * 1000));
+    let priorTickStart: RecallCursor = readRecallCursor(sourceId, 'watch') ?? wallClockCursor(defaultCursorStart());
 
     const effectiveFlags: ParsedFlags = { ...flags, sinceLastRun: true };
 

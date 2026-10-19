@@ -154,8 +154,8 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
-          "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
+          "listFactsSince: (source_id: string, since: Date, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",
@@ -1156,8 +1156,8 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
-          "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
+          "listFactsSince: (source_id: string, since: Date, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",
@@ -3452,8 +3452,8 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
-          "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
+          "listFactsSince: (source_id: string, since: Date, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",
@@ -3856,6 +3856,13 @@
           "sourceId?: string | undefined"
         ],
         "name": "PageWriteOptions"
+      },
+      {
+        "kind": "type",
+        "name": "RecallFactReadOpts",
+        "signature": [
+          "FactListOpts & { entitySlug?: string; }"
+        ]
       },
       {
         "kind": "interface",
@@ -6723,8 +6730,8 @@
           "listEvalCaptureFailures: (filter?: { since?: Date; }) => Promise<EvalCaptureFailure[]>",
           "listFactsByEntity: (source_id: string, entitySlug: string, opts?: FactListOpts) => Promise<FactRow[]>",
           "listFactsBySession: (source_id: string, sessionId: string, opts?: FactListOpts) => Promise<FactRow[]>",
-          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
-          "listFactsSince: (source_id: string, since: Date, opts?: FactListOpts & { entitySlug?: string; sessionId?: string; }) => Promise<FactRow[]>",
+          "listFactsKeyset: (source_id: string, after: { createdAt: string; id: number | null; } | null, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
+          "listFactsSince: (source_id: string, since: Date, opts?: RecallFactReadOpts) => Promise<FactRow[]>",
           "listFilesForPage: (pageId: number) => Promise<FileRow[]>",
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",

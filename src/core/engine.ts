@@ -681,6 +681,9 @@ export interface FactListOpts {
   excludePrivate?: boolean;
 }
 
+/** FactListOpts plus the entity the recall cursor reads (listFactsSince, listFactsKeyset) narrow to before LIMIT. */
+export type RecallFactReadOpts = FactListOpts & { entitySlug?: string };
+
 /** Per-source operational health snapshot consumed by `gbrain doctor`. */
 export interface FactsHealth {
   source_id: string;
@@ -2279,19 +2282,19 @@ export interface BrainEngine {
   listFactsSince(
     source_id: string,
     since: Date,
-    opts?: FactListOpts & { entitySlug?: string; sessionId?: string },
+    opts?: RecallFactReadOpts,
   ): Promise<FactRow[]>;
 
   /**
    * delta's facts arm: facts strictly after a `(created_at, id)` keyset
    * (`id: null` = strictly after the timestamp), OLDEST first, each row with
    * `created_at_iso` at column precision. Honors activeOnly, visibility,
-   * fingerprint, limit, and opt-in entitySlug / sessionId / grep / excludeAuditRows filters (recall paging).
+   * fingerprint, limit, and the opt-in recall narrowing (entitySlug, sessionId, grep, excludeAuditRows) that --since-last-run paging uses.
    */
   listFactsKeyset(
     source_id: string,
     after: { createdAt: string; id: number | null } | null,
-    opts?: FactListOpts & { entitySlug?: string; sessionId?: string },
+    opts?: RecallFactReadOpts,
   ): Promise<FactRow[]>;
 
   /** List facts captured under a session id within a source. */
