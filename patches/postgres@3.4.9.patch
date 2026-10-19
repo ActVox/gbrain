@@ -1,5 +1,5 @@
 diff --git a/cjs/src/connection.js b/vendor/postgres/cjs/src/connection.js
-index 07f6716..a15e780 100644
+index 07f6716..cf56b7c 100644
 --- a/cjs/src/connection.js
 +++ b/vendor/postgres/cjs/src/connection.js
 @@ -20,6 +20,7 @@ const Sync = b().S().end()
@@ -19,7 +19,15 @@ index 07f6716..a15e780 100644
    const {
      sslnegotiation,
      ssl,
-@@ -75,9 +76,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -64,6 +65,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     onnotify,
+     onparameter,
+     max_pipeline,
++    transaction_pipeline,
+     keep_alive,
+     backoff,
+     target_session_attrs
+@@ -75,9 +77,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        , idleTimer = timer(end, options.idle_timeout)
        , lifeTimer = timer(end, options.max_lifetime)
        , connectTimer = timer(connectTimedOut, options.connect_timeout)
@@ -34,7 +42,7 @@ index 07f6716..a15e780 100644
      , errorResponse = null
      , result = new Result()
      , incoming = Buffer.alloc(0)
-@@ -95,6 +101,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -95,6 +102,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      , rows = 0
      , serverSignature = null
      , nextWriteTimer = null
@@ -44,7 +52,7 @@ index 07f6716..a15e780 100644
      , terminated = false
      , incomings = null
      , results = null
-@@ -105,11 +114,18 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -105,11 +115,19 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      , ended = null
      , nonce = null
      , query = null
@@ -54,6 +62,7 @@ index 07f6716..a15e780 100644
 +    , sessionBudget = undefined
 +    , recovering = null
      , final = null
++    , inTransactionAfterSent = false
  
    const connection = {
      queue: queues.closed,
@@ -63,7 +72,7 @@ index 07f6716..a15e780 100644
      connect(query) {
        initial = query
        reconnect()
-@@ -143,11 +159,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -143,11 +161,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    async function cancel({ pid, secret }, resolve, reject) {
@@ -79,7 +88,7 @@ index 07f6716..a15e780 100644
      } catch (error) {
        reject(error)
      }
-@@ -163,22 +181,139 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -163,22 +183,174 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      if (q.cancelled)
        return
  
@@ -94,13 +103,15 @@ index 07f6716..a15e780 100644
        build(q)
 +      mayPipeline = mayPipeline || q.options.onexecute(connection)
 +      noteBudget(q)
++      noteTransaction(q)
 +      lastWritten = q
 +      lastExecuted = q
        return write(toBuffer(q))
          && !q.describeFirst
          && !q.cursorFn
-         && sent.length < max_pipeline
+-        && sent.length < max_pipeline
 -        && (!q.options.onexecute || q.options.onexecute(connection))
++        && sent.length < pipelineLimit()
 +        && mayPipeline
      } catch (error) {
 -      sent.length === 0 && write(Sync)
@@ -127,10 +138,44 @@ index 07f6716..a15e780 100644
 +    }
 +  }
 +
++  // GBrain (#6930): a transaction-mode pooler cannot carry statements pipelined across a transaction boundary (#6543,
++  // max_pipeline 0), but it pins one server connection from BEGIN until the transaction ends. So on a connection its
++  // owner holds (sql.begin, sql.reserve) a statement may follow others still in flight when every one of them leaves the
++  // connection inside a transaction: the last ReadyForQuery said T or E, or an in-flight statement began one, and none
++  // since may end it (COMMIT, ROLLBACK, END, ABORT, PREPARE TRANSACTION). Nothing is ever sent behind a statement that
++  // may end a transaction, so the next owner's statements never reach the server connection this one held.
++  function noteTransaction(q) {
++    const control = transactionControl(q.string || '')
++    control === 'end'
++      ? inTransactionAfterSent = false
++      : control === 'begin'
++        ? inTransactionAfterSent = true
++        : q === query && (inTransactionAfterSent = connection.status === 84 || connection.status === 69)
++  }
++
++  function pipelineLimit() {
++    return transaction_pipeline > max_pipeline && inTransactionAfterSent && connection.reserved
++      ? transaction_pipeline
++      : max_pipeline
++  }
++
 +  function reportBuildError(q, error) {
 +    try {
 +      options.onbuilderror(error && error.code ? error.code : 'BUILD_FAILED', statementText(q), error && error.parameter)
 +    } catch (_) {}
++  }
++
++  // GBrain (#6930): 'begin' when the text opens a transaction, 'end' when any statement in it may end one.
++  function transactionControl(text) {
++    let control = null
++    for (const part of text.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*(?:\n|$))*/, '').split(';')) {
++      const statement = part.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*(?:\n|$))*/, '')
++      if (/^(?:commit|end|abort|rollback(?!\s+to\b)|prepare\s+transaction)\b/i.test(statement))
++        return 'end'
++      if (/^(?:begin|start\s+transaction)\b/i.test(statement))
++        control = 'begin'
++    }
++    return control
 +  }
 +
 +  // The statement's text with $n placeholders, never its parameter values.
@@ -224,7 +269,7 @@ index 07f6716..a15e780 100644
      }
    }
  
-@@ -235,10 +370,15 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -235,10 +407,15 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      q.onlyDescribe && (delete statements[q.signature])
      q.parameters = q.parameters || parameters
      q.prepared = q.prepare && q.signature in statements
@@ -242,7 +287,7 @@ index 07f6716..a15e780 100644
  
      typeof options.debug === 'function' && options.debug(id, string, parameters, types)
    }
-@@ -295,10 +435,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -295,10 +472,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
    /* c8 ignore next 3 */
    function drain() {
@@ -255,7 +300,15 @@ index 07f6716..a15e780 100644
      if (incomings) {
        incomings.push(x)
        remaining -= x.length
-@@ -379,20 +520,35 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -366,6 +544,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     try {
+       statements = {}
+       needsTypes = options.fetch_types
++      inTransactionAfterSent = false
+       statementId = Math.random().toString(36).slice(2)
+       statementCount = 1
+       lifeTimer.start()
+@@ -379,20 +558,35 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function error(err) {
@@ -291,7 +344,7 @@ index 07f6716..a15e780 100644
    function queryError(query, err) {
      if (query.reserve)
        return query.reject(err)
-@@ -438,19 +594,47 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -438,19 +632,47 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -340,7 +393,7 @@ index 07f6716..a15e780 100644
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -459,6 +643,10 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -459,6 +681,10 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
    /* Handlers */
    function handle(xs, x = xs[0]) {
@@ -351,7 +404,7 @@ index 07f6716..a15e780 100644
      (
        x === 68 ? DataRow :                   // D
        x === 100 ? CopyData :                 // d
-@@ -489,6 +677,39 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -489,6 +715,39 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      )(xs)
    }
  
@@ -391,7 +444,7 @@ index 07f6716..a15e780 100644
    function DataRow(x) {
      let index = 7
      let length
-@@ -533,13 +754,25 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -533,13 +792,25 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function ReadyForQuery(x) {
@@ -418,7 +471,7 @@ index 07f6716..a15e780 100644
        } else {
          query.resolve(results || result)
        }
-@@ -547,9 +780,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -547,9 +818,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        errored(errorResponse)
      }
  
@@ -435,7 +488,18 @@ index 07f6716..a15e780 100644
  
      if (initial) {
        if (target_session_attrs) {
-@@ -564,23 +804,43 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -559,28 +837,54 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+           return terminate()
+       }
+ 
++      // GBrain (#6930): the array types a pool for this database already fetched are applied without a round trip.
++      if (needsTypes && options.array_types && options.array_types.rows) {
++        needsTypes = false
++        options.array_types.rows.forEach(([oid, typarray]) => addArrayType(oid, typarray))
++      }
++
+       if (needsTypes) {
+         initial.reserve && (initial = null)
          return fetchArrayTypes()
        }
  
@@ -485,7 +549,7 @@ index 07f6716..a15e780 100644
          : connection.reserved()
        : ending
          ? terminate()
-@@ -630,7 +890,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -630,7 +934,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        !query.statement.types[i] && (query.statement.types[i] = x.readUInt32BE(7 + i * 4))
  
      query.prepare && (statements[query.signature] = query.statement)
@@ -497,7 +561,7 @@ index 07f6716..a15e780 100644
    }
  
    function RowDescription(x) {
-@@ -767,14 +1031,21 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -767,15 +1075,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
    async function fetchArrayTypes() {
      needsTypes = false
@@ -525,9 +589,11 @@ index 07f6716..a15e780 100644
 +      return
 +    }
      types.forEach(({ oid, typarray }) => addArrayType(oid, typarray))
++    options.array_types && (options.array_types.rows = types.map(({ oid, typarray }) => [oid, typarray]))
    }
  
-@@ -821,7 +1092,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   function addArrayType(oid, typarray) {
+@@ -821,7 +1137,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    function retry(q, error) {
      delete statements[q.signature]
      q.retried = error
@@ -545,7 +611,7 @@ index 07f6716..a15e780 100644
    }
  
    function NotificationResponse(x) {
-@@ -1039,6 +1319,59 @@ function xor(a, b) {
+@@ -1039,6 +1364,59 @@ function xor(a, b) {
    return buffer
  }
  
@@ -606,7 +672,7 @@ index 07f6716..a15e780 100644
    seconds = typeof seconds === 'function' ? seconds() : seconds
    if (!seconds)
 diff --git a/cjs/src/index.js b/vendor/postgres/cjs/src/index.js
-index f09c61c..b25e0b6 100644
+index f09c61c..97d3e55 100644
 --- a/cjs/src/index.js
 +++ b/vendor/postgres/cjs/src/index.js
 @@ -62,10 +62,36 @@ function Postgres(a, b) {
@@ -1003,21 +1069,22 @@ index f09c61c..b25e0b6 100644
    query.sslrootcert === 'system' && (query.ssl = 'verify-full')
  
 -  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'backoff', 'keep_alive']
-+  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'backoff', 'keep_alive', 'inflight_timeout', 'inflight_max', 'inflight_grace']
++  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'transaction_pipeline', 'backoff', 'keep_alive', 'inflight_timeout', 'inflight_max', 'inflight_grace']
    const defaults = {
      max             : globalThis.Cloudflare ? 3 : 10,
      ssl             : false,
-@@ -453,6 +689,9 @@ function parseOptions(a, b) {
+@@ -453,6 +689,10 @@ function parseOptions(a, b) {
      connect_timeout : 30,
      max_lifetime    : max_lifetime,
      max_pipeline    : 100,
++    transaction_pipeline: 0,
 +    inflight_timeout: null,
 +    inflight_max    : null,
 +    inflight_grace  : null,
      backoff         : backoff,
      keep_alive      : 60,
      prepare         : true,
-@@ -491,11 +730,18 @@ function parseOptions(a, b) {
+@@ -491,11 +731,19 @@ function parseOptions(a, b) {
      onnotice        : o.onnotice,
      onnotify        : o.onnotify,
      onclose         : o.onclose,
@@ -1028,6 +1095,7 @@ index f09c61c..b25e0b6 100644
 +    onrecovered     : o.onrecovered,
 +    onrecoveryfailed: o.onrecoveryfailed,
 +    shared_types    : o.shared_types === false ? null : o.shared_types instanceof Map ? o.shared_types : new Map(),
++    array_types     : o.array_types || null,
      onparameter     : o.onparameter,
      socket          : o.socket,
      transform       : parseTransform(o.transform || { undefined: undefined }),
@@ -1107,7 +1175,7 @@ index 0578284..e80a868 100644
  
    return '$' + (types.push(
 diff --git a/src/connection.js b/vendor/postgres/src/connection.js
-index 1b1cccd..7b6372c 100644
+index 1b1cccd..8be7fc0 100644
 --- a/src/connection.js
 +++ b/vendor/postgres/src/connection.js
 @@ -20,6 +20,7 @@ const Sync = b().S().end()
@@ -1127,7 +1195,15 @@ index 1b1cccd..7b6372c 100644
    const {
      sslnegotiation,
      ssl,
-@@ -75,9 +76,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -64,6 +65,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     onnotify,
+     onparameter,
+     max_pipeline,
++    transaction_pipeline,
+     keep_alive,
+     backoff,
+     target_session_attrs
+@@ -75,9 +77,14 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        , idleTimer = timer(end, options.idle_timeout)
        , lifeTimer = timer(end, options.max_lifetime)
        , connectTimer = timer(connectTimedOut, options.connect_timeout)
@@ -1142,7 +1218,7 @@ index 1b1cccd..7b6372c 100644
      , errorResponse = null
      , result = new Result()
      , incoming = Buffer.alloc(0)
-@@ -95,6 +101,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -95,6 +102,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      , rows = 0
      , serverSignature = null
      , nextWriteTimer = null
@@ -1152,7 +1228,7 @@ index 1b1cccd..7b6372c 100644
      , terminated = false
      , incomings = null
      , results = null
-@@ -105,11 +114,18 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -105,11 +115,19 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      , ended = null
      , nonce = null
      , query = null
@@ -1162,6 +1238,7 @@ index 1b1cccd..7b6372c 100644
 +    , sessionBudget = undefined
 +    , recovering = null
      , final = null
++    , inTransactionAfterSent = false
  
    const connection = {
      queue: queues.closed,
@@ -1171,7 +1248,7 @@ index 1b1cccd..7b6372c 100644
      connect(query) {
        initial = query
        reconnect()
-@@ -143,11 +159,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -143,11 +161,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    async function cancel({ pid, secret }, resolve, reject) {
@@ -1187,7 +1264,7 @@ index 1b1cccd..7b6372c 100644
      } catch (error) {
        reject(error)
      }
-@@ -163,22 +181,139 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -163,22 +183,174 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      if (q.cancelled)
        return
  
@@ -1202,13 +1279,15 @@ index 1b1cccd..7b6372c 100644
        build(q)
 +      mayPipeline = mayPipeline || q.options.onexecute(connection)
 +      noteBudget(q)
++      noteTransaction(q)
 +      lastWritten = q
 +      lastExecuted = q
        return write(toBuffer(q))
          && !q.describeFirst
          && !q.cursorFn
-         && sent.length < max_pipeline
+-        && sent.length < max_pipeline
 -        && (!q.options.onexecute || q.options.onexecute(connection))
++        && sent.length < pipelineLimit()
 +        && mayPipeline
      } catch (error) {
 -      sent.length === 0 && write(Sync)
@@ -1235,10 +1314,44 @@ index 1b1cccd..7b6372c 100644
 +    }
 +  }
 +
++  // GBrain (#6930): a transaction-mode pooler cannot carry statements pipelined across a transaction boundary (#6543,
++  // max_pipeline 0), but it pins one server connection from BEGIN until the transaction ends. So on a connection its
++  // owner holds (sql.begin, sql.reserve) a statement may follow others still in flight when every one of them leaves the
++  // connection inside a transaction: the last ReadyForQuery said T or E, or an in-flight statement began one, and none
++  // since may end it (COMMIT, ROLLBACK, END, ABORT, PREPARE TRANSACTION). Nothing is ever sent behind a statement that
++  // may end a transaction, so the next owner's statements never reach the server connection this one held.
++  function noteTransaction(q) {
++    const control = transactionControl(q.string || '')
++    control === 'end'
++      ? inTransactionAfterSent = false
++      : control === 'begin'
++        ? inTransactionAfterSent = true
++        : q === query && (inTransactionAfterSent = connection.status === 84 || connection.status === 69)
++  }
++
++  function pipelineLimit() {
++    return transaction_pipeline > max_pipeline && inTransactionAfterSent && connection.reserved
++      ? transaction_pipeline
++      : max_pipeline
++  }
++
 +  function reportBuildError(q, error) {
 +    try {
 +      options.onbuilderror(error && error.code ? error.code : 'BUILD_FAILED', statementText(q), error && error.parameter)
 +    } catch (_) {}
++  }
++
++  // GBrain (#6930): 'begin' when the text opens a transaction, 'end' when any statement in it may end one.
++  function transactionControl(text) {
++    let control = null
++    for (const part of text.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*(?:\n|$))*/, '').split(';')) {
++      const statement = part.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*(?:\n|$))*/, '')
++      if (/^(?:commit|end|abort|rollback(?!\s+to\b)|prepare\s+transaction)\b/i.test(statement))
++        return 'end'
++      if (/^(?:begin|start\s+transaction)\b/i.test(statement))
++        control = 'begin'
++    }
++    return control
 +  }
 +
 +  // The statement's text with $n placeholders, never its parameter values.
@@ -1332,7 +1445,7 @@ index 1b1cccd..7b6372c 100644
      }
    }
  
-@@ -235,10 +370,15 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -235,10 +407,15 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      q.onlyDescribe && (delete statements[q.signature])
      q.parameters = q.parameters || parameters
      q.prepared = q.prepare && q.signature in statements
@@ -1350,7 +1463,7 @@ index 1b1cccd..7b6372c 100644
  
      typeof options.debug === 'function' && options.debug(id, string, parameters, types)
    }
-@@ -295,10 +435,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -295,10 +472,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
    /* c8 ignore next 3 */
    function drain() {
@@ -1363,7 +1476,15 @@ index 1b1cccd..7b6372c 100644
      if (incomings) {
        incomings.push(x)
        remaining -= x.length
-@@ -379,20 +520,35 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -366,6 +544,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     try {
+       statements = {}
+       needsTypes = options.fetch_types
++      inTransactionAfterSent = false
+       statementId = Math.random().toString(36).slice(2)
+       statementCount = 1
+       lifeTimer.start()
+@@ -379,20 +558,35 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function error(err) {
@@ -1399,7 +1520,7 @@ index 1b1cccd..7b6372c 100644
    function queryError(query, err) {
      if (query.reserve)
        return query.reject(err)
-@@ -438,19 +594,47 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -438,19 +632,47 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -1448,7 +1569,7 @@ index 1b1cccd..7b6372c 100644
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -459,6 +643,10 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -459,6 +681,10 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
    /* Handlers */
    function handle(xs, x = xs[0]) {
@@ -1459,7 +1580,7 @@ index 1b1cccd..7b6372c 100644
      (
        x === 68 ? DataRow :                   // D
        x === 100 ? CopyData :                 // d
-@@ -489,6 +677,39 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -489,6 +715,39 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      )(xs)
    }
  
@@ -1499,7 +1620,7 @@ index 1b1cccd..7b6372c 100644
    function DataRow(x) {
      let index = 7
      let length
-@@ -533,13 +754,25 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -533,13 +792,25 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function ReadyForQuery(x) {
@@ -1526,7 +1647,7 @@ index 1b1cccd..7b6372c 100644
        } else {
          query.resolve(results || result)
        }
-@@ -547,9 +780,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -547,9 +818,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        errored(errorResponse)
      }
  
@@ -1543,7 +1664,18 @@ index 1b1cccd..7b6372c 100644
  
      if (initial) {
        if (target_session_attrs) {
-@@ -564,23 +804,43 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -559,28 +837,54 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+           return terminate()
+       }
+ 
++      // GBrain (#6930): the array types a pool for this database already fetched are applied without a round trip.
++      if (needsTypes && options.array_types && options.array_types.rows) {
++        needsTypes = false
++        options.array_types.rows.forEach(([oid, typarray]) => addArrayType(oid, typarray))
++      }
++
+       if (needsTypes) {
+         initial.reserve && (initial = null)
          return fetchArrayTypes()
        }
  
@@ -1593,7 +1725,7 @@ index 1b1cccd..7b6372c 100644
          : connection.reserved()
        : ending
          ? terminate()
-@@ -630,7 +890,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -630,7 +934,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        !query.statement.types[i] && (query.statement.types[i] = x.readUInt32BE(7 + i * 4))
  
      query.prepare && (statements[query.signature] = query.statement)
@@ -1605,7 +1737,7 @@ index 1b1cccd..7b6372c 100644
    }
  
    function RowDescription(x) {
-@@ -767,14 +1031,21 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -767,15 +1075,23 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
  
    async function fetchArrayTypes() {
      needsTypes = false
@@ -1633,9 +1765,11 @@ index 1b1cccd..7b6372c 100644
 +      return
 +    }
      types.forEach(({ oid, typarray }) => addArrayType(oid, typarray))
++    options.array_types && (options.array_types.rows = types.map(({ oid, typarray }) => [oid, typarray]))
    }
  
-@@ -821,7 +1092,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   function addArrayType(oid, typarray) {
+@@ -821,7 +1137,16 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    function retry(q, error) {
      delete statements[q.signature]
      q.retried = error
@@ -1653,7 +1787,7 @@ index 1b1cccd..7b6372c 100644
    }
  
    function NotificationResponse(x) {
-@@ -1039,6 +1319,59 @@ function xor(a, b) {
+@@ -1039,6 +1364,59 @@ function xor(a, b) {
    return buffer
  }
  
@@ -1714,7 +1848,7 @@ index 1b1cccd..7b6372c 100644
    seconds = typeof seconds === 'function' ? seconds() : seconds
    if (!seconds)
 diff --git a/src/index.js b/vendor/postgres/src/index.js
-index c7fba3d..5458638 100644
+index c7fba3d..36e1db3 100644
 --- a/src/index.js
 +++ b/vendor/postgres/src/index.js
 @@ -62,10 +62,36 @@ function Postgres(a, b) {
@@ -2111,21 +2245,22 @@ index c7fba3d..5458638 100644
    query.sslrootcert === 'system' && (query.ssl = 'verify-full')
  
 -  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'backoff', 'keep_alive']
-+  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'backoff', 'keep_alive', 'inflight_timeout', 'inflight_max', 'inflight_grace']
++  const ints = ['idle_timeout', 'connect_timeout', 'max_lifetime', 'max_pipeline', 'transaction_pipeline', 'backoff', 'keep_alive', 'inflight_timeout', 'inflight_max', 'inflight_grace']
    const defaults = {
      max             : globalThis.Cloudflare ? 3 : 10,
      ssl             : false,
-@@ -453,6 +689,9 @@ function parseOptions(a, b) {
+@@ -453,6 +689,10 @@ function parseOptions(a, b) {
      connect_timeout : 30,
      max_lifetime    : max_lifetime,
      max_pipeline    : 100,
++    transaction_pipeline: 0,
 +    inflight_timeout: null,
 +    inflight_max    : null,
 +    inflight_grace  : null,
      backoff         : backoff,
      keep_alive      : 60,
      prepare         : true,
-@@ -491,11 +730,18 @@ function parseOptions(a, b) {
+@@ -491,11 +731,19 @@ function parseOptions(a, b) {
      onnotice        : o.onnotice,
      onnotify        : o.onnotify,
      onclose         : o.onclose,
@@ -2136,6 +2271,7 @@ index c7fba3d..5458638 100644
 +    onrecovered     : o.onrecovered,
 +    onrecoveryfailed: o.onrecoveryfailed,
 +    shared_types    : o.shared_types === false ? null : o.shared_types instanceof Map ? o.shared_types : new Map(),
++    array_types     : o.array_types || null,
      onparameter     : o.onparameter,
      socket          : o.socket,
      transform       : parseTransform(o.transform || { undefined: undefined }),
@@ -2215,10 +2351,10 @@ index 7c7c2b9..d462498 100644
  
    return '$' + (types.push(
 diff --git a/types/index.d.ts b/vendor/postgres/types/index.d.ts
-index 13c3432..49c8e53 100644
+index 13c3432..aedfb29 100644
 --- a/types/index.d.ts
 +++ b/vendor/postgres/types/index.d.ts
-@@ -119,6 +119,51 @@ interface BaseOptions<T extends Record<string, postgres.PostgresType>> {
+@@ -119,6 +119,63 @@ interface BaseOptions<T extends Record<string, postgres.PostgresType>> {
     */
    publications: string
    onclose: (connId: number) => void;
@@ -2267,10 +2403,22 @@ index 13c3432..49c8e53 100644
 +   * @default true
 +   */
 +  shared_types: boolean | Map<string, number[]>;
++  /**
++   * GBrain (#6930): the array types the first connection to a database fetched, shared with every later
++   * connection (of any pool given the same object), so only that first connection runs the pg_type query.
++   * @default null
++   */
++  array_types: { rows: Array<[number, number]> | null } | null;
++  /**
++   * GBrain (#6930): the pipeline depth on a connection its owner holds (sql.begin, sql.reserve) while every statement
++   * in flight leaves it inside a transaction; used when above max_pipeline (a transaction-mode pooler's 0).
++   * @default 0
++   */
++  transaction_pipeline: number;
    backoff: boolean | ((attemptNum: number) => number);
    max_lifetime: number | null;
    keep_alive: number | null;
-@@ -605,7 +650,7 @@ declare namespace postgres {
+@@ -605,7 +662,7 @@ declare namespace postgres {
      writable(): Promise<Writable>;
  
      execute(): this;
@@ -2279,7 +2427,7 @@ index 13c3432..49c8e53 100644
  
      /**
       * @deprecated `.stream` has been renamed to `.forEach`
-@@ -659,6 +704,7 @@ declare namespace postgres {
+@@ -659,6 +716,7 @@ declare namespace postgres {
    | Fragment[]
  
    interface UnsafeQueryOptions {
@@ -2287,7 +2435,7 @@ index 13c3432..49c8e53 100644
      /**
       * When executes query as prepared statement.
       * @default false
-@@ -705,6 +751,8 @@ declare namespace postgres {
+@@ -705,6 +763,8 @@ declare namespace postgres {
  
      options: ParsedOptions<TTypes>;
      parameters: ConnectionParameters;
@@ -2296,7 +2444,7 @@ index 13c3432..49c8e53 100644
  
      end(options?: { timeout?: number | undefined } | undefined): Promise<void>;
  
-@@ -717,10 +765,12 @@ declare namespace postgres {
+@@ -717,10 +777,12 @@ declare namespace postgres {
      begin<T>(cb: (sql: TransactionSql<TTypes>) => T | Promise<T>): Promise<UnwrapPromiseArray<T>>;
      begin<T>(options: string, cb: (sql: TransactionSql<TTypes>) => T | Promise<T>): Promise<UnwrapPromiseArray<T>>;
  
@@ -2310,7 +2458,7 @@ index 13c3432..49c8e53 100644
      savepoint<T>(cb: (sql: TransactionSql<TTypes>) => T | Promise<T>): Promise<UnwrapPromiseArray<T>>;
      savepoint<T>(name: string, cb: (sql: TransactionSql<TTypes>) => T | Promise<T>): Promise<UnwrapPromiseArray<T>>;
  
-@@ -728,6 +778,8 @@ declare namespace postgres {
+@@ -728,6 +790,8 @@ declare namespace postgres {
    }
  
    interface ReservedSql<TTypes extends Record<string, unknown> = {}> extends Sql<TTypes> {

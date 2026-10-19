@@ -67,6 +67,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     onnotify,
     onparameter,
     max_pipeline,
+    transaction_pipeline,
     keep_alive,
     backoff,
     target_session_attrs
@@ -122,6 +123,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     , sessionBudget = undefined
     , recovering = null
     , final = null
+    , inTransactionAfterSent = false
 
   const connection = {
     queue: queues.closed,
@@ -193,12 +195,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       build(q)
       mayPipeline = mayPipeline || q.options.onexecute(connection)
       noteBudget(q)
+      noteTransaction(q)
       lastWritten = q
       lastExecuted = q
       return write(toBuffer(q))
         && !q.describeFirst
         && !q.cursorFn
-        && sent.length < max_pipeline
+        && sent.length < pipelineLimit()
         && mayPipeline
     } catch (error) {
       // GBrain (#6383), the approach of porsager/postgres#1236: q already has its place in the queue of
@@ -222,10 +225,44 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     }
   }
 
+  // GBrain (#6930): a transaction-mode pooler cannot carry statements pipelined across a transaction boundary (#6543,
+  // max_pipeline 0), but it pins one server connection from BEGIN until the transaction ends. So on a connection its
+  // owner holds (sql.begin, sql.reserve) a statement may follow others still in flight when every one of them leaves the
+  // connection inside a transaction: the last ReadyForQuery said T or E, or an in-flight statement began one, and none
+  // since may end it (COMMIT, ROLLBACK, END, ABORT, PREPARE TRANSACTION). Nothing is ever sent behind a statement that
+  // may end a transaction, so the next owner's statements never reach the server connection this one held.
+  function noteTransaction(q) {
+    const control = transactionControl(q.string || '')
+    control === 'end'
+      ? inTransactionAfterSent = false
+      : control === 'begin'
+        ? inTransactionAfterSent = true
+        : q === query && (inTransactionAfterSent = connection.status === 84 || connection.status === 69)
+  }
+
+  function pipelineLimit() {
+    return transaction_pipeline > max_pipeline && inTransactionAfterSent && connection.reserved
+      ? transaction_pipeline
+      : max_pipeline
+  }
+
   function reportBuildError(q, error) {
     try {
       options.onbuilderror(error && error.code ? error.code : 'BUILD_FAILED', statementText(q), error && error.parameter)
     } catch (_) {}
+  }
+
+  // GBrain (#6930): 'begin' when the text opens a transaction, 'end' when any statement in it may end one.
+  function transactionControl(text) {
+    let control = null
+    for (const part of text.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*(?:\n|$))*/, '').split(';')) {
+      const statement = part.replace(/^(?:\s|\/\*[\s\S]*?\*\/|--[^\n]*(?:\n|$))*/, '')
+      if (/^(?:commit|end|abort|rollback(?!\s+to\b)|prepare\s+transaction)\b/i.test(statement))
+        return 'end'
+      if (/^(?:begin|start\s+transaction)\b/i.test(statement))
+        control = 'begin'
+    }
+    return control
   }
 
   // The statement's text with $n placeholders, never its parameter values.
@@ -509,6 +546,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     try {
       statements = {}
       needsTypes = options.fetch_types
+      inTransactionAfterSent = false
       statementId = Math.random().toString(36).slice(2)
       statementCount = 1
       lifeTimer.start()
@@ -801,6 +839,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
           return terminate()
       }
 
+      // GBrain (#6930): the array types a pool for this database already fetched are applied without a round trip.
+      if (needsTypes && options.array_types && options.array_types.rows) {
+        needsTypes = false
+        options.array_types.rows.forEach(([oid, typarray]) => addArrayType(oid, typarray))
+      }
+
       if (needsTypes) {
         initial.reserve && (initial = null)
         return fetchArrayTypes()
@@ -1049,6 +1093,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       return
     }
     types.forEach(({ oid, typarray }) => addArrayType(oid, typarray))
+    options.array_types && (options.array_types.rows = types.map(({ oid, typarray }) => [oid, typarray]))
   }
 
   function addArrayType(oid, typarray) {
