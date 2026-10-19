@@ -7,22 +7,23 @@ import type { BrainEngine } from '../engine.ts';
 import { SYNC_NUDGE_VERSION, type SyncNudgeRequest, type SyncNudgeResponse } from '../context/sync-ipc.ts';
 import { MARKER_INTENTS, upsertMarker, type MarkerIntent, type MarkerRequester, type WantedMarker } from './store.ts';
 import { revParseHead } from './detect.ts';
+import { readManagedMode } from '../persistence/managed-mode.ts';
 import { nudgeResidentNotifier, residentNotifier } from './resident.ts';
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /** Whether the source is a managed one (bound to a worktree on an activated brain), and its checkout root. */
 export async function sourceSyncShape(engine: BrainEngine, sourceId: string): Promise<{ exists: boolean; managed: boolean; root: string | null }> {
-  const [row] = await engine.executeRaw<{ local_path: string | null; root: string | null; bound: unknown; enabled: unknown }>(
-    `SELECT s.local_path, h.local_path AS root, (b.source_id IS NOT NULL) AS bound,
-            COALESCE((SELECT enabled FROM persistence_brain WHERE singleton = 1), false) AS enabled
+  const [row] = await engine.executeRaw<{ local_path: string | null; root: string | null; bound: unknown }>(
+    `SELECT s.local_path, h.local_path AS root, (b.source_id IS NOT NULL) AS bound
        FROM sources s
        LEFT JOIN persistence_source_bindings b ON b.source_id = s.id AND b.source_incarnation = s.incarnation
        LEFT JOIN persistence_worktrees w ON w.id = b.worktree_id
        LEFT JOIN persistence_host_bindings h ON h.worktree_id = w.id AND h.host_id = w.owner_host_id
       WHERE s.id = $1 AND NOT s.archived LIMIT 1`, [sourceId]);
   if (!row) return { exists: false, managed: false, root: null };
-  const managed = (row.bound === true || row.bound === 't') && (row.enabled === true || row.enabled === 't');
+  const managed = (row.bound === true || row.bound === 't')
+    && await readManagedMode(engine, { refusal: { subject: 'Recording a sync request', consequence: 'it refuses rather than guess whether the source pulls' } });
   return { exists: true, managed, root: (managed ? row.root : null) ?? row.local_path };
 }
 
