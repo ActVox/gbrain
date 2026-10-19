@@ -42,6 +42,9 @@ import type { FenceReason, FenceTier, GateLetter } from '../fence-repair/types.t
 import { FENCE_VERSION } from '../fence-repair/refusal.ts';
 import { fenceHoldFix, fenceHoldLocation, fencePreviewArgv, readFenceAutoRepair, type FenceAutoRepair, type FenceHoldLocation } from '../fence-repair/hold-fix.ts';
 import { contentHoldDocs, contentHoldFix } from '../content-repair/hold-fix.ts';
+import { classicRenameHoldFix } from '../classic-rename-holds.ts';
+import { classicFileHoldFix } from '../classic-file-holds.ts';
+import { unsupportedPathHoldFix } from '../sync-byte-paths.ts';
 import { STRUCTURED_WRITE_ADVICE, type FencesNormalized } from '../fence-repair/report.ts';
 import type { SyncDiscovery, SyncRename } from './sync-discovery.ts';
 import { isCodeFilePath, isImageFilePath, isMultimodalEnabled } from '../sync.ts';
@@ -86,7 +89,9 @@ export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regre
   /** GBRA-133 S-33: a committed file whose Git blob the repository no longer has, and whose working-tree copy differs or is gone. */
   | 'git_object_missing'
   /** GBRA-133 S-7: a committed file whose name is not valid UTF-8, so no Git read or file finds it by its decoded name. */
-  | 'path_not_utf8';
+  | 'path_not_utf8'
+  /** GBRA-133 PR 1 (classic sync): src/core/classic-rename-holds.ts, src/core/classic-file-holds.ts and src/core/sync-byte-paths.ts. */
+  | 'rename_identity_unreadable' | 'rename_reconcile_failed' | 'absent_from_worktree' | 'unsupported_path';
 /** GBRA-130 A-6: the fault a `page_write_failed` hold stands for (identifiers and classes only, never content). */
 export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null;
   /** The newest failed receipt; null for a GBRA-133 S-63 freeze fault (origin `freeze`), which threw before any request was admitted. */
@@ -110,7 +115,9 @@ export interface PreparationStallMeta {
   /** The `gbrain sync` arguments that resume the cursor with its stored options (after `sources retry-held`). */
   sync_argv: string[];
 }
-export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason | OriginConflictReason | PageIdentityHoldReason;
+export type GitHoldReason = InvalidFrontmatterReason | 'rename_source_changed' | 'explicit_id_conflict' | FenceReason | OriginConflictReason | PageIdentityHoldReason
+  | 'symlink_in_repo' | 'symlink_outside_root' | 'symlink_dangling' | 'symlink_loop' | 'permission_denied' | 'not_regular_file' | 'skip_worktree' | 'deleted_locally'
+  | 'not_utf8' | 'control_character';
 /** GBRA-130: why a `page_identity_changed` hold's path has no page sync may write (A-17, B-3, B-4). */
 export type PageIdentityHoldReason = 'several_tombstones' | 'spelling' | 'identity_differs';
 /** #6712 PR 4b: the sides a `file_drift` Decision can be about, and the states of a deleted side (design v3.2 §4). */
@@ -716,6 +723,7 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
         verify };
     }
     case 'file_unreadable': {
+      if (record.meta.reason) return classicFileHoldFix(record);
       const verify = { argv: ['gbrain', 'sources', 'status', source, '--json'] };
       return { argv: ['gbrain', 'sources', 'retry-held', source], consent: [], actor: 'user', requires_exclusive: false, docs: 'docs/guides/write-refusals.md#file_unreadable',
         why: `${record.path} is not a readable regular file inside the source root (a symlink, a non-regular file or a permission error), so sync held it without reading or following it and the rest of the source kept syncing. `
@@ -838,7 +846,7 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
         verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
     case 'parser_regression':
       return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'user', requires_exclusive: false,
-        user_message: `gbrain refuses ${record.path}, whose exact bytes imported under an earlier version. This is a gbrain bug: report it with the gbrain version, the file and the code, then upgrade or pin the last good version.`,
+        user_message: `gbrain refuses ${record.path}, whose exact bytes imported under an earlier version. This is a gbrain bug: report it with the gbrain version, the file and the code, then upgrade, or keep GBRAIN_SYNC_PARSER_REGRESSION=hold set for the process that syncs; never pin a release older than 0.60.305.0.`,
         why: 'The same bytes imported before, so only gbrain changed; sync holds the file under GBRAIN_SYNC_PARSER_REGRESSION=hold.' };
     case 'page_identity_changed': {
       const slugs = record.meta.identity_slugs ?? [], paths = record.meta.identity_paths ?? [], ids = record.meta.identity_ids;
@@ -906,10 +914,14 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
           + (soft.length ? `, for example: ${soft.join('; ')}` : '') + `; then run gbrain sync --source ${source} --no-pull. gbrain repair origin-twins --source ${source} lists the group and its commands.`,
         why: 'Which page owns a file cannot be decided when the pages differ, carry different frontmatter ids, or none is the page the path names; sync never deletes a page it cannot prove is a duplicate.', then, verify };
     }
+    case 'rename_identity_unreadable': case 'rename_reconcile_failed':
+      return classicRenameHoldFix(record);
     case 'rename_held':
       return repair(true, `The page that ${record.path} renames changed after the rename was recorded, so it was not moved; the preview proposes re-binding the rename to the current page for approval.`);
     case 'frontmatter_slug_conflict':
       return contentHoldFix(record);
+    case 'absent_from_worktree': return classicFileHoldFix(record);
+    case 'unsupported_path': return unsupportedPathHoldFix(record);
     default:
       return record.meta.reason === 'needs_interpretation'
         ? repair(true, `Reading ${record.path} needs an interpretation (folded lines, a duplicate key or an unclosed list); the preview shows the exact proposal for approval.`)

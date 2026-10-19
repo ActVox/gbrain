@@ -144,8 +144,12 @@ Every hold and error has three fields, from one table
 | `git_object_missing` | page | none | yes | always: only restoring the Git object clears it |
 | `path_not_utf8` | page | none | yes | always: only renaming the file clears it |
 | `origin_conflict` | page | repair | no | the hold carries a reason (the pages differ, ids conflict or none is the page the path names), or the heal is off |
+| `rename_identity_unreadable` | page | none | yes | always: the file title or id holds characters the database cannot compare |
+| `rename_reconcile_failed` | page | none | yes | always: the old page may be a duplicate |
 | `origin_conflict_decision` | page | none | yes | always: the pages differ, their ids conflict or none is the page the path names |
 | `page_identity_decision` | page | none | yes | always: only a person decides which page the file is |
+| `absent_from_worktree` | page | none | yes | always: only a person decides whether the file comes back or its deletion is committed |
+| `unsupported_path` | page | none | yes | always: only a rename makes the name a page path |
 | `revision_conflict` | page | retry | no | the same path fails again after a rerun |
 | `page_identity_changed` | page | retry | no | the same path fails again after a rerun |
 | `pinned_git_worktree_conflict` | page | retry | no | the same path fails again after a rerun |
