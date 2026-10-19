@@ -10,6 +10,110 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.308.0] - 2026-10-19
+
+**The PostgreSQL arms lane of a full Test run costs about 43% less, and every listed test file still runs on PostgreSQL.** Each arms job now runs two files at once, each against its own Postgres service (11 shards instead of 19). The Bun 1.4.3 cell runs only the PostgreSQL side of files that use `testBackends()`, because their PGLite side already runs in the unit and serial lanes on that Bun.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An arms job | one file at a time, 19 shards per Bun cell | two files at a time on separate Postgres services, heaviest first, 11 shards; each file's output prints whole in its own group with an `ARM_FILE … ms=` line the weight miner reads |
+| The Bun 1.4.3 arms cell | both backends of every listed file | the PostgreSQL side of `testBackends()` files (`--postgres-only`); files that read `DATABASE_URL` directly keep both; the Bun 1.4.0 cell is unchanged |
+| Proving a test still ran after moving lanes | receipts tagged only the arm, so a PGLite test leaving a cell looked like a drop | identities carry the backend the test pins; a PGLite test may move to another arm, a PostgreSQL test only to another database arm; receipts carry the real shard count (shards 9–19 were never checked) |
+| A test that restored a saved `process.exitCode` of `undefined` | the earlier exit code stayed set, so a run could exit 1 with every test passing | 24 sites restore `?? 0`, and a scan fails on a bare restore |
+
+## [0.60.307.0] - 2026-10-18
+
+**A token scoped to one source can no longer read other sources' data through `gbrain remote doctor`.** Fifteen remote doctor checks ignored the caller's source grant, so a source-bound token saw other sources' ids, names, sync lag, embed coverage, failed jobs and page counts (directly, or by subtracting its own share from a brain-wide total). Every check now reads only the sources the token is granted. Local `gbrain doctor` and unscoped admin callers see exactly what they saw before.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `federation_health` for a scoped token | every source's id, lag, embed coverage and failed-job count | only the granted sources; the "single-source brain" shortcut is skipped because it revealed whether other sources exist |
+| `sync_freshness` for a scoped token | named other sources (id and display name) and put them in its fix commands | only the granted sources |
+| `sync_consolidation`, `links_extraction_lag`, `graph_signals_coverage`, `hidden_by_search_policy`, `link_resolution_opportunity`, `embedding_migration_state`, `schema_pack_source_drift` | brain-wide counts, ratios and samples | counted over the granted sources; `links_extraction_lag` grades each granted source and reports the worst |
+| `contextual_retrieval_coverage` synopsis failures, `brainstorm_health`, `calibration_freshness`, `voice_gate_health`, `abandoned_threads`, `grade_confidence_drift` | read every source's audit events, calibration profiles, takes and grades | read only the granted sources' rows |
+
+Contributed by @Masashi-Ono0611, who spotted the `federation_health` leak in #6914.
+
+## [0.60.306.0] - 2026-10-18
+
+**A pull request now runs a cheap CI tier on each push, and the full suite runs once on the head before merge. A master push whose tree already passed the full suite doesn't run it again, and leaked gate VMs now expire.** A pull-request push cost about $1.77 in Test and E2E; it now costs about $0.03–0.23 (Test only, more when the diff touches persistence or native code). The full run happens once, at handoff, and the push to master reuses it.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A push to a pull request | the full Test matrix (18 unit shards, serial, slow, both PostgreSQL arms) and diff-selected E2E | the cheap tier: `verify`, `typecheck`, `gitleaks`, security regressions, dependency audit, the stress gate on changed tests, and the crash robot, convergence and native cells when the diff selects them; `cheap-tier (full suite not run)` says so; no E2E |
+| Running the full suite on a pull request | every push | the maintainer-only `full-ci` label (`full-ci.yml`) or a hand dispatch runs Test and E2E on the head, with the same shape as a push to master, and again on every later push while the label stays |
+| What merge reads | `test-status` / `e2e-status` from the pull-request run | `full-suite` and `e2e-full-suite`, which succeed only when their run's aggregate did; a pull-request run can never produce either |
+| A push to master whose tree equals a passed full-suite run's | ran everything again | reuses that run (`scripts/ci-reuse.ts`), records it, and the release gate checks the record; any doubt runs in full |
+| A `ci:ubicloud` gate VM a sleeping machine never tore down | lived for days | is named to expire after 2 hours; `scripts/ubicloud/reap-expired.ts` (dry run by default) lists and, with `--apply`, destroys expired gate VMs across owners, never legacy or untagged names |
+| The gstack pregate remote stage | a full `ci:ubicloud` | `ci:ubicloud:diff`; one full gate per PR, at handoff |
+| Watching CI spend | by hand | `scripts/ci-cost-ledger.ts` prices each week's Actions runs against `scripts/ci-cost-baseline.json` in the CI health report |
+
+Docs: `docs/ci-event-parity.md#full-ci-on-pull-requests` and `#master-push-reuse`, `docs/RELEASING.md#release-ci-gate`, `scripts/ubicloud/README.md`.
+
+## [0.60.305.0] - 2026-10-18
+
+**A few hundred bytes of crafted frontmatter can no longer take down your brain.** YAML lets a value refer back to another value, and nesting those references multiplies them: a 432-byte page sent through `put_page` used to expand into gigabytes in memory and crash a PGLite brain, and a committed file like it could kill `gbrain sync`. Any caller with write access could do it, including a remote agent over MCP. gbrain now measures how far a frontmatter block would expand before it uses it, and refuses one that would grow far past its own size.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `put_page` / `edit_page` with frontmatter whose YAML aliases expand past the limit | stored the expanded value (681 KB from 324 bytes, 6.1 MB from 378 bytes) or ran the database out of memory (432 bytes) | refused `invalid_frontmatter`; nothing is written |
+| `gbrain sync` reaches such a file (classic or managed) | stored it whole, or the process was killed for running out of memory | the file is held `invalid_frontmatter` with a message naming the alias limit and its line; every other file keeps syncing |
+| Ordinary anchors and merge keys (`<<: *defaults`) | read | still read: a block may expand up to its own length plus 64 KiB |
+
+### What you need to do
+
+Nothing. Real frontmatter stays far below the limit. If a file is held for it, replace its anchors and aliases with plain values, commit, and run `gbrain sync --source <id> --no-pull`.
+
+### Itemized changes
+
+- `loadBoundedYaml` in `src/core/data-frontmatter.ts` is the only js-yaml `load` in `src/`. Every frontmatter, skill and manifest parse goes through it: `data-frontmatter`, `markdown`, `brain-writer`, `frontmatter-recovery`, `skill-frontmatter`, `shared-skills/manifest`, `skill-catalog` and `sync-rename-identity`. After loading, it sizes the value as if every alias were copied out (a shared node is measured once, a cycle counts as unbounded) and throws `YamlAliasBoundError`, shaped like a js-yaml parse error, past the text length plus 65,536 characters, before anything serializes the value.
+- Tests: `test/pathological/s-47-yaml-alias-bomb.test.ts` (remote `put_page` and `edit_page` through MCP dispatch, classic and managed sync, and a 9-level parse-time guard) and its Postgres arm `test/e2e/s-47-yaml-alias-bomb-postgres.test.ts`.
+
+## [0.60.304.0] - 2026-10-18
+
+**A re-extraction that comes back empty or partial no longer deletes what the earlier run found, and a page write's Git backup no longer gets stuck when another machine pushed first.** On a managed brain, a model that honestly answered `[]` for an edited page retired every atom that page had produced (#7013). The same thing happened when a batch was published only partly, to Life Chronicle events, and to conversation facts. Separately, a Git effect whose push met a moved remote failed `git_push_unavailable` on every attempt and parked after five, leaving the page commits on that one machine (#7010).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed atom re-extraction returns `[]`, fails, or read only part of the page | every prior atom of the page was retired (`retired_by: managed-reextract`) | nothing retires; the page's scan state still advances, so the same text is not paid for again |
+| A managed atom batch publishes only some of its new atoms (one conflicts) | the batch's retirements of the old atoms still committed | a retirement waits until every replacement page of its run has committed; until then the old atom stays live |
+| `gbrain repair stale-atoms` after a zero-yield extraction | listed the kept atoms as `origin_changed` | an atom is `origin_changed` only when the current text's extraction produced a live atom |
+| A Life Chronicle re-judge returns no events, drops or caps proposals, or reads a truncated body | the page's earlier events were retired | they stay live; a complete, clean replacement and a page that stops being chronicle-shaped still retire them |
+| A conversation-fact re-extraction finds nothing, finds the page not extractable, runs with `--since` or `--segment-limit`, has rows held by the write gate, or fails partway (unmanaged) | every prior extractor fact of the page was deleted or expired first | prior facts stay; the outcome row still advances, a `--since` window adds its facts beside them, and only a complete non-empty run replaces them; the unmanaged path buffers and publishes once at the end |
+| A Git effect's push is rejected because the remote moved | `git_push_unavailable` forever, parked after five attempts | the push runs `gbrain git commit-push --push-only --keep-checkout`, which merges the remote in memory and pushes without moving the checkout (`gbrain sources refresh` stays the only importer) |
+| Both machines changed the same page file | indistinguishable from a network failure | the effect holds `integrate_conflict` with the user's choice as its fix (`--keep-checkout --resolve <path>=<ours\|theirs>`) |
+| Git effects already parked on a push | needed `--pat-file` or one `retry-effects --request-id` per write | `gbrain sources writer retry-effects <source> --parked-pushes [--dry-run]` retries them all; it also covers `push_unconfirmed` and `integrate_conflict` |
+| Atoms a zero-yield managed re-extraction already retired | gone from search, and the purge removed them after 72 hours | doctor `atom_retirements_restorable` counts them per source; `gbrain repair atoms-restore` previews exactly the latest retired generation of each still-live origin that nothing replaced, and `--apply --expect <hash>` restores them with a receipt per atom; the purge keeps those tombstones for 30 days so there is time to decide |
+| Finding stuck Git backups | per-request lines in doctor `parked_effects` only | doctor `parked_effects` and `gbrain sync status` (`git_push_holds`) show, per source, how many are retrying or parked, any conflict, and the one fix; `sync status`'s `next` falls back to it |
+
+### What you need to do
+
+Nothing for new runs. Nothing is restored on upgrade. If doctor warns `atom_retirements_restorable`, preview with `gbrain repair atoms-restore --source <id>` and apply with the printed hash once you agree. If doctor shows `git_push_holds`, run the fix it names; a conflict asks you which version wins.
+
+**Say to your agent:** *"Check whether my brain lost atoms to an empty re-extraction and show me what restoring them would bring back."*
+
+**Say to your agent:** *"My brain's Git backups stopped pushing. Find out why and get them moving again."*
+
+Long Chronicle pages (over 12,000 characters) and segmented pages no longer retire stale events on re-extraction, because the judge never reads their whole body. Their earlier events stay visible instead of being lost.
+
+### For contributors
+
+- New pathological cases `test/pathological/h1`…`h4` (atoms, Git effects, Chronicle, conversation facts), each on PGLite and Postgres.
+- Three existing tests encoded the lossy behavior and now assert the new invariant: `test/chronicle-auto-phase.test.ts` ("a genuine [] keeps the previous generation live"), `test/chronicle-date-quality.test.ts` ("keeps the old generation live when every new proposal is dropped") and `test/repair-stale-atoms.test.ts` (a zero-yield completion lists nothing; a completion that produced atoms still lists both old atoms).
+- `gbrain git commit-push --push-only --keep-checkout` is the one form a managed worktree accepts.
+
+Reported by @davidfragnoli-lang (#7013) and @dovstern (#7010).
+
 ## [0.60.303.0] - 2026-10-18
 
 **CI only: master is green again. tsc runs in its own `typecheck` job beside `verify`, and the crash robot reaches every fault its count role plans.** Nothing changes for gbrain users.
