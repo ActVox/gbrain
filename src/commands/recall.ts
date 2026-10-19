@@ -40,7 +40,7 @@ import { callRemoteTool, RemoteMcpError, unpackToolResult } from '../core/mcp-cl
 import { readCursor, writeCursor } from '../core/recall-cursor-state.ts';
 import { resolveSourceId, resolveSourceIdEngineFree, SourceTargetError } from '../core/source-resolver.ts';
 import { usageError } from '../cli/cli-error.ts';
-import { parseRelativeSince } from '../core/facts/since-parse.ts';
+import { parseSinceParam, SINCE_GRAMMAR } from '../core/facts/since-parse.ts';
 
 // Same kebab-case shape gate the source-resolver applies. v0.32: applied
 // locally on thin-client where the canonical resolver's assertSourceExists
@@ -120,8 +120,33 @@ function parseFlags(args: string[]): ParsedFlags {
   let rawBudget: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--since') { out.since = parseSinceParam(args[++i] ?? ''); continue; }
-    if (a === '--session' || a === '--session-id') { out.sessionId = args[++i] ?? null; continue; }
+    if (a === '--since') {
+      const raw = args[i + 1];
+      const valueGiven = raw !== undefined && !raw.startsWith('--');
+      const since = valueGiven ? parseSinceParam(raw) : null;
+      if (!since || !Number.isFinite(since.getTime())) {
+        throw usageError(valueGiven ? `--since is not a date or duration (got "${raw.slice(0, 60)}").` : '--since requires a date or duration.',
+          `Pass ${SINCE_GRAMMAR}.`, {
+            why: `An unreadable time bound must not silently widen recall to every fact. --since takes ${SINCE_GRAMMAR}.`,
+            fix: { argv: ['gbrain', 'recall', '--help'], consent: [], actor: 'agent', why: 'Shows the accepted --since forms.', requires_exclusive: false },
+          });
+      }
+      out.since = since;
+      i++;
+      continue;
+    }
+    if (a === '--session' || a === '--session-id') {
+      const raw = args[i + 1];
+      if (raw === undefined || raw.trim().length === 0 || raw.startsWith('--')) {
+        throw usageError(`${a} requires a session ID.`, `Pass the session ID after the flag, e.g. ${a} <id>.`, {
+          why: 'A missing session bound must not silently widen recall to every session.',
+          fix: { argv: ['gbrain', 'recall', '--help'], consent: [], actor: 'agent', why: 'Shows the recall selectors.', requires_exclusive: false },
+        });
+      }
+      out.sessionId = raw;
+      i++;
+      continue;
+    }
     if (a === '--grep') { out.grep = (args[++i] ?? '').toLowerCase(); continue; }
     if (a === '--today') { out.today = true; continue; }
     if (a === '--supersessions') { out.supersessions = true; continue; }
@@ -188,24 +213,6 @@ function parseFlags(args: string[]): ParsedFlags {
 export function recallNeedsLocalEngine(args: string[]): boolean {
   const flags = parseFlags(args);
   return flags.budgetPolicy === null && flags.question === null && (flags.query !== null || flags.budgetTokens !== null);
-}
-
-function parseSinceParam(raw: string): Date | null {
-  if (!raw) return null;
-  const iso = Date.parse(raw);
-  if (Number.isFinite(iso)) return new Date(iso);
-  const ago = raw.match(/^(\d+)\s*(s|sec|seconds?|m|min|minutes?|h|hr|hours?|d|days?)(?:\s+ago)?$/i);
-  if (ago) {
-    const n = parseInt(ago[1], 10);
-    const unit = ago[2].toLowerCase();
-    const ms =
-      unit.startsWith('s') ? n * 1000 :
-      unit.startsWith('m') ? n * 60 * 1000 :
-      unit.startsWith('h') ? n * 60 * 60 * 1000 :
-      n * 24 * 60 * 60 * 1000;
-    return new Date(Date.now() - ms);
-  }
-  return parseRelativeSince(raw);
 }
 
 function validateAndNormalizeFlags(flags: ParsedFlags): void {
@@ -282,6 +289,10 @@ positional is an entity name, then a literal piece of fact text.
   gbrain recall --grep <text>            facts whose text contains <text>
   gbrain recall --since "8 hours ago"    facts from a time window (--today: today, rendered by kind)
   gbrain recall --session <id>           facts from one session
+
+--since takes an ISO 8601 date or datetime, a duration ("8 hours ago", "30m",
+"2d") or a relative phrase ("6 weeks ago", "last month"). An unreadable
+--since or a --session with no ID is refused (invalid_params, exit 2).
 
 Options: --limit N, --include-expired, --json, --as-context, --source <id>,
 --budget-tokens N, --budget-policy facts_first|query_first, --supersessions,
