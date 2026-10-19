@@ -5,8 +5,11 @@
  * these reads runs the checkout's clean/process filter or textconv, while
  * porcelain on the same checkout does.
  */
-import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, spyOn, test } from 'bun:test';
+import * as childProcess from 'node:child_process';
 import { execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { chmodSync, existsSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -90,6 +93,26 @@ describe('hardenedGitStream', () => {
     expect(hardenedStreamComplete(lined)).toBe(false);
     await expect(hardenedGitStream(root, ['status', '--porcelain'], { timeoutMs: 10_000 })).rejects.toThrow(/hardened git refuses/);
   });
+
+  // #7053: under Bun a child's stdout that turns readable as the child exits can lose its readiness (its one-shot epoll
+  // registration fired and was never re-armed, the record and EOF left unread), so 'exit' arrives and stdout never ends or
+  // closes. The read waited for 'close' with nothing to bound it: its timeout only SIGKILLs a child that is already gone.
+  test('a child that exited while its stdout stopped delivering fails the read instead of hanging it', async () => {
+    const child = Object.assign(new EventEmitter(), { pid: 4242, stdout: new PassThrough(), stdin: null, kill: () => true });
+    const spawn = spyOn(childProcess, 'spawn').mockImplementation((() => {
+      setTimeout(() => { child.stdout.write('100644 blob 708d805e8798c0eba388e1826208be3929aabf5f'); child.emit('exit', 0, null); }, 10);
+      return child;
+    }) as unknown as typeof childProcess.spawn);
+    try {
+      const chunks: Buffer[] = [];
+      const read = hardenedGitStream('/nonexistent-root', ['ls-tree', '-r', '-z', 'HEAD', '--', '.'], { timeoutMs: 120_000, onChunk: chunk => { chunks.push(chunk); } });
+      expect(await Promise.race([read, new Promise(resolve => setTimeout(() => resolve('still waiting'), 10_000))])).toEqual({ ok: false, reason: 'stalled' });
+      expect(Buffer.concat(chunks).toString()).toBe('100644 blob 708d805e8798c0eba388e1826208be3929aabf5f');
+      child.stdout.write('\tlate\0');
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(chunks.length).toBe(1);
+    } finally { spawn.mockRestore(); }
+  }, 15_000);
 
   test('a non-zero exit, a byte cap, a timeout and an external signal are each reported as such', async () => {
     const root = repo({ 'a.md': 'a\n' });
