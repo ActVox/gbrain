@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.317.0] - 2026-10-19
+## [0.60.318.0] - 2026-10-19
 
 **A managed `gbrain sync` of an ordinary (non-company) source now compares the files at HEAD with what the brain holds, instead of replaying commits, so a reset, a revert, a rewritten history or a lost run can no longer leave pages behind, and one bad file holds only itself.** Each pass reads the committed tree, the index and the database, admits only the files whose page differs, proves nothing moved underneath it, and records the checkpoint inside the last import's own transaction. An idle sync with nothing new returns in well under a second.
 
@@ -33,6 +33,18 @@ identifiers and attribution are available in the pre-removal Git revision
 - `gbrain sync status --json` reports `convergence` for a managed source.
 
 No schema migration. Company-brain sources keep their existing sync path.
+
+## [0.60.317.0] - 2026-10-19
+
+**Two CI flakes are closed at their source, and a stuck native safety suite now leaves a log instead of a silent timeout.** `test-reads-source-smell` failed with `ENOENT` when `import-file.test.ts` removed its scratch directory from `test/` mid-walk; scratch now lives in the system temp directory and a lint rule keeps it there. The native data-safety suites no longer wait inside `Bun.spawnSync`, where Bun 1.4.0 to 1.4.2 can poison a process (oven-sh/bun#34069).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A unit test needing a scratch directory | `import-file` and `files` made theirs inside `test/`, racing `test-reads-source-smell`'s walk (15 of 82 probe runs failed) | both use `mkdtempSync(join(tmpdir(), ...))` (0 of 79); `check-test-isolation` rule R8 refuses a new scratch path inside the test tree |
+| `persistence-sync-origin-native` and `export-publication-native` on Bun 1.4.0 | 21 untimed sync `git` calls and four sync child runs, each a window for the spawnSync poisoning that spins every later test to its 180 s deadline | every child process is awaited, with the same assertions |
+| A native data-safety suite that stalls | ran until the 15-minute job timeout, which kept no log | named, its process table and (macOS) a native stack sampled, and killed at 300 s; the step fails |
 
 ## [0.60.316.0] - 2026-10-19
 

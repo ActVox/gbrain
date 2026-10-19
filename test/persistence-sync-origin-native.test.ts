@@ -15,7 +15,6 @@
  */
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep } from 'node:path';
@@ -43,7 +42,7 @@ import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import { readGitSourceHolds } from '../src/core/persistence/sync-holds.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
-import { makeGitFixture } from './helpers/git-fixture.ts';
+import { gitAsync } from './helpers/git-publication.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-sync-origin-native-'));
@@ -69,10 +68,11 @@ async function fixture(engine: BrainEngine, sourcePath = 'notes/example.md', slu
   await disposePersistenceConsumer(engine);
   await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
   const id = `origin-${randomUUID().slice(0, 12)}`, root = join(home, id); mkdirSync(root);
-  const git = await makeGitFixture(root);
+  for (const args of [['init', '-q'], ['config', 'maintenance.auto', 'false'], ['config', 'gc.auto', '0'], ['config', 'user.email', 't@t.co'], ['config', 'user.name', 't']]) await gitAsync(root, ...args);
   for (const [path, bytes] of Object.entries(files)) { const full = join(root, path); mkdirSync(join(full, '..'), { recursive: true }); writeFileSync(full, bytes); }
-  git.commitAll('Add synthetic origin fixture');
-  const head = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  await gitAsync(root, 'add', '-A');
+  await gitAsync(root, 'commit', '-q', '-m', 'Add synthetic origin fixture');
+  const head = (await gitAsync(root, 'rev-parse', 'HEAD')).trim();
   await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [id, root]);
   await importFromContent(engine, slug, content, { sourceId: id, sourcePath, noEmbed: true });
   const snapshot = (await engine.readPageSnapshot(slug, { sourceId: id }))!;
@@ -92,7 +92,7 @@ async function legacyDeletion(engine: BrainEngine, f: Awaited<ReturnType<typeof 
   const authority = await managedSyncAuthority(engine, f.id, context.incarnation, context.root);
   const binding = { ...context.binding, owner_epoch: String(context.binding.owner_epoch), topology_generation: String(context.binding.topology_generation) };
   const key = `legacy-${randomUUID()}`, runId = randomUUID();
-  const target = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const target = (await gitAsync(f.root, 'rev-parse', 'HEAD')).trim();
   const entry = { path: 'notes/example.md', sourcePath: f.snapshot.page.source_path!, action: 'delete', working: false,
     slug: f.slug, pageId: f.snapshot.page.id, revision: f.snapshot.revision };
   const cursor: Record<string, any> = { binding, root: context.root, gitRoot: context.gitRoot, sourceId: f.id, incarnation: context.incarnation, from: null, target,
@@ -242,8 +242,8 @@ check('native historical separator identity preserves the original page or refus
     // GBRA-130 B-3 (was: the pass refused page_identity_changed): both spellings are held, neither is imported or deleted,
     // and an unrelated file in the same sync imports.
     writeFileSync(join(f.root, 'notes/other.md'), 'An unrelated synthetic note.\n');
-    execFileSync('git', ['-C', f.root, 'add', 'notes/other.md']);
-    execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Add an unrelated note']);
+    await gitAsync(f.root, 'add', 'notes/other.md');
+    await gitAsync(f.root, 'commit', '-qm', 'Add an unrelated note');
     const result = await performManagedSync(engine, f.opts);
     expect(result.held?.map(hold => [hold.path, hold.code, hold.reason]).sort()).toEqual([['notes/example.md', 'page_identity_changed', 'spelling'], ['notes\\example.md', 'page_identity_changed', 'spelling']]);
     expect(await engine.executeRaw("SELECT intent->>'path' AS path FROM persistence_requests WHERE source_id=$1 AND intent->>'kind' <> 'managed_sync_checkpoint' ORDER BY path", [f.id])).toEqual([{ path: 'notes/other.md' }]);
@@ -297,9 +297,9 @@ for (const alias of [false, true]) check(`native historical ${alias ? 'alias' : 
   await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [f.id, f.head]), TEST_WRITE_ATTRIBUTION));
   const revised = content.replace('title: Example note', 'title: "Example note"');
   writeFileSync(join(f.root, 'notes/example.md'), revised);
-  execFileSync('git', ['-C', f.root, 'add', 'notes/example.md']);
-  execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Change only equivalent frontmatter spelling']);
-  const target = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  await gitAsync(f.root, 'add', 'notes/example.md');
+  await gitAsync(f.root, 'commit', '-qm', 'Change only equivalent frontmatter spelling');
+  const target = (await gitAsync(f.root, 'rev-parse', 'HEAD')).trim();
   expect(target).not.toBe(f.head);
   expect(computeSyncDelta(f.root, f.head, target)).toMatchObject({ status: 'ok', manifest: { added: [], modified: ['notes/example.md'], deleted: [], renamed: [] } });
   const opts = { ...f.opts, full: false };
@@ -360,9 +360,9 @@ check('deleting an unowned filename is not a pass candidate and preserves the li
     const before = await engine.readPageSnapshot(f.slug, { sourceId: f.id, includeDeleted: true });
     const history = await engine.getVersions(f.slug, { sourceId: f.id });
     unlinkSync(join(f.root, 'notes/example.md'));
-    execFileSync('git', ['-C', f.root, 'add', '-A']);
-    execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Remove only an unowned duplicate']);
-    const target = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    await gitAsync(f.root, 'add', '-A');
+    await gitAsync(f.root, 'commit', '-qm', 'Remove only an unowned duplicate');
+    const target = (await gitAsync(f.root, 'rev-parse', 'HEAD')).trim();
     const opts = { ...f.opts, full: false };
     expect(await performManagedSync(engine, { ...opts, dryRun: true })).toMatchObject({ status: 'dry_run' });
     const result = await performManagedSync(engine, opts);
@@ -385,9 +385,9 @@ check('a committed Git deletion of a page no sync import recorded is held file_d
   await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw('UPDATE sources SET last_commit=$2 WHERE id=$1', [f.id, f.head]), TEST_WRITE_ATTRIBUTION));
   const history = await engine.getVersions(f.slug, { sourceId: f.id });
   unlinkSync(join(f.root, 'notes/example.md'));
-  execFileSync('git', ['-C', f.root, 'add', '-A']);
-  execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Commit the intentional source deletion']);
-  const target = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  await gitAsync(f.root, 'add', '-A');
+  await gitAsync(f.root, 'commit', '-qm', 'Commit the intentional source deletion');
+  const target = (await gitAsync(f.root, 'rev-parse', 'HEAD')).trim();
   expect(computeSyncDelta(f.root, f.head, target)).toMatchObject({ status: 'ok', manifest: { deleted: ['notes/example.md'] } });
   expect(await performManagedSync(engine, { ...f.opts, full: false, dryRun: true })).toMatchObject({ status: 'dry_run' });
   expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
@@ -459,9 +459,9 @@ check('an explicit working-tree deletion of a page no sync import recorded is he
 
 check('native case aliases refuse rather than merge distinct origins', async engine => {
   const f = await fixture(engine, 'Notes/example.md', 'notes/example', { 'Notes/example.md': content, 'other.md': 'An unrelated synthetic note.\n' });
-  const object = execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD:Notes/example.md'], { encoding: 'utf8' }).trim();
-  execFileSync('git', ['-C', f.root, '-c', 'core.ignorecase=false', 'update-index', '--add', '--cacheinfo', `100644,${object},notes/example.md`]);
-  execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Add case-distinct tree entry']);
+  const object = (await gitAsync(f.root, 'rev-parse', 'HEAD:Notes/example.md')).trim();
+  await gitAsync(f.root, '-c', 'core.ignorecase=false', 'update-index', '--add', '--cacheinfo', `100644,${object},notes/example.md`);
+  await gitAsync(f.root, 'commit', '-qm', 'Add case-distinct tree entry');
   if (process.platform !== 'win32') {
     mkdirSync(join(f.root, 'notes'), { recursive: true });
     writeFileSync(join(f.root, 'notes/example.md'), content);
@@ -484,8 +484,8 @@ check('native case aliases refuse rather than merge distinct origins', async eng
 check('unknown old deletion manifests fail closed without rewriting accepted request identity', async engine => {
   const f = await fixture(engine);
   unlinkSync(join(f.root, 'notes/example.md'));
-  execFileSync('git', ['-C', f.root, 'add', '-A']);
-  execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Remove the synthetic source file']);
+  await gitAsync(f.root, 'add', '-A');
+  await gitAsync(f.root, 'commit', '-qm', 'Remove the synthetic source file');
   const legacy = await legacyDeletion(engine, f, true);
   await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync-manifest' AND fingerprint=$1", [legacy.cursor.runId]);
   const row = (await getWriteRequest(engine, legacy.cursor.authority.writer.principal, legacy.requestId))!;
@@ -502,8 +502,8 @@ check('a pass never infers a missing page origin from its slug: the origin-less 
   const f = await fixture(engine);
   expect((await performManagedSync(engine, f.opts)).status).toBe('first_sync');
   unlinkSync(join(f.root, 'notes/example.md'));
-  execFileSync('git', ['-C', f.root, 'add', '-A']);
-  execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Remove the synthetic source file']);
+  await gitAsync(f.root, 'add', '-A');
+  await gitAsync(f.root, 'commit', '-qm', 'Remove the synthetic source file');
   await engine.executeRaw('UPDATE pages SET source_path=NULL WHERE id=$1', [f.snapshot.page.id]);
   const before = (await engine.readPageSnapshot(f.slug, { sourceId: f.id }))!;
   const legacy = await legacyDeletion(engine, f, true);
@@ -568,16 +568,16 @@ check('an exact recorded origin retains its existing slug on every native platfo
   const f = await fixture(engine, 'notes/recorded.md', 'notes/example', { 'notes/recorded.md': content });
   const canonical = serializePageToMarkdown(f.snapshot.page, f.snapshot.tags).replace(/^---\n/, '---\nslug: notes/example\n');
   writeFileSync(join(f.root, 'notes/recorded.md'), canonical);
-  execFileSync('git', ['-C', f.root, 'add', '-A']);
-  execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Export existing canonical identity']);
+  await gitAsync(f.root, 'add', '-A');
+  await gitAsync(f.root, 'commit', '-qm', 'Export existing canonical identity');
   const history = await engine.getVersions(f.slug, { sourceId: f.id });
   expect(await performManagedSync(engine, f.opts)).toMatchObject({ status: 'first_sync', added: 0, modified: 0, deleted: 0 });
   expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
   expect(await engine.getVersions(f.slug, { sourceId: f.id })).toEqual(history);
   expect(readFileSync(join(f.root, 'notes/recorded.md'), 'utf8')).toBe(canonical);
   writeFileSync(join(f.root, 'notes/recorded.md'), canonical.replace('slug: notes/example', 'slug: notes/impostor'));
-  execFileSync('git', ['-C', f.root, 'add', '-A']);
-  execFileSync('git', ['-C', f.root, 'commit', '-qm', 'Attempt a different canonical identity']);
+  await gitAsync(f.root, 'add', '-A');
+  await gitAsync(f.root, 'commit', '-qm', 'Attempt a different canonical identity');
   // #5988: the conflicting identity is held, never imported, instead of blocking the sync.
   const held = await performManagedSync(engine, { ...f.opts, full: false });
   expect(held.held?.map(item => [item.path, item.code])).toEqual([['notes/recorded.md', 'frontmatter_slug_conflict']]);
