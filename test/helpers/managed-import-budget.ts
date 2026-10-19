@@ -73,6 +73,21 @@ export function publicationOf(records: StatementRecord[]): StatementRecord[] {
   throw new Error('no committed transaction inserted the page');
 }
 
+/**
+ * #6712 PR 4b: the publication split into the folded pass stamp (its savepoint through its first release or rollback, a
+ * writeback import's checkpoint published inside the page's transaction) and the import's own statements around it. A
+ * publication without the fold is all import.
+ */
+export function splitFoldBlock(publication: StatementRecord[]): { fold: StatementRecord[]; imported: StatementRecord[] } {
+  const statements = publication.filter(isStatement);
+  const texts = statements.map(record => flat(record.sql));
+  const start = texts.indexOf('SAVEPOINT gbrain_pass_stamp_fold');
+  if (start < 0) return { fold: [], imported: statements };
+  const end = texts.findIndex((text, i) => i > start && /^(?:RELEASE|ROLLBACK TO) SAVEPOINT gbrain_pass_stamp_fold$/.test(text));
+  if (end < 0) throw new Error('the folded stamp opened its savepoint and never released or rolled it back');
+  return { fold: statements.slice(start, end + 1), imported: [...statements.slice(0, start), ...statements.slice(end + 1)] };
+}
+
 /** Statement counts by normalized text. */
 export function byText(records: StatementRecord[]): Map<string, number> {
   const counts = new Map<string, number>();
