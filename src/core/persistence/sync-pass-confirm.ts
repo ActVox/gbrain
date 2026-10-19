@@ -34,9 +34,11 @@
  * write inside savepoints), which reads as ended though its transaction was in flight at S1. Such an id is larger than its
  * transaction's own, and its row is visible to S2 only when that transaction committed before S2: so an id at or above the
  * smallest listed transaction S2 sees committed counts as changed, and so does S1's own transaction's id. A transaction
- * that held no id at S1 takes one at or above S1's `xmax`. The 64-bit id of a 32-bit `xmin` is S2's `xmax` less their
- * distance modulo 2^32, exact while the row is within 2^31 of S2 (unfrozen rows always are; a frozen `xmin` is unchanged
- * by its `age`). A round without S1's snapshot (a stamp frozen before it was recorded) judges by `xmin` alone. `age` and
+ * that held no id at S1 takes one at or above S1's `xmax`. Each row is judged in the 32-bit xid space: S1's 64-bit
+ * `cut`, list and own id become xids, `age(xmin) > age(cut)` (both counted back from S2's counter) is `xmin < cut`, and
+ * xid equality is id equality, exact while every id is within 2^31 of S2 (unfrozen rows always are; a frozen `xmin` is
+ * unchanged by its `age`; test/sync-pass-xid-arms-gbra108.test.ts checks the verdicts against the 64-bit ids). A round
+ * without S1's snapshot (a stamp frozen before it was recorded) judges by `xmin` alone. `age` and
  * the `txid_*` snapshot functions exist on every supported Postgres and on PGLite, where one connection leaves S1's list
  * empty. More than 2^31 xids between S1's `xmin` and S2's `xmax` takes the full read (`age` would wrap).
  */
@@ -68,19 +70,27 @@ export async function readLevelMark(exec: Exec, sourceId: string, incarnation: s
   return { xmin: row!.xmin, ops: row!.ops ?? {}, holds: row!.holds, snapshot: row!.snapshot, own: row!.own };
 }
 
-/** `col`'s (a 32-bit xid) 64-bit id: S2's `xmax` less their distance modulo 2^32. */
-const full = (col: string) => `(x.hi - ((x.hi % 4294967296) - ${col}::text::bigint + 4294967296) % 4294967296)`;
+/** A 64-bit id's 32-bit xid (the same id within 2^31 of S2; a txid never has the special low words 0-2). */
+const xid32 = (id: string) => `((${id}) % 4294967296)::text::xid`;
+/** `age` of S1's 64-bit `xmin`: rows older than it are unchanged. */
+export const loAge = (lo: string) => `age(${xid32(lo)})`;
+/**
+ * S1's arms in the 32-bit xid space, from its 64-bit `cut`, in-progress list and own id: `age` counts back from S2's
+ * transaction counter, so `age(xmin) > cut_age` is `xmin < cut` and xid equality is 64-bit equality, both exact within 2^31.
+ */
+export const s1XidArms = (cut: string, xip: string, own: string) =>
+  `age(${xid32(cut)}) AS cut_age, ARRAY(SELECT ${xid32('t')} FROM unnest(${xip}) t) AS xip, ${xid32(own)} AS own`;
 /** Whether `col` (an xid) was committed before S1 (see the header). */
-const unchanged = (col: string) => `(age(${col}) > x.lo_age OR COALESCE(${full(col)} < s1.cut AND ${full(col)} <> ALL(s1.xip) AND ${full(col)} IS DISTINCT FROM s1.own, false))`;
+export const unchanged = (col: string) => `(age(${col}) > x.lo_age OR COALESCE(age(${col}) > s1.cut_age AND ${col} <> ALL(s1.xip) AND ${col} IS DISTINCT FROM s1.own, false))`;
 
 /**
  * One scan of the source's pages and one of the incarnation's op rows: the counts, and the rows S1 does not prove unchanged.
  * `$6`: the request publishing in this transaction (a folded checkpoint, sync-pass-fold.ts), whose page is not committed yet.
  */
 const PROOF = `WITH x AS MATERIALIZED (SELECT txid_snapshot_xmin(txid_current_snapshot()) AS now_lo, txid_snapshot_xmax(txid_current_snapshot()) AS hi,
-    age(($4::bigint % 4294967296)::text::xid) AS lo_age, txid_current_snapshot()::text AS now_snapshot, txid_current_if_assigned()::text AS now_own),
-  s1 AS MATERIALIZED (SELECT ARRAY(SELECT txid_snapshot_xip($7::txid_snapshot)) AS xip, $8::bigint AS own,
-    LEAST(txid_snapshot_xmax($7::txid_snapshot), (SELECT min(t) FROM txid_snapshot_xip($7::txid_snapshot) t WHERE txid_visible_in_snapshot(t, txid_current_snapshot()))) AS cut),
+    ${loAge('$4::bigint')} AS lo_age, txid_current_snapshot()::text AS now_snapshot, txid_current_if_assigned()::text AS now_own),
+  s1 AS MATERIALIZED (SELECT ${s1XidArms('c.cut', 'c.xip', 'c.own')} FROM (SELECT ARRAY(SELECT txid_snapshot_xip($7::txid_snapshot)) AS xip, $8::bigint AS own,
+    LEAST(txid_snapshot_xmax($7::txid_snapshot), (SELECT min(t) FROM txid_snapshot_xip($7::txid_snapshot) t WHERE txid_visible_in_snapshot(t, txid_current_snapshot()))) AS cut) c),
   pg AS (SELECT count(*) FILTER (WHERE p.source_path IS NOT NULL)::int AS n,
       COALESCE(jsonb_agg(jsonb_build_array(p.id::text, EXISTS (SELECT 1 FROM persistence_requests r WHERE r.id=p.revision_write_request_id AND r.source_id=$1
         AND (r.id=$6::uuid OR r.state='committed' AND r.intent->>'passId'=$5 AND r.outcome->>'revision'=p.knowledge_revision::text)), p.knowledge_revision::text))
