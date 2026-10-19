@@ -1035,14 +1035,14 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1258 column(s) verified against live schema",
+            "message": "1296 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "All 149 table(s) the applied migrations create exist.",
+            "message": "All 152 table(s) the applied migrations create exist.",
             "name": "schema_missing_tables",
             "status": "ok"
           },
@@ -2602,6 +2602,44 @@
             "elapsed_ms": "<volatile>",
             "message": "No commit→searchable samples in the last 24 h (no managed sync imported a new commit).",
             "name": "managed_sync_latency",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "docs": "docs/guides/on-commit-sync.md",
+              "sources": [
+                {
+                  "pending_markers": 0,
+                  "reason": null,
+                  "resident": null,
+                  "source_id": "default",
+                  "stalled": false,
+                  "state": null
+                },
+                {
+                  "pending_markers": 0,
+                  "reason": null,
+                  "resident": null,
+                  "source_id": "notes",
+                  "stalled": false,
+                  "state": null
+                },
+                {
+                  "pending_markers": 0,
+                  "reason": null,
+                  "resident": null,
+                  "source_id": "plain",
+                  "stalled": false,
+                  "state": null
+                }
+              ],
+              "sync_on_commit": false
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "sync.on_commit is off; residents still run explicit sync requests. notifier for default: none running; idle; notifier for notes: none running; idle; notifier for plain: none running; idle.",
+            "name": "commit_notifier",
+            "severity": "info",
             "status": "ok"
           },
           {
@@ -5334,14 +5372,14 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "1258 column(s) verified against live schema",
+            "message": "1296 column(s) verified against live schema",
             "name": "schema_columns",
             "status": "ok"
           },
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "All 149 table(s) the applied migrations create exist.",
+            "message": "All 152 table(s) the applied migrations create exist.",
             "name": "schema_missing_tables",
             "status": "ok"
           },
@@ -6901,6 +6939,44 @@
             "elapsed_ms": "<volatile>",
             "message": "No commit→searchable samples in the last 24 h (no managed sync imported a new commit).",
             "name": "managed_sync_latency",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "docs": "docs/guides/on-commit-sync.md",
+              "sources": [
+                {
+                  "pending_markers": 0,
+                  "reason": null,
+                  "resident": null,
+                  "source_id": "default",
+                  "stalled": false,
+                  "state": null
+                },
+                {
+                  "pending_markers": 0,
+                  "reason": null,
+                  "resident": null,
+                  "source_id": "notes",
+                  "stalled": false,
+                  "state": null
+                },
+                {
+                  "pending_markers": 0,
+                  "reason": null,
+                  "resident": null,
+                  "source_id": "plain",
+                  "stalled": false,
+                  "state": null
+                }
+              ],
+              "sync_on_commit": false
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "sync.on_commit is off; residents still run explicit sync requests. notifier for default: none running; idle; notifier for notes: none running; idle; notifier for plain: none running; idle.",
+            "name": "commit_notifier",
+            "severity": "info",
             "status": "ok"
           },
           {
