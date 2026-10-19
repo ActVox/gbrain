@@ -12,8 +12,11 @@ import type { Action } from '../agent-output.ts';
 import { localHostId } from '../persistence/identity.ts';
 import { missingTable, type DetectionMode, type NotifierState } from './store.ts';
 import { residentNotifier } from './resident.ts';
+import { parseOnCommit } from '../commit-notifier.ts';
+import { SYNC_ON_COMMIT_KEY } from '../sync-config-keys.ts';
 
 type Exec = Pick<BrainEngine, 'executeRaw' | 'kind'>;
+type FreshnessExec = Exec & Pick<BrainEngine, 'getConfig'>;
 
 export type FreshnessState = 'current' | 'behind' | 'syncing' | 'unknown' | 'not_monitored';
 
@@ -84,17 +87,33 @@ function freshnessOf(engine: Exec, row: Row, held: number): SourceFreshness {
 }
 
 /**
- * The freshness notice for search and query: one entry per source in the caller's scope, from the cached coverage
- * record. A brain without the v261 tables, or a failed read, answers unknown for the scope instead of failing the search.
+ * Whether search carries the freshness notice: the brain opted in (`sync.on_commit` on) or a resident has recorded
+ * coverage for some source. A brain that never ran a resident with the flag off keeps its search output unchanged;
+ * once the notice is on, a source nobody watches still reads not_monitored.
  */
-export async function readSourceFreshness(engine: Exec, scope: { sourceId?: string; sourceIds?: string[] }, held: ReadonlyArray<{ source_id: string; missing: number; stale: number }> = []): Promise<SourceFreshness[]> {
+async function freshnessReported(engine: FreshnessExec): Promise<boolean> {
+  const [flag, [covered]] = await Promise.all([
+    engine.getConfig(SYNC_ON_COMMIT_KEY),
+    engine.executeRaw<{ covered: unknown }>('SELECT EXISTS (SELECT 1 FROM sync_notifier_sources WHERE observed_at IS NOT NULL) AS covered'),
+  ]);
+  return parseOnCommit(flag) || truthy(covered?.covered);
+}
+
+/**
+ * The freshness notice for search and query: one entry per source in the caller's scope, from the cached coverage
+ * record, or none when the brain does not report freshness (freshnessReported). A brain without the v261 tables reports
+ * none; another failed read answers unknown for the scope instead of failing the search.
+ */
+export async function readSourceFreshness(engine: FreshnessExec, scope: { sourceId?: string; sourceIds?: string[] }, held: ReadonlyArray<{ source_id: string; missing: number; stale: number }> = []): Promise<SourceFreshness[]> {
   const ids = scope.sourceIds ?? (scope.sourceId ? [scope.sourceId] : null);
   if (ids && ids.length === 0) return [];
   const heldBy = new Map(held.map(h => [h.source_id, h.missing + h.stale]));
   try {
+    if (!await freshnessReported(engine)) return [];
     return (await readRows(engine, ids)).map(row => freshnessOf(engine, row, heldBy.get(row.id) ?? 0));
   } catch (error) {
-    if (!missingTable(error)) console.error(`[notifier] reading source freshness failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (missingTable(error)) return [];
+    console.error(`[notifier] reading source freshness failed: ${error instanceof Error ? error.message : String(error)}`);
     return (ids ?? []).map(id => ({ source_id: id, state: 'unknown' as const, observed_head: null, observed_at: null, mode: null, held_count: heldBy.get(id) ?? 0 }));
   }
 }

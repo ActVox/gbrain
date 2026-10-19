@@ -69,20 +69,39 @@ async function printed(run: () => Promise<void>): Promise<string> {
   return out.join('\n');
 }
 
-async function searchFreshness(engine: BrainEngine, remote: boolean): Promise<Array<Record<string, unknown>>> {
+/** The search response's freshness entries; undefined when the response carries no freshness key at all. */
+async function searchFreshnessKey(engine: BrainEngine, remote: boolean): Promise<Array<Record<string, unknown>> | undefined> {
   const meta: Array<{ key: string; value: unknown }> = [];
   const ctx = { engine, config: {}, logger: { info() {}, warn() {}, error() {} }, dryRun: false, remote, sourceId: SOURCE,
     emitResponseMeta: (key: string, value: unknown) => { meta.push({ key, value }); } } as unknown as OperationContext;
   const rows = await operations.find(o => o.name === 'search')!.handler(ctx, { query: 'juniper' }) as Array<{ slug: string }>;
   expect(rows.map(r => r.slug)).toContain('notes/alice-example');
   const retrieval = meta.find(m => m.key === 'retrieval')?.value as { freshness?: Array<Record<string, unknown>> } | undefined;
-  return retrieval?.freshness ?? [];
+  expect(retrieval).toBeDefined();
+  return retrieval!.freshness;
 }
+const searchFreshness = async (engine: BrainEngine, remote: boolean) => (await searchFreshnessKey(engine, remote)) ?? [];
 
 for (const { backend, databaseUrl } of pathologicalArms()) {
   describe(`notifier status and search freshness (${backend})`, () => {
-    test('no resident: search reads not_monitored and the notifier block names no resident with the fix', async () => {
+    test('the freshness gate: absent until the brain opts in or a resident records coverage, then not_monitored for an unwatched source', async () => {
       await classicBrain(databaseUrl, async ({ engine }) => {
+        await engine.setConfig('sync.on_commit', 'false');
+        expect(await searchFreshnessKey(engine, false)).toBeUndefined();
+        // The classic sync above recorded this host as the syncer (a row with no coverage); a resident's observation adds it.
+        await engine.executeRaw('UPDATE sync_notifier_sources SET observed_at = now(), detection_mode = $2, owner_host_id = $3, owner_kind = $4, owner_pid = $5 WHERE source_id = $1',
+          [SOURCE, 'poll', '00000000-0000-4000-8000-0000000000bb', 'serve', 1]);
+        expect(await searchFreshnessKey(engine, false)).toEqual([expect.objectContaining({ source_id: SOURCE, state: 'not_monitored' })]);
+        await engine.executeRaw('UPDATE sync_notifier_sources SET observed_at = NULL, detection_mode = NULL, owner_host_id = NULL, owner_kind = NULL, owner_pid = NULL WHERE source_id = $1', [SOURCE]);
+        expect(await searchFreshnessKey(engine, false)).toBeUndefined();
+        await engine.setConfig('sync.on_commit', 'true');
+        expect(await searchFreshnessKey(engine, false)).toEqual([expect.objectContaining({ source_id: SOURCE, state: 'not_monitored', held_count: 0 })]);
+      });
+    }, 120_000);
+
+    test('no resident: with sync.on_commit on, search reads not_monitored and the notifier block names no resident with the fix', async () => {
+      await classicBrain(databaseUrl, async ({ engine }) => {
+        await engine.setConfig('sync.on_commit', 'true');
         const fresh = await searchFreshness(engine, false);
         expect(fresh).toEqual([expect.objectContaining({ source_id: SOURCE, state: 'not_monitored', held_count: 0 })]);
         const block = await readNotifierBlock(engine, SOURCE);

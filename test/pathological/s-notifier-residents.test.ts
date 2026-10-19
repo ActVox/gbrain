@@ -109,6 +109,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       await brain(databaseUrl, async engine => {
         await engine.executeRaw("INSERT INTO sources(id,name,local_path,config) VALUES('acme-example','acme-example','/nonexistent/acme-example','{}') ON CONFLICT (id) DO NOTHING");
         await engine.executeRaw('INSERT INTO sync_notifier_sources (source_id, syncer_host_id) VALUES ($1, $2) ON CONFLICT (source_id) DO UPDATE SET syncer_host_id = EXCLUDED.syncer_host_id', ['acme-example', HOST]);
+        await engine.setConfig('sync.on_commit', 'true');
         __resetResidentNotifierForTests();
         let revParses = 0;
         const lines: string[] = [];
@@ -122,7 +123,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
           expect(fresh).toEqual([expect.objectContaining({ source_id: 'acme-example', state: 'not_monitored' })]);
           await until('the background first pass to ask for HEAD', () => revParses > 0, lines);
           expect((await readSourceFreshness(engine, { sourceId: 'acme-example' }))[0]!.state).toBe('not_monitored');
-        } finally { await started?.stop(); __resetResidentNotifierForTests(); await engine.executeRaw("DELETE FROM sources WHERE id='acme-example'"); }
+        } finally { await started?.stop(); __resetResidentNotifierForTests(); await engine.executeRaw("DELETE FROM sources WHERE id='acme-example'"); await engine.setConfig('sync.on_commit', 'false'); }
       });
     }, 60_000);
   });
