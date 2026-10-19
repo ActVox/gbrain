@@ -2453,6 +2453,7 @@
             "facts": {
               "missing": 0,
               "other_model": 0,
+              "partially_embedded": 0,
               "stale": 0
             },
             "model": "voyage:voyage-4",
@@ -3258,7 +3259,7 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "Active pack gbrain-base-v2@1.4.0+1c5ba903 is current (no successor declared)",
+          "message": "Active pack gbrain-base-v2@1.5.0+4604112a is current (no successor declared)",
           "name": "pack_upgrade_available",
           "status": "ok"
         },
