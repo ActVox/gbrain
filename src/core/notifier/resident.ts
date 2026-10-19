@@ -89,6 +89,7 @@ export async function listHostSources(engine: BrainEngine, hostId: string, env: 
     } else {
       kind = 'classic';
       root = row.local_path;
+      if (!root) { skipped.push({ sourceId: row.id, reason: 'no local checkout path' }); continue; }
       if (!bind.has(row.id) && row.syncer !== hostId) {
         skipped.push({ sourceId: row.id, reason: row.syncer
           ? `classic source last synced on host ${row.syncer.slice(0, 8)}; its resident there watches it (or bind it here with GBRAIN_NOTIFIER_CLASSIC_SOURCES=${row.id})`
