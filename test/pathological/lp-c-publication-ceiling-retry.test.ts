@@ -8,7 +8,9 @@
  *    publication overruns the ceiling every time ends `failed`/`write_interrupted` (cause `publication_ceiling`) after
  *    the cap instead of being prepared and published again without limit. A single overrun re-prepares and commits. Both
  *    publication arms: a database-only page (finishUnpublishedFailure) and a worktree-backed page (the recovery route,
- *    which restores the canonical file first; on Postgres the retried publish there surfaces as a bare AbortError).
+ *    which restores the canonical file first; on Postgres the retried publish there surfaces as a bare AbortError). A
+ *    member a group's overrun charged publishes alone from then on, and a sync lane group cancelled while its predecessor
+ *    still publishes charges each member on release (laneFallback).
  * 2. Fails when: the cancelled publication is released as `database_contention` uncounted (v0.60.299.0: the error is a
  *    discarded connection, which is never counted), so the claim count grows past the cap; or when the recovery route
  *    fails it `storage_error` at once.
@@ -38,6 +40,9 @@ import { resetWriteSwitches } from '../../src/core/persistence/switches.ts';
 import { _resetWriteThroughCacheForTest } from '../../src/core/write-through.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
+import { waitFor } from '../helpers/wait-for.ts';
+import { performSync } from '../../src/commands/sync/perform.ts';
+import { execFileSync } from 'node:child_process';
 import { pathologicalArms } from './harness.ts';
 
 const op = (name: string) => operations.find(o => o.name === name)!;
@@ -212,6 +217,47 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
       for (const { sourcePath } of files) expect(await engine.readPageSnapshot(sourcePath.replace(/\.md$/, ''), { sourceId })).toBeNull();
     }, 180_000);
 
+    test('a grouped import whose group publication overruns only as a whole publishes each member alone after one charged interruption, and both commit', async () => {
+      await engine.setConfig('persistence.max_transient_retries', '2');
+      resetWriteSwitches();
+      const dir = `grp-whole-${++n}`;
+      mkdirSync(join(brainDir, dir), { recursive: true });
+      const files = ['a', 'b'].map(name => {
+        const sourcePath = `${dir}/${name}.md`;
+        writeFileSync(join(brainDir, sourcePath), page(`Whole ${name} ${n}`));
+        return { filePath: join(brainDir, sourcePath), sourcePath };
+      });
+      // A publication overruns only while another member prepared in the same pass is still unpublished (a group of two):
+      // the members prepare together and then reach before_commit one after the other inside the one transaction.
+      const unpublished = new Set<string>(), claims = new Map<string, number>(), grouped: string[][] = [];
+      installFaultHook(async (point, detail) => {
+        if (detail.sourceId !== sourceId) return;
+        if (point === 'consumer:preparing') { unpublished.add(detail.requestId!); claims.set(detail.requestId!, (claims.get(detail.requestId!) ?? 0) + 1); return; }
+        if (point !== 'publication:before_commit') return;
+        const together = unpublished.size;
+        unpublished.delete(detail.requestId!);
+        if (together < 2 || grouped.length >= GUARD) return;
+        grouped.push([...unpublished, detail.requestId!]);
+        unpublished.clear();
+        await new Promise(resolve => setTimeout(resolve, PARK_MS));
+        throw discarded();
+      });
+      const results = await withEnv({ GBRAIN_HOME: home }, () => importManagedFiles(engine, files, { sourceId, noEmbed: true }));
+      installFaultHook(undefined);
+      expect(results.map(result => result.status === 'rejected' ? (result.reason as { code?: string }).code : result.status)).toEqual(['fulfilled', 'fulfilled']);
+      // One group publication, cancelled at the ceiling; after it each member is claimed and published on its own.
+      expect(grouped.length).toBe(1);
+      const rows = await engine.executeRaw<{ request_id: string; state: string; transient_interruptions: number }>(
+        "SELECT request_id::text AS request_id,state,transient_interruptions FROM persistence_requests WHERE source_id=$1 AND intent->>'import_batch' IS NOT NULL AND slug LIKE $2 ORDER BY sequence",
+        [sourceId, `${dir}/%`]);
+      expect(rows.length).toBe(2);
+      for (const member of rows) {
+        expect(member).toMatchObject({ state: 'committed', transient_interruptions: 1 });
+        expect(claims.get(member.request_id)).toBe(2);
+      }
+      for (const { sourcePath } of files) expect(await engine.readPageSnapshot(sourcePath.replace(/\.md$/, ''), { sourceId })).not.toBeNull();
+    }, 180_000);
+
     test('a single overrun is retried, never a terminal storage_error (on Postgres the retried publish surfaces as a bare AbortError), and commits', async () => {
       const slug = `wt/overrun-once-${++n}`;
       expect(await call({ slug, content: page(`Prior ${n}`), request_id: randomUUID() }, sourceId)).toMatchObject({ state: 'committed' });
@@ -223,5 +269,75 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
       expect(seen.transient).toEqual([0, 1]);
       expect(readFileSync(join(brainDir, `${slug}.md`), 'utf8')).toContain(`Next ${n}`);
     }, 180_000);
+  });
+
+  /**
+   * #5984 lanes (Postgres only): a lane group the ceiling cancels while its predecessor group still publishes releases
+   * its claims (laneFallback) instead of taking the single path, and charges each member there. Eight pages in bulk
+   * groups on two lanes: the first group parks at `lane:applied` until the second's release is seen; the second overruns once at
+   * `lane:applied` (inside its transaction, before its turn) and rejects as the discarded connection does. Without the
+   * charge on release, a lane group the ceiling cancels every time would be released and claimed again without bound.
+   */
+  (backend === 'postgres' ? describe : describe.skip)('lane group (laneFallback)', () => {
+    let lanes: BrainEngine;
+    let closeLanes: (() => Promise<void>) | undefined;
+    const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    beforeAll(async () => { const pg = await isolatedPersistencePostgres(databaseUrl!, 'instance', 12); lanes = pg.engine; closeLanes = pg.close; }, 120_000);
+    afterAll(async () => { await withEnv({ GBRAIN_HOME: home }, () => disposePersistenceConsumer(lanes)); await closeLanes?.(); }, 60_000);
+
+    test('a lane group cancelled at the ceiling while its predecessor still publishes charges each member on release, and every page commits', async () => withEnv({ GBRAIN_HOME: home, GBRAIN_SYNC_BULK_SIZE: '4' }, async () => {
+      const id = `lpc-lanes-${randomUUID().slice(0, 8)}`, root = join(home, id);
+      mkdirSync(join(root, 'notes'), { recursive: true }); git(root, 'init', '-q');
+      for (let i = 0; i < 8; i++) writeFileSync(join(root, 'notes', `n${i}.md`), page(`Lane note ${i}`));
+      git(root, 'add', '.'); git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'notes');
+      await lanes.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      await lanes.executeRaw("INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,'{}')", [id, root]);
+      await claimWorktree(lanes, id, root);
+      await lanes.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      /** The request's group and the source's first two groups in admission order. */
+      const groupOf = async (requestId: string) => {
+        const [row] = await lanes.executeRaw<{ grp: string | null }>("SELECT intent->>'group' AS grp FROM persistence_requests WHERE request_id=$1::uuid", [requestId]);
+        const order = (await lanes.executeRaw<{ grp: string }>(`SELECT intent->>'group' AS grp FROM persistence_requests WHERE source_id=$1 AND intent ? 'group'
+          GROUP BY 1 ORDER BY min(sequence) LIMIT 2`, [id])).map(r => r.grp);
+        return { grp: row?.grp ?? null, first: order[0], second: order[1] };
+      };
+      let releaseFirst!: () => void;
+      const firstReleased = new Promise<void>(resolve => { releaseFirst = resolve; });
+      setTimeout(() => releaseFirst(), 10_000);
+      const overrun = new Set<string>(), charges: Array<{ grp: string | null; blocked: string | null }> = [];
+      let second: string | null = null;
+      installFaultHook(async (point, detail) => {
+        if (detail.sourceId !== id) return;
+        if (point === 'persistence:interruption_charged') {
+          const [charged] = await lanes.executeRaw<{ grp: string | null; blocked: string | null }>(
+            "SELECT intent->>'group' AS grp,blocked_reason AS blocked FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
+          charges.push(charged!);
+          if (charged!.grp === second) releaseFirst();
+          return;
+        }
+        if (point !== 'lane:applied') return;
+        const group = await groupOf(detail.requestId!);
+        if (!group?.grp) return;
+        if (group.grp === group.first) { await firstReleased; return; }
+        if (group.grp !== group.second || overrun.has(group.grp)) return;
+        overrun.add(group.grp); second = group.grp;
+        await new Promise(resolve => setTimeout(resolve, PARK_MS));
+        throw discarded();
+      });
+      try {
+        await performSync(lanes, { sourceId: id, noPull: true, noEmbed: true, noExtract: true, drain: true, lanes: 2 });
+        await waitFor(async () => (await lanes.executeRaw<{ n: number }>(
+          "SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import' AND state<>'committed'", [id]))[0]!.n === 0,
+        { timeoutMs: 120_000, label: 'every lane page commits' });
+      } finally { installFaultHook(undefined); }
+      expect(overrun.size).toBe(1);
+      const members = await lanes.executeRaw<{ slug: string; transient_interruptions: number }>(
+        "SELECT slug,transient_interruptions FROM persistence_requests WHERE source_id=$1 AND intent->>'group'=$2 ORDER BY sequence", [id, second]);
+      expect(members.length).toBeGreaterThan(1);
+      // Each member of the cancelled group was charged once, by the lane release (its claim went back as group_member_waiting).
+      expect(members.map(member => member.transient_interruptions)).toEqual(members.map(() => 1));
+      expect(charges.filter(charge => charge.grp === second)).toEqual(members.map(() => ({ grp: second, blocked: 'group_member_waiting' })));
+      for (let i = 0; i < 8; i++) expect(await lanes.readPageSnapshot(`notes/n${i}`, { sourceId: id })).not.toBeNull();
+    }), 300_000);
   });
 });

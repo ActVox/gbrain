@@ -13,7 +13,8 @@
  *    forms stagingsHoldingClaim matches, so an orphan holding a claim with `|` goes too. A text can outlive the staging
  *    that recorded it (another page's write that dedupes onto it refreshes its created_at, and terminal stagings go
  *    after 24 h), so the page purge also deletes the source's unreferenced texts holding one of the page's claims,
- *    withdrawn ones included, in both forms; a text a live staging holds still stays.
+ *    withdrawn ones included (all of them, not only the first 32 the journal sweep reads), in both forms; a text a live
+    staging holds still stays.
  * 2. Fails when: right after the purge, before any GC, a row of page_segment_texts still holds the planted claim, plain
  *    or escaped.
  * 3. A 2 MB conversation page with a facts fence: put_page, forget_fact, delete_page, restore_page, then delete_page
@@ -124,7 +125,6 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`a purge aft
     const purge = await op('delete_page', { slug, purge: true, request_id: randomUUID(), expected_revision: await revision(slug) });
     expect(purge.status).toBe('purged');
     const left = { token: await textsHolding(MARKER), needles: await Promise.all(NEEDLES.map(textsHolding)), orphans: (await Promise.all(orphans.map(textExists))).filter(Boolean).length };
-    console.log(`[lp-h] ${backend} page purge: ${orphans.length} orphan(s) before; after: ${JSON.stringify(left)}`);
     expect(left).toEqual({ token: 0, needles: NEEDLES.map(() => 0), orphans: 0 });
     expect((await allTexts()).filter(sha => !before.has(sha))).toEqual([]);
     expect((purge.receipt.stores as Array<{ store: string; status: string }>).find(s => s.store === 'page_segment_texts')?.status).toBe('deleted');
@@ -183,7 +183,6 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`a purge aft
     const done = await op('purge_fact', { id: factId, confirm: dry.confirm_token, expected_revision: dry.expected_revision, request_id: randomUUID() });
     expect(done.state).toBe('committed');
     const left = { escaped: await textsHolding(cell), plain: await textsHolding(PIPE_CLAIM), orphans: (await Promise.all(orphans.map(textExists))).filter(Boolean).length };
-    console.log(`[lp-h] ${backend} pipe purge_fact: ${escaped} orphan(s) holding the escaped cell before; after: ${JSON.stringify(left)}`);
     expect(left).toEqual({ escaped: 0, plain: 0, orphans: 0 });
     const { page: row, body, hash } = await reconstructedPage(engine, slug);
     expect(hash).toBe(row.content_hash);
@@ -232,8 +231,23 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`a purge aft
     const purge = await op('delete_page', { slug, purge: true, request_id: randomUUID(), expected_revision: await revision(slug) });
     expect(purge.status).toBe('purged');
     const left = { escaped: await textsHolding(cell), plain: await textsHolding(claim), text: await textExists(sha) };
-    console.log(`[lp-h] ${backend} expired-staging page purge: after: ${JSON.stringify(left)}`);
     expect(left).toEqual({ escaped: 0, plain: 0, text: false });
+    expect((purge.receipt.stores as Array<{ store: string; status: string }>).find(s => s.store === 'page_segment_texts')?.status).toBe('deleted');
+    await engine.executeRaw('DELETE FROM page_body_stagings WHERE id=$1::uuid', [staging]);
+  }), 600_000);
+
+  test('the purge deletes that text when the withdrawn claim is the 41st claim of the page (past the journal sweep\'s first 32)', async () => withEnv(env(), async () => {
+    const slug = 'notes/lp-h-expired-many';
+    const { claim, cell, sha, staging } = await expiredStagingOrphan(slug, 'notes/lp-h-expired-many-dedupe', 31, 'vault5503', false);
+    // 40 more claims filed on the page, ordered before it (negative ids), held by no segment text: the purge's journal
+    // sweep reads the first 32 claims by id, so the withdrawn claim is past it.
+    const [marked] = await engine.executeRaw<{ id: number }>("SELECT id FROM facts WHERE source_id='default' AND source_markdown_slug=$1", [slug]);
+    await engine.executeRaw(`INSERT INTO facts SELECT (jsonb_populate_record(NULL::facts, to_jsonb(f) || jsonb_build_object('id', -g, 'row_num', null, 'fact', 'Filler claim number ' || g || ' of the page'))).*
+      FROM facts f, generate_series(1, 40) AS g WHERE f.id=$1`, [marked!.id]);
+    expect(Number((await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM facts WHERE source_id='default' AND source_markdown_slug=$1", [slug]))[0]!.n)).toBe(41);
+    const purge = await op('delete_page', { slug, purge: true, request_id: randomUUID(), expected_revision: await revision(slug) });
+    expect(purge.status).toBe('purged');
+    expect({ escaped: await textsHolding(cell), plain: await textsHolding(claim), text: await textExists(sha) }).toEqual({ escaped: 0, plain: 0, text: false });
     expect((purge.receipt.stores as Array<{ store: string; status: string }>).find(s => s.store === 'page_segment_texts')?.status).toBe('deleted');
     await engine.executeRaw('DELETE FROM page_body_stagings WHERE id=$1::uuid', [staging]);
   }), 600_000);
