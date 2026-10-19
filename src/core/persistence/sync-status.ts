@@ -80,6 +80,8 @@ export interface SyncStatusError extends SyncFaultVerdict {
   phase: ManagedSyncFailure['phase'];
   first_seen: string;
   attempts: number;
+  /** GBRA-133 S-60: the runs in a row that stopped on this path with this code and message (`ManagedSyncFailure.repeats`). */
+  repeats?: number;
   /** #6643: what caused this failure (a knock-on's root request, or the receipt blocking a checkpoint). */
   root_cause?: ManagedSyncFailure['root_cause'];
 }
@@ -295,7 +297,8 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     ...(laneFault ? { detail: laneFault } : {}), message: failure.message, ...(failure.write_error_detail ? { write_error_detail: failure.write_error_detail } : {}),
     path: failure.path, phase: failure.phase, first_seen: failure.first_seen, attempts: failure.attempts,
     ...(failure.request_id ? { request_id: failure.request_id } : {}), ...(rootCause ? { root_cause: rootCause } : {}),
-    ...classifySyncFault({ code: failure.code, detail: laneFault, message: failure.message }) }
+    ...(failure.repeats ? { repeats: failure.repeats } : {}),
+    ...classifySyncFault({ code: failure.code, detail: laneFault, message: failure.message, repeated: failure.repeats ? { path: failure.path, runs: failure.repeats } : null }) }
     : retired ? { code: 'cursor_incarnation_retired', category: 'sync_fault', public_category: 'superseded', message: `An unfinished sync cursor of ${sourceId} was recorded under an incarnation the source no longer has; no current sync selects it, and it says nothing about whether the current files are imported. `
       + `Retire it with ${repairPreview.argv!.join(' ')} (preview, then --apply with the printed hash).`, phase: 'resume', first_seen: retired.first_seen, attempts: 1, ...classifySyncFault({ code: 'cursor_incarnation_retired' }) } : null;
   const unfinished = !!header && !header.done;

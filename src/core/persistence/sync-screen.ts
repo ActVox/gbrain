@@ -36,6 +36,7 @@ import { listTrustAllowRules } from '../trust/allow-rules.ts';
 import { readSyncContent, readSyncFile, syncGitPath, UNREADABLE_SYNC_FILE, type SyncDiscovery, type SyncEntry } from './sync-discovery.ts';
 import { pinnedWindowBlock, readBlobBytes, readBlobContents, readPinnedBlob, readPinnedBytes, readPinnedContent, readTreeBlobs, SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
 import { screenSyncImport, type SyncImportScreenInput } from './sync-prepare.ts';
+import { committedContentOrMissing, nullBytesRefusal } from './sync-entry-fault.ts';
 import type { SyncProcessingOptions } from './sync-authority.ts';
 import { gitHoldItem, readSyncHoldPolicy, readSyncImportProvenance, type GitHoldCode, type GitHoldItem, type GitHoldRecord, type PreparationStallMeta, type SyncHoldPolicy } from './sync-holds.ts';
 import type { WriteRequest } from './model.ts';
@@ -92,7 +93,12 @@ export function driftBaselineContent(gitRoot: string, entry: Pick<SyncEntry, 'dr
 /** The frozen import content of one entry (`readSyncContent`); a committed entry's pinned blob is read with the entries after it. */
 export function pinnedContent(cursor: SyncDiscovery & { index: number }, entry: SyncEntry): string {
   const content = entry.working ? null : readPinnedContent(cursor.gitRoot, cursor.target, syncGitPath(cursor, entry.path), upcomingGitPaths(cursor));
-  return content ?? readSyncContent(cursor, entry);
+  if (content !== null) return content;
+  try { return readSyncContent(cursor, entry); } catch (error) {
+    // GBRA-133 S-33: a committed blob the repository lost reads from identical working-tree bytes, or is refused git_object_missing.
+    if (entry.working) throw error;
+    return committedContentOrMissing(cursor, entry, pinnedBlob(cursor, entry.path), error);
+  }
 }
 
 /**
@@ -232,6 +238,11 @@ export function oversizeHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'wor
 
 /** File-system errors that make one path unreadable while the rest of its source reads (GBRA-130 A-7). */
 const UNREADABLE_ERRNO = new Set(['EACCES', 'EPERM', 'ELOOP', 'EISDIR', 'ENOTDIR']);
+/** GBRA-130 A-7: whether `readSyncFile` refused one path as not a readable regular file inside its root (a per-file error). */
+export function isUnreadableSyncFile(error: unknown): boolean {
+  const errno = (error as NodeJS.ErrnoException | null)?.code;
+  return error instanceof OperationError && error.detail === UNREADABLE_SYNC_FILE || typeof errno === 'string' && UNREADABLE_ERRNO.has(errno);
+}
 /**
  * GBRA-130 A-7: the hold of a file sync cannot read as a regular file inside its root (a symlink component, a non-regular
  * file, a permission or loop error); null for any other error. Its content is never read or followed, and the root-level
@@ -239,10 +250,8 @@ const UNREADABLE_ERRNO = new Set(['EACCES', 'EPERM', 'ELOOP', 'EISDIR', 'ENOTDIR
  */
 export function unreadableFileHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'working' | 'renameFrom' | 'renameHeld'>, slug: string, pageId: number | null, error: unknown,
   blob: () => TreeBlob | null | undefined): HeldEntry | null {
-  const errno = (error as NodeJS.ErrnoException | null)?.code;
-  const refused = error instanceof OperationError && error.detail === UNREADABLE_SYNC_FILE;
-  if (!refused && !(typeof errno === 'string' && UNREADABLE_ERRNO.has(errno))) return null;
-  const why = refused ? (error as OperationError).message : `it cannot be read (${errno})`;
+  if (!isUnreadableSyncFile(error)) return null;
+  const why = error instanceof OperationError && error.detail === UNREADABLE_SYNC_FILE ? error.message : `it cannot be read (${(error as NodeJS.ErrnoException).code})`;
   return heldEntry(entry, slug, pageId, { code: 'file_unreadable',
     message: `Sync did not read ${entry.path}: ${why} Sync reads only regular files inside the source root and never follows a symlink. Make it a readable regular file there (or exclude it with sync.exclude) and commit, then run gbrain sources retry-held to re-test it.` }, null, blob());
 }
@@ -329,6 +338,9 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
     return { ...held, meta: { ...held.meta, legacy_slugs: entry.legacySlugs } };
   }
   if (content === null) return null;
+  // GBRA-133 S-39: text holding NUL cannot be stored or carried in the write intent; only this file is held.
+  const nul = nullBytesRefusal(entry.path, content);
+  if (nul) return heldEntry(entry, slug, pageId, nul, content, blob);
   // #6188: a fence Tier 1 rewrites is admitted (publication writes the normalized file back); with fences.normalize=false it is held.
   const screen = await screenFrozenContent(await frozenImportScreenInput(engine, { ...input, content }, run), run);
   if (screen.status === 'importable' && screen.fences?.fixes.length) input.onNormalized?.(screen.fences.fixes);

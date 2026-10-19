@@ -54,6 +54,7 @@ import { checkpointSuperseded } from './sync-checkpoint-replaced.ts';
 import { publicFailureDetail } from './publication-failure.ts';
 import { dependentHold, fileDriftHold, sharedOriginSurvivor, fileChangedAfterAdmission, headCommittedBytes, liveRevision, idempotentDeletionProof, originFaultHold, pageChangeProof, pageChangedHold, pinnedWorktreeConflict, receiptPageFaultHold, worktreeDirtyHold } from './sync-page-fault.ts';
 import { faultPoint } from './fault-points.ts';
+import { directoryAt, freezeFaultHold, noteFrozen, nullBytesRefusal } from './sync-entry-fault.ts';
 import { syncCursorOptions } from './sync-slices.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { withCoordinatedWrite } from './context.ts';
@@ -321,7 +322,16 @@ function remember(snapshot: PageSnapshot | null | undefined, pending: Pending): 
   if (snapshot !== undefined) frozenSnapshots.set(pending, snapshot);
   return pending;
 }
-async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, assertActive: () => void,
+/** GBRA-133 S-63: one entry whose freeze throws is held alone when holds are on (sync-entry-fault.ts); run-scoped faults and deliberate refusals still stop. */
+async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, assertActive: () => void, run: Parameters<typeof freezeEntryOnce>[4]): Promise<Pending | Held | Settled> {
+  const entry = cursor.entries[cursor.index];
+  try { const frozen = await freezeEntryOnce(engine, cursor, key, assertActive, run); noteFrozen(run.screen); return frozen; } catch (error) {
+    const hold = entry && run.screen && !cursor.companyPlan && !run.signal?.aborted ? freezeFaultHold(run.screen, entry, entry.slug!, entry.pageId ?? null, error, () => pinnedBlob(cursor, entry.path)) : null;
+    if (!hold) throw error;
+    return { hold };
+  }
+}
+async function freezeEntryOnce(engine: BrainEngine, cursor: Cursor, key: string, assertActive: () => void,
   run: { syncOptions: SyncCursorOptions; repoPath?: string; screen?: SyncScreenRun | null; observedAt?: string; signal?: AbortSignal; embedDeferred?: boolean }): Promise<Pending | Held | Settled> {
   assertActive();
   const entry = cursor.entries[cursor.index];
@@ -364,7 +374,7 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
       return { hold: await originFaultHold(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, entry, observed: snapshot, message: occupant.originFault.message }), overtaken: true };
     }
     let bytes: Buffer | null = null;
-    try { bytes = readSyncFile(cursor.root, entry.path); }
+    try { bytes = entry.action === 'delete' && directoryAt(cursor.root, entry.path) ? null : readSyncFile(cursor.root, entry.path); } // GBRA-133 S-22: a directory is no file
     catch (error) {
       if (!isSyncReadBound(error)) { const held = holdsOn ? unreadableFileHold(entry, entry.slug!, entry.pageId ?? null, error, () => pinnedBlob(cursor, entry.path)) : null; if (held) return { hold: held }; throw error; } // GBRA-130 A-7
       // Wave B: with segmented storage on, a Markdown file over the read bound is frozen by reference and streamed by its owner.
@@ -393,6 +403,8 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
       content = (await readCommittedBlob(cursor.companyPlan.revision!, blob, cursor.companyPlan.limits)).toString('utf8');
       assertActive();
     } else content = imageBytes ? frozenImageIntent(imageBytes).content : entry.action === 'import' && !oversize && !bodyRef ? pinnedContent(cursor, entry) : null;
+    const nul = !screening && content !== null && !image ? nullBytesRefusal(entry.path, content) : null; // GBRA-133 S-39 with sync.holds=fail
+    if (nul) throw syncRunRefusal('content_null_bytes', 'A synced Markdown file holds NUL bytes.', retry, nul.message);
     // #6340: working-tree bytes that differ from the pinned blob but are committed at HEAD (a commit past the pin on a
     // live checkout) are imported as HEAD has them; the pin..HEAD diff later re-imports the same bytes as a no-op.
     // Uncommitted bytes keep the pinned content and reach the publication screen (idea from PR #6323).
@@ -1355,7 +1367,7 @@ async function recordRunFailure(engine: BrainEngine, error: unknown, run: { curs
     const failedCursor = cursor ?? stored?.completed_keys?.[0];
     const { failure } = await recordManagedSyncFailure(engine, { source_id: context.sourceId, source_incarnation: context.incarnation, path: cursor?.entries[cursor.index]?.path ?? failedCursor?.pending?.intent.path ?? `<${phase}>`, code,
       message: error instanceof Error ? error.message : String(error), request_id: failedCursor?.pending?.requestId ?? null,
-      run_id: failedCursor?.runId ?? discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: cursor?.failureKey ?? key,
+      run_id: failedCursor?.runId ?? discoveryRun, invocation: discoveryRun, target: failedCursor?.target ?? discoveryTarget, cursor_key: cursor?.failureKey ?? key,
       syncOptions: failedCursor?.syncOptions ?? syncOptions, processingOptions: failedCursor?.processingOptions ?? processingOptions, phase, state: 'failed',
       observation_id: failedCursor ? `${failedCursor.runId}:${failedCursor.index}:${phase}:${code}` : `${key}:discovery:${discoveryTarget}:${code}` });
     if (error instanceof Error) error.message = run.remote ? 'Managed sync is blocked; ask the host operator to inspect doctor.' : `${formatManagedSyncFailure(failure)} Fix the cause, then run: ${managedSyncRetryCommand(failure, run.repoPath)}`;
@@ -1496,7 +1508,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           if (slice && (cursor.index - sliceFirstIndex >= slice.maxPages || performance.now() - sliceStarted >= slice.maxMs)) return result(cursor, 'partial', 'writer_yield');
           continue;
         }
-        const freezeAt: FreezeAt = base => async index => { if (base.entries[index]?.prescreened && !prescreen.missed.has(index)) return null; const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun); return 'requestId' in frozen ? frozen : null; };
+        const freezeAt: FreezeAt = base => async index => { if (base.entries[index]?.prescreened && !prescreen.missed.has(index)) return null; const frozen = await freezeEntry(engine, { ...base, index }, key, assertActive, frozenRun).catch(() => null); return frozen && 'requestId' in frozen ? frozen : null; }; // GBRA-133 S-64: a follower's throw is raised by the single path, naming its own entry
         if (bulk.settings.enabled && (bulk.foregroundFirst || !foregroundQueued) && !prior && !cursor.group && !pending.rebound && indexOf(cursor, pending) === cursor.index && groupableIntent(pending.intent)) cursor = await formGroup(engine, cursor, pending, key, bulk, config, freezeAt, assertActive);
         if (cursor.group?.[0]?.requestId === pending.requestId && cursor.pending?.requestId === pending.requestId) {
           const step = await groupStep(engine, cursor, key, bulk, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: 5000, ...whileHeld }, drainStartedAt, opts.onProgress,
