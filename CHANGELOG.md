@@ -10,6 +10,18 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.314.0] - 2026-10-19
+
+**A master-red incident closed by hand stays closed, and a master push that reused a full run is judged by that run.** Nightly-watch opened a false master-red (#7056) after a maintainer closed the real one by hand: the incident's newest block was still red, a re-run-failed-jobs attempt left an incomplete manifest, and pushes that reused a full run carried no manifest of their own, so nothing could ever clear it. A full `ci:ubicloud` gate now runs only in `eu-central-h1`, where test timeouts and shard weights are calibrated.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A master-red incident closed by hand while its newest block is red | the next rebuild opened a fresh incident carrying the stale note | the incident ends green with `closed_by_hand` recorded; a later run whose latest attempt is red still opens a new incident |
+| A master push that reused a passed full run | judged incomplete (it has no ci-manifest), so it could never clear an incident | judged by its source run's complete evidence: `reuse.json` checked with the release gate's record check, identical trees, and the source attempt's ci-manifest |
+| A full `ci:ubicloud` gate with `--location` other than `eu-central-h1` | ran, and its timing failures read as test failures | refused before any VM is requested; `--lanes` runs a diagnostic subset elsewhere, whose summary says it is not gate evidence |
+
 ## [0.60.313.0] - 2026-10-19
 
 **Unit shards in a full Test run cost about 29% less, the macOS 26 nightly typecheck no longer times out, and test paths survive a checkout directory with a space in it.** Each 4-vCPU runner now runs two unit shards at once (22 shards on 11 runners, re-mined from a green packed run, each within the unchanged 600 s budget). The `ci:ubicloud` gate plans its unit shards from the same partition, weights and budget.
