@@ -61,12 +61,13 @@ const holds = async (engine: BrainEngine) => ((await readGitSourceHolds(engine, 
 const atHead = async (engine: BrainEngine, root: string) => (await engine.executeRaw<{ c: string | null }>("SELECT last_commit AS c FROM sources WHERE id='default'"))[0]!.c === git(root, 'rev-parse', 'HEAD');
 const dropBlob = (root: string, path: string) => { const oid = git(root, 'rev-parse', `HEAD:${path}`); rmSync(join(root, '.git/objects', oid.slice(0, 2), oid.slice(2))); return oid; };
 /** The odd commit beside a healthy file, the sync, then a later healthy commit and its sync: the source keeps moving. */
-async function oddThenHealthy(engine: BrainEngine, root: string, odd: () => void, committed: () => void = () => {}) {
+async function oddThenHealthy(engine: BrainEngine, root: string, odd: () => void, committed: () => void = () => {}, beforeNext: () => void = () => {}) {
   expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
   writeFileSync(join(root, 'notes/ok.md'), note('notes/ok'));
   odd(); commit(root, 'odd'); committed();
   const first = await performManagedSync(engine, OPTS);
   expect(await atHead(engine, root)).toBe(true);
+  beforeNext();
   writeFileSync(join(root, 'notes/ok2.md'), note('notes/ok2')); commit(root, 'ok2');
   const second = await performManagedSync(engine, OPTS);
   expect(second.status).toBe('synced');
@@ -103,7 +104,10 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: one odd f
   }), 240_000);
 
   test('S-33: a lost committed blob imports from identical working-tree bytes', () => brain(async ({ engine, root }) => {
-    const first = await oddThenHealthy(engine, root, () => writeFileSync(join(root, 'notes/odd.md'), note('notes/odd')), () => dropBlob(root, 'notes/odd.md'));
+    // Whether Git can build the next commit's tree while the index names the lost object depends on index stat timing
+    // (racy-git), so the object is restored explicitly after the sync under test, before the next commit.
+    const first = await oddThenHealthy(engine, root, () => writeFileSync(join(root, 'notes/odd.md'), note('notes/odd')), () => dropBlob(root, 'notes/odd.md'),
+      () => git(root, 'hash-object', '-w', '--', 'notes/odd.md'));
     expect(first.held ?? []).toEqual([]);
     expect(await live(engine)).toEqual(['notes/fd', 'notes/odd', 'notes/ok', 'notes/ok2', 'notes/seed']);
   }), 240_000);
