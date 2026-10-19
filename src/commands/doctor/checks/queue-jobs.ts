@@ -13,6 +13,22 @@ import { queueWorkerAlive, runWaitingJobsFix } from '../../../core/minions/no-wo
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveEnvNumber = resolveEnvNumber;
 
+type RegistryFailure = { errno: string; path: string | null };
+
+/** A remote doctor caller never sees the host's filesystem path to the worker registry. */
+function registryFailureDetails(failure: RegistryFailure, remote: boolean): Record<string, unknown> {
+  return {
+    worker_registry_unreadable: true,
+    worker_registry_errno: failure.errno,
+    ...(remote ? { worker_registry_path_redacted: true } : { worker_registry_path: failure.path }),
+  };
+}
+
+function registryFailureLabel(failure: RegistryFailure, remote: boolean): string {
+  if (remote) return `${failure.errno}; path withheld from remote callers, run \`gbrain doctor\` on the brain host`;
+  return `${failure.errno}${failure.path ? ` at ${failure.path}` : ''}`;
+}
+
 /**
  * v0.41.18.0 batch_retry_health doctor check (codex H-9 thresholds).
  *
@@ -47,6 +63,7 @@ export async function computeQueueHealthCheck(
     waitingDepthThreshold?: number;
     oldWaitingHours?: number;
     readWorkers?: () => Array<{ queue: string }>;
+    remote?: boolean;
   } = {},
 ): Promise<Check> {
   if (engine.kind === 'pglite') return computePgliteQueueHealth(engine, opts.readWorkers);
@@ -170,7 +187,7 @@ export async function computeQueueHealthCheck(
         null,
       ),
       worker_alive: liveWorkerQueues === null ? null : waitingByQueue.every((r) => liveWorkerQueues.has(r.queue)),
-      ...(registryFailure ? { worker_registry_unreadable: true, worker_registry_errno: registryFailure.errno, worker_registry_path: registryFailure.path } : {}),
+      ...(registryFailure ? registryFailureDetails(registryFailure, opts.remote === true) : {}),
     };
 
     const problems: string[] = [];
@@ -198,7 +215,7 @@ export async function computeQueueHealthCheck(
       if (registryFailure) {
         problems.push(
           `${row.depth} ${row.name} job(s) have waited on queue '${row.queue}' for up to ${hours}h; ` +
-          `the worker registry is unreadable (${registryFailure.errno}${registryFailure.path ? ` at ${registryFailure.path}` : ''}), ` +
+          `the worker registry is unreadable (${registryFailureLabel(registryFailure, opts.remote === true)}), ` +
           `so worker liveness is unknown. Check that directory's permissions, then run \`gbrain jobs supervisor status\`.`
         );
         continue;
@@ -370,7 +387,7 @@ async function computePgliteQueueHealth(engine: BrainEngine, readWorkers?: () =>
  */
 export async function computeWedgedQueueCheck(
   engine: BrainEngine,
-  opts: { readWorkers?: () => Array<{ queue: string }> } = {},
+  opts: { readWorkers?: () => Array<{ queue: string }>; remote?: boolean } = {},
 ): Promise<Check> {
   if (engine.kind !== 'postgres') {
     return { name: 'wedged_queue', status: 'ok', message: 'PGLite — no queue to check' };
@@ -438,16 +455,14 @@ export async function computeWedgedQueueCheck(
         name: 'wedged_queue',
         status: 'fail',
         message:
-          `Wedged queue(s) — worker registry unreadable (${registryFailure.errno}${registryFailure.path ? ` at ${registryFailure.path}` : ''}), worker liveness unknown: ` +
+          `Wedged queue(s) — worker registry unreadable (${registryFailureLabel(registryFailure, opts.remote === true)}), worker liveness unknown: ` +
           `${wedged.map((w) => w.label).join('; ')}. ` +
           `If a worker is running for the queue, restart it: ` +
           '`gbrain jobs supervisor stop && gbrain jobs supervisor start [--queue <name>]`; ' +
           'if none is, start one: `gbrain jobs supervisor start --queue <name> --detach`.',
         details: {
           wedged_queues: wedged.length,
-          worker_registry_unreadable: true,
-          worker_registry_errno: registryFailure.errno,
-          worker_registry_path: registryFailure.path,
+          ...registryFailureDetails(registryFailure, opts.remote === true),
           threshold_minutes: thresholdMin,
         },
       };
