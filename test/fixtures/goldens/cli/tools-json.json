@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 243688,
-    "stdoutSha256": "8dd9a6403a547142ad8b4dc51498bc3a16db5932be626a755d1a24d246d8f4c3",
+    "stdoutBytes": 243872,
+    "stdoutSha256": "6ee4209e4e99064f148052de48a83f11e600ff47fc3bb720a6a9394bb59e2737",
     "toolNames": [
       "remember",
       "entity",
@@ -6592,7 +6592,7 @@
         "scope": "read"
       },
       {
-        "description": "BEFORE editing any function, run code_callers with the symbol name to find every caller (the people who'd be affected by your change). Returns direct callers from the tree-sitter call graph. Use during plan-mode to size the change. Defaults to source-scoped; for multi-source brains pass source_id or all_sources=true. Returns: `{symbol, count, callers: [{from_symbol_qualified, to_symbol_qualified, edge_type, resolved}]}`. Example: `{symbol:'parseMarkdown', count:4, callers:[{from_symbol_qualified:'callerInA', to_symbol_qualified:'parseMarkdown', edge_type:'calls', resolved:true}]}`. Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
+        "description": "BEFORE editing any function, run code_callers with the symbol name to find every caller (the people who'd be affected by your change). Returns direct callers from the tree-sitter call graph. Use during plan-mode to size the change. Defaults to source-scoped; for multi-source brains pass source_id or all_sources=true. `resolved:false` marks a call matched by name only: the resolver links calls within one file, so a cross-file call stays unresolved and may name a different symbol with the same name. Returns: `{symbol, count, callers: [{from_symbol_qualified, to_symbol_qualified, edge_type, resolved}]}`. Example: `{symbol:'parseMarkdown', count:4, callers:[{from_symbol_qualified:'callerInA', to_symbol_qualified:'parseMarkdown', edge_type:'calls', resolved:true}]}`. Temporarily available only to trusted local CLI callers; agent-facing code reads are suspended.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
