@@ -95,9 +95,11 @@ left its receive buffer as an empty view over the last message it joined from
 several socket reads, so the buffer stayed allocated until the connection's
 next read. For a 1 MiB bytea row, that buffer is the 2 MiB hex DataRow. The
 desync tripwire keeps only the last statement's text, not the query, whose
-promise holds its rows. Pools hand statements out in turn, so before this fix
-each pooled connection held one segment read
-(`test/large-pages/segmented-prior-view.test.ts`).
+promise holds its rows, and a connection that closes forgets the last
+statement it wrote, with its parameters. Pools hand statements out in turn, so
+before this fix each pooled connection held one segment read
+(`test/e2e/postgres-driver-idle-retention-postgres.test.ts`,
+`test/large-pages/segmented-prior-view.test.ts`).
 
 ## Reproduce and update
 

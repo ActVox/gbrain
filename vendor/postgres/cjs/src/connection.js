@@ -596,6 +596,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     incoming = Buffer.alloc(0)
     remaining = 0
     incomings = null
+    lastWritten = null
     clearImmediate(nextWriteTimer)
     // GBrain (#6355): bytes still waiting for the cleared immediate belonged to this socket. Left in place, the next
     // connection's StartupMessage is appended to them and never scheduled for writing (the timer handle is not
