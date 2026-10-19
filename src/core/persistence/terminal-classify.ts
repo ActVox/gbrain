@@ -391,18 +391,20 @@ const UUID_TEXT = `'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 
 /**
  * #6824: a connector retry records `retryBase`/`retryOf`/`retryAttempt` in its intent, so its digest never equals the
- * refusal it replaces. A committed retry `c` supersedes the refused `r` (read whole as `k`) only when every hop of its
+ * refusal it replaces. A committed retry `c` (read whole as `cc` by its unique sequence) supersedes the refused `r`
+ * (read whole as `k` by id; callers may pass narrow row aliases) only when every hop of its
  * recorded `retryOf` chain, back to `r`, has the same principal, source and incarnation, operation, slug and connector
  * intent kind, at a lower sequence, within CONNECTOR_RETRY_LINEAGE_MAX_DEPTH hops. Another refusal of the same item with
  * no recorded link is not proof. Each hop is one lookup on the (principal_kind, principal_id, request_id) unique index.
  */
 function connectorRetrySql(r: string, c: string): string {
   return `(${r}.operation='submit_job' AND ${c}.operation='submit_job' AND ${c}.state='committed' AND COALESCE(${c}.intent ? 'retryOf', false)
-      AND EXISTS (SELECT 1 FROM persistence_requests k WHERE k.id=${r}.id AND k.intent->>'kind' IN (${CONNECTOR_WRITE_KINDS})
-        AND ${c}.intent->>'kind'=k.intent->>'kind' AND ${c}.principal_kind=k.principal_kind AND ${c}.principal_id=k.principal_id
-        AND ${c}.source_incarnation=k.source_incarnation
+      AND EXISTS (SELECT 1 FROM persistence_requests k, persistence_requests cc WHERE k.id=${r}.id AND cc.sequence=${c}.sequence
+        AND k.intent->>'kind' IN (${CONNECTOR_WRITE_KINDS})
+        AND cc.intent->>'kind'=k.intent->>'kind' AND cc.principal_kind=k.principal_kind AND cc.principal_id=k.principal_id
+        AND cc.source_incarnation=k.source_incarnation
         AND EXISTS (WITH RECURSIVE lineage(request_id, sequence, intent, depth) AS (
-            SELECT ${c}.request_id, ${c}.sequence, ${c}.intent, 0
+            SELECT cc.request_id, cc.sequence, cc.intent, 0
             UNION ALL
             SELECT p.request_id, p.sequence, p.intent, l.depth+1 FROM lineage l JOIN persistence_requests p
               ON p.principal_kind=k.principal_kind AND p.principal_id=k.principal_id
