@@ -129,6 +129,7 @@ export const CODES = {
   claim_already_used: { class: 'caller', summary: "Google connect credential error: claim already used.", docs: 'docs/guides/google-connect.md#troubleshooting' },
   client_json_unreadable: { class: 'caller', summary: "Google connect credential error: client json unreadable.", docs: 'docs/guides/google-connect.md#troubleshooting' },
   client_json_wrong_type: { class: 'caller', summary: "Google connect credential error: client json wrong type.", docs: 'docs/guides/google-connect.md#troubleshooting' },
+  client_not_found: { class: 'caller', summary: "No OAuth client with this id is registered on this brain, so nothing was read or changed.", why: 'A client id is matched exactly; a revoked, deleted or mistyped id has no grant to read or edit.', suggestion: 'List the clients with `gbrain auth clients --json` and retry with an existing client id. Do not register a replacement client or rotate credentials for a lookup miss.', fix: { argv: ['gbrain', 'auth', 'clients', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why: 'Read-only: lists the OAuth clients registered on this brain.', verify: { argv: ['gbrain', 'auth', 'clients', '--json'] } } },
   client_shape_invalid: { class: 'caller', summary: "Google connect credential error: client shape invalid.", docs: 'docs/guides/google-connect.md#troubleshooting' },
   code_callees_requires_symbol: { class: 'caller', summary: "code-callees requires a symbol name." },
   code_callers_requires_symbol: { class: 'caller', summary: "code-callers requires a symbol name." },
