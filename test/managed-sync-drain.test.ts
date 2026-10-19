@@ -76,7 +76,7 @@ test('a drain re-enters sliced passes over one cursor until it is synced and rec
   }
 }), 180_000);
 
-test('a transaction open elsewhere in the cluster keeps the drain from folding its stamp: the last import publishes alone and a checkpoint request stamps the pass', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+test('a transaction open elsewhere in the cluster, holding back the cluster xmin, does not keep the drain from folding its stamp into the last import', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   const engine = engines.find(candidate => candidate.kind === 'postgres');
   if (!engine) return;
   const f = await fixture(engine, 3);
@@ -97,8 +97,7 @@ test('a transaction open elsewhere in the cluster keeps the drain from folding i
     outcome->>'pass_stamp_skipped' AS skipped FROM persistence_requests WHERE source_id=$1 ORDER BY sequence`, [f.id]);
   expect(requests).toEqual([
     ...Array.from({ length: 2 }, () => ({ kind: 'managed_sync_import', state: 'committed', stamp: null, skipped: null })),
-    { kind: 'managed_sync_import', state: 'committed', stamp: null, skipped: 'foreign_page_write' },
-    { kind: 'managed_sync_checkpoint', state: 'committed', stamp: null, skipped: null }]);
+    { kind: 'managed_sync_import', state: 'committed', stamp: 'folded', skipped: null }]);
   const [source] = await engine.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]);
   expect(source!.last_commit).toBe(git(f.root, 'rev-parse', 'HEAD'));
 }), 180_000);
