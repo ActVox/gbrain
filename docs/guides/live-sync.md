@@ -168,6 +168,8 @@ therefore prefers one full consumer per host:
   `sources`, `cli`) keep their own consumer for the life of their write, because
   the owner's wake is in-process only and a waiter-only `gbrain put` would often
   return `writer_pending`.
+- An idle `gbrain jobs work` on Postgres starts its consumer at boot (#7002), so
+  it takes over queued writes when the host's `serve` stops.
 - This is a preference, not a fenced role. Two processes that start within one
   heartbeat of each other can both start full, and a sync CLI that took its
   consumer before the `serve` started keeps it for that run; doctor reports the
@@ -292,6 +294,11 @@ on repeated failures.
 ```bash
 gbrain sync --watch --repo /data/brain
 ```
+
+### Autopilot and the jobs worker
+
+The autopilot daemon is HEAD-driven and an idle `gbrain jobs work` wakes on a queued sync; see
+[on-commit-sync.md](on-commit-sync.md#autopilot-and-the-jobs-worker).
 
 ### Approach 3: Git Hook / Webhook
 
