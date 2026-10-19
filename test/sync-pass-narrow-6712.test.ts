@@ -64,6 +64,8 @@ type Hook = (point: FaultPoint, detail: FaultDetail) => Promise<void>;
  * The pass's narrowed read and the comparison's full read happen one after the other, so each round's open work is held
  * still from the round's start until its comparison ends: no request is claimed, a claimed request waits before it
  * prepares or publishes, a Git effect waits before it finishes, and the round starts reading once nothing else is running.
+ * The effect worker walks the Git effects one pass claimed (a coalesced group, and every group it deferred) one at a time,
+ * so while one waits at its seam the others it claimed stay running behind it and never reach theirs: they are held too.
  * Otherwise a write committing between the two reads makes them differ by that path's open work alone.
  */
 async function compared(engine: BrainEngine, { force = false, also }: { force?: boolean; also?: Hook } = {}) {
@@ -72,11 +74,17 @@ async function compared(engine: BrainEngine, { force = false, also }: { force?: 
   let thaw = () => {}, thawed = Promise.resolve();
   const still = async () => {
     thawed = new Promise<void>(resolve => { thaw = resolve; });
+    let unheld: unknown[] = [];
     await waitFor(async () => {
-      const running = await engine.executeRaw<{ id: string }>(`SELECT 'r' || request_id::text AS id FROM persistence_requests WHERE source_id='default' AND state='running'
-        UNION ALL SELECT 'e' || id::text FROM persistence_effects WHERE source_id='default' AND kind='git' AND state='running'`);
-      return running.every(row => waiting.has(row.id));
-    }, { timeoutMs: 60_000, label: 'the open work of the source holds still' });
+      const running = await engine.executeRaw<{ id: string }>(`SELECT 'r' || request_id::text AS id, operation AS kind, slug, intent->>'kind' AS intent, claim_phase->>'step' AS step FROM persistence_requests WHERE source_id='default' AND state='running'
+        UNION ALL SELECT 'e' || id::text, kind, request_id::text, NULL, NULL FROM persistence_effects WHERE source_id='default' AND kind='git' AND state='running'`);
+      const effectHeld = running.some(row => row.id.startsWith('e') && waiting.has(row.id));
+      unheld = running.filter(row => !waiting.has(row.id) && !(effectHeld && row.id.startsWith('e')));
+      return !unheld.length;
+    }, { timeoutMs: 60_000, label: 'the open work of the source holds still' }).catch((error: Error) => {
+      error.message += `; running and not held: ${JSON.stringify(unheld)}; held: ${JSON.stringify([...waiting])}`;
+      throw error;
+    });
   };
   installFaultHook(async (point, detail) => {
     const held = point === 'consumer:preparing' || point === 'consumer:prepared' ? `r${detail.requestId}` : point === 'effect:git:mid' ? `e${detail.effectId}` : null;
