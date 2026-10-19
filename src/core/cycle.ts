@@ -1379,7 +1379,7 @@ async function runPhaseExtract(
   sourceId?: string,
 ): Promise<PhaseResult> {
   try {
-    const { runExtractCore } = await import('../commands/extract.ts');
+    const [{ runExtractCore }, { ExtractBatchWriteError }] = await Promise.all([import('../commands/extract.ts'), import('./extract-watermark.ts')]);
     const { resolveIncludeFrontmatter } = await import('./extract-frontmatter.ts');
     // Shared resolver (file plane wins, then DB plane, fail-closed) so this
     // cycle, sync's inline extract, the extract_stale minion and maintain all
@@ -1399,7 +1399,7 @@ async function runPhaseExtract(
     }
     // Incremental path: if sync told us which slugs changed, only extract those.
     // On a 54K-page brain this turns a 10-minute full walk into a sub-second pass.
-    // PR #6954: a lost link/timeline write leaves its pages unstamped (still due), so the stale drain below retries them; warn, like A-1.
+    // #6954: a lost link/timeline write leaves its pages due; the stale drain below retries them and the phase warns.
     let lostWrites: string | null = null;
     const result = await runExtractCore(engine, {
       mode: 'all',
@@ -1410,7 +1410,7 @@ async function runPhaseExtract(
       signal,
       sourceId,
       includeFrontmatter,  // honored on the incremental (slugs) path only
-    }).catch((e: unknown) => { if ((e as { code?: unknown } | null)?.code !== 'extract_write_lost') throw e; lostWrites = `; ${(e as Error).message}`; return null; });
+    }).catch((error: unknown) => { if (!(error instanceof ExtractBatchWriteError)) throw error; lostWrites = `; ${error.message}`; return null; });
     const linksCreated = result?.links_created ?? 0;
     const timelineCreated = result?.timeline_entries_created ?? 0;
     const incremental = changedSlugs !== undefined;
