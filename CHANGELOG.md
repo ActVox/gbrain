@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.316.0] - 2026-10-19
+## [0.60.317.0] - 2026-10-19
 
 **A managed `gbrain sync` of an ordinary (non-company) source now compares the files at HEAD with what the brain holds, instead of replaying commits, so a reset, a revert, a rewritten history or a lost run can no longer leave pages behind, and one bad file holds only itself.** Each pass reads the committed tree, the index and the database, admits only the files whose page differs, proves nothing moved underneath it, and records the checkpoint inside the last import's own transaction. An idle sync with nothing new returns in well under a second.
 
@@ -33,6 +33,30 @@ identifiers and attribution are available in the pre-removal Git revision
 - `gbrain sync status --json` reports `convergence` for a managed source.
 
 No schema migration. Company-brain sources keep their existing sync path.
+
+## [0.60.316.0] - 2026-10-19
+
+**A commit is searchable within about a second whenever any gbrain process is running, and a sync request is never dropped.** Before this, only `gbrain serve` watched for commits: managed sources only, after a 3 s debounce, and a wake could be lost. Classic sources never synced on commit, a lone `gbrain jobs work` took 5 s, and the autopilot daemon waited for its next wall-clock tick (up to 7 minutes). `sync.on_commit` is still off by default.
+
+### What changed
+
+| Situation (10k pages, n=10) | Before (p50 / p95) | Now (p50 / p95) |
+|---|---|---|
+| `gbrain serve`, managed source, commit to search | 3.7 / 4.1 s | 0.6–0.7 / 0.9–1.1 s |
+| `gbrain serve`, classic source | never synced | 0.6–1.1 / 0.7–1.1 s |
+| only `gbrain jobs work` running (Postgres) | 5.0–5.3 / 5.1–5.5 s | 0.6–0.7 / 0.8 s |
+| only the autopilot daemon (classic, on_commit off) | 266 / 406 s | 84 / 138 s |
+
+The other changes:
+- **One commit notifier per host.** It runs in `gbrain serve` (stdio and http), `gbrain jobs work` and the autopilot daemon, with one owner per host and brain. It watches classic sources this host synced as well as managed ones, and starts a sync as soon as the checkout is quiet.
+- **Retries instead of drops.** A failed or refused sync is retried at 5 s, 15 s, 1 min and 5 min, then reported as `notifier_stalled` with the fix and a trace file.
+- **Requests are recorded first.** `gbrain sync trigger`, webhooks and busy delegated syncs record a wanted marker before they run. Whoever drains the source re-checks it afterwards, so a request is never lost to a sync already running. `sync trigger --json` reports queued, coalesced or nudged, and adds a `no_resident` notice with the fix when no resident runs. A managed push webhook answers 409 `refresh_required`.
+- **HEAD-driven autopilot.** The daemon dispatches when a checkout's HEAD moves past the last synced commit, with the wall-clock rule kept as a backstop. Its `--status` grades from a new heartbeat sidecar (#7003).
+- **Worker boot.** On Postgres, `gbrain jobs work` starts the persistence consumer at boot through the existing election (#7002). An idle worker wakes on a queued sync, using LISTEN on a direct session and a 1 s poll behind a pooler.
+- **Visibility.** `gbrain sync status` and the new doctor check `commit_notifier` name the resident that syncs each source, or say none is running and give the fix. Once a resident has run, or `sync.on_commit` is on, search and query responses carry a per-source `freshness` entry (current, behind, syncing, unknown or not_monitored).
+- **Upgrade.** Migration v262 adds `sync_wanted_markers`, `sync_notifier_sources` and `sync_notifier_leases`.
+
+Docs: `docs/guides/on-commit-sync.md`. `GBRAIN_NOTIFIER=0` turns the notifier off for a process.
 
 ## [0.60.315.0] - 2026-10-19
 
