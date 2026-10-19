@@ -22,13 +22,15 @@
  *   doctor `managed_sync_blocked` (`readBlockedManagedSyncs`) said nothing was blocked; it lists the stop until a sync succeeds.
  * - S-69: a non-Error rejection (`undefined`) while a pass batches a level's entries was replaced by a TypeError about
  *   `.code`; it now reaches the caller and the failure record as itself (red with the `sync:batch_entries` seam alone).
+ * - S-7: a committed file whose name is not valid UTF-8 (a Latin-1 byte) was held `page_write_failed` with a Git error (and
+ *   stopped the source before this lane); it is held `path_not_utf8` naming the rename, which clears the hold.
  * The deliberate-refusal, systemic and changing-message guards pass before and after.
  *
  * PGLite here; Postgres through test/e2e/sync-entry-faults-6712-postgres.test.ts.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { opError } from '../src/core/ops/contract.ts';
@@ -232,5 +234,24 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: one odd f
     installFaultHook(point => { if (point === 'sync:batch_entries') throw undefined; });
     expect(await performManagedSync(engine, OPTS).then(() => 'resolved', (error: unknown) => error)).toBeUndefined();
     expect((await readSyncStatus(engine, 'default')).last_error).toMatchObject({ code: 'storage_error', path: '<discovery>', message: 'undefined' });
+  }), 240_000);
+  const latin1 = (root: string) => Buffer.concat([Buffer.from(join(root, 'notes/caf')), Buffer.from([0xe9]), Buffer.from('.md')]);
+  test('S-7: a committed file whose name is not valid UTF-8 is held path_not_utf8 naming the rename; the rename imports it', () => brain(async ({ engine, root }) => {
+    const first = await oddThenHealthy(engine, root, () => writeFileSync(latin1(root), note('notes/cafe')));
+    expect(first.held?.map(hold => [hold.path, hold.code])).toEqual([['notes/caf\uFFFD.md', 'path_not_utf8']]);
+    const [hold] = await holds(engine);
+    expect(hold!.message).toContain('Rename it to a UTF-8 name');
+    expect(await live(engine)).toEqual(['notes/fd', 'notes/ok', 'notes/ok2', 'notes/seed']);
+    renameSync(latin1(root), join(root, 'notes/cafe.md')); commit(root, 'rename');
+    expect((await performManagedSync(engine, OPTS)).status).toBe('synced');
+    expect(await holds(engine)).toEqual([]);
+    expect(await live(engine)).toEqual(['notes/cafe', 'notes/fd', 'notes/ok', 'notes/ok2', 'notes/seed']);
+  }), 240_000);
+
+  test('S-7 with sync.holds=fail: the run stops with the typed path_not_utf8 refusal', () => brain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await engine.setConfig('sync.holds', 'fail');
+    writeFileSync(latin1(root), note('notes/cafe')); commit(root, 'odd');
+    await expect(performManagedSync(engine, OPTS)).rejects.toMatchObject({ code: 'path_not_utf8' });
   }), 240_000);
 });

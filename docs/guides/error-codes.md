@@ -2660,6 +2660,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | The --pat-file token file is missing, empty, holds more than one token, or is readable by other users, so it was not read. | The token is read from a private file so it never appears on a command line or in a process list; a file other users can read would leak it, so the verb refuses before any credential is written. | Write exactly one token on one line to a file, chmod 600 it, and pass its path with --pat-file. | agent | `repeat the read that failed` | 1 | no |
 
+### path_not_utf8
+
+<a id="path_not_utf8"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A committed file's name is not valid UTF-8, so managed sync holds that file alone. | Git hands the name back with U+FFFD for the bytes that are not UTF-8 (a Latin-1 name from an older system, an archive or a network share), and no Git read or file matches that decoded name, so nothing is imported from it. The rest of the source keeps syncing. | Rename the file to a UTF-8 name (git ls-files with core.quotePath shows its exact bytes; convmv -f latin1 -t utf8 converts a Latin-1 name), commit, then sync again; the rename clears the hold. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#path_not_utf8](../../docs/guides/write-refusals.md#path_not_utf8)
+
 ### pattern_claims_pending
 
 <a id="pattern_claims_pending"></a>

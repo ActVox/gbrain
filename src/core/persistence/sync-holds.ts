@@ -84,7 +84,9 @@ export type GitHoldCode = ContentRefusal['code'] | 'rename_held' | 'parser_regre
   /** GBRA-133 S-39: a Markdown file whose text holds a NUL byte (U+0000): a binary file, a padded file, a UTF-16 save. */
   | 'content_null_bytes'
   /** GBRA-133 S-33: a committed file whose Git blob the repository no longer has, and whose working-tree copy differs or is gone. */
-  | 'git_object_missing';
+  | 'git_object_missing'
+  /** GBRA-133 S-7: a committed file whose name is not valid UTF-8, so no Git read or file finds it by its decoded name. */
+  | 'path_not_utf8';
 /** GBRA-130 A-6: the fault a `page_write_failed` hold stands for (identifiers and classes only, never content). */
 export interface PageWriteFailureMeta { code: string; origin: string | null; error_class: string | null; errno: string | null;
   /** The newest failed receipt; null for a GBRA-133 S-63 freeze fault (origin `freeze`), which threw before any request was admitted. */
@@ -828,6 +830,11 @@ export function gitHoldFix(record: Pick<GitHoldRecord, 'source_id' | 'path' | 'c
       return { argv: ['gbrain', 'sources', 'status', source, '--json'], consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code),
         user_message: `The Git object of ${record.path}${record.meta.blob_oid ? ` (blob ${record.meta.blob_oid})` : ''} is missing from the checkout of source ${source}, and its working-tree copy differs or is gone, so sync holds it and the rest of the source keeps syncing. Run git fsck in the checkout to see what is missing, restore it with git fetch (a partial or shallow clone) or from a backup, then run gbrain sync --source ${source} --no-pull.`,
         why: 'An interrupted gc, a partial clone without its promisor remote or disk corruption can drop an object a commit still names; nothing is imported from a guess, and every sync re-tests the hold.',
+        verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
+    case 'path_not_utf8':
+      return { argv: ['gbrain', 'sources', 'status', source, '--json'], consent: [], actor: 'user', requires_exclusive: false, docs: gitHoldDocs(record.code),
+        user_message: `The committed name of ${record.path} is not valid UTF-8 (U+FFFD marks the bytes that are not), so sync holds it and the rest of source ${source} keeps syncing. Rename the file to a UTF-8 name (git ls-files with core.quotePath shows the exact bytes; convmv -f latin1 -t utf8 converts a Latin-1 name), commit, then run gbrain sync --source ${source} --no-pull.`,
+        why: 'Page paths are UTF-8 text; a name that is not cannot be read back or written again by the name sync would record, so nothing is imported until the file is renamed (the rename clears the hold).',
         verify: { argv: ['gbrain', 'sources', 'status', source, '--json'] } };
     case 'parser_regression':
       return { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'user', requires_exclusive: false,
