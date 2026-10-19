@@ -65,12 +65,12 @@ export interface UpstreamResultField { upstream?: UpstreamDivergenceReport }
 
 export interface CheckoutUpstream { head: string; upstream: string; tracking_ref: string; branch: string | null }
 
-const readEnv = () => gitChildEnv({ ...GIT_ENV, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' });
+const READ_ENV: NodeJS.ProcessEnv = { ...GIT_ENV, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' };
 
 /** Runs git read-only (no optional locks); null when git exits non-zero. */
 export function gitRead(root: string, args: string[]): string | null {
   try {
-    return execFileSync('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, env: readEnv() }).toString().trim();
+    return execFileSync('git', ['-C', root, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, env: gitChildEnv(READ_ENV) }).toString().trim();
   } catch {
     return null;
   }
@@ -79,7 +79,7 @@ export function gitRead(root: string, args: string[]): string | null {
 /** `a` is an ancestor of (or equal to) `b`; null when git cannot tell (a missing object). */
 export function isAncestor(root: string, a: string, b: string): boolean | null {
   try {
-    execFileSync('git', ['-C', root, 'merge-base', '--is-ancestor', a, b], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, env: readEnv() });
+    execFileSync('git', ['-C', root, 'merge-base', '--is-ancestor', a, b], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, env: gitChildEnv(READ_ENV) });
     return true;
   } catch (e) {
     return (e as { status?: unknown }).status === 1 ? false : null;
