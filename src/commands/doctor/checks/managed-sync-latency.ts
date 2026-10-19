@@ -9,8 +9,9 @@
  *     synced commit, aged from the reflog entry that moved HEAD (or the commit notifier's persisted first_due_at), or
  *     unknown when neither can date it (no reflog, rewritten history). A stalled source has no new samples, so this
  *     is what keeps it from reading ok.
- * Keyword-visible and embedded freshness are reported separately per source (details.freshness_by_source); the
- * embedding backlog is reported, not graded (a keyless brain reads disabled).
+ * Keyword-visible and embedded freshness are reported separately per source that has synced
+ * (details.freshness_by_source, absent when none has); the embedding backlog is reported, not graded (a keyless brain
+ * reads disabled).
  * It grades only a brain that asked for low latency, with `sync.on_commit` true or `sync.freshness_target_seconds` set: a
  * p95 or a waiting commit over the target (default 300 s) warns and one over max(1 h, target) fails; a waiting commit of
  * unknown age and synced commits it cannot date (not in this host's checkout) warn. Otherwise it reports ok with the
@@ -61,11 +62,11 @@ async function runManagedSyncLatencyCheck(ctx: DoctorContext): Promise<Check[]> 
     const freshness = managed ? await readSyncFreshness(engine, { sourceIds: scope }) : [];
     const backlog = await readEmbedBacklog(engine, roster.map(s => s.id));
     const samplesBy = new Map(freshness.map(f => [f.source_id, f]));
-    const freshnessBySource = roster.map((s, i) => ({ source_id: s.id, kind: s.managed ? 'managed' : 'classic',
+    const freshnessBySource = roster.flatMap((s, i) => pending[i]!.state === 'never_synced' ? [] : [{ source_id: s.id, kind: s.managed ? 'managed' : 'classic',
       keyword_visible: { state: pending[i]!.state, oldest_unsynced: pending[i]!, samples: samplesBy.get(s.id)?.commit_to_searchable ?? null },
-      embedded: { state: embeddedState(pending[i]!, backlog.get(s.id)), backlog: backlog.get(s.id) ?? null, samples: samplesBy.get(s.id)?.commit_to_embedded ?? null } }));
+      embedded: { state: embeddedState(pending[i]!, backlog.get(s.id)), backlog: backlog.get(s.id) ?? null, samples: samplesBy.get(s.id)?.commit_to_embedded ?? null } }]);
     const sampled = freshness.filter(f => f.commit_to_searchable.samples > 0);
-    const details = { graded, on_commit: onCommit, target_seconds: target.seconds, fail_seconds: failSeconds, sources: freshness, freshness_by_source: freshnessBySource, docs: DOCS };
+    const details = { graded, on_commit: onCommit, target_seconds: target.seconds, fail_seconds: failSeconds, sources: freshness, ...(freshnessBySource.length ? { freshness_by_source: freshnessBySource } : {}), docs: DOCS };
     const behind = pending.filter(p => p.state === 'behind');
     const undatable = pending.filter(p => p.state === 'unknown');
     const waitFail = behind.filter(p => (p.age_seconds ?? 0) > failSeconds);

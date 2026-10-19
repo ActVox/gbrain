@@ -21,13 +21,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { managedSyncLatencyEntry } from '../../src/commands/doctor/checks/managed-sync-latency.ts';
 import { computeAllSourceMetrics } from '../../src/core/source-health.ts';
 import { loadAllSources } from '../../src/core/sources-load.ts';
-import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
+import { isolatedSharedSkillsEngine } from '../helpers/shared-skills-engine.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { pathologicalArms } from './harness.ts';
 
@@ -53,10 +52,7 @@ interface Brain { engine: BrainEngine; home: string; root: string; synced: strin
 async function withBrain(databaseUrl: string | undefined, opts: { managed: boolean }, run: (b: Brain) => Promise<void>): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-truthful-status-'));
   await withEnv({ GBRAIN_HOME: home, GBRAIN_NOTIFIER: '0' }, async () => {
-    let engine: BrainEngine;
-    let close: () => Promise<void>;
-    if (databaseUrl) ({ engine, close } = await isolatedPersistencePostgres(databaseUrl));
-    else { const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engine = lite; close = () => lite.disconnect(); }
+    const { engine, close } = await isolatedSharedSkillsEngine(databaseUrl);
     try {
       const root = join(home, SOURCE);
       mkdirSync(join(root, 'notes'), { recursive: true });
