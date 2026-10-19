@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync, type Stats } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { BrainEngine } from '../engine.ts';
@@ -132,14 +132,16 @@ export function syncFilePath(root: string, path: string, maxBytes = SYNC_READ_BO
   try {
     // Reject symlink components, including ones targeting another path inside the root.
     let current = root;
+    let stat: Stats | undefined;
     for (const part of relative(root, absolute).split(sep)) {
       current = join(current, part);
-      if (lstatSync(current).isSymbolicLink()) throw unreadableSyncFile(syncTargetRefusal('source_changed', 'Sync cannot publish through a symlink.',
+      stat = lstatSync(current);
+      if (stat.isSymbolicLink()) throw unreadableSyncFile(syncTargetRefusal('source_changed', 'Sync cannot publish through a symlink.',
         `A component of ${path} is a symlink; sync reads and publishes only real files inside the root.`));
     }
-    if (!lstatSync(absolute).isFile()) throw unreadableSyncFile(syncTargetRefusal('source_changed', 'Sync target is not a regular file.',
+    if (!stat?.isFile()) throw unreadableSyncFile(syncTargetRefusal('source_changed', 'Sync target is not a regular file.',
       `${path} is not a regular file.`));
-    if (lstatSync(absolute).size > maxBytes) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
+    if (stat.size > maxBytes) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
       `${path} is larger than the ${SYNC_READ_BOUND}-byte (24 MiB) page ceiling, so nothing was imported from it. Pages up to that size are chunked and searchable; above it, add the file to the sync.exclude config (or keep it outside the brain repo), then sync its source again. See docs/guides/memory-boundaries.md#large-pages.`);
     return absolute;
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }

@@ -27,6 +27,7 @@ import { prepareManagedSyncStreamed, type SyncBodyRef } from './sync-streamed.ts
 import { fenceBody, withoutBody } from '../page-body/page-shape.ts';
 import { pipelined, transactionMemo } from '../page-state/transactions.ts';
 import { prepareCanonicalProjections } from './canonical-projections.ts';
+import { sliceMemo } from './slice-memo.ts';
 import { withoutSafetyAssessments } from './reconcile-safety.ts';
 import { digest, sha256 } from './digest.ts';
 import { preserveProtectedTakes } from './protected-takes.ts';
@@ -674,13 +675,15 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
   enterClaimStep(clock, 'authority', undefined, 'db');
   await validateSyncAuthority(engine, p.syncAuthority, row.slug);
   enterClaimStep(clock, 'worktree_binding', undefined, 'db');
-  const binding = await getWorktreeBinding(engine, row.source_id);
+  const binding = await sliceMemo(unbounded, `binding\0${row.source_id}`, () => getWorktreeBinding(engine, row.source_id));
   if (!binding?.local_path || String(binding.owner_epoch) !== p.ownerEpoch) throw syncPublicationRefusal('owner_unavailable', 'The accepted sync owner changed.', row, p,
     `The canonical owner of ${row.source_id} changed, or lost its local path, after this sync was admitted. Do not claim or transfer the source to repair content.`, true);
   const root = at.root = join(binding.local_path, binding.relative_path);
   enterClaimStep(clock, 'configured_root', undefined, 'db');
-  const [configuredSource] = await engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [row.source_id]);
-  assertConfiguredSyncRoot(root, configuredSource?.local_path ?? null);
+  await sliceMemo(unbounded, `configured-root\0${row.source_id}\0${root}`, async () => {
+    const [configuredSource] = await engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [row.source_id]);
+    assertConfiguredSyncRoot(root, configuredSource?.local_path ?? null);
+  });
   if (p.kind !== 'managed_sync_checkpoint') {
     enterClaimStep(clock, 'knowledge_publication', undefined, 'db');
     await assertKnowledgePublicationAllowed(engine, row, p.path === null ? undefined : { root, path: join(root, p.path) });
