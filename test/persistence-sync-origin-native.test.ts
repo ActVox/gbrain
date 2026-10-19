@@ -113,6 +113,9 @@ async function legacyDeletion(engine: BrainEngine, f: Awaited<ReturnType<typeof 
     authority: authority.writer, callerIntent: intent, intent });
   return { requestId, intent, cursor: cursor as { runId: string; authority: typeof authority }, entry, key };
 }
+/** The page the pass keeps: on Windows it re-spells a stored backslash origin with '/' in place, revision unchanged (as the separator identity test asserts). */
+const keptSnapshot = (f: Awaited<ReturnType<typeof fixture>>) => process.platform === 'win32'
+  ? { ...f.snapshot, page: { ...f.snapshot.page, source_path: syncOriginPath(f.snapshot.page.source_path!, 'win32') } } : f.snapshot;
 const legacyRows = (engine: BrainEngine, legacy: Awaited<ReturnType<typeof legacyDeletion>>) => engine.executeRaw<{ op: string }>(
   "SELECT op FROM op_checkpoints WHERE (op='managed-sync' AND fingerprint=$1) OR (op='managed-sync-manifest' AND fingerprint=$2)", [legacy.key, legacy.cursor.runId]);
 const deleteRequests = (engine: BrainEngine, id: string) => engine.executeRaw<{ request_id: string; state: string; error_code: string | null }>(
@@ -414,7 +417,7 @@ check("an older binary's unfinished cursor freezing a present file's deletion is
   const legacy = await legacyDeletion(engine, f, false);
   expect(await performManagedSync(engine, f.opts)).toMatchObject({ status: 'first_sync', deleted: 0, pass: { outcome: 'synced' } });
   expect(await deleteRequests(engine, f.id)).toEqual([]);
-  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
+  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(keptSnapshot(f));
   expect(await legacyRows(engine, legacy)).toEqual([]);
   expect((await engine.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [f.id]))[0].last_commit).toBe(f.head);
   expect(readFileSync(join(f.root, 'notes/example.md'), 'utf8')).toBe(content);
@@ -431,7 +434,7 @@ check('an already-admitted legacy deletion is cancelled under its original ID wi
   expect(row.intent).toEqual(legacy.intent);
   expect(await deleteRequests(engine, f.id)).toEqual([{ request_id: legacy.requestId, state: 'cancelled', error_code: 'cancelled' }]);
   expect(await legacyRows(engine, legacy)).toEqual([]);
-  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(f.snapshot);
+  expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(keptSnapshot(f));
   expect(['synced', 'up_to_date']).toContain((await performManagedSync(engine, f.opts)).status);
   expect(await getWriteRequest(engine, legacy.cursor.authority.writer.principal, legacy.requestId)).toEqual(row);
   expect(await deleteRequests(engine, f.id)).toHaveLength(1);

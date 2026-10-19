@@ -338,11 +338,12 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
     return { ...held, meta: { ...held.meta, legacy_slugs: entry.legacySlugs } };
   }
   if (content === null) return null;
-  // GBRA-133 S-39: text holding NUL cannot be stored or carried in the write intent; only this file is held.
+  // GBRA-133 S-39: text holding NUL cannot be stored or carried in the write intent; only this file is held. A slug conflict
+  // still names the hold (#6749): its message carries the path alone, and the slug-conflicts lane reports NULL_BYTES as still_invalid.
   const nul = nullBytesRefusal(entry.path, content);
-  if (nul) return heldEntry(entry, slug, pageId, nul, content, blob);
   // #6188: a fence Tier 1 rewrites is admitted (publication writes the normalized file back); with fences.normalize=false it is held.
   const screen = await screenFrozenContent(await frozenImportScreenInput(engine, { ...input, content }, run), run);
+  if (nul && !(screen.status === 'refused' && screen.refusal.code === 'frontmatter_slug_conflict')) return heldEntry(entry, slug, pageId, nul, content, blob);
   if (screen.status === 'importable' && screen.fences?.fixes.length) input.onNormalized?.(screen.fences.fixes);
   if (screen.status !== 'refused') return null;
   const refusal = screen.refusal;

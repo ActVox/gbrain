@@ -32,6 +32,7 @@ function locateBlock(source: string): { rowLines: number; first: number; count: 
   return { rowLines, first, count };
 }
 
+// test-reads-source-ok[structural]: the block's position, contiguity and since stamp are properties of the array's source order, which the runtime list does not keep apart from master's rows.
 const source = readFileSync(join(import.meta.dir, '..', 'src', 'core', 'behavior-change-notice.ts'), 'utf8');
 
 describe('#6712 PR 4b BEHAVIOR_CHANGES block', () => {
