@@ -652,10 +652,18 @@ async function segmentedContentHash(engine: BrainEngine, snapshot: PageSnapshot,
 export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequest, _config: GBrainConfig,
   preparedIntent?: { content: string; expectedRevision: string; tags?: string[] }, signal?: AbortSignal,
   options: { allowMissingFile?: boolean; coordinated?: boolean; clock?: ClaimPhaseClock } = {}): Promise<PreparedMutation> {
-  signal?.throwIfAborted();
+  // Wave B (spec 6.2): a committed upload session prepares the put_page its staged parts hold.
   if (row.operation === 'put_page' && isStagingBodyRef(row.intent?.body_ref)) {
+    signal?.throwIfAborted();
     return prepareStagedUpload(unbounded, row, staged => preparePageMutation(unbounded, staged, _config, preparedIntent, signal, options));
   }
+  return prepareInlineOrSegmentedMutation(unbounded, row, _config, preparedIntent, signal, options);
+}
+
+async function prepareInlineOrSegmentedMutation(unbounded: BrainEngine, row: WriteRequest, _config: Parameters<typeof preparePageMutation>[2],
+  preparedIntent: Parameters<typeof preparePageMutation>[3], signal: AbortSignal | undefined,
+  options: NonNullable<Parameters<typeof preparePageMutation>[5]>): Promise<PreparedMutation> {
+  signal?.throwIfAborted();
   const clock = options.clock;
   const engine = boundedReads(unbounded, clock);
   enterClaimStep(clock, 'page_snapshot', undefined, 'db');
