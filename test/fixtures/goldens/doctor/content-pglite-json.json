@@ -2285,6 +2285,7 @@
               "no_remote": 1,
               "pages_at_risk": 0,
               "recoverable_repos": 0,
+              "remote_timeouts": 0,
               "unpushed": 0
             }
           },
