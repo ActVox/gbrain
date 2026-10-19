@@ -96,8 +96,10 @@ gbrain backlinks crm/acme-example --type ticket --group page --limit 2
 
 returns `{rows, total, truncated, cursor, coverage}`, newest first by
 `(date, source, slug)`; pass `cursor` back to continue. Without `group`,
-`get_backlinks` returns the link rows it always did (`type` and `limit` filter
-them). `type` takes a schema-pack type, one of its aliases (`crm` and
+`get_backlinks` returns link rows, 500 per call by default (`limit`, up to 5000):
+when more match, the last row carries `truncated: true` and `next_cursor`, which
+you pass back as `cursor`. `type` filters each page of rows, so a page can hold
+fewer rows than `limit` while the cursor continues. `type` takes a schema-pack type, one of its aliases (`crm` and
 `account` both mean the account group), a type seen on a referring page
 (`ticket`), or `untyped`.
 
