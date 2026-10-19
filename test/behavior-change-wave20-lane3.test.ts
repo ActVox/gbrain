@@ -17,4 +17,19 @@ describe('wave 20 lane 3 spend rows', () => {
     expect(row).toMatch(/change which model runs/);
     expect(row).toMatch(/spend/);
   });
+
+  test('#6984: embed --max-usd prices with pricing.overrides and can now spend up to the cap', () => {
+    const [row] = find('(#6984)');
+    expect(row).toBeDefined();
+    expect(row).toContain('pricing.overrides');
+    expect(row).toContain('no_pricing');
+    expect(row).toMatch(/spend up to the cap/);
+  });
+
+  test('#6959: restamp-only vectors are left out of paid migration estimates and approvals', () => {
+    const [row] = find('(#6959)');
+    expect(row).toBeDefined();
+    expect(row).toMatch(/estimate/);
+    expect(row).toMatch(/approv/);
+  });
 });
