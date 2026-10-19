@@ -506,18 +506,18 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 68719476736,
-                    "max_day_7d": 196788,
+                    "max_day_7d": 198780,
                     "net_per_day_7d": 58870,
                     "pct": 0,
-                    "per_day_7d": 196788,
-                    "reclaimable_bytes": 137918,
+                    "per_day_7d": 198780,
+                    "reclaimable_bytes": 139910,
                     "recommended_limit": 137438953472,
                     "resource": "terminal_bytes",
                     "scope": "brain",
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 196788,
+                    "used": 198780,
                     "window_days": 1
                   },
                   {
@@ -543,18 +543,18 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 17179869184,
-                    "max_day_7d": 196788,
+                    "max_day_7d": 198780,
                     "net_per_day_7d": 58870,
                     "pct": 0,
-                    "per_day_7d": 196788,
-                    "reclaimable_bytes": 137918,
+                    "per_day_7d": 198780,
+                    "reclaimable_bytes": 139910,
                     "recommended_limit": 34359738368,
                     "resource": "terminal_bytes",
                     "scope": "principal:local_cli:<uuid>",
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 196788,
+                    "used": 198780,
                     "window_days": 1
                   }
                 ],
@@ -3708,7 +3708,7 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No retrieval-affecting files changed in working tree.",
+            "message": "1 retrieval-affecting file(s) changed since HEAD: src/core/search/vector-statement.ts. Re-run `gbrain eval run-all` after committing these changes.",
             "name": "eval_drift",
             "status": "ok"
           },
@@ -3982,14 +3982,14 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "Active pack gbrain-base-v2@1.4.0+1c5ba903 is current (no successor declared)",
+            "message": "Active pack gbrain-base-v2@1.5.0+4604112a is current (no successor declared)",
             "name": "pack_upgrade_available",
             "status": "ok"
           },
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "5 distinct typed values (pack gbrain-base-v2 declares 21)",
+            "message": "5 distinct typed values (pack gbrain-base-v2 declares 23)",
             "name": "type_proliferation",
             "status": "ok"
           },
@@ -4819,18 +4819,18 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 68719476736,
-                    "max_day_7d": 196788,
+                    "max_day_7d": 198780,
                     "net_per_day_7d": 58870,
                     "pct": 0,
-                    "per_day_7d": 196788,
-                    "reclaimable_bytes": 137918,
+                    "per_day_7d": 198780,
+                    "reclaimable_bytes": 139910,
                     "recommended_limit": 137438953472,
                     "resource": "terminal_bytes",
                     "scope": "brain",
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 196788,
+                    "used": 198780,
                     "window_days": 1
                   },
                   {
@@ -4856,18 +4856,18 @@
                     "days_to_exhaustion": null,
                     "exhaustion_date": null,
                     "limit": 17179869184,
-                    "max_day_7d": 196788,
+                    "max_day_7d": 198780,
                     "net_per_day_7d": 58870,
                     "pct": 0,
-                    "per_day_7d": 196788,
-                    "reclaimable_bytes": 137918,
+                    "per_day_7d": 198780,
+                    "reclaimable_bytes": 139910,
                     "recommended_limit": 34359738368,
                     "resource": "terminal_bytes",
                     "scope": "principal:local_cli:<uuid>",
                     "spike_day": null,
                     "status": "ok",
                     "under_reserved_receipts": 0,
-                    "used": 196788,
+                    "used": 198780,
                     "window_days": 1
                   }
                 ],
@@ -8021,7 +8021,7 @@
           {
             "category": "brain",
             "elapsed_ms": "<volatile>",
-            "message": "No retrieval-affecting files changed in working tree.",
+            "message": "1 retrieval-affecting file(s) changed since HEAD: src/core/search/vector-statement.ts. Re-run `gbrain eval run-all` after committing these changes.",
             "name": "eval_drift",
             "status": "ok"
           },
@@ -8295,14 +8295,14 @@
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "Active pack gbrain-base-v2@1.4.0+1c5ba903 is current (no successor declared)",
+            "message": "Active pack gbrain-base-v2@1.5.0+4604112a is current (no successor declared)",
             "name": "pack_upgrade_available",
             "status": "ok"
           },
           {
             "category": "meta",
             "elapsed_ms": "<volatile>",
-            "message": "5 distinct typed values (pack gbrain-base-v2 declares 21)",
+            "message": "5 distinct typed values (pack gbrain-base-v2 declares 23)",
             "name": "type_proliferation",
             "status": "ok"
           },
