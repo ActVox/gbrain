@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.311.0] - 2026-10-19
+
+**The dream `consolidate` phase no longer silently supersedes a real fact when two typed statements of one metric share an effective time, and the facts an earlier run closed that way can be reopened.** Fixes the residual case of #6023.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A consolidation cluster holds two typed facts with the same metric, unit and period at the same effective time (an amount and its correction recorded on one day, or one statement stored twice) | the higher-confidence one became the take and the other got a `valid_until` equal to its own `valid_from`, a zero-length validity that marked a real fact superseded | the cluster is left unchanged. The phase reports `warn` with `details.clusters_held_same_instant` and `details.same_instant_clusters`, each with the fact ids and a next step: ask which statement is current, then `gbrain forget` the other. The managed path holds it before admission, and an intent an older release admitted publishes nothing |
+| Facts an earlier run closed at their own instant | no supported way back | `gbrain repair consolidate-ties` lists them with their tied partners and take; `--apply --expect <hash>` reopens exactly the previewed facts. It never runs on upgrade |
+
+A typed series at distinct times still consolidates with its chronological writeback.
+
+### What you need to do
+
+Nothing. If `gbrain dream` reports held clusters, answer the question it relays. To check for facts an earlier run closed, preview `gbrain repair consolidate-ties`.
+
+Contributed by @Kkkkkuro (report and reproduction on #6023).
+
 ## [0.60.310.0] - 2026-10-19
 
 **On Postgres, a brain no longer keeps a copy of its last big read in memory on every database connection.** After a query that returned a large row, such as a 1 MiB piece of a segmented page, each pooled connection held on to it until that connection ran another query. That was about 2 MiB of raw network buffer plus the query's whole result. A worker with a pool of 10 could sit on 30 MiB it no longer needed. Idle connections now hold nothing from their last query. PGLite brains were never affected.
