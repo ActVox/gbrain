@@ -148,10 +148,15 @@ files at a time), and a shard over the step's 20-minute timeout
 fails the run, since GitHub would cut that shard off mid-list. The committed
 weights must also fit each shard twice over with a minute to spare
 (`ARM_SHARD_BUDGET_MS`, 570 s), because a slow runner ran the files 1.3-2x
-their mined weights. With the unit and slow lanes, the summary does the same
-for test.yml's unit shards: it sums measured durations over `test-shard.sh`'s
-`UNIT_SHARDS` partition and fails a shard over the 21 minutes left in the
-22-minute job after setup (`docs/TESTING.md#keeping-ci-partitions-balanced`);
+their mined weights. With the unit and slow lanes, the summary checks
+test.yml's unit shards exactly as `test/scripts/unit-shard-budget.test.ts`
+does: `test-shard.sh`'s `UNIT_SHARDS` partition, each shard's weight from
+`scripts/test-weights.json`, failing a shard over `UNIT_SHARD_BUDGET_MS`
+(`unitShardCheck`, `docs/TESTING.md#keeping-ci-partitions-balanced`). It
+prints each shard's measured time beside its mined weight but never fails on
+it: every item is its own Bun process on a shared VM, so the same partition
+measured 1.2-2.5x its mined weight across gates (one shard 1,274 s, about
+503 s mined), with every test passing;
 `evals/` files, which no ci:ubicloud lane runs, count as unmeasured. Tests run natively as
 a non-root user on Ubuntu 24.04, the same OS as the CI runners, instead of as
 root in the `oven/bun` container.
@@ -174,7 +179,11 @@ VM). The decision is logged (`fleet: project VMs hold 192 vCPUs, ceiling 448:
 10 VM(s) × 16 vCPUs (burst maximum 10)`). The 64 vCPUs above the ceiling are
 headroom for the managed GitHub runners `usage` can't see. When usage can't
 be read, or the project is busy, the run takes the default. Slots default to
-one per two vCPUs (`--slots`); `--size` and `--location` pick the VM shape. A VM that the quota refuses fails
+one per two vCPUs (`--slots`); `--size` picks the VM shape. A full gate runs only in
+`eu-central-h1` (the default `--location`): test timeouts and the mined shard weights are calibrated on
+its VMs, and on 2026-10-19 two full gates in `us-east-a2` ran about half as fast and timed out tests that
+pass there. Another `--location` is refused unless `--lanes` names a diagnostic subset, whose summary
+says it is not gate evidence. A VM that the quota refuses fails
 to provision and the run continues on the VMs that did start, so a busy
 project shrinks the fleet instead of failing. The runner prints the refusal
 (needed, used and maximum vCPUs) with the project's VMs and vCPUs per owner;

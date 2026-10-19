@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.314.0] - 2026-10-19
+
+**A master-red incident closed by hand stays closed, and a master push that reused a full run is judged by that run.** Nightly-watch opened a false master-red (#7056) after a maintainer closed the real one by hand: the incident's newest block was still red, a re-run-failed-jobs attempt left an incomplete manifest, and pushes that reused a full run carried no manifest of their own, so nothing could ever clear it. A full `ci:ubicloud` gate now runs only in `eu-central-h1`, where test timeouts and shard weights are calibrated.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A master-red incident closed by hand while its newest block is red | the next rebuild opened a fresh incident carrying the stale note | the incident ends green with `closed_by_hand` recorded; a later run whose latest attempt is red still opens a new incident |
+| A master push that reused a passed full run | judged incomplete (it has no ci-manifest), so it could never clear an incident | judged by its source run's complete evidence: `reuse.json` checked with the release gate's record check, identical trees, and the source attempt's ci-manifest |
+| A full `ci:ubicloud` gate with `--location` other than `eu-central-h1` | ran, and its timing failures read as test failures | refused before any VM is requested; `--lanes` runs a diagnostic subset elsewhere, whose summary says it is not gate evidence |
+
+## [0.60.313.0] - 2026-10-19
+
+**Unit shards in a full Test run cost about 29% less, the macOS 26 nightly typecheck no longer times out, and test paths survive a checkout directory with a space in it.** Each 4-vCPU runner now runs two unit shards at once (22 shards on 11 runners, re-mined from a green packed run, each within the unchanged 600 s budget). The `ci:ubicloud` gate plans its unit shards from the same partition, weights and budget.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The unit lane of a full Test run | 18 shards on 18 runners | 22 shards on 11 runners, two per runner (`scripts/test-shard-pack.sh`), each with its own coverage, receipts and log; lane names, coverage manifests and per-shard artifacts are unchanged in kind |
+| The `ci:ubicloud` unit check | its own 1,260 s budget against measured time, so a slow fleet failed a gate whose tests all passed | the same `unitShardPlan` and `UNIT_SHARD_BUDGET_MS` as GitHub; measured time is printed beside the plan for drift |
+| macOS 26 validation | typecheck ran inside verify and was killed at the 240 s cap (#6056) | typecheck has its own job with a measured 15-minute step timeout and its state saved on every outcome |
+| A test resolving a file URL with `.pathname` | broke in a checkout path containing a space (#6845) | 42 test files use `fileURLToPath`, and `check:file-url-pathname` fails verify on a new one |
+| An index-lock reclaim meeting this user's own exiting git | a cwd or environ read that failed while the git exited was taken for another user's process, so the reclaim refused | the read is re-checked within `RECLAIM_MIN_AGE_MS`; another user's git, or an alive one that stays unreadable, still fails the proof |
+| Tier 2 when provider keys aren't passed to the test process | the notice said it ran keyed | it says "provider keys not passed (GBRAIN_TEST_KEEP_PROVIDER_KEYS unset)" |
+
 ## [0.60.312.0] - 2026-10-19
 
 **Fix wave 20: about thirty answers that were quietly wrong are now right.** Recall honours every filter you give it, think names the model that actually answered, doctor and the advisor stop calling stale or failed checks healthy, `embed --max-usd` respects your own prices, Katakana names stop matching inside longer words, `get_links` pages instead of returning everything, and a disabled Gmail API is reported as what it is. Thirty-one contributor fixes were rewritten on master and credited. Nothing here adds a paid call or a migration.
