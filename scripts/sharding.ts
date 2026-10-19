@@ -80,6 +80,15 @@ export function unitShards(root: string, n: number = UNIT_SHARDS): string[][] {
 
 export type WeightMap = Map<string, number>;
 
+/**
+ * test.yml's unit partition with each shard's mined weight (`root`'s scripts/test-weights.json): the plan
+ * test/scripts/unit-shard-budget.test.ts and the ci:ubicloud gate both hold to UNIT_SHARD_BUDGET_MS.
+ */
+export function unitShardPlan(root: string): { shard: number; files: string[]; ms: number }[] {
+  const weights = loadWeights(join(root, "scripts/test-weights.json"));
+  return unitShards(root).map((files, i) => ({ shard: i + 1, files, ms: Math.round(predictedWeight(files, weights).totalMs) }));
+}
+
 export class WeightsLoadError extends Error {
   constructor(public readonly path: string, public readonly cause: unknown) {
     super(`failed to load weights from ${path}: ${cause}`);
