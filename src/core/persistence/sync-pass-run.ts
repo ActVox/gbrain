@@ -146,6 +146,7 @@ function entryPaths(level: ShadowLevel, gitPath: string): { path: string; source
 async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: ShadowPath[], imports: ShadowPath[]):
   Promise<{ entries: PassEntry[]; collisions: SyncSlugCollision[]; skipped: ShadowPath[]; downgrades: DowngradedRename[];
     identity: Array<{ entry: ShadowPath; origin: ShadowPath | null; slug: string; ids: { page: string; file: string } }> }> {
+  await faultPoint('sync:batch_entries', { sourceId: level.sourceId });
   const working = (entry: ShadowPath) => level.mode === 'working' && entry.state.level !== entry.state.tree;
   const deleteEntries = new Map<string, PassEntry>(deletes.map(entry => [entry.path, { ...entryPaths(level, entry.path), action: 'delete' as const, working: level.mode === 'working',
     slug: entry.slug!, pageId: entry.pageId, revision: entry.revision, level: null }]));
@@ -846,7 +847,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         return synced(false);
       }
       const built = await batchEntries(engine, level, deletes, imports).catch(async (error: unknown) => {
-        if ((error as { code?: string }).code === 'page_identity_changed') await save('blocked', 'page_identity_changed');
+        if ((error as { code?: string } | null | undefined)?.code === 'page_identity_changed') await save('blocked', 'page_identity_changed');
         throw error;
       });
       collisions.push(...built.collisions);

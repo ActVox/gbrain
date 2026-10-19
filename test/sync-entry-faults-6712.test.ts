@@ -20,6 +20,8 @@
  *   changes between runs stays a rerun, and the count survives a resumed cursor's repeated observation.
  * - S-61: a pass that stopped in discovery (path `<discovery>`) or on one entry left no cursor and an `open` pass row, so
  *   doctor `managed_sync_blocked` (`readBlockedManagedSyncs`) said nothing was blocked; it lists the stop until a sync succeeds.
+ * - S-69: a non-Error rejection (`undefined`) while a pass batches a level's entries was replaced by a TypeError about
+ *   `.code`; it now reaches the caller and the failure record as itself (red with the `sync:batch_entries` seam alone).
  * The deliberate-refusal, systemic and changing-message guards pass before and after.
  *
  * PGLite here; Postgres through test/e2e/sync-entry-faults-6712-postgres.test.ts.
@@ -224,4 +226,11 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: one odd f
       expect(await readBlockedManagedSyncs(engine, ['default'])).toEqual([]);
     }), 240_000);
   }
+  test('S-69: a non-Error rejection while a pass batches its entries reaches the caller as itself, not as a TypeError about .code', () => brain(async ({ engine, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    writeFileSync(join(root, 'notes/odd.md'), note('notes/odd')); commit(root, 'odd');
+    installFaultHook(point => { if (point === 'sync:batch_entries') throw undefined; });
+    expect(await performManagedSync(engine, OPTS).then(() => 'resolved', (error: unknown) => error)).toBeUndefined();
+    expect((await readSyncStatus(engine, 'default')).last_error).toMatchObject({ code: 'storage_error', path: '<discovery>', message: 'undefined' });
+  }), 240_000);
 });
