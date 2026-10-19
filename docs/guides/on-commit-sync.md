@@ -80,7 +80,9 @@ a sync is finishing is still served.
 - gbrain sync trigger --source <id> [--json] records the request and answers
   queued (a job was queued; stdout keeps job_id=N), coalesced (a job for the
   source is already waiting or running), nudged (a running gbrain serve on
-  PGLite took it and its notifier starts the sync) or no_resident.
+  PGLite took it and its notifier starts the sync); exit 0. When no resident
+  watches the source the answer also carries resident: null and the notice
+  no_resident with its fix.
 - A GitHub push for a classic source queues one sync per source; a second push
   while that job waits joins it and the newer commit is kept.
 - gbrain sync while a serve on the same PGLite brain is already syncing records
@@ -116,7 +118,8 @@ requests. Doctor `commit_notifier` reads the same record: with sync.on_commit on
 it warns for a source no resident watches or a stalled notifier, and with it off
 it warns only when a recorded request waits with no resident.
 
-Search and query responses carry a freshness entry per source (current, behind,
+Once sync.on_commit is on, or a resident has observed a source, search and
+query responses carry a freshness entry per source (current, behind,
 syncing, unknown or not_monitored, with the observed HEAD, when it was observed,
 the detection mode and the held-file count). not_monitored means no resident is
 watching the source: nothing will sync a new commit until one starts.
@@ -124,10 +127,12 @@ watching the source: nothing will sync a new commit until one starts.
 <a id="no-resident"></a>
 ## no_resident
 
-gbrain sync trigger recorded the request, but no resident runs on this brain to
-sync it. Run gbrain sync --source <id> --no-pull now, or start gbrain serve (or
-gbrain jobs work, or the autopilot daemon); the first resident that starts drains
-the recorded request. No service is installed for you.
+A notice, not an error: gbrain sync trigger recorded the request (and queued a
+job, or the serve took it) and exits 0, but no resident watches the source, so
+the recorded request waits. Run gbrain sync --source <id> --no-pull now, or
+start gbrain serve (or gbrain jobs work, or the autopilot daemon); the first
+resident that starts drains the recorded request. No service is installed for
+you.
 
 <a id="notifier-stalled"></a>
 ## notifier_stalled

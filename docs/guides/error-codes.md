@@ -2471,16 +2471,6 @@ More: [docs/guides/write-refusals.md#no_pricing](../../docs/guides/write-refusal
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
 
-### no_resident
-
-<a id="no_resident"></a>
-
-| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
-|---|---|---|---|---|---|---|
-| A sync request (gbrain sync trigger) was recorded as a wanted marker, but no resident process (gbrain serve, gbrain jobs work or the autopilot daemon) runs on this brain to sync it. | On PGLite only the process that holds the database can sync, and none does; the marker is kept, so the next resident or sync drains it and nothing is lost. | Run gbrain sync --source <id> --no-pull now, or start gbrain serve (no service is installed for you); the recorded request is drained by the next resident. | agent | `gbrain doctor --json` | 3 | no |
-
-More: [docs/guides/on-commit-sync.md#no-resident](../../docs/guides/on-commit-sync.md#no-resident)
-
 ### no_routing_eval
 
 <a id="no_routing_eval"></a>

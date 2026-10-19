@@ -12,7 +12,8 @@
  *  - a dry run stays read-only (no marker read, cleared or written);
  *  - the push webhook coalesces a second push into the waiting job and keeps the newer sha; a managed push answers
  *    refresh_required (409) with the gbrain sources refresh fix and queues nothing;
- *  - sync trigger --json reports queued / coalesced (Postgres) and no_resident with exit 3 (PGLite, no serve).
+ *  - sync trigger --json reports queued then coalesced on either engine (stdout keeps job_id=N, exit 0), and with no
+ *    resident watching the source adds resident: null and the no_resident notice with its fix.
  * Real git, real store, real handler, real delegated runner. PGLite always, Postgres when DATABASE_URL is set.
  */
 import { describe, expect, test } from 'bun:test';
@@ -182,20 +183,17 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
       });
     }, 120_000);
 
-    test('sync trigger --json: queued then coalesced on Postgres; no_resident with exit 3 on PGLite without a serve', async () => {
+    test('sync trigger --json: queued then coalesced, exit 0; with no resident it adds resident: null and the no_resident notice', async () => {
       await classicBrain(databaseUrl, async ({ engine }) => {
         _resetCliExitVerdictForTests();
         try {
           const one = await quietly(() => runSyncTrigger(engine, ['--source', SOURCE, '--json']));
+          expect(one.out).toHaveLength(1);
           const a = JSON.parse(one.out.at(-1)!);
-          if (engine.kind === 'pglite') {
-            expect(a).toMatchObject({ action: 'no_resident', source_id: SOURCE, intent: 'pull' });
-            expect(a.error.fix).toBeDefined();
-            expect(JSON.stringify(a.error)).toContain('--no-pull');
-            expect(currentExitCode()).toBe(3);
-            expect((await readMarkers(engine, [SOURCE])).map(m => m.intent)).toEqual(['pull']);
-            return;
-          }
+          expect(a.resident).toBeNull();
+          expect(a.notice).toMatchObject({ code: 'no_resident' });
+          expect(JSON.stringify(a.notice)).toContain('--no-pull');
+          expect((await readMarkers(engine, [SOURCE])).map(m => [m.intent, m.job_id])).toEqual([['pull', a.job_id]]);
           const two = await quietly(() => runSyncTrigger(engine, ['--source', SOURCE, '--json']));
           const b = JSON.parse(two.out.at(-1)!);
           expect(a).toMatchObject({ action: 'queued', source_id: SOURCE, intent: 'pull' });
@@ -203,7 +201,8 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
           expect(b).toMatchObject({ action: 'coalesced', job_id: a.job_id, marker_generation: a.marker_generation + 1 });
           expect(currentExitCode()).toBe(0);
           const text = await quietly(() => runSyncTrigger(engine, ['--source', SOURCE]));
-          expect(text.out).toContain(`job_id=${a.job_id}`);
+          expect(text.out).toEqual([`job_id=${a.job_id}`]);
+          expect(text.err.filter(l => l.startsWith('[gbrain notice no_resident]'))).toHaveLength(1);
         } finally { _resetCliExitVerdictForTests(); }
       });
     }, 120_000);

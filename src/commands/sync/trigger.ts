@@ -1,7 +1,11 @@
 /** `gbrain sync trigger`: ask for a sync of one source without waiting for it (GBRA-133 PR 2a). */
 import type { BrainEngine } from '../../core/engine.ts';
+import { cliRenderContext, renderNotice, type Notice } from '../../core/agent-output.ts';
 
-export type TriggerAction = 'queued' | 'nudged' | 'coalesced' | 'no_resident';
+export type TriggerAction = 'queued' | 'nudged' | 'coalesced';
+
+/** The resident that syncs the source (its notifier drains the marker), or null when none is running. */
+export interface TriggerResident { kind: string; pid: number | null }
 
 export interface TriggerOutcome {
   action: TriggerAction;
@@ -10,6 +14,7 @@ export interface TriggerOutcome {
   wanted_head: string | null;
   marker_generation: number;
   job_id?: number;
+  resident: TriggerResident | null;
 }
 
 const USAGE = 'Usage: gbrain sync trigger --source <id> [--priority high|normal|low] [--json]';
@@ -23,17 +28,17 @@ its checkout's HEAD; pull for a classic source), so it is never lost while
 another sync runs: whoever drains the source re-checks the marker afterwards.
 
 Outcomes (stdout keeps job_id=N whenever a job is queued; --json prints
-{action, job_id?, wanted_head, ...}):
-  queued      a sync job was queued (Postgres; a jobs worker or autopilot runs it)
+{action, job_id?, wanted_head, resident, ...}):
+  queued      a sync job was queued (a jobs worker or autopilot runs it)
   coalesced   a sync job for this source is already waiting or running; the
               marker makes it (or the notifier) run once more if needed
   nudged      the running gbrain serve recorded the request and its notifier
               starts the sync (PGLite)
-  no_resident the request is recorded, but nothing on this brain will sync it
-              until a resident starts; exit 3 with the fix
-              gbrain sync --source <id> --no-pull
 
-Exit 0 for queued, coalesced and nudged; 3 for no_resident.
+When no resident (gbrain serve, gbrain jobs work or the autopilot daemon)
+watches the source, the outcome carries resident: null and the notice
+no_resident with the fix gbrain sync --source <id> --no-pull (one stderr line,
+or notice in --json). Exit 0 for every outcome.
 
 See also:
   gbrain sources webhook set <id>   Set up GitHub-signed push webhook
@@ -41,24 +46,39 @@ See also:
 `);
 }
 
+/** The no_resident notice: the request is recorded, but nothing watches the source to run it on its own. */
+export function noResidentNotice(sourceId: string): Notice {
+  return {
+    code: 'no_resident', kind: 'degraded',
+    why: `No resident (gbrain serve, gbrain jobs work or the autopilot daemon) watches source ${sourceId}; the request is recorded and runs when one starts, or when a sync reaches it.`,
+    fix: { argv: ['gbrain', 'sync', '--source', sourceId, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false,
+      why: 'Syncs the checkout HEAD now; the recorded request clears once last_commit reaches it.' },
+  };
+}
+
 export function printTriggerOutcome(o: TriggerOutcome, json: boolean): void {
-  if (json) { console.log(JSON.stringify(o)); return; }
+  const notice = o.resident ? null : noResidentNotice(o.source_id);
+  if (json) {
+    console.log(JSON.stringify({ ...o, ...(notice ? { notice: renderNotice(notice, cliRenderContext()) } : {}) }));
+    return;
+  }
   const head = o.wanted_head ? o.wanted_head.slice(0, 8) : 'upstream';
   if (o.job_id !== undefined) console.log(`job_id=${o.job_id}`);
   else console.log(`action=${o.action}`);
   const line: Record<TriggerAction, string> = {
     queued: `queued sync job ${o.job_id} for ${o.source_id} (${o.intent}, wanted ${head})`,
     coalesced: `a sync job for ${o.source_id} is already waiting or running (job ${o.job_id}); the request is recorded and runs once more if that job does not reach ${head}`,
-    nudged: `the running serve recorded the request for ${o.source_id} (${o.intent}, wanted ${head}) and its notifier starts the sync`,
-    no_resident: `recorded the request for ${o.source_id} (${o.intent}, wanted ${head}), but no resident (gbrain serve, gbrain jobs work or the autopilot daemon) runs on this brain to sync it. Run: gbrain sync --source ${o.source_id} --no-pull`,
+    nudged: `the running serve recorded the request for ${o.source_id} (${o.intent}, wanted ${head})${o.resident ? ' and its notifier starts the sync' : ''}`,
   };
   console.error(`[sync trigger] ${line[o.action]}`);
+  if (notice) console.error(`[gbrain notice no_resident] ${notice.why} Run: ${notice.fix!.argv!.join(' ')}`);
 }
 
 /**
- * The engine path: Postgres queues a job (single flight per source through maxPending 1; the wanted marker replaces
- * the old 30 s idempotency bucket), PGLite records the marker and reports no_resident (a live serve would have taken
- * the request over its IPC socket before this process could open the brain, commands/sync-delegate.ts).
+ * The engine path: records the marker and queues a job on either engine (single flight per source through maxPending
+ * 1; the marker replaces the old 30 s idempotency bucket). On PGLite a live serve would have taken the request over its
+ * IPC socket before this process could open the brain (commands/sync-delegate.ts). The outcome names the source's
+ * resident, or none with the no_resident notice.
  */
 export async function runSyncTrigger(engine: BrainEngine, args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) return printSyncTriggerHelp();
@@ -84,7 +104,6 @@ export async function runSyncTrigger(engine: BrainEngine, args: string[]): Promi
   }
   const { marker, managed } = recorded;
   const base = { source_id: marker.source_id, intent: marker.intent, wanted_head: marker.wanted_head, marker_generation: marker.generation };
-  if (engine.kind === 'pglite') return finishTrigger({ action: 'no_resident', ...base }, json);
   const { MinionQueue } = await import('../../core/minions/queue.ts');
   const job = await new MinionQueue(engine).add('sync', {
     sourceId: marker.source_id,
@@ -95,20 +114,7 @@ export async function runSyncTrigger(engine: BrainEngine, args: string[]): Promi
   }, { priority, maxPending: 1 });
   const { attachMarkerJob } = await import('../../core/notifier/store.ts');
   await attachMarkerJob(engine, marker.source_id, marker.intent, marker.generation, job.id);
-  await finishTrigger({ action: job.coalesced ? 'coalesced' : 'queued', ...base, job_id: job.id }, json);
-}
-
-/** Prints the outcome; no_resident also carries the error envelope (--json) and exits 3 with the fix. */
-export async function finishTrigger(o: TriggerOutcome, json: boolean): Promise<void> {
-  if (o.action !== 'no_resident') return printTriggerOutcome(o, json);
-  if (json) {
-    const { opError } = await import('../../core/ops/contract.ts');
-    const error = opError('no_resident', `No resident process syncs source ${o.source_id}; the request is recorded and waits for one.`,
-      `Run gbrain sync --source ${o.source_id} --no-pull now, or start gbrain serve; the recorded request is drained by the next resident.`,
-      { fix: { argv: ['gbrain', 'sync', '--source', o.source_id, '--no-pull'], consent: [], actor: 'agent', requires_exclusive: false,
-        why: 'Syncs the checkout HEAD now; the recorded marker clears once last_commit reaches it.' } });
-    console.log(JSON.stringify({ ...o, error: error.toJSON() }));
-  } else printTriggerOutcome(o, false);
-  const { setCliExitVerdict } = await import('../../core/cli-force-exit.ts');
-  setCliExitVerdict(3);
+  const { readNotifierBlock } = await import('../../core/notifier/status.ts');
+  const live = (await readNotifierBlock(engine, marker.source_id).catch(() => null))?.resident ?? null;
+  printTriggerOutcome({ action: job.coalesced ? 'coalesced' : 'queued', ...base, job_id: job.id, resident: live ? { kind: live.kind, pid: live.pid } : null }, json);
 }

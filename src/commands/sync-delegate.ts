@@ -646,8 +646,9 @@ function pick<T extends object, K extends keyof T>(source: T, keys: readonly K[]
 /**
  * GBRA-133 PR 2a: `gbrain sync trigger` while a live serve holds the PGLite brain. The request is recorded as a wanted
  * marker through the serve (sync_nudge, acknowledged) and its notifier starts the sync: action nudged, exit 0. A serve
- * running without a notifier (GBRAIN_NOTIFIER=0) records it too and answers no_resident (exit 3 with the fix).
- * Returns false off PGLite or when no serve holds the brain (the engine path records the marker: queued or no_resident).
+ * running without a notifier (GBRAIN_NOTIFIER=0) records it too; the outcome then carries resident: null and the
+ * no_resident notice with the fix. Returns false off PGLite or when no serve holds the brain (the engine path records
+ * the marker and queues the job).
  * The owner-delegated sync paths in cli/main.ts skip `sync trigger`, which they would refuse as an unknown sync option.
  */
 export async function maybeTriggerThroughServe(config: { engine?: string; database_path?: string; database_url?: string } | null, args: string[]): Promise<boolean> {
@@ -670,9 +671,10 @@ export async function maybeTriggerThroughServe(config: { engine?: string; databa
     if (resp.error === 'unknown_source') { serr(`Source "${sourceId}" not found. List with: gbrain sources list`); await setVerdict(1); return true; }
     return refuse(`refused the request (${resp.error ?? 'unknown error'}).`);
   }
-  const { finishTrigger } = await import('./sync/trigger.ts');
+  const { printTriggerOutcome } = await import('./sync/trigger.ts');
   const m = resp.marker;
-  await finishTrigger({ action: resp.notifier ? 'nudged' : 'no_resident', source_id: m.source_id, intent: m.intent, wanted_head: m.wanted_head, marker_generation: m.generation }, json);
-  if (resp.notifier) await setVerdict(0);
+  printTriggerOutcome({ action: 'nudged', source_id: m.source_id, intent: m.intent, wanted_head: m.wanted_head, marker_generation: m.generation,
+    resident: resp.notifier ? { kind: resp.resident ?? 'serve', pid: holder.pid } : null }, json);
+  await setVerdict(0);
   return true;
 }
