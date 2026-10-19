@@ -219,9 +219,23 @@ async function readStoredMarker(exec: Pick<BrainEngine, 'executeRaw'>, level: Sh
   return await readOriginDeletedMarker(exec, level.sourceId, level.incarnation, origin) as { kind?: string; blob_oids?: string[]; slug?: string } | null;
 }
 
-/** Design §2.6: the round's deletes through #2828's valve; a trip withholds them all under one source-level record. */
+/**
+ * Design §2.6: the round's deletes through #2828's valve; a trip withholds them all under one source-level record.
+ * GBRA-133 rename storm: a delete whose recorded bytes arrive at a new path in the same round is a rename (batchEntries pairs
+ * it), not a deletion, so it is neither counted nor withheld; a whole folder moved with git mv stays a move of each page.
+ */
 async function applyDeleteValve(engine: BrainEngine, level: ShadowLevel, input: PassApplyInput, state: PassApplyState): Promise<void> {
-  const deletes = await filterYielding(level.paths, entry => entry.result.action === 'delete' && !entry.result.settled && !entry.result.inFlight);
+  const arriving = new Map<string, number>();
+  for (const entry of await filterYielding(level.paths, entry => entry.result.action === 'import' && !entry.state.page && !!entry.state.level)) {
+    arriving.set(entry.state.level!, (arriving.get(entry.state.level!) ?? 0) + 1);
+  }
+  const moving = (entry: ShadowPath) => {
+    const oid = entry.state.record?.blobOids.find(blob => (arriving.get(blob) ?? 0) > 0);
+    if (oid === undefined) return false;
+    arriving.set(oid, arriving.get(oid)! - 1);
+    return true;
+  };
+  const deletes = await filterYielding(level.paths, entry => entry.result.action === 'delete' && !entry.result.settled && !entry.result.inFlight && !moving(entry));
   // The valve plans over every live page only when the round deletes something (no delete never trips it).
   const plan = deletes.length ? await (async () => {
     const deleting = new Set(deletes.map(entry => entry.path));

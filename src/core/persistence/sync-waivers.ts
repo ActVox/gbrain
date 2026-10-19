@@ -11,7 +11,7 @@ import type { GBrainConfig } from '../config.ts';
 import { prepareManagedSyncMutation, type SyncIntent } from './sync-prepare.ts';
 import { heldGitPaths, readSyncImportProvenances, syncImportParserFor, recordSyncImportProvenances, syncDiskProvenance, type SyncImportProvenance, type SyncImportProvenanceBase } from './sync-holds.ts';
 import { sameParser } from './sync-prescreen.ts';
-import { isSyncReadBound } from './sync-screen.ts';
+import { isSyncReadBound, isUnreadableSyncFile } from './sync-screen.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { sha256 } from './digest.ts';
 import { startClaimPhase } from './claim-phase.ts';
@@ -134,7 +134,7 @@ export async function waiveNoopEntry<C extends WaiverCursor>(engine: BrainEngine
     if (held?.run_id !== cursor.runId || Number(held.index) !== cursor.index || held.request_id !== pending.requestId) return reread(tx);
     const snapshot = await tx.readPageSnapshot(pending.slug, { sourceId: cursor.sourceId, includeDeleted: true });
     if (waived.kind === 'delete') {
-      if (!softDeletedAt(snapshot, pending) || readSyncFile(cursor.root, intent.path!) !== null) return null;
+      if (!softDeletedAt(snapshot, pending) || waiverRead(cursor.root, intent.path!) !== null) return null;
       try { await assertSyncPageOrigin(tx, cursor.sourceId, intent.sourcePath!, pending.pageId, true, syncOriginScope(cursor)); }
       catch { return null; }
     } else if (snapshot?.page.id !== pending.pageId || snapshot.page.deleted_at != null || snapshot.revision !== intent.expected_revision) return null;
@@ -233,7 +233,7 @@ export async function waiveNoopRun<C extends WaiverCursor>(engine: BrainEngine, 
           const page = bySlug.get(pending.slug);
           const revision = page ? page.knowledge_revision == null ? REVISION_BACKFILL_PENDING : String(page.knowledge_revision) : null;
           if (!page || Number(page.id) !== pending.pageId || revision !== pending.intent.expected_revision) break chunks;
-          if (waived.kind === 'delete' ? !page.deleted || readSyncFile(cursor.root, pending.intent.path!) !== null : page.deleted) break chunks;
+          if (waived.kind === 'delete' ? !page.deleted || waiverRead(cursor.root, pending.intent.path!) !== null : page.deleted) break chunks;
           if ((checks[2 * i] as unknown[]).length || checks[2 * i + 1] !== true) break chunks;
           const provenance = waivedProvenance(cursor, pending, waived, revision!);
           if (provenance === false) break chunks;
@@ -308,8 +308,7 @@ export async function waivePrescreenedRun<C extends WaiverCursor & { binding: { 
           if (!page || Number(page.id) !== entry.pageId || page.knowledge_revision !== entry.revision || unfinished[i]!.length || holds.has(entry.path)) break chunks;
           if (kernelPageWork(page, { sourcePath: entry.sourcePath, embeddingRequested: input.embeddingRequested }) !== null) break chunks;
           if (!record?.disk_sha256 || record.revision !== entry.revision || !sameParser(record.parser, syncImportParserFor(entry.sourcePath, pack?.identity ?? null))) break chunks;
-          let bytes: Buffer | null;
-          try { bytes = readSyncFile(cursor.root, entry.path); } catch (error) { if (isSyncReadBound(error)) break chunks; throw error; }
+          const bytes = waiverRead(cursor.root, entry.path);
           if (!bytes || sha256(bytes) !== record.disk_sha256) break chunks;
           valid++;
         }
@@ -336,14 +335,23 @@ export async function wouldWaiveEntry(engine: BrainEngine, cursor: WaiverCursor,
 }
 
 /**
+ * GBRA-133 S-68: a waiver's read of the working-tree file; undefined when the freeze would hold it (over the read bound, or
+ * `file_unreadable`: a symlink, a FIFO, a permission error), so the entry is not waived and goes on to admission instead of
+ * failing the run.
+ */
+function waiverRead(root: string, path: string): Buffer | null | undefined {
+  try { return readSyncFile(root, path); } catch (error) { if (isSyncReadBound(error) || isUnreadableSyncFile(error)) return undefined; throw error; }
+}
+
+/**
  * #6712: the import provenance a waived import records in its waiver transaction, from the file read there: false when
  * the file no longer has the frozen raw hash (the entry is not waived), null for a waiver that records none (a delete,
  * or an import whose preparation carried no provenance, such as a code file).
  */
 function waivedProvenance(cursor: WaiverCursor, pending: WaiverEntry, waived: NoopWaiver, revision: string): Omit<SyncImportProvenance, 'recorded_at' | 'validated'> | false | null {
   if (waived.kind !== 'import') return null;
-  const bytes = readSyncFile(cursor.root, pending.intent.path!);
-  if ((bytes === null ? null : sha256(bytes)) !== pending.intent.rawHash) return false;
+  const bytes = waiverRead(cursor.root, pending.intent.path!);
+  if (bytes === undefined || (bytes === null ? null : sha256(bytes)) !== pending.intent.rawHash) return false;
   if (!waived.provenance) return null;
   return { ...waived.provenance, page_id: pending.pageId!, revision, ...syncDiskProvenance(bytes, pending.intent.target) };
 }

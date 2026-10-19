@@ -748,6 +748,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/troubleshooting.md#consumers-without-heartbeat](../../docs/guides/troubleshooting.md#consumers-without-heartbeat)
 
+### content_null_bytes
+
+<a id="content_null_bytes"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A synced Markdown file holds NUL bytes (U+0000), so managed sync holds that file alone. | Page text is stored as UTF-8 without NUL bytes, so the file cannot be imported as it stands; NUL bytes usually mean a UTF-16 save (a Windows "Unicode" file), a binary file named .md or a crash-padded file. The rest of the source keeps syncing. | Save a UTF-16 file as UTF-8, remove the NUL bytes, or remove a binary file (or leave it out with sync.exclude), then commit and sync again. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#content_null_bytes](../../docs/guides/write-refusals.md#content_null_bytes)
+
 ### content_receipt_stale
 
 <a id="content_receipt_stale"></a>
@@ -1545,6 +1555,16 @@ More: [docs/guides/concurrent-writes.md#git-durability-at-activation](../../docs
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Git index stale. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### git_object_missing
+
+<a id="git_object_missing"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A committed file's Git object is missing from the checkout and its working-tree copy differs or is gone, so managed sync holds that file alone. | An interrupted gc, a partial clone without its promisor remote or disk corruption can drop an object a commit still names. Sync imports the working-tree bytes when they hash to the committed blob id; otherwise it imports nothing from a guess, and the rest of the source keeps syncing. | Run git fsck in the checkout to see what is missing, restore it with git fetch (a partial or shallow clone) or from a backup, then sync again; every sync re-tests the hold. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#git_object_missing](../../docs/guides/write-refusals.md#git_object_missing)
 
 ### git_operation_in_progress
 
@@ -2639,6 +2659,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The --pat-file token file is missing, empty, holds more than one token, or is readable by other users, so it was not read. | The token is read from a private file so it never appears on a command line or in a process list; a file other users can read would leak it, so the verb refuses before any credential is written. | Write exactly one token on one line to a file, chmod 600 it, and pass its path with --pat-file. | agent | `repeat the read that failed` | 1 | no |
+
+### path_not_utf8
+
+<a id="path_not_utf8"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A committed file's name is not valid UTF-8, so managed sync holds that file alone. | Git hands the name back with U+FFFD for the bytes that are not UTF-8 (a Latin-1 name from an older system, an archive or a network share), and no Git read or file matches that decoded name, so nothing is imported from it. The rest of the source keeps syncing. | Rename the file to a UTF-8 name (git ls-files with core.quotePath shows its exact bytes; convmv -f latin1 -t utf8 converts a Latin-1 name), commit, then sync again; the rename clears the hold. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#path_not_utf8](../../docs/guides/write-refusals.md#path_not_utf8)
 
 ### pattern_claims_pending
 

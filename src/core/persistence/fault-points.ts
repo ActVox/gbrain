@@ -50,6 +50,9 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   // #6712 PR 4b: before each round of a pass reads its level (`round`), and after it read it (`level`: its statements and its
   // confirm-round verdict), before it applies.
   | 'sync:round_start' | 'sync:level_read'
+  // GBRA-133 S-69: as a pass starts batching a level's entries (sync-pass-run.ts `batchEntries`); a hook that throws models a
+  // rejection there, including a non-Error one.
+  | 'sync:batch_entries'
   // #6712 PR 4b: the level's overlapping reads, which share one loop budget (sync-yield.ts `turnYield`): a Git chunk as its
   // records are visited (`read`: ls-tree or ls-files; a synchronous hook), an `I⋈P` result in hand before the shared budget
   // decides whether it waits a turn, and the same result right before its rows are taken.
