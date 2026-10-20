@@ -16,7 +16,9 @@
  * guessing oracle), as get_page withholds it.
  *
  * The segmented path writes its derived rows for the appended text after commit as any segmented write does (chunks,
- * embeddings); links, timeline rows and fence projections of the appended text follow PR 4's incremental derivation.
+ * embeddings). A remote append to the compiled truth records the bytes it added (`mentionRange`) for its `links` effect,
+ * which mines those bytes alone (#7122, effect-links.ts); timeline rows and fence projections of the appended text follow
+ * PR 4's incremental derivation.
  */
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
@@ -27,7 +29,7 @@ import { OperationError, opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { FACTS_FENCE_BEGIN, FACTS_FENCE_END } from '../facts-fence.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../takes-fence.ts';
-import { serializePageToMarkdown, timelineSentinelKind } from '../markdown.ts';
+import { parseMarkdown, serializePageToMarkdown, timelineSentinelKind } from '../markdown.ts';
 import { buildContentFlagMarker, CONTENT_FLAG_KEY, isQuarantined } from '../quarantine.ts';
 import { sizeStateField } from '../page-embedding-budget.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
@@ -384,6 +386,7 @@ export async function prepareAppendMutation(engine: BrainEngine, row: WriteReque
   const separatorFor = (tail: RegionTail) => intent.separator === 'auto' && tail.bytes.length > 0 && tail.bytes[tail.bytes.length - 1] !== 0x0a ? '\n' : '';
 
   if (isSegmentedPage(stored.page)) {
+    let mentionRange: PreparedMutation['mentionRange'];
     const prepared = await prepareSegmentedSpliceMutation(engine, row, stored, { full: appendProbe.fullRewrite, replacements: async page => {
       const region = targetRegion(intent.region, page.bodyBytes > page.truthBytes);
       const tail = await segmentedRegionTail(engine, row.source_id, page, region);
@@ -391,9 +394,13 @@ export async function prepareAppendMutation(engine: BrainEngine, row: WriteReque
       if (region === 'timeline' && page.bodyBytes === page.truthBytes) return null;
       const bytes = Buffer.from(separatorFor(tail) + text, 'utf8');
       const at = region === 'truth' ? page.truthBytes : page.bodyBytes;
+      mentionRange = region === 'truth' ? { start: at, end: at + bytes.length, sha256: sha256Hex(bytes) } : undefined;
       return { replacements: [{ start: at, end: at, bytes }], appendTo: region, outcome: { appended_bytes: bytes.length, region } };
     } });
-    if (prepared) return prepared;
+    if (prepared) {
+      if (mentionRange) prepared.mentionRange = mentionRange;
+      return prepared;
+    }
     if (Number((stored.page as { body_bytes?: number | null }).body_bytes ?? 0) + Buffer.byteLength(text, 'utf8') + 1 > PAGE_MAX_BYTES) {
       throw opError('page_body_segmented', `Page ${row.slug} cannot take this append in segments (an external_untrusted write the gate scans whole, an always-loaded core page, or an append that starts a region), and it is over the ${PAGE_MAX_BYTES}-byte limit of a whole-body write. Nothing was appended.`,
         'Append to the last non-empty region (omit region), or write from a trusted caller.', { fix: pageFix(row.source_id, row.slug) });
@@ -410,7 +417,12 @@ export async function prepareAppendMutation(engine: BrainEngine, row: WriteReque
   const beforeBytes = Buffer.byteLength(page.compiled_truth ?? '', 'utf8') + Buffer.byteLength(page.timeline ?? '', 'utf8');
   const prepared = await preparePageMutation(engine, row, config, { content, expectedRevision: stored.revision }, signal, { clock });
   const apply = prepared.apply.bind(prepared);
-  return { ...prepared, apply: async (tx, preimage) => {
+  // The stored truth is the parsed one (trimmed); the append's bytes are what it adds after the old truth.
+  const truth = region === 'truth' ? Buffer.from(parseMarkdown(content, row.slug).compiled_truth, 'utf8') : null;
+  const start = Buffer.byteLength(before, 'utf8');
+  const mentionRange = truth && truth.length > start && truth.subarray(0, start).equals(Buffer.from(before, 'utf8'))
+    ? { start, end: truth.length, sha256: sha256Hex(truth.subarray(start)) } : undefined;
+  return { ...prepared, ...(mentionRange ? { mentionRange } : {}), apply: async (tx, preimage) => {
     const outcome = await apply(tx, preimage);
     const [row2] = await tx.executeRaw<{ bytes: string | null }>(`SELECT COALESCE(body_bytes, octet_length(COALESCE(compiled_truth,'')) + octet_length(COALESCE(timeline,'')))::text AS bytes
       FROM pages WHERE id=$1`, [stored.page.id]);
