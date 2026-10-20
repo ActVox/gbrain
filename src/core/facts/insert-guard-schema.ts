@@ -13,7 +13,12 @@
  *   `gbrain_preserve_fact_withdrawal`): an inserted active row matching a
  *   fact_withdrawals row (v2 or v1 fingerprint) is stamped expired_at =
  *   min(withdrawn_at) and valid_until = LEAST(valid_until, withdrawn_at), by
- *   an UPDATE of just those rows at the end of the inserting statement.
+ *   an UPDATE of just those rows at the end of the inserting statement. The
+ *   UPDATE runs under FACT_WITHDRAWAL_STAMP_SETTING (attribution-schema.ts),
+ *   so the row keeps the last_write_* values its INSERT stamped or supplied,
+ *   and resets it afterwards. The stamp lands after the INSERT's RETURNING:
+ *   `INSERT ... RETURNING expired_at` (or a CTE over it) reads the unstamped
+ *   row; the next statement reads the stamp.
  *
  * Both take the per-row guards' lock: FOR SHARE on each inserted source row
  * before the ledgers are read, so an insert still serializes with a purge or
@@ -26,13 +31,15 @@
  * statement wrote: a row ON CONFLICT DO NOTHING skipped is not checked (it is
  * not saved either). Installed by migration v263.
  */
+import { FACT_WITHDRAWAL_STAMP_SETTING } from '../persistence/attribution-schema.ts';
+
 export const FACT_INSERT_GUARD_TRIGGER = 'facts_guard_inserted';
 export const FACT_INSERT_GUARD_FUNCTION = 'gbrain_guard_inserted_facts';
 
 export const FACT_INSERT_GUARD_SQL = `
 CREATE OR REPLACE FUNCTION gbrain_guard_inserted_facts() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog, public AS $fn$
-  DECLARE purged TEXT;
+  DECLARE purged TEXT; stamp_setting TEXT;
   BEGIN
     PERFORM s.id FROM sources s WHERE s.id IN (SELECT i.source_id FROM inserted_facts i) ORDER BY s.id FOR SHARE OF s;
     IF EXISTS (SELECT 1 FROM fact_purges p WHERE p.source_id IN (SELECT i.source_id FROM inserted_facts i)) THEN
@@ -50,6 +57,8 @@ CREATE OR REPLACE FUNCTION gbrain_guard_inserted_facts() RETURNS trigger
       END IF;
     END IF;
     IF EXISTS (SELECT 1 FROM fact_withdrawals w WHERE w.source_id IN (SELECT i.source_id FROM inserted_facts i WHERE i.expired_at IS NULL)) THEN
+      stamp_setting := current_setting('${FACT_WITHDRAWAL_STAMP_SETTING}', true);
+      PERFORM set_config('${FACT_WITHDRAWAL_STAMP_SETTING}', 'on', true);
       WITH n AS MATERIALIZED (
         SELECT i.id, i.source_id, i.visibility, i.entity_slug,
           gbrain_fact_fingerprint(i.fact) AS fact_hash, gbrain_fact_fingerprint_v1(i.fact) AS fact_hash_v1
@@ -61,6 +70,7 @@ CREATE OR REPLACE FUNCTION gbrain_guard_inserted_facts() RETURNS trigger
         GROUP BY n.id)
       UPDATE facts f SET expired_at = m.withdrawn_at, valid_until = LEAST(COALESCE(f.valid_until, m.withdrawn_at), m.withdrawn_at)
         FROM m WHERE f.id = m.id;
+      PERFORM set_config('${FACT_WITHDRAWAL_STAMP_SETTING}', COALESCE(stamp_setting, ''), true);
     END IF;
     RETURN NULL;
   END

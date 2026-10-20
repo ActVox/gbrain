@@ -16,8 +16,12 @@
  *    from their original SQL inside a rolled-back transaction) and under the
  *    statement guard, ends identically: the same P0001 purged_content refusal
  *    and detail for a batch carrying a purged claim, and the same stamped
- *    expired_at / valid_until for a batch carrying withdrawn rows. Updates
- *    still go through the per-row guards.
+ *    expired_at / valid_until for a batch carrying withdrawn rows, and keeps
+ *    the last_write_* attribution the INSERT stamped or supplied (the stamp is
+ *    an UPDATE under gbrain.fact_withdrawal_stamp). Updates still go through
+ *    the per-row guards.
+ * 3. The documented edge: INSERT ... RETURNING reads a withdrawn row before
+ *    its stamp.
  * Runs on PGLite, and on Postgres when DATABASE_URL is set
  * (test/postgres-unit-arms.txt).
  */
@@ -244,3 +248,69 @@ test('a batch insert carrying withdrawn rows is stamped exactly as the per-row g
     expect(statement).toEqual(perRow);
   }
 }, 120_000);
+
+test('a withdrawal stamp keeps the write attribution the INSERT stamped or supplied', async () => {
+  const supplied = '11111111-1111-4111-8111-111111111111', actor = '22222222-2222-4222-8222-222222222222';
+  for (const engine of engines) {
+    const sourceId = await newSource(engine);
+    const arm = (perRow: boolean) => inRolledBack(engine, perRow, async tx => {
+      for (const i of [1, 2]) await tx.executeRaw(
+        `INSERT INTO fact_withdrawals(source_id, visibility, subject, fact_hash, withdrawn_at) VALUES ($1, 'private', '*', gbrain_fact_fingerprint($2), '2023-01-01T00:00:00Z')`,
+        [sourceId, claim(i)]);
+      const insert = (rows: Array<[number, number, string | null]>) => tx.executeRaw(`INSERT INTO facts (source_id, fact, kind, visibility, source, entity_slug,
+          source_markdown_slug, row_num, valid_from, write_request_id, write_principal_kind, write_principal_id,
+          last_write_request_id, last_write_principal_kind, last_write_principal_id, last_written_at)
+        SELECT $1, r.fact, 'fact', 'private', 'fixture', $2, $2, r.row_num, '2020-01-01T00:00:00Z', r.req::uuid, r.kind, r.principal,
+          r.req::uuid, r.kind, r.principal, r.at::timestamptz
+        FROM jsonb_to_recordset($3::text::jsonb) AS r(fact text, row_num integer, req text, kind text, principal text, at text)`,
+        [sourceId, SLUG, JSON.stringify(rows.map(([i, rowNum, req]) => ({ fact: claim(i), row_num: rowNum, req,
+          kind: req && 'local_cli', principal: req && 'principal-supplied', at: req && '2020-01-01T00:00:00Z' })))]);
+      // No actor set (an engine copy or backfill): supplied and absent attribution, withdrawn and not.
+      await insert([[1, 1, supplied], [2, 2, null], [3, 3, supplied]]);
+      // An actor set (a coordinated write): the INSERT stamps the actor.
+      await tx.executeRaw(`SELECT set_config('gbrain.write_request', $1, true), set_config('gbrain.write_principal_kind', 'local_cli', true),
+        set_config('gbrain.write_principal_id', 'principal-actor', true)`, [actor]);
+      await insert([[1, 4, null]]);
+      await tx.executeRaw(`SELECT set_config('gbrain.write_request', '', true), set_config('gbrain.write_principal_kind', '', true),
+        set_config('gbrain.write_principal_id', '', true)`);
+      // The stamp setting does not outlive the stamp: a later expiry by an unattributed writer moves attribution.
+      await tx.executeRaw(`UPDATE facts SET expired_at = '2024-01-01T00:00:00Z' WHERE source_id = $1 AND row_num = 3`, [sourceId]);
+      return (await tx.executeRaw<Record<string, unknown>>(`SELECT row_num, expired_at, write_request_id::text AS created_req, write_principal_id AS created_by,
+          last_write_request_id::text AS last_req, last_write_principal_kind AS last_kind, last_write_principal_id AS last_by,
+          CASE WHEN last_written_at = now() THEN 'now' ELSE last_written_at::text END AS last_at,
+          current_setting('gbrain.fact_withdrawal_stamp', true) AS setting
+        FROM facts WHERE source_id = $1 ORDER BY row_num`, [sourceId]))
+        .map(r => ({ ...r, row_num: Number(r.row_num), expired_at: iso(r.expired_at), last_at: r.last_at === 'now' || r.last_at == null ? r.last_at : iso(r.last_at),
+          setting: r.setting || null }) as Record<string, unknown>);
+    });
+    const perRow = await arm(true), statement = await arm(false);
+    const suppliedRow = { created_req: supplied, created_by: 'principal-supplied', last_req: supplied, last_kind: 'local_cli', last_by: 'principal-supplied',
+      last_at: '2020-01-01T00:00:00.000Z', setting: null };
+    const none = { created_req: null, created_by: null, last_req: null, last_kind: null, last_by: null, last_at: null, setting: null };
+    expect(statement).toEqual([
+      { row_num: 1, expired_at: '2023-01-01T00:00:00.000Z', ...suppliedRow },
+      { row_num: 2, expired_at: '2023-01-01T00:00:00.000Z', ...none },
+      { row_num: 3, expired_at: '2024-01-01T00:00:00.000Z', ...suppliedRow, last_req: null, last_kind: null, last_by: null, last_at: 'now' },
+      { row_num: 4, expired_at: '2023-01-01T00:00:00.000Z', created_req: actor, created_by: 'principal-actor', last_req: actor, last_kind: 'local_cli',
+        last_by: 'principal-actor', last_at: 'now', setting: null },
+    ]);
+    expect(statement).toEqual(perRow);
+  }
+}, 120_000);
+
+
+test('documented edge: INSERT ... RETURNING reads a withdrawn row before its stamp; the next statement reads the stamp', async () => {
+  for (const engine of engines) {
+    const sourceId = await newSource(engine);
+    const seen = await inRolledBack(engine, false, async tx => {
+      await tx.executeRaw(`INSERT INTO fact_withdrawals(source_id, visibility, subject, fact_hash, withdrawn_at) VALUES ($1, 'private', '*', gbrain_fact_fingerprint($2), '2023-01-01T00:00:00Z')`,
+        [sourceId, claim(1)]);
+      const [returned] = await tx.executeRaw<{ id: number; expired_at: unknown }>(`INSERT INTO facts (source_id, fact, kind, visibility, source)
+        VALUES ($1, $2, 'fact', 'private', 'fixture') RETURNING id, expired_at`, [sourceId, claim(1)]);
+      const [stored] = await tx.executeRaw<{ expired_at: unknown }>('SELECT expired_at FROM facts WHERE id = $1', [returned!.id]);
+      return { returned: iso(returned!.expired_at), stored: iso(stored!.expired_at) };
+    });
+    expect(seen).toEqual({ returned: null, stored: '2023-01-01T00:00:00.000Z' });
+  }
+}, 120_000);
+
