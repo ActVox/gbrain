@@ -15,6 +15,9 @@ import { connectedEngine, type DoctorContext, type DoctorEntry } from '../contex
 import { agentFix, checkError, doctorVerify, withSkippedSegmented } from '../check-fix.ts';
 import { scanDeadline } from '../budget.ts';
 
+/** Oversized pages `oversized_pages` lists before it reports a floor. */
+const OVERSIZED_LIST_LIMIT = 100;
+
 async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
   const { args, progress } = ctx;
   const engine = connectedEngine(ctx);
@@ -63,9 +66,11 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
          AND ${EMBED_SKIP_FILTER_FRAGMENT}
          AND (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) > $1
        ORDER BY bytes DESC
-       LIMIT 100`,
+       LIMIT ${OVERSIZED_LIST_LIMIT + 1}`,
       [bytesBlock],
     );
+    // #7145: a full list means more pages exceed the block; the count is then a floor.
+    const capped = rows.length > OVERSIZED_LIST_LIMIT;
     // Pages an older gbrain stored chunkless for size that now fit under the block: the free backfill re-indexes them.
     const [skipped] = await engine.executeRaw<{ n: number }>(`SELECT COUNT(*)::int AS n FROM pages p
        WHERE p.deleted_at IS NULL AND p.frontmatter->'embed_skip'->>'reason' = 'oversized'
@@ -97,17 +102,14 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
       oversizedCheck({
         name: 'oversized_pages',
         status: 'warn',
-        message: `${rows.length} page(s) exceed the ${bytesBlock}-byte content_sanity.bytes_block. Top: ${top}. A page over the block is stored without chunks on its next write. `
+        details: { count: Math.min(rows.length, OVERSIZED_LIST_LIMIT), exact: !capped, ...(capped ? { limit: OVERSIZED_LIST_LIMIT } : {}) },
+        message: `${capped ? `At least ${OVERSIZED_LIST_LIMIT}` : rows.length} page(s) exceed the ${bytesBlock}-byte content_sanity.bytes_block. Top: ${top}. A page over the block is stored without chunks on its next write. `
           + 'Raise content_sanity.bytes_block (up to the 24 MiB page ceiling) to make them searchable, or exclude them from the source.',
       });
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    checks.push({
-      name: 'oversized_pages',
-      status: 'ok',
-      message: `Skipped (${msg})`,
-    });
+    // #7145: a scan that failed found nothing either way.
+    checks.push(checkError('oversized_pages', 'check for oversized pages', err, { details: { health: 'unknown' } }));
   }
 
   progress.heartbeat('scraper_junk_pages');

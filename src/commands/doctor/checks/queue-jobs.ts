@@ -70,9 +70,10 @@ export async function computeQueueHealthCheck(
 
   try {
     // issue #1801: column is `status`, not `state` (schema.sql:780).
-    const stalledRows: Array<{ id: number; name: string; started_at: string }> =
+    // #7145: total counts every stalled job, not only the five listed.
+    const stalledRows: Array<{ id: number; name: string; started_at: string; total: number }> =
       await engine.executeRaw(
-        `SELECT id, name, started_at::text AS started_at
+        `SELECT id, name, started_at::text AS started_at, count(*) OVER ()::int AS total
            FROM minion_jobs
           WHERE status = 'active'
             AND started_at IS NOT NULL
@@ -136,8 +137,7 @@ export async function computeQueueHealthCheck(
           AND name = 'embed-backfill'
         GROUP BY name, queue
        HAVING min(created_at) < now() - ($1::text::interval)
-        ORDER BY oldest_age_seconds DESC
-        LIMIT 5`,
+        ORDER BY oldest_age_seconds DESC`,
       [`${oldWaitingHours} hours`],
     );
 
@@ -196,7 +196,7 @@ export async function computeQueueHealthCheck(
         .map(r => `#${r.id}(${r.name})`)
         .join(', ');
       problems.push(
-        `${stalledRows.length} stalled-forever job(s): ${sample}. ` +
+        `${Number(stalledRows[0]!.total)} stalled-forever job(s)${Number(stalledRows[0]!.total) > stalledRows.length ? ` (oldest ${stalledRows.length} listed)` : ''}: ${sample}. ` +
         `Fix: gbrain jobs get <id> to inspect; gbrain jobs cancel <id> to force-kill.`
       );
     }
@@ -209,8 +209,8 @@ export async function computeQueueHealthCheck(
         `Fix: set maxWaiting on the submitter (or raise GBRAIN_QUEUE_WAITING_THRESHOLD).`
       );
     }
-    for (const row of oldWaitingRows) {
-      if (liveWorkerQueues?.has(row.queue)) continue;
+    // #7145: queues with a live worker are dropped before the five-queue cap, so they cannot hide one without.
+    for (const row of oldWaitingRows.filter(r => !liveWorkerQueues?.has(r.queue)).slice(0, 5)) {
       const hours = Math.max(1, Math.round(Number(row.oldest_age_seconds ?? 0) / 3600));
       if (registryFailure) {
         problems.push(
