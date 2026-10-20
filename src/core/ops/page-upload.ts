@@ -33,7 +33,7 @@ import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
 import { admitPageAppend } from '../persistence/page-append.ts';
 import {
   abortUpload, appendPart, expireIfLapsed, partBytes, partMaxFrameBytes, partSha256, readUpload, readUploadByRequest, reserveUpload,
-  sealUpload, stagedSha256, transitionUploads, uploadExpired, uploadNotFound, uploadPartFrameBytes, type StagingBodyRef, type UploadMode, type UploadRow,
+  isStagingBodyRef, sealUpload, stagedSha256, transitionUploads, uploadExpired, uploadNotFound, uploadPartFrameBytes, uploadPartLimit, type StagingBodyRef, type UploadMode, type UploadRow,
 } from '../persistence/page-upload.ts';
 
 const MODES: readonly UploadMode[] = ['create', 'replace', 'append'];
@@ -257,6 +257,11 @@ const upload_page_part: Operation = {
       if (part !== row.next_part) {
         throw opError('invalid_params', `Parts are sent in order: this upload expects part ${row.next_part}, not ${part}.`, `Send part ${row.next_part} next.`, { fix: statusFix(row.id) });
       }
+      const limit = uploadPartLimit(row.declared_bytes, cap);
+      if (part >= limit && row.received_bytes + bytes.byteLength < row.declared_bytes) {
+        throw opError('upload_too_many_parts', `This upload takes at most ${limit} parts for its ${row.declared_bytes} bytes, and part ${part} does not complete it, so it was not stored.`,
+          `Send the remaining ${row.declared_bytes - row.received_bytes} bytes in part ${part}, cut near part_max_frame_bytes (${cap}); or abort this upload and begin again with larger parts.`, { fix: statusFix(row.id) });
+      }
       if (row.received_bytes + bytes.byteLength > row.declared_bytes) {
         throw invalidParam(`This part would make the upload ${row.received_bytes + bytes.byteLength} bytes, over its declared total_bytes (${row.declared_bytes}).`,
           'Send only the remaining bytes of the content, or abort and begin again with the right total_bytes.');
@@ -340,7 +345,7 @@ const commit_page_upload: Operation = {
         throw opError('invalid_params', `This upload has ${row.received_bytes} of its ${row.declared_bytes} bytes, so it cannot be committed yet.`,
           `Send part ${row.next_part} and the rest, then commit.`, { fix: statusFix(row.id) });
       }
-      if (!await sealUpload(ctx.engine, row.id)) row = await boundUpload(ctx, principal, row.id);
+      if (!await sealUpload(ctx.engine, row.id)) row = await settleLapse(ctx, principal, await boundUpload(ctx, principal, row.id));
       else {
         const hashed = await stagedSha256(ctx.engine, row);
         await uploadCommitProbe.afterHash?.(row.id);
@@ -393,7 +398,8 @@ const commit_page_upload: Operation = {
 /** Records the session's commit request, and ends the session when that write ended without committing (releasing its bytes). */
 async function settleCommit(ctx: OperationContext, principal: Principal, row: UploadRow): Promise<void> {
   const request = await getWriteRequest(ctx.engine, principal, row.client_request_id);
-  if (!request) return;
+  const ref = (request?.intent as Record<string, unknown> | undefined)?.body_ref;
+  if (!request || !isStagingBodyRef(ref) || ref.staging_id !== row.id) return;
   await ctx.engine.executeRaw('UPDATE page_body_stagings SET commit_request_id = COALESCE(commit_request_id, $2::uuid) WHERE id = $1::uuid', [row.id, request.id]);
   if (isTerminal(request) && request.state !== 'committed') await transitionUploads(ctx.engine, 'aborted', 's.id = $1::uuid', [row.id]);
 }

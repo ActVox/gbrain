@@ -28,6 +28,8 @@ import { coreMarking } from '../core-memory.ts';
 import { TAKES_FENCE_BEGIN } from '../takes-fence.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { inlineRegions } from '../page-body/tail-digest.ts';
+import { segmentedFactsFenceView } from '../page-body/segment-facts.ts';
+import { parseFactsFence, type FactsFenceParseResult } from '../facts-fence.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { bodyStagingGoneError } from '../engine-sql/page-body.ts';
@@ -42,10 +44,12 @@ import type { WriteRequest } from './model.ts';
 const text = (value: unknown) => (typeof value === 'string' ? value : null);
 
 /**
- * put_page keeps, for a remote writer, the takes fence remote reads hide (preserveProtectedTakes) and refuses to drop
- * timeline rows its content omits (assertTimelineNotOmitted); both compare whole bodies. Streamed, this refuses
- * instead: a remote replace over the ceiling of a page holding a takes fence, or timeline rows (unless drop_timeline),
- * is `upload_protected_content`. Bounded: one probe of the live manifest and of timeline_entries.
+ * put_page keeps, for a remote writer, the takes fence and the non-world facts rows remote reads hide
+ * (preserveProtectedTakes, mergeHiddenFactRowsIntoBody) and refuses to drop timeline rows its content omits
+ * (assertTimelineNotOmitted); all compare whole bodies. Streamed, this refuses instead: a remote replace over the
+ * ceiling of a page holding a takes fence, a facts fence with a non-world row (or one that does not parse), or timeline
+ * rows (unless drop_timeline), is `upload_protected_content`. Bounded: one probe of the live manifest and of
+ * timeline_entries, and the facts fence alone (segmentedFactsFenceView reads only the runs holding a fence marker).
  */
 async function assertNothingHiddenDropped(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot, p: Record<string, unknown>): Promise<void> {
   const [found] = await engine.executeRaw<{ has_takes: boolean; has_timeline: boolean }>(`SELECT
@@ -53,15 +57,23 @@ async function assertNothingHiddenDropped(engine: BrainEngine, row: WriteRequest
         AND m.gen_from <= pg.body_generation AND (m.gen_to IS NULL OR m.gen_to > pg.body_generation)
         AND m.protected_regions @> '[{"kind":"takes"}]'::jsonb) AS has_takes,
       EXISTS (SELECT 1 FROM timeline_entries WHERE page_id = $1) AS has_timeline`, [Number(snapshot.page.id)]);
-  const inlineTakes = !isSegmentedPage(snapshot.page)
-    && Object.values(await inlineRegions(engine, Number(snapshot.page.id))).some(region => region.includes(TAKES_FENCE_BEGIN));
-  const reason = found?.has_takes || inlineTakes ? 'takes' : found?.has_timeline && p.drop_timeline !== true ? 'timeline' : null;
+  const segmented = isSegmentedPage(snapshot.page);
+  const inline = segmented ? null : await inlineRegions(engine, Number(snapshot.page.id));
+  const fences = inline ? Object.values(inline).map(region => parseFactsFence(region))
+    : Object.values(await segmentedFactsFenceView(engine, { id: Number(snapshot.page.id), slug: row.slug, source_id: row.source_id }))
+      .filter((value): value is FactsFenceParseResult => typeof value === 'object' && value !== null && 'facts' in value);
+  const hiddenFacts = fences.some(fence => fence.warnings.length > 0 || fence.facts.some(fact => fact.visibility !== 'world'));
+  const reason = found?.has_takes || (inline && Object.values(inline).some(region => region.includes(TAKES_FENCE_BEGIN))) ? 'takes'
+    : hiddenFacts ? 'facts'
+    : found?.has_timeline && p.drop_timeline !== true ? 'timeline' : null;
   if (!reason) return;
   throw opError('upload_protected_content', reason === 'takes'
     ? `Page ${row.slug} holds a takes fence that remote reads hide, and a remote replace over ${PAGE_MAX_BYTES} bytes cannot carry it over, so nothing was written.`
-    : `Page ${row.slug} has timeline rows, and a remote replace over ${PAGE_MAX_BYTES} bytes cannot check which of them its content keeps, so nothing was written.`,
-    reason === 'takes'
-      ? `Replace the page with content of at most ${PAGE_MAX_BYTES} bytes (put_page keeps the hidden takes fence), or ask the user to write it locally on the brain host.`
+    : reason === 'facts'
+      ? `Page ${row.slug} holds facts rows that remote reads hide, and a remote replace over ${PAGE_MAX_BYTES} bytes cannot carry them over, so nothing was written.`
+      : `Page ${row.slug} has timeline rows, and a remote replace over ${PAGE_MAX_BYTES} bytes cannot check which of them its content keeps, so nothing was written.`,
+    reason === 'takes' || reason === 'facts'
+      ? `Replace the page with content of at most ${PAGE_MAX_BYTES} bytes (put_page keeps the hidden ${reason === 'takes' ? 'takes fence' : 'facts rows'}), or ask the user to write it locally on the brain host.`
       : `Upload the page again and commit it with drop_timeline: true only if deleting every timeline entry of the page is intended; otherwise replace it with content of at most ${PAGE_MAX_BYTES} bytes, which put_page checks entry by entry.`,
     { reason, docs: 'docs/guides/write-refusals.md#upload_protected_content' });
 }
