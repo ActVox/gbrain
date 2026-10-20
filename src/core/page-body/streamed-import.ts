@@ -101,7 +101,13 @@ type StreamedImportOptions = {
    * `put`, and `head` replaces the file's first `skip` bytes after its BOM (capture's merged frontmatter). The
    * caller passes `<slug>.md` as the relative path.
    */
-  content?: { head?: { skip: number; bytes: Uint8Array }; provenance?: { source_kind: string | null; source_uri: string | null; ingested_via: string | null } };
+  content?: { head?: { skip: number; bytes: Uint8Array }; provenance?: { source_kind: string | null; source_uri: string | null; ingested_via: string | null };
+    /**
+     * A remote writer's page (commit_page_upload, upload-streamed.ts): `gate` names the tier the write gate assesses
+     * from the page's frontmatter (put_page's, not the source owner's), gate-owned markers are stripped as put_page
+     * strips them, and `stamp` writes the server's trust marker into the frontmatter.
+     */
+    writer?: { gate(frontmatter: Record<string, unknown>): Promise<StreamedGateInput>; stamp(frontmatter: Record<string, unknown>): void } };
   /**
    * A managed import's preparation (import-prepare.ts): the file must hash to
    * `sha256` (the admitted bytes), the page base is the caller's snapshot, and
@@ -115,6 +121,9 @@ type StreamedImportOptions = {
     moved?: boolean;
     prepare(prepared: StreamedPreparedImport): Promise<ImportResult> };
 };
+
+/** The write gate's input for a streamed page: the tier it assesses and the write's origin. */
+export type StreamedGateInput = Awaited<ReturnType<typeof ownerSourceGateInput>>;
 
 /** A coordinated streamed import ready to publish: no parsed body strings exist, only the page's frontmatter. */
 export type StreamedPreparedImport = Omit<PreparedContentImport, 'parsedPage'> & { frontmatter: Record<string, unknown> };
@@ -356,8 +365,10 @@ async function importScanned(engine: BrainEngine, input: { file: FileHandle; bom
   const read = (start: number, end: number) => readChecked(file, bom, prefix, size, digests, drift, start, end);
   parsed.title = sanitizeText(parsed.title);
   delete parsed.frontmatter[QUARANTINE_OVERRIDE_KEY];
-  const writeGate = await ownerSourceGateInput(engine, sourceId, parsed.frontmatter);
-  stripGateOwnedMarkers(parsed, { preserveGateMarkers: true, writeGate });
+  const writer = opts.content?.writer;
+  const writeGate = writer ? await writer.gate(parsed.frontmatter) : await ownerSourceGateInput(engine, sourceId, parsed.frontmatter);
+  stripGateOwnedMarkers(parsed, { preserveGateMarkers: !writer, writeGate });
+  writer?.stamp(parsed.frontmatter);
   const sanity = await loadImportSanityConfig(engine);
   if (writeGateApplies(writeGate.tier, sanity.writeGate ?? DEFAULT_WRITE_GATE_CONFIG)) return hold(slug, size, `the write gate scans the whole body of a ${writeGate.tier} page`);
   const bodyBytes = scan.truthBytes + (scan.timelineBytes ? 1 + scan.timelineBytes : 0);

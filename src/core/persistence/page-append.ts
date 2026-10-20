@@ -151,12 +151,12 @@ function parseAppendInput(input: AppendPageInput): AppendIntent {
  * Admit one append (append_page, and lane 3b's commit_page_upload for mode 'append' with `body_ref`) and wait for its
  * receipt as put_page does. A `tail_changed` refusal carries the current tail digest when the caller may see it.
  */
-export async function admitPageAppend(ctx: OperationContext, input: AppendPageInput): Promise<Record<string, unknown>> {
+export async function admitPageAppend(ctx: OperationContext, input: AppendPageInput, opts: { stagedBody?: true } = {}): Promise<Record<string, unknown>> {
   const intent = parseAppendInput(input);
   const params = { slug: input.slug, ...(input.source_id !== undefined ? { source_id: input.source_id } : {}), request_id: input.request_id,
     ...(input.wait_ms !== undefined ? { wait_ms: input.wait_ms } : {}), ...intent };
   try {
-    return await submitPageMutation(ctx, { operation: 'append_page', params });
+    return await submitPageMutation(ctx, { operation: 'append_page', params, ...opts });
   } catch (error) {
     if (!(error instanceof OperationError) || (error.canonical ?? error.code) !== 'tail_changed') throw error;
     const sourceId = String(error.receiptFields?.source_id ?? input.source_id ?? ctx.sourceId ?? 'default');

@@ -184,6 +184,7 @@ test/large-pages/streamed-import-drift.test.ts
 test/large-pages/streamed-sync-origin-b14.test.ts
 test/large-pages/stuck-recovery-large.slow.test.ts
 test/large-pages/upload-binding.test.ts
+test/large-pages/upload-over-ceiling.test.ts
 test/large-pages/v252-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts

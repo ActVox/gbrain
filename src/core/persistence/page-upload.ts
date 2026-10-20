@@ -9,13 +9,14 @@
  * sessions under the counter row locks, so a session a cascade removed never
  * keeps its capacity.
  *
- * A commit admits an ordinary put_page whose intent carries
- * `body_ref: {kind: 'staging', staging_id, sha256, bytes}` instead of the
- * content; `prepareStagedUpload` reads the sealed parts back, verifies them
- * against the reference and prepares the put_page as if the content had been
- * sent, so every put_page rule (remote sanitizing, trust, the timeline
- * omission and shrink guards, the revision check under the page lock) applies.
- * Pages up to the single-string ceiling (PAGE_MAX_BYTES) commit this way.
+ * A commit admits an ordinary put_page (or, for mode append, an append_page)
+ * whose intent carries `body_ref: {kind: 'staging', staging_id, sha256, bytes}`
+ * instead of the text; `withStagedUpload` binds the preparation to the sealed
+ * session and commits it in the write's publication. A put_page body within the
+ * single-string ceiling (PAGE_MAX_BYTES) is read back and prepared as if the
+ * content had been sent, so every put_page rule (remote sanitizing, trust, the
+ * timeline omission and shrink guards, the revision check under the page lock)
+ * applies; a larger one streams through upload-streamed.ts.
  */
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
@@ -27,6 +28,7 @@ import { ENSURE_COUNTERS_SQL, LOCK_COUNTERS_SQL } from './journal.ts';
 import { BRAIN_STAGED_KEY, RELEASE_STAGED_CTE, readUploadLimits, stagedCounterKeys, stagedQuotaExhausted } from './limits.ts';
 import type { Principal, SqlEngine, WriteRequest } from './model.ts';
 import { timelineSectionOf } from './timeline-omission.ts';
+import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 
 export type UploadMode = 'create' | 'replace' | 'append';
 export type UploadState = 'open' | 'sealed' | 'prepared' | 'committed' | 'aborted' | 'expired';
@@ -243,16 +245,28 @@ export function isStagingBodyRef(value: unknown): value is StagingBodyRef {
   return !!ref && typeof ref === 'object' && ref.kind === 'staging' && typeof ref.staging_id === 'string' && typeof ref.sha256 === 'string' && Number.isSafeInteger(ref.bytes);
 }
 
+/** @internal Work counters of the staged-body readers: whole-body strings built, streamed preparations, largest part held. */
+export const stagedUploadWork = { wholeTexts: 0, streamed: 0, largestPart: 0 };
+
+/** The staged parts of a body reference in order, one part at a time; null at a gap. */
+export async function* stagedUploadParts(engine: SqlEngine, ref: StagingBodyRef): AsyncIterable<Uint8Array | null> {
+  for (let part = 0, at = 0; at < ref.bytes; part++) {
+    const [stored] = await engine.executeRaw<{ byte_start: unknown; body: Uint8Array }>(
+      'SELECT byte_start, body FROM page_body_staging_parts WHERE staging_id = $1::uuid AND part_no = $2', [ref.staging_id, part]);
+    if (!stored || Number(stored.byte_start) !== at) { yield null; return; }
+    stagedUploadWork.largestPart = Math.max(stagedUploadWork.largestPart, stored.body.byteLength);
+    at += stored.body.byteLength;
+    yield stored.body;
+  }
+}
+
 /** The staged page text a body reference names, verified against its byte count and sha256; null when it no longer matches. */
 export async function stagedUploadText(engine: SqlEngine, ref: StagingBodyRef): Promise<string | null> {
-  const parts = await engine.executeRaw<{ part_no: unknown; byte_start: unknown; body: Uint8Array }>(`SELECT part_no, byte_start, body FROM page_body_staging_parts
-    WHERE staging_id = $1::uuid ORDER BY part_no`, [ref.staging_id]);
-  let at = 0;
+  stagedUploadWork.wholeTexts++;
   const buffers: Buffer[] = [];
-  for (const [index, part] of parts.entries()) {
-    if (Number(part.part_no) !== index || Number(part.byte_start) !== at) return null;
-    buffers.push(Buffer.from(part.body.buffer, part.body.byteOffset, part.body.byteLength));
-    at += part.body.byteLength;
+  for await (const part of stagedUploadParts(engine, ref)) {
+    if (!part) return null;
+    buffers.push(Buffer.from(part.buffer, part.byteOffset, part.byteLength));
   }
   const body = Buffer.concat(buffers);
   if (body.byteLength !== ref.bytes || createHash('sha256').update(body).digest('hex') !== ref.sha256) return null;
@@ -262,25 +276,20 @@ export async function stagedUploadText(engine: SqlEngine, ref: StagingBodyRef): 
 interface Publishable { apply(tx: BrainEngine, preimage?: never): Promise<Record<string, unknown>> }
 
 /**
- * Preparation of a put_page whose intent names a sealed upload session: the session must still be the sealed upload
- * of the request's principal, source and slug, and its parts must match the reference. `prepare` gets the request with
- * the staged text as its content (and the timeline section put_page admission records for content); its publication
- * re-checks the session under a row lock, and the same transaction marks it committed and releases its reservation.
+ * A write whose intent names a sealed upload session (put_page, or append_page with mode append): the session must
+ * still be the sealed upload of the request's principal, source and slug, matching the reference. `prepare` builds the
+ * write; its publication re-checks the session under a row lock, and the same transaction marks it committed and
+ * releases its reservation.
  */
-export async function prepareStagedUpload<T extends Publishable>(engine: BrainEngine, row: WriteRequest, prepare: (row: WriteRequest) => Promise<T>): Promise<T> {
-  const intent = row.intent as Record<string, unknown>;
-  const ref = intent.body_ref as StagingBodyRef;
+export async function withStagedUpload<T extends Publishable>(engine: BrainEngine, row: WriteRequest, prepare: (ref: StagingBodyRef) => Promise<T>): Promise<T> {
+  const ref = (row.intent as Record<string, unknown>).body_ref as StagingBodyRef;
   const [staging] = await engine.executeRaw<{ state: string; principal_kind: string; principal_id: string; source_id: string; slug: string; declared_bytes: unknown; sha: string }>(
     `SELECT state, principal_kind, principal_id, source_id, slug, declared_bytes, encode(declared_sha256, 'hex') AS sha FROM page_body_stagings
       WHERE id = $1::uuid AND kind = 'upload'`, [ref.staging_id]);
   if (!staging || staging.principal_kind !== row.principal_kind || staging.principal_id !== row.principal_id || staging.source_id !== row.source_id
     || staging.slug !== row.slug || Number(staging.declared_bytes) !== ref.bytes || staging.sha !== ref.sha256) throw bodyStagingGoneError(row.slug, ref.staging_id, null);
   if (staging.state !== 'sealed') throw bodyStagingGoneError(row.slug, ref.staging_id, staging.state);
-  const content = await stagedUploadText(engine, ref);
-  if (content === null) throw bodyStagingGoneError(row.slug, ref.staging_id, null);
-  const { body_ref: _ref, ...rest } = intent;
-  const prepared = await prepare({ ...row, intent: { ...rest, content,
-    ...(rest.kind === undefined && rest.timeline_section === undefined ? { timeline_section: timelineSectionOf(content, row.slug) } : {}) } });
+  const prepared = await prepare(ref);
   const apply = prepared.apply.bind(prepared);
   prepared.apply = async (tx, preimage) => {
     const [held] = await tx.executeRaw<{ state: string }>('SELECT state FROM page_body_stagings WHERE id = $1::uuid FOR UPDATE', [ref.staging_id]);
@@ -290,4 +299,26 @@ export async function prepareStagedUpload<T extends Publishable>(engine: BrainEn
     return outcome;
   };
   return prepared;
+}
+
+/** `prepare` under withStagedUpload when the request's intent names an upload session (an append upload), else as is. */
+export async function withStagedBodyIf<T extends Publishable>(engine: BrainEngine, row: WriteRequest, prepare: () => Promise<T>): Promise<T> {
+  return isStagingBodyRef(row.intent?.body_ref) ? withStagedUpload(engine, row, prepare) : prepare();
+}
+
+/**
+ * Preparation of a put_page whose intent names a sealed upload session. A body within the single-string ceiling
+ * (PAGE_MAX_BYTES) is read back and `prepare` gets the request with it as its content (and the timeline section put_page
+ * admission records for content), so every put_page rule applies; a larger body streams from its parts through the
+ * segmented import (upload-streamed.ts) and is never held as one string.
+ */
+export async function prepareStagedUpload<T extends Publishable>(engine: BrainEngine, row: WriteRequest, prepare: (row: WriteRequest) => Promise<T>): Promise<T> {
+  return withStagedUpload(engine, row, async ref => {
+    if (ref.bytes > PAGE_MAX_BYTES) return (await import('./upload-streamed.ts')).prepareStreamedUpload(engine, row, ref) as unknown as Promise<T>;
+    const content = await stagedUploadText(engine, ref);
+    if (content === null) throw bodyStagingGoneError(row.slug, ref.staging_id, null);
+    const { body_ref: _ref, ...rest } = row.intent as Record<string, unknown>;
+    return prepare({ ...row, intent: { ...rest, content,
+      ...(rest.kind === undefined && rest.timeline_section === undefined ? { timeline_section: timelineSectionOf(content, row.slug) } : {}) } });
+  });
 }
