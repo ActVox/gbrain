@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.328.0] - 2026-10-20
+
+**A Google API that's disabled in your OAuth project is now reported as itself, all at once, instead of looking like a different account.** When Gmail, Calendar or People was disabled (or a scope wasn't granted), a managed Google source could not read the account, so the sync failed or refused with `connector_account_changed`, and setup only found out one API at a time. The account now resolves through Google's sign-in identity, the services that work keep syncing, and setup, `gbrain google status` and doctor name every disabled API with its project and enable link in one report.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed source whose Gmail (or People) API is disabled, other services fine | the whole sync failed with `api_not_enabled`, or refused as an account change | the account resolves through userinfo, the other services sync, the run is `partial` and names the disabled API |
+| Nothing can name the account because of a network failure | refused as `connector_account_changed` (`account_unresolved`), and autopilot skipped the source | fails with the network error and retries next interval |
+| A credential that really belongs to another account | refused `connector_account_changed` | unchanged |
+| `gbrain google setup` with two APIs disabled | registered the source, then failed one API per sync | stops before registering (exit 2, `status: api_access_blocked`) naming every disabled API with its project and console link, every ungranted scope, and a narrower `--services` command for what already works |
+| `gbrain google status` | refresh and calendar checks only | also `accounts[].api_access`, with `ok: false` and exit 1 while an API is disabled or a scope is missing |
+| A Google 403 "insufficient authentication scopes" on a calendar read | reported as `calendar_unreadable` (pick another calendar) | `scope_missing`, fixed with `gbrain google connect --reauth <email>` |
+
+### What to watch for after you upgrade
+
+- Run `gbrain google status`. If it lists `api_access` problems, open each enable link (only the Google Cloud project owner can enable an API), or reauth for a missing scope, then run it again.
+- Doctor's new `google_api_access` check reads what the last sync recorded; it makes no network call, so it clears after the next sync reaches the API.
+
+### Itemized changes
+
+- New doctor check `google_api_access` (operator resolution).
+- `gbrain google setup` probes every requested service before registering a source; `gbrain google status` probes the services each linked source syncs.
+- A disabled-API error carries the API, its title, the project and the enable link from Google's error body; only Google Cloud console links are relayed.
+- When the Gmail label list fails, the loop-exclusion log says the label names could not be checked rather than that they are not labels.
+
 ## [0.60.327.0] - 2026-10-20
 
 **Facts keep their words again, and a brain whose facts already lost them can get them back. The embed sweep for changed chunks now finishes on large brains.** Fact extraction ran the prompt-injection filter over the text it saved, and one rule matched the word "System" before a parenthesis, so "Acme Business System (ABS)" was saved as "Acme Business [redacted](ABS)" in the fact, its page's `## Facts` fence and its search chunks. Separately, the sweep that re-embeds chunks whose text changed was one statement over the whole brain; on a large brain it hit the statement timeout every run, from embed jobs and from the hourly maintenance pass, and kept nothing.
