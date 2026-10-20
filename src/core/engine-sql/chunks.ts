@@ -665,7 +665,8 @@ export async function invalidateContentDriftBatch(
 /**
  * A whole content-drift pass with no saved cursor, as consecutive bounded
  * batches (`invalidateContentDriftBatch`), each in its own transaction from
- * `inTransaction`. Returns the chunk count invalidated. The embed paths run the
+ * `inTransaction`; a batch shorter than its limit ends the pass. Returns the
+ * chunk count invalidated. The embed paths run the
  * resumable, budgeted pass in content-drift-sweep.ts instead.
  */
 export async function invalidateContentDriftEmbeddings(
@@ -677,8 +678,8 @@ export async function invalidateContentDriftEmbeddings(
     let drifted = 0;
     for (;;) {
       const batch = await invalidateContentDriftBatch(inTransaction, column, { ...opts, afterChunkId, limit: CONTENT_DRIFT_BATCH_ROWS });
-      if (batch.lastChunkId === null) return drifted;
       drifted += batch.drifted;
+      if (batch.lastChunkId === null || batch.checked < CONTENT_DRIFT_BATCH_ROWS) return drifted;
       afterChunkId = batch.lastChunkId;
     }
   }
