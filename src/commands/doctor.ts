@@ -398,7 +398,6 @@ export async function buildChecks(
   connectError?: unknown,
   // #6696: the run's deadline (started by the CLI before connecting) and a remote caller's readable sources.
   deadline: DoctorDeadline = startDoctorDeadline(args),
-  // #7142: lastKnown / entryBudgetOverrideMs / refreshOnly: the CLI run and the doctor-refresh job (./doctor/last-known.ts).
   remoteScope: { sourceIds?: string[]; lastKnown?: 'cli' | 'refresh'; entryBudgetOverrideMs?: number; refreshOnly?: boolean } = {},
 ): Promise<Check[]> {
   const jsonOutput = args.includes('--json');
