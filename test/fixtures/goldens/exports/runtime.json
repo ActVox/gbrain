@@ -854,6 +854,7 @@
         "releaseLock"
       ],
       "./search/evidence-delivery": [
+        "AUTO_BLOCK_CHAR_CAP",
         "AUTO_PACKINGS",
         "AUTO_PACKING_CONFIG_KEY",
         "DEFAULT_AUTO_PACKING",

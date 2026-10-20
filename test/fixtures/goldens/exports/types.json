@@ -747,6 +747,7 @@
           "answerability?: AnswerabilityVerdict | undefined",
           "autocut?: AutocutDecision | undefined",
           "cache?: { status: \"hit\" | \"miss\" | \"disabled\"; similarity?: number; age_seconds?: number; } | undefined",
+          "collapse?: CollapseDecision | undefined",
           "cosine_rescore?: \"js_fallback\" | undefined",
           "decide?: Partial<Record<\"rerank\" | \"intent\" | \"evidence\" | \"answerable\" | \"injection\" | \"recall_needed\" | \"triage\" | \"grounding\" | \"conflict\", DecideSlotMeta>> | undefined",
           "degraded?: DegradedStageEntry[] | undefined",
@@ -1478,10 +1479,12 @@
           "base_score?: number | undefined",
           "blend_norm_rrf?: number | undefined",
           "chronicle_boost?: number | undefined",
+          "chunk_chars?: number | undefined",
           "chunk_id: number",
           "chunk_index: number",
           "chunk_source: \"timeline\" | \"compiled_truth\" | \"fenced_code\"",
           "chunk_text: string",
+          "collapsed?: CollapsedRef[] | undefined",
           "content_flag?: { reason: string; detail: string; } | undefined",
           "content_hash?: string | null | undefined",
           "cosine?: number | undefined",
@@ -1499,6 +1502,7 @@
           "fact_row?: { id: number; valid_from: string; valid_until: string | null; } | undefined",
           "feedback_boost?: number | undefined",
           "follow_up?: { op: \"recall\"; args: Record<string, string>; } | undefined",
+          "fused_score?: number | undefined",
           "generated_demotion?: number | undefined",
           "graph_adjacency_boost?: number | undefined",
           "graph_adjacency_hits?: number | undefined",
@@ -1506,6 +1510,7 @@
           "graph_cross_source_hits?: number | undefined",
           "graph_session_demoted?: boolean | undefined",
           "graph_session_prefix?: string | undefined",
+          "image_page?: true | undefined",
           "injection_p?: number | undefined",
           "injection_suspected?: true | undefined",
           "keyword_hit?: boolean | undefined",
@@ -1517,7 +1522,10 @@
           "page_id: number",
           "page_slug?: string | undefined",
           "provenance?: \"generated\" | undefined",
+          "rank_prior?: number | undefined",
+          "rank_score?: number | undefined",
           "recency_boost?: number | undefined",
+          "redirect_to?: string | undefined",
           "relational?: RelationalEvidence | undefined",
           "relational_hop?: number | undefined",
           "relational_path?: string[] | undefined",
@@ -7229,6 +7237,13 @@
     "./search/evidence-delivery": [
       {
         "kind": "variable",
+        "name": "AUTO_BLOCK_CHAR_CAP",
+        "signature": [
+          "12000"
+        ]
+      },
+      {
+        "kind": "variable",
         "name": "AUTO_PACKINGS",
         "signature": [
           "readonly [\"off\", \"cap_only\", \"breadth_capped\", \"depth_first\"]"
@@ -7423,6 +7438,7 @@
       {
         "kind": "interface",
         "members": [
+          "blockCharCap?: number | undefined",
           "budgetClamped?: { requested: number; max: number; } | undefined",
           "budgetExplicit: boolean",
           "budgetTokens: number",
@@ -7811,7 +7827,7 @@
         "kind": "function",
         "name": "withLongPagePolicy",
         "signature": [
-          "(engine: BrainEngine, plan: EvidencePlan | null) => Promise<EvidencePlan | null>"
+          "(engine: BrainEngine, input: EvidencePlan | null) => Promise<EvidencePlan | null>"
         ]
       }
     ],
@@ -8998,6 +9014,7 @@
           "answerability?: AnswerabilityVerdict | undefined",
           "autocut?: AutocutDecision | undefined",
           "cache?: { status: \"hit\" | \"miss\" | \"disabled\"; similarity?: number; age_seconds?: number; } | undefined",
+          "collapse?: CollapseDecision | undefined",
           "cosine_rescore?: \"js_fallback\" | undefined",
           "decide?: Partial<Record<\"rerank\" | \"intent\" | \"evidence\" | \"answerable\" | \"injection\" | \"recall_needed\" | \"triage\" | \"grounding\" | \"conflict\", DecideSlotMeta>> | undefined",
           "degraded?: DegradedStageEntry[] | undefined",
@@ -9482,10 +9499,12 @@
           "base_score?: number | undefined",
           "blend_norm_rrf?: number | undefined",
           "chronicle_boost?: number | undefined",
+          "chunk_chars?: number | undefined",
           "chunk_id: number",
           "chunk_index: number",
           "chunk_source: \"timeline\" | \"compiled_truth\" | \"fenced_code\"",
           "chunk_text: string",
+          "collapsed?: CollapsedRef[] | undefined",
           "content_flag?: { reason: string; detail: string; } | undefined",
           "content_hash?: string | null | undefined",
           "cosine?: number | undefined",
@@ -9503,6 +9522,7 @@
           "fact_row?: { id: number; valid_from: string; valid_until: string | null; } | undefined",
           "feedback_boost?: number | undefined",
           "follow_up?: { op: \"recall\"; args: Record<string, string>; } | undefined",
+          "fused_score?: number | undefined",
           "generated_demotion?: number | undefined",
           "graph_adjacency_boost?: number | undefined",
           "graph_adjacency_hits?: number | undefined",
@@ -9510,6 +9530,7 @@
           "graph_cross_source_hits?: number | undefined",
           "graph_session_demoted?: boolean | undefined",
           "graph_session_prefix?: string | undefined",
+          "image_page?: true | undefined",
           "injection_p?: number | undefined",
           "injection_suspected?: true | undefined",
           "keyword_hit?: boolean | undefined",
@@ -9521,7 +9542,10 @@
           "page_id: number",
           "page_slug?: string | undefined",
           "provenance?: \"generated\" | undefined",
+          "rank_prior?: number | undefined",
+          "rank_score?: number | undefined",
           "recency_boost?: number | undefined",
+          "redirect_to?: string | undefined",
           "relational?: RelationalEvidence | undefined",
           "relational_hop?: number | undefined",
           "relational_path?: string[] | undefined",
