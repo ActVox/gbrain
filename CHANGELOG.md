@@ -10,6 +10,32 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.326.0] - 2026-10-20
+
+**Managed sync works on Postgres 15 again, and a database error in a write receipt now says what failed.** On a Postgres 15 brain every managed sync stopped at its checkpoint with `storage_error` (PostgreSQL 42601, `syntax_error`), run after run, because the statement that merges `sources.config` used the `IS JSON` predicate, which only Postgres 16 and newer parse. The receipt kept only the error class and SQLSTATE, so nobody could tell which statement failed. Both are fixed. A new CI lane now runs the write, sync, jobs and migration suites on Postgres 15 for every full run, and a unit-tier check refuses Postgres 16+ only SQL in `src/`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Managed sync, put_page with a slug-root mode, source config updates, archive/restore and the shared-skills opt-out on Postgres 15 | every statement that merges `sources.config` failed to parse (42601); the managed sync checkpoint never committed | the merge uses `gbrain_try_jsonb(text)` (migration v263), which parses on Postgres 15, 16 and 17 and PGLite |
+| Doctor `jsonb_integrity` and `gbrain repair-jsonb` on Postgres 15 | `pg_input_is_valid` (Postgres 16+) failed the check | the same `gbrain_try_jsonb` guard |
+| A double-encoded config or dream-breaker map whose text is JSON but not jsonb (a `\u0000` escape) | passed `IS JSON`, then the cast raised and the whole update failed, on every server | reads as an empty object, like other unparseable text |
+| A write that failed on an unexpected database error | the receipt named the class and SQLSTATE only | owner-side the receipt also keeps `error_text` (the server message; object names survive only in known catalog messages or when the statement names them, any other quoted run is replaced by `…`), `statement` (the SQL's keywords, identifiers and operators, every literal, number and comment replaced, never parameters) and `position`; `gbrain write-request <id> --json` on the brain host prints `error_detail`, and the consumer log line carries the same fields |
+
+### What to watch for after you upgrade
+
+- On Postgres 15 the first sync after the upgrade publishes the checkpoint that kept failing. The failed checkpoint receipts from before then count as superseded and stop warning; nothing needs replaying.
+- Remote and agent readers of a receipt see no new field. A PL/pgSQL `RAISE` (a trigger refusal) keeps no text, because it can carry page values.
+- #6719's older `0A000` receipts were written before error text was stored, so their cause stays unknown; once a later checkpoint of the source commits they count as historical (since #6834). A new failure of that kind now records its statement.
+
+### Itemized changes
+
+- New SQL function `gbrain_try_jsonb(text) RETURNS jsonb` (schema.sql and migration v263), used by the `sources.config` normalizer (`src/core/source-config-sql.ts`), the dream-breaker reset, doctor `jsonb_integrity` and `gbrain repair-jsonb`.
+- `ownerExceptionFailure` keeps a server-generated database error's redacted `error_text`, `statement` and `position`; `get_write_request` returns `error_detail` to trusted local callers only.
+- CI: an E2E job `postgres15-compat` runs `scripts/e2e-postgres15.txt` on `pgvector/pgvector:pg15` wherever the gated E2E jobs run and gates `e2e-status` (so `e2e-full-suite`); `bun run ci:ubicloud --lanes pg-arms,e2e --pg-image pgvector/pgvector:pg15` reruns the whole corpus on Postgres 15 as a diagnostic; `test/postgres15-sql-compat-7112.test.ts` fails on Postgres 16+ only SQL in `src/`.
+- Reported by @Justinn231 (#7112, who found the failing statement in the server log) and @Kkkkkuro (#6719).
+
 ## [0.60.325.0] - 2026-10-20
 
 **The crash robot no longer fails a run because a sync race made one round fewer than its count saw.** `sync_and_connector_race_direct_write` races a sync pass against a direct write to the same page; when the write is still in flight as round 1 reads its level, the page gets a round of its own, so the same schedule makes two or three rounds per pass. The robot counted every round's sync seams, so a fault drawn from a three-round count (`sync:level_chunk#7`, seed 5105) went unreached in a run that made two (#7124). How many chunks one Git read arrived in also followed pipe timing.
