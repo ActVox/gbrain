@@ -654,6 +654,8 @@ export interface UploadPageOptions {
   retries?: number;
   /** commit_page_upload's wait_ms. */
   wait_ms?: number;
+  /** begin_page_upload's reply when the caller already began the session (with this body's total_bytes and sha256). */
+  begun?: Record<string, unknown>;
 }
 
 /** A body held as one string. */
@@ -683,7 +685,7 @@ export async function uploadPageBody(call: UploadToolCall, begin: Record<string,
       try { return await fn(); } catch (error) { if (attempt >= retries || !transient(error)) throw error; }
     }
   };
-  const session = await retry(() => call('begin_page_upload', { ...begin, total_bytes: body.bytes, sha256: body.sha256 }));
+  const session = opts.begun ?? await retry(() => call('begin_page_upload', { ...begin, total_bytes: body.bytes, sha256: body.sha256 }));
   const uploadId = String(session.upload_id);
   const maxFrame = Number(session.part_max_frame_bytes);
   let part = Number(session.next_part);

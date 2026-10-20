@@ -133,16 +133,51 @@ for (const backend of testBackends()) {
       expect(region.stderr).toContain('--region must be one of: auto, truth, timeline');
     }, 60_000);
 
-    test('append over one request goes through an upload session and lands whole', async () => {
-      await cli(['put', 'notes/big-append', '--file', file('big-append.md', '# Big append\n\nstart\n')]);
+    const tailOf = async (slug: string) => {
+      const read = await cli(['get', slug, '--body', 'none', '--json']);
+      expect(read.code, read.stderr).toBe(0);
+      return /"tail_sha256":\s*"([0-9a-f]{64})"/.exec(read.stdout)![1]!;
+    };
+    const lines = (bytes: number) => {
       const line = `- ${ESCAPE_HEAVY} message\n`;
-      const text = line.repeat(Math.ceil((1.5 * 1024 * 1024) / Buffer.byteLength(line)));
-      const appended = await cli(['append', 'notes/big-append', '--file', file('big-append-text.md', text), '--json']);
+      return line.repeat(Math.ceil(bytes / Buffer.byteLength(line)));
+    };
+
+    test('a 2 MiB local append is one direct append_page, with no upload session, and honours --expect-tail', async () => {
+      await cli(['put', 'notes/big-append', '--file', file('big-append.md', '# Big append\n\nstart\n')]);
+      const before = await uploads();
+      const tail = await tailOf('notes/big-append');
+      const text = lines(2 * 1024 * 1024);
+      const path = file('big-append-text.md', text);
+      const stale = await cli(['append', 'notes/big-append', '--file', path, '--expect-tail', 'f'.repeat(64)]);
+      expect(stale.code).not.toBe(0);
+      expect(stale.stderr).toContain('tail_changed');
+      expect(printedBody((await cli(['get', 'notes/big-append'])).stdout).trimEnd()).toBe('# Big append\n\nstart');
+      const appended = await cli(['append', 'notes/big-append', '--file', path, '--expect-tail', tail, '--region', 'truth', '--separator', 'auto', '--json']);
       expect(appended.code, appended.stderr).toBe(0);
-      expect(await stored('notes/big-append')).toMatchObject({ body_storage: 'segmented' });
+      expect(await uploads()).toBe(before);
       const read = await cli(['get', 'notes/big-append']);
       expect(read.code, read.stderr).toBe(0);
       expect(printedBody(read.stdout).trimEnd()).toBe(`# Big append\n\nstart\n${text}`.trimEnd());
+    }, 300_000);
+
+    test('an append over the 4 MiB part cap goes through an upload session; --expect-tail, --region and --separator are refused there', async () => {
+      await cli(['put', 'notes/huge-append', '--file', file('huge-append.md', '# Huge append\n\nstart\n')]);
+      const before = await uploads();
+      const text = lines(4 * 1024 * 1024 + 64 * 1024);
+      const path = file('huge-append-text.md', text);
+      for (const flags of [['--expect-tail', await tailOf('notes/huge-append')], ['--region', 'truth'], ['--separator', 'none']]) {
+        const refused = await cli(['append', 'notes/huge-append', '--file', path, ...flags]);
+        expect(refused.code, refused.stderr).toBe(2);
+        expect(refused.stderr).toContain(`${flags[0]} apply only to an append whose call fits`);
+      }
+      expect(await uploads()).toBe(before);
+      const appended = await cli(['append', 'notes/huge-append', '--file', path, '--json']);
+      expect(appended.code, appended.stderr).toBe(0);
+      expect(await uploads()).toBe(before + 1);
+      const read = await cli(['get', 'notes/huge-append']);
+      expect(read.code, read.stderr).toBe(0);
+      expect(printedBody(read.stdout).trimEnd()).toBe(`# Huge append\n\nstart\n${text}`.trimEnd());
     }, 300_000);
 
     test('local put --file over the page ceiling on a managed brain goes through an upload session, byte-identical', async () => {

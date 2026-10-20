@@ -241,15 +241,26 @@ for (const backend of backends) describe(`upload sessions over every transport (
     });
   }, 600_000);
 
-  test('OAuth /mcp: the thin client append over one request rides an upload session (mode append)', async () => {
+  test('OAuth /mcp: the thin client appends directly within the part cap the server reports (--expect-tail honoured), and through an upload session above it', async () => {
     await withOAuthServe('append', async (_client, thinHome) => {
       const big = escapeHeavy(2 * MIB);
+      const huge = escapeHeavy(4 * MIB + 64 * 1024);
       writeFileSync(join(thinHome, 'big.md'), big);
+      writeFileSync(join(thinHome, 'huge.md'), huge);
       writeFileSync(join(thinHome, 'start.md'), '# Thin append');
       expect((await cli(['put', 'uploads/thin-append', '--file', join(thinHome, 'start.md')], thinHome)).code).toBe(0);
-      const appended = await cli(['append', 'uploads/thin-append', '--file', join(thinHome, 'big.md'), '--json'], thinHome);
-      expect(appended.code, appended.stdout + appended.stderr).toBe(0);
-      expected.set('uploads/thin-append', `# Thin append\n${big}`);
+      const head = await cli(['get', 'uploads/thin-append', '--body', 'none', '--json'], thinHome);
+      expect(head.code, head.stdout + head.stderr).toBe(0);
+      const tail = /"tail_sha256":\s*"([0-9a-f]{64})"/.exec(head.stdout)?.[1];
+      expect(tail, head.stdout).toBeDefined();
+      const direct = await cli(['append', 'uploads/thin-append', '--file', join(thinHome, 'big.md'), '--expect-tail', tail!, '--json'], thinHome);
+      expect(direct.code, direct.stdout + direct.stderr).toBe(0);
+      const refused = await cli(['append', 'uploads/thin-append', '--file', join(thinHome, 'huge.md'), '--region', 'truth'], thinHome);
+      expect(refused.code).toBe(2);
+      expect(refused.stderr).toContain('--region apply only to an append whose call fits');
+      const uploaded = await cli(['append', 'uploads/thin-append', '--file', join(thinHome, 'huge.md'), '--json'], thinHome);
+      expect(uploaded.code, uploaded.stdout + uploaded.stderr).toBe(0);
+      expected.set('uploads/thin-append', `# Thin append\n${big}\n${huge}`);
     });
   }, 600_000);
 
