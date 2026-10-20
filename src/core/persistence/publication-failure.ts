@@ -246,24 +246,23 @@ function sqlShape(query: string): { text: string; names: Set<string> } {
   return { text: out.length > STATEMENT_MAX ? `${out.slice(0, STATEMENT_MAX - 1)}…` : out, names };
 }
 
-const quotedName = (template: string) => new RegExp(`^${template.replace(/"N"/g, '"([A-Za-z_][A-Za-z0-9_$]{0,62})"')}$`);
 /** Server messages whose every double-quoted token is a catalog name: a bound or literal value cannot appear in them. */
 const CATALOG_NAMED = [
-  'null value in column "N" of relation "N" violates not-null constraint',
-  'duplicate key value violates unique constraint "N"',
-  'new row for relation "N" violates check constraint "N"',
-  'insert or update on table "N" violates foreign key constraint "N"',
-  'update or delete on table "N" violates foreign key constraint "N" on table "N"',
-].map(quotedName);
+  /^null value in column "([A-Za-z_][A-Za-z0-9_$]{0,62})" of relation "([A-Za-z_][A-Za-z0-9_$]{0,62})" violates not-null constraint$/,
+  /^duplicate key value violates unique constraint "([A-Za-z_][A-Za-z0-9_$]{0,62})"$/,
+  /^new row for relation "([A-Za-z_][A-Za-z0-9_$]{0,62})" violates check constraint "([A-Za-z_][A-Za-z0-9_$]{0,62})"$/,
+  /^insert or update on table "([A-Za-z_][A-Za-z0-9_$]{0,62})" violates foreign key constraint "([A-Za-z_][A-Za-z0-9_$]{0,62})"$/,
+  /^update or delete on table "([A-Za-z_][A-Za-z0-9_$]{0,62})" violates foreign key constraint "([A-Za-z_][A-Za-z0-9_$]{0,62})" on table "([A-Za-z_][A-Za-z0-9_$]{0,62})"$/,
+];
 /**
  * Server messages whose quoted token is a name from the statement text, kept only when the statement holds it as an
  * identifier: a bound value cast to regclass or regtype yields the same message with the value in it.
  */
 const STATEMENT_NAMED = [
-  'syntax error at or near "N"',
-  '(?:relation|column|type|function|schema|index|constraint|table) "N" does not exist',
-  'column "N" of relation "N" does not exist',
-].map(quotedName);
+  /^syntax error at or near "([A-Za-z_][A-Za-z0-9_$]{0,62})"$/,
+  /^(?:relation|column|type|function|schema|index|constraint|table) "([A-Za-z_][A-Za-z0-9_$]{0,62})" does not exist$/,
+  /^column "([A-Za-z_][A-Za-z0-9_$]{0,62})" of relation "([A-Za-z_][A-Za-z0-9_$]{0,62})" does not exist$/,
+];
 
 /**
  * #7112: a server message without the values it can carry. A message that matches a known template keeps its object
