@@ -53,7 +53,7 @@ async function runPlannerStats(ctx: DoctorContext): Promise<Check[]> {
     const gaps = await readExpressionIndexesWithoutStats(engine);
     const starved = await readVacuumStarvation(engine);
     const details = { engine: engine.kind, auto_analyze: autoAnalyze, checked: tables.map(t => t.table), stale, missing_search_statistics: missing,
-      expression_indexes_without_statistics: gaps, vacuum_starved: starved, fix: PLANNER_STATS_REPAIR_COMMAND };
+      expression_indexes_without_statistics: gaps, ...(starved.length ? { vacuum_starved: starved } : {}), fix: PLANNER_STATS_REPAIR_COMMAND };
     const expression = [expressionIndexText(gaps, engine.kind, autoAnalyze), starvationText(starved)].filter(Boolean).join(' ');
     if (stale.length === 0 && missing.length === 0 && gaps.length === 0 && starved.length === 0) {
       checks.push({ name: 'planner_stats_stale', status: 'ok', message: `Planner statistics are fresh on ${tables.length} hot tables.`, details });
