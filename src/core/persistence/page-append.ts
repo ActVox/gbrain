@@ -28,12 +28,15 @@ import { readFix } from '../ops/op-fix.ts';
 import { FACTS_FENCE_BEGIN, FACTS_FENCE_END } from '../facts-fence.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../takes-fence.ts';
 import { serializePageToMarkdown, timelineSentinelKind } from '../markdown.ts';
-import { isQuarantined } from '../quarantine.ts';
+import { buildContentFlagMarker, CONTENT_FLAG_KEY, isQuarantined } from '../quarantine.ts';
 import { sizeStateField } from '../page-embedding-budget.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
-import { loadImportSanityConfig } from '../import-screen.ts';
-import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
+import { contentRefusalError, loadImportSanityConfig } from '../import-screen.ts';
+import { assessWriteGate, DEFAULT_WRITE_GATE_CONFIG, frontmatterText, stripManagedFenceRows, writeGateApplies, writeGateDetail } from '../write-gate.ts';
+import { applyTrustAllowRules } from '../trust/allow-rules.ts';
+import { gateField, gateInput } from '../trust/gate-outcomes.ts';
+import { recordPageGateReceipt } from '../write-gate-store.ts';
 import { pageGateTrust, pageWriteTrust, recordAgentPageLowering, stampPageTrustMarker, storedPageTier } from '../trust/page-write.ts';
 import { readPageBodyPolicy } from '../page-body/limits.ts';
 import { isSegmentedPage, withoutBody } from '../page-body/page-shape.ts';
@@ -51,6 +54,7 @@ import { applySegmentedBody, materializedSnapshot, sealSegmentedPage } from './s
 import { StreamedFileContent } from './large-file.ts';
 import { pageDatabaseOnlyPublication, pageFix, pageRefusal, preparePageMutation, prepareFileTarget, snapshotLedger } from './page-prepare.ts';
 import { submitPageMutation } from './page-mutations.ts';
+import { stagedUploadText } from './page-upload.ts';
 import { isWriteRequestId } from './types.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
@@ -230,13 +234,11 @@ function revisionRefusal(row: WriteRequest, current: string): OperationError {
 async function appendedText(engine: BrainEngine, intent: AppendIntent): Promise<string> {
   if (intent.text !== undefined) return intent.text;
   const ref = intent.body_ref!;
-  const parts = await engine.executeRaw<{ body: Uint8Array }>('SELECT body FROM page_body_staging_parts WHERE staging_id=$1::uuid ORDER BY part_no', [ref.staging_id]);
-  const raw = Buffer.concat(parts.map(part => Buffer.from(part.body)));
-  if (raw.length !== ref.bytes || sha256Hex(raw) !== ref.sha256) {
+  const text = await stagedUploadText(engine, ref);
+  if (text === null) {
     throw opError('body_staging_expired', 'The staged text of this append is gone or changed, so nothing was appended.',
       'Begin a new upload session and send the text again.', { detail: JSON.stringify({ staging_id: ref.staging_id }) });
   }
-  const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw);
   assertAppendText(text);
   return text;
 }
@@ -301,13 +303,26 @@ export async function prepareSegmentedSpliceMutation(engine: BrainEngine, row: W
     loadActivePackForEngine(engine, { remote: row.authority.remote, sourceId: row.source_id }).catch(() => null), storedPageTier(engine, row.source_id, row.slug)]);
   const trust = pageWriteTrust(row, frontmatter);
   const gateTrust = pageGateTrust(row, trust, storedTier);
-  if (gateTrust?.tier === 'external_untrusted' && writeGateApplies(gateTrust.tier, (await loadImportSanityConfig(engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG)) return null;
+  const gateConfig = (await loadImportSanityConfig(engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG;
+  if (gateTrust?.tier === 'external_untrusted' && writeGateApplies(gateTrust.tier, gateConfig)) return null;
   const pageId = Number(stored.page.id);
   const page = await splicePage(engine, pageId);
   if (!page) return null;
   const built = await request.replacements(page);
   if (!built) return null;
+  const policy = await readPageBodyPolicy(engine);
+  const bodyBytes = built.replacements.reduce((n, r) => n + r.bytes.length - (r.end - r.start), page.bodyBytes);
+  if (bodyBytes > policy.maxBytes && bodyBytes > page.bodyBytes) {
+    throw contentRefusalError({ code: 'file_too_large', message: `File too large (${bodyBytes} bytes): page ${row.slug} would be over pages.max_bytes (${policy.maxBytes}), so nothing was written.` },
+      `Page ${row.slug} is near the configured page ceiling, so this write refuses on every retry. Start a new page for further text, or ask the owner to raise pages.max_bytes.`,
+      { fix: pageFix(row.source_id, row.slug) });
+  }
   stampPageTrustMarker(row, frontmatter, trust, storedTier);
+  // As put_page's gate (import-screen.ts settleContentDisposition), over the new text only: the stored text was assessed when it was written.
+  const gate = gateTrust && writeGateApplies(gateTrust.tier, gateConfig) ? await applyTrustAllowRules(engine, assessWriteGate([['title', stored.page.title],
+    ['body', stripManagedFenceRows(built.replacements.map(r => Buffer.from(r.bytes).toString('utf8')).join('\n'))], ['frontmatter', frontmatterText(frontmatter)]],
+    gateInput(gateTrust, row.id), gateConfig), { sourceId: row.source_id, sourceUri: gateTrust.origin?.source_uri ?? null }) : null;
+  if (gate?.verdict === 'flag' && !isQuarantined(frontmatter)) frontmatter[CONTENT_FLAG_KEY] = buildContentFlagMarker('instruction_like', writeGateDetail(gate));
   const content = row.worktree_id ? await splicedPageFile(engine, stored, frontmatter, built.replacements, built.appendTo) : undefined;
   if (content === null) return null;
   const quarantined = isQuarantined(frontmatter);
@@ -319,7 +334,7 @@ export async function prepareSegmentedSpliceMutation(engine: BrainEngine, row: W
   const abort = () => engine.setBodyStagingState(prepared.stagingId, 'aborted').catch(() => undefined);
   try {
     const file = content ? await prepareFileTarget(engine, row, stored, content, undefined, { activePack: pack?.manifest, remote: row.authority.remote }) : undefined;
-    const { flipRetireMaxRows } = await readPageBodyPolicy(engine);
+    const { flipRetireMaxRows } = policy;
     let applied: { complete: boolean } | null = null;
     return { observedRevision: stored.revision, file, ...await pageDatabaseOnlyPublication(engine, row, file), ...(trust ? { trust } : {}),
       apply: async tx => {
@@ -328,12 +343,15 @@ export async function prepareSegmentedSpliceMutation(engine: BrainEngine, row: W
           meta: { title: stored.page.title, type: stored.page.type, frontmatter: frontmatter as never, page_kind: page.pageKind as never } });
         const lowered = storedTier ? await recordAgentPageLowering(tx, row, { tier: storedTier, revision: stored.revision }) : null;
         if (applied.complete) await sealSegmentedPage(tx, pageId);
+        if (gate) await recordPageGateReceipt(tx, { slug: row.slug, sourceId: row.source_id, assessment: gate, requestId: row.id });
+        const gateOutcome = gateField(gate, `p:${row.source_id}/${row.slug}`, null);
         const [after] = await tx.executeRaw<{ body_bytes: string }>('SELECT body_bytes::text AS body_bytes FROM pages WHERE id=$1', [pageId]);
         return { ...remoteLinkHint(row), status: 'created_or_updated', slug: row.slug, source_id: row.source_id, chunks: prepared.rows.chunks, noop: false,
           searchable: quarantined ? false : applied.complete ? true : 'pending', ...(applied.complete ? {} : { projection: 'pending' }),
           ...(splice.rescanned ? { rescanned: true } : {}), ...(lowered ? { trust_lowered: lowered } : {}),
           body_bytes: Number(after?.body_bytes ?? prepared.body.body_bytes), chunks_new: prepared.rows.chunks, ...built.outcome,
-          ...await sizeStateField(tx, row.source_id, row.slug, { body_storage: 'segmented', body_bytes: prepared.body.body_bytes, frontmatter }) };
+          ...await sizeStateField(tx, row.source_id, row.slug, { body_storage: 'segmented', body_bytes: prepared.body.body_bytes, frontmatter }),
+          ...(gateOutcome ? { gate: gateOutcome } : {}) };
       },
       afterCommit: async target => {
         if (!applied) { await abort(); return; }

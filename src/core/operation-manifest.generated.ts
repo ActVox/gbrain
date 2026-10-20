@@ -896,6 +896,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "source_id": {
         "type": "string",
         "description": "Write source."
+      },
+      "wait_ms": {
+        "type": "number",
+        "description": "Commit wait ms (0-30000, default 5000)."
       }
     },
     "mutating": true,

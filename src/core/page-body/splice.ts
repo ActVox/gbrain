@@ -82,7 +82,7 @@ export interface SegmentedSplice {
  * @internal Deterministic work counters for the append and edit cost tests: bytes fed to the segmenter
  * ('segmented'), segment text bytes read back ('read') and manifest rows loaded ('rows'). Counts, never time.
  */
-export const spliceWork = { segmented: 0, read: 0, rows: 0 };
+export const spliceWork = { segmented: 0, read: 0, rows: 0, matches: 0 };
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -97,11 +97,19 @@ function positionFree(row: ManifestRow): boolean {
   return !opens(row.protectedRegions) && !opens(row.factsSlots);
 }
 
-/** Whether replacements touch a row, and its bytes with them applied ('first': the row starts its region, so an insertion at its start is its own). */
-function applyToRow(row: Pick<ManifestRow, 'byteStart' | 'byteLen'>, reps: readonly BodyReplacement[], first: boolean):
-  { touched: boolean; pieces: (bytes: Uint8Array) => Uint8Array[] } {
+/** The region a replacement belongs to; an insertion at truthBytes, the boundary, appends to truth. */
+const replacementRegion = (page: Pick<SplicePage, 'truthBytes' | 'bodyBytes'>, r: BodyReplacement): BodyRegion =>
+  page.bodyBytes > page.truthBytes && (r.start === r.end ? r.start > page.truthBytes : r.start >= page.truthBytes) ? 'timeline' : 'truth';
+
+/**
+ * Whether replacements touch a row, and its bytes with them applied ('first': the row starts its region, so an insertion
+ * at its start is its own). An insertion is owned by one row only: a row of the region it belongs to.
+ */
+function applyToRow(row: Pick<ManifestRow, 'byteStart' | 'byteLen' | 'region'>, reps: readonly BodyReplacement[], first: boolean,
+  regionOf: (r: BodyReplacement) => BodyRegion): { touched: boolean; pieces: (bytes: Uint8Array) => Uint8Array[] } {
   const start = Number(row.byteStart), end = start + row.byteLen;
-  const mine = reps.filter(r => r.start === r.end ? (r.start > start || (first && r.start === start)) && r.start <= end : r.start < end && r.end > start);
+  const mine = reps.filter(r => r.start === r.end
+    ? regionOf(r) === row.region && (r.start > start || (first && r.start === start)) && r.start <= end : r.start < end && r.end > start);
   return { touched: mine.length > 0, pieces: bytes => {
     const out: Uint8Array[] = [];
     let cur = start;
@@ -148,7 +156,8 @@ async function rowAt(engine: BrainEngine, page: SplicePage, p: number): Promise<
 }
 
 /** One region of the whole body with the replacements applied (the rescan path). */
-async function* virtualRegion(engine: BrainEngine, sourceId: string, rows: readonly ManifestRow[], reps: readonly BodyReplacement[], region: BodyRegion): AsyncIterable<Uint8Array> {
+async function* virtualRegion(engine: BrainEngine, sourceId: string, rows: readonly ManifestRow[], reps: readonly BodyReplacement[], region: BodyRegion,
+  regionOf: (r: BodyReplacement) => BodyRegion): AsyncIterable<Uint8Array> {
   const mine = rows.filter(row => row.region === region);
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   for (let i = 0; i < mine.length;) {
@@ -157,7 +166,7 @@ async function* virtualRegion(engine: BrainEngine, sourceId: string, rows: reado
     const batch = mine.slice(i, j);
     const texts = await readTexts(engine, sourceId, batch);
     for (const row of batch) {
-      for (const piece of applyToRow(row, reps, row === mine[0]).pieces(texts.get(hex(row.sha256))!)) {
+      for (const piece of applyToRow(row, reps, row === mine[0], regionOf).pieces(texts.get(hex(row.sha256))!)) {
         if (!piece.length) continue;
         spliceWork.segmented += piece.length;
         yield piece;
@@ -175,7 +184,8 @@ async function restageWhole(engine: BrainEngine, input: SegmentedSpliceInput, fl
   const delta = input.replacements.reduce((n, r) => n + r.bytes.length - (r.end - r.start), 0);
   return prepareSegmentedBody(engine, { sourceId: input.sourceId, slug: input.slug, title: page.title, type: page.type, frontmatter: input.frontmatter, tags: input.tags,
     live: { id: page.id, generation: page.generation, storage: 'segmented', title: page.title, type: page.type, flags: page.flags },
-    truth: virtualRegion(engine, input.sourceId, rows, input.replacements, 'truth'), timeline: virtualRegion(engine, input.sourceId, rows, input.replacements, 'timeline'),
+    truth: virtualRegion(engine, input.sourceId, rows, input.replacements, 'truth', r => replacementRegion(input.page, r)),
+    timeline: virtualRegion(engine, input.sourceId, rows, input.replacements, 'timeline', r => replacementRegion(input.page, r)),
     hasTimeline: page.bodyBytes > page.truthBytes, flags, declaredBytes: page.bodyBytes + delta, owner: input.owner, chunking: input.chunking });
 }
 
@@ -200,7 +210,7 @@ export async function spliceSegmentedBody(engine: BrainEngine, input: SegmentedS
   const flags = page.flags ?? {};
   if (!reps.length) throw new Error('spliceSegmentedBody: no replacements.');
   const hasTimeline = page.bodyBytes > page.truthBytes;
-  const regionOf = (r: BodyReplacement): BodyRegion => hasTimeline && (r.start === r.end ? r.start > page.truthBytes : r.start >= page.truthBytes) ? 'timeline' : 'truth';
+  const regionOf = (r: BodyReplacement): BodyRegion => replacementRegion(page, r);
   for (const r of reps) {
     const [lo, hi] = regionOf(r) === 'truth' ? [0, page.truthBytes] : [page.truthBytes, page.bodyBytes];
     if (lo === hi || r.start < lo || r.end > hi || (r.start === lo && r.end === hi && r.bytes.length === 0)) return null;
@@ -234,7 +244,7 @@ export async function spliceSegmentedBody(engine: BrainEngine, input: SegmentedS
     const replaced: ManifestRow[] = [];
     const exits: Partial<Record<BodyRegion, EntryState>> = {};
     const touchedAt = rows.map((row, i) => applyToRow(row, reps, base + i === 0 || (i > 0 && rows[i - 1]!.region !== row.region)
-      || (i === 0 && prior !== null && prior.region !== row.region)));
+      || (i === 0 && prior !== null && prior.region !== row.region), regionOf));
     const hasher = prior ? ContentHashStream.fromState(prior.hashState) : ContentHashStream.begin({ title: page.title, type: page.type });
     let byteStart = Number(rows[f]!.byteStart), lineStart = Number(rows[f]!.lineStart), seq = base + f;
     const push = (core: RowCore, text: Uint8Array, extra: Pick<NewRow, 'segment' | 'moved'>) => {
