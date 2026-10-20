@@ -137,7 +137,7 @@ export async function repairJsonb(opts: RepairOpts = { dryRun: false }): Promise
   // migrations, and the per-target catch below would turn its absence into "0 rows" while damaged rows stay.
   const [helper] = await sql.unsafe(`SELECT to_regprocedure('gbrain_try_jsonb(text)') IS NOT NULL AS installed`) as Array<{ installed: boolean }>;
   if (!helper?.installed) {
-    throw new Error('repair-jsonb needs the gbrain_try_jsonb function from schema migration v263, which this database does not have yet. Run: gbrain apply-migrations --yes --no-autopilot-install');
+    throw new Error('repair-jsonb needs the gbrain_try_jsonb function from schema migration v263, which this database does not have yet. Run gbrain apply-migrations first, then repair-jsonb again.');
   }
 
   // Progress on stderr only. Stdout is reserved for the JSON summary that
