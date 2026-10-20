@@ -12,6 +12,7 @@ import { readCapacityForecast } from '../src/core/persistence/capacity-forecast.
 import { readExtractionLag } from '../src/core/extraction-lag.ts';
 import { getDefaultSourcePath } from '../src/core/source-resolver.ts';
 import { mergeDbPlaneConfig } from '../src/cli/db-plane-config.ts';
+import { cleanupRetiredManagedMarkers } from '../src/core/persistence/deactivation.ts';
 import { freshBrainFactory, requestFixture } from './helpers/persistence-request-fixture.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -98,6 +99,19 @@ for (const kind of testBackends()) {
       const { result, statements } = await recordWaves(engine, () => getDefaultSourcePath(engine, tmpdir()));
       expect(result).toBe(root);
       expect(statements.filter(s => s.startsWith('SELECT local_path FROM sources WHERE id'))).toEqual([]);
+    });
+
+    check('the default source resolution sends tier 5 with tier 4 and the emptiness guard with the sole-source listing: two waves', async engine => {
+      await engine.executeRaw("INSERT INTO sources(id,name,local_path) VALUES('gbra133-sole','gbra133-sole','/nonexistent/gbra133-sole') ON CONFLICT(id) DO NOTHING");
+      const { result, waves } = await recordWaves(engine, () => getDefaultSourcePath(engine, tmpdir()));
+      expect(waves).toBeLessThanOrEqual(2);
+      expect(result).toBe('/nonexistent/gbra133-sole');
+    });
+
+    check('the retired-marker cleanup reads the persistence row and the deactivations together', async engine => {
+      const { result, waves } = await recordWaves(engine, () => cleanupRetiredManagedMarkers(engine));
+      expect(waves).toBeLessThanOrEqual(2);
+      expect(result).toEqual({ state: 'cleared', removed: [], pending: [] });
     });
   });
 }

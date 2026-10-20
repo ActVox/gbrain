@@ -200,6 +200,9 @@ async function resolveSourceIdChain(
   //    gstack at ~/gstack + plans at ~/gstack/plans) pick the deepest.
   //    #3880 active-over-archived tiering + parallel realpath both live in
   //    the shared resolveRegisteredPathMatch helper.
+  // GBRA-133: tier 5's config read is independent of the listing, so it is sent with it (unused when tier 4 wins).
+  const defaultRead = engine.getConfig('sources.default');
+  defaultRead.catch(() => {});
   const registered = seen.registered = await listRegisteredLocalPathSources(engine);
   const best = await resolveRegisteredPathMatch(registered, cwd);
   if (best) {
@@ -214,7 +217,7 @@ async function resolveSourceIdChain(
   // Silent-fallback tier per codex P1-F: an invalid `sources.default` config
   // value (operator hand-edit gone wrong, legacy underscore id) falls through
   // to tier 6 rather than throwing. Resolver stays robust to bad config.
-  const globalDefault = await engine.getConfig('sources.default');
+  const globalDefault = await defaultRead;
   if (globalDefault && isValidSourceId(globalDefault)) {
     await assertSourceExists(engine, globalDefault);
     return globalDefault;
@@ -323,6 +326,11 @@ async function pickSoleNonDefaultSource(
 ): Promise<string | null> {
   // archived column was added in v34 (v0.26.5). Older brains may not have
   // it — fall back to the un-archived query in that case via try/catch.
+  // GBRA-133: the emptiness guard's read is sent with the listing (one round trip); it is used only for a sole candidate.
+  const defaultPagesRead = engine.executeRaw<{ one: number }>(
+    `SELECT 1 AS one FROM pages WHERE source_id = 'default' AND deleted_at IS NULL LIMIT 1`,
+  );
+  defaultPagesRead.catch(() => {});
   let rows: Array<{ id: string }>;
   try {
     rows = await engine.executeRaw<{ id: string }>(
@@ -336,9 +344,7 @@ async function pickSoleNonDefaultSource(
   if (rows.length !== 1) return null;
   // #3070 emptiness guard: fire only when 'default' holds no active pages.
   try {
-    const defaultPages = await engine.executeRaw<{ one: number }>(
-      `SELECT 1 AS one FROM pages WHERE source_id = 'default' AND deleted_at IS NULL LIMIT 1`,
-    );
+    const defaultPages = await defaultPagesRead;
     if (defaultPages.length > 0) {
       // The flip must not be silent: one stray page in 'default' reroutes
       // every bare command away from the sole side-source, and the user
