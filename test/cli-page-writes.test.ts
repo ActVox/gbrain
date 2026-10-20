@@ -139,7 +139,10 @@ for (const backend of testBackends()) {
       const text = line.repeat(Math.ceil((1.5 * 1024 * 1024) / Buffer.byteLength(line)));
       const appended = await cli(['append', 'notes/big-append', '--file', file('big-append-text.md', text), '--json']);
       expect(appended.code, appended.stderr).toBe(0);
-      expect((await page('notes/big-append')).compiled_truth).toBe(`# Big append\n\nstart\n${text}`.trimEnd());
+      expect(await stored('notes/big-append')).toMatchObject({ body_storage: 'segmented' });
+      const read = await cli(['get', 'notes/big-append']);
+      expect(read.code, read.stderr).toBe(0);
+      expect(printedBody(read.stdout).trimEnd()).toBe(`# Big append\n\nstart\n${text}`.trimEnd());
     }, 300_000);
 
     test('local put --file over the page ceiling on a managed brain goes through an upload session, byte-identical', async () => {

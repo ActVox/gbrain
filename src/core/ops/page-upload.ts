@@ -25,6 +25,10 @@ import { sha256 } from '../persistence/digest.ts';
 import { isTerminal, type Principal } from '../persistence/model.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { contentSizeHold } from '../markdown.ts';
+import { readPageBodyPolicy } from '../page-body/limits.ts';
+import { contentRefusalError, loadImportSanityConfig } from '../import-screen.ts';
+import { DEFAULT_WRITE_GATE_CONFIG, writeGateApplies } from '../write-gate.ts';
+import { admitPageAppend } from '../persistence/page-append.ts';
 import {
   abortUpload, appendPart, expireIfLapsed, partBytes, partMaxFrameBytes, partSha256, readUpload, readUploadByRequest, reserveUpload,
   sealUpload, stagedSha256, transitionUploads, uploadExpired, uploadNotFound, uploadPartFrameBytes, type StagingBodyRef, type UploadMode, type UploadRow,
@@ -86,6 +90,26 @@ function invalidParam(message: string, suggestion: string): OperationError {
   return opError('invalid_params', message, suggestion);
 }
 
+/**
+ * A body over the single-string ceiling: create and replace go up to the brain's page ceiling (pages.max_bytes, the
+ * engine ceiling by default) through the segmented streamed preparation; an append stays within the ceiling (lane 3a
+ * reads appended text whole). A remote writer is refused at once where the write gate applies to an agent-written page,
+ * since the gate scans a whole body and commit would refuse the same way.
+ */
+async function assertLargeUploadAdmissible(ctx: OperationContext, mode: UploadMode, total: number): Promise<void> {
+  const ceiling = mode === 'append' ? PAGE_MAX_BYTES : Math.max(PAGE_MAX_BYTES, (await readPageBodyPolicy(ctx.engine)).maxBytes);
+  if (total > ceiling) {
+    throw opError('request_too_large', contentSizeHold(total, ceiling)!.message, mode === 'append'
+      ? `Nothing was staged. An append upload carries at most ${PAGE_MAX_BYTES} bytes; append the text in several uploads.`
+      : `Nothing was staged. Pages up to ${ceiling} bytes are stored and searchable on this brain; split the content into smaller pages.`);
+  }
+  if (ctx.remote !== false && mode !== 'append' && writeGateApplies('agent_written', (await loadImportSanityConfig(ctx.engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG)) {
+    throw contentRefusalError({ code: 'file_too_large', message: `Page too large (${total} bytes) for this writer: the write gate scans an agent-written page whole, and a page over ${PAGE_MAX_BYTES} bytes is never held whole.` },
+      `Nothing was staged. Split the content into pages of at most ${PAGE_MAX_BYTES} bytes; whether agent-written pages may skip the write gate (write_gate.agent_mode) is the brain host operator's decision.`,
+      { legacy_error: 'request_too_large' });
+  }
+}
+
 const begin_page_upload: Operation = {
   name: 'begin_page_upload',
   idempotent: true,
@@ -115,10 +139,7 @@ const begin_page_upload: Operation = {
     if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 1) {
       throw invalidParam('total_bytes must be a positive whole number of bytes.', 'Pass the UTF-8 byte length of the complete content.');
     }
-    if (total > PAGE_MAX_BYTES) {
-      throw opError('request_too_large', contentSizeHold(total, PAGE_MAX_BYTES)!.message,
-        `Nothing was staged. Pages up to ${PAGE_MAX_BYTES} bytes are stored and searchable; send a smaller page.`);
-    }
+    if (total > PAGE_MAX_BYTES) await assertLargeUploadAdmissible(ctx, mode, total);
     if (typeof p.sha256 !== 'string' || !SHA256_HEX.test(p.sha256)) throw invalidParam('sha256 must be 64 hex characters.', 'Pass the hex SHA-256 of the complete content\'s UTF-8 bytes.');
     if (p.request_id === undefined) throw invalidParam('request_id is required.', 'Pass a new UUID; send the same request_id again only to resume this upload.');
     const clientRequestId = parseWriteRequestId(p.request_id)!;
@@ -261,13 +282,6 @@ const abort_page_upload: Operation = {
   },
 };
 
-/** Lane 3a's `admitPageAppend` with this session as the appended text; wired at integration. */
-async function admitStagedAppend(_ctx: OperationContext, _input: { slug: string; source_id: string; request_id: string; body_ref: StagingBodyRef;
-  region: 'auto'; separator: 'auto'; preconditions: { expected_revision?: string } }): Promise<Record<string, unknown>> {
-  throw opError('unavailable', 'Committing an append upload is not available in this build; nothing was written.',
-    'Abort this upload, then append the text with append_page in parts no larger than one request.');
-}
-
 const commit_page_upload: Operation = {
   name: 'commit_page_upload',
   idempotent: true,
@@ -306,8 +320,12 @@ const commit_page_upload: Operation = {
     }
     const bodyRef: StagingBodyRef = { kind: 'staging', staging_id: row.id, sha256: row.declared_sha256, bytes: row.declared_bytes };
     if (row.mode === 'append') {
-      return admitStagedAppend(ctx, { slug: row.slug, source_id: row.source_id, request_id: row.client_request_id, body_ref: bodyRef, region: 'auto', separator: 'auto',
-        preconditions: row.base_revision ? { expected_revision: row.base_revision } : {} });
+      try {
+        return await admitPageAppend(ctx, { slug: row.slug, source_id: row.source_id, request_id: row.client_request_id, body_ref: bodyRef,
+          ...(row.base_revision ? { expected_revision: row.base_revision } : {}), ...(p.wait_ms !== undefined ? { wait_ms: p.wait_ms } : {}) }, { stagedBody: true });
+      } finally {
+        await settleCommit(ctx, principal, row).catch(() => undefined);
+      }
     }
     const params: Record<string, unknown> = { slug: row.slug, source_id: row.source_id, request_id: row.client_request_id, body_ref: bodyRef,
       ...(row.mode === 'replace' ? { expected_revision: row.base_revision } : {}),

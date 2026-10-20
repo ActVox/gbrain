@@ -287,7 +287,47 @@ for (const kind of testBackends()) {
       expect(await counters()).toEqual({ ...Object.fromEntries(Object.keys(await counters()).map(key => [key, [0, 0]])), ...before });
     }, 120_000);
 
-    test.todo('append mode commits through lane 3a admitPageAppend with the staged body_ref (wired at integration)', () => {});
+    test('append uploads commit in order through append_page, a second commit replays the receipt, and the reservation is released', async () => {
+      const slug = slugOf();
+      await createPage(slug, pageText('append-base', 2000));
+      const before = await counters();
+      const appended: string[] = [];
+      for (const tag of ['first', 'second']) {
+        const text = `\nAppended ${tag} block. ${`Notes for the ${tag} append. `.repeat(200)}\n`;
+        const session = await begin(slug, text, { mode: 'append' });
+        await send(session.upload_id, cut(text, 3));
+        const receipt = await call('commit_page_upload', { upload_id: session.upload_id });
+        expect(receipt.state).toBe('committed');
+        const again = await call('commit_page_upload', { upload_id: session.upload_id });
+        expect(again.request_id).toBe(receipt.request_id);
+        appended.push(text);
+      }
+      const truth = (await engine.getPage(slug, { sourceId: 'default' }))!.compiled_truth;
+      const first = truth.indexOf('Appended first block.'), second = truth.indexOf('Appended second block.');
+      expect(first).toBeGreaterThan(0);
+      expect(second).toBeGreaterThan(first);
+      expect(truth.split('Notes for the first append.').length - 1).toBe(200);
+      const [requests] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_requests WHERE slug = $1 AND operation = 'append_page'", [slug]);
+      expect(requests!.n).toBe(2);
+      const after = await counters();
+      for (const [key, value] of Object.entries(after)) expect([key, value]).toEqual([key, before[key] ?? [0, 0]]);
+    }, 120_000);
+
+    test('an append upload against a stale expected_revision refuses with revision_changed, appends nothing and releases its reservation', async () => {
+      const slug = slugOf();
+      await createPage(slug, pageText('append-stale', 2000));
+      const base = await revisionOf(slug);
+      const before = await counters();
+      const text = `\nStale append. ${'Never lands. '.repeat(100)}\n`;
+      const session = await begin(slug, text, { mode: 'append', expected_revision: base });
+      await send(session.upload_id, cut(text, 2));
+      await call('put_page', { slug, content: pageText('append-moved', 2000), expected_revision: base, request_id: randomUUID() });
+      const refused = await refusal('commit_page_upload', { upload_id: session.upload_id });
+      expect(refused.code).toBe('revision_changed');
+      expect((await engine.getPage(slug, { sourceId: 'default' }))!.compiled_truth).not.toContain('Stale append.');
+      const after = await counters();
+      for (const [key, value] of Object.entries(after)) expect([key, value]).toEqual([key, before[key] ?? [0, 0]]);
+    }, 120_000);
 
     const quotas: Array<[string, string, string, number]> = [
       ['open sessions per principal', 'persistence.limits.principal_uploads', 'open_uploads', 1],

@@ -264,8 +264,9 @@ export async function preparePageAdmission(ctx: OperationContext,
     }
   }
   const bodyRefKind = (input.params.body_ref as { kind?: unknown } | null | undefined)?.kind;
-  if (Object.hasOwn(input.params, 'body_ref') && (input.operation !== 'put_page' || Object.hasOwn(input.params, 'content')
-    || (input.stagedBody === true ? bodyRefKind !== 'staging' : input.managedFileImport !== true || bodyRefKind !== 'input_file'))) {
+  const staged = input.stagedBody === true && ['put_page', 'append_page'].includes(input.operation) && bodyRefKind === 'staging';
+  const imported = input.managedFileImport === true && input.operation === 'put_page' && bodyRefKind === 'input_file';
+  if (Object.hasOwn(input.params, 'body_ref') && ((!staged && !imported) || Object.hasOwn(input.params, 'content') || Object.hasOwn(input.params, 'text'))) {
     throw new OperationError('invalid_params', 'body_ref is reserved for commit_page_upload.',
       'Drop body_ref and send the page as content; a page larger than one request goes through begin_page_upload, upload_page_part and commit_page_upload.');
   }
