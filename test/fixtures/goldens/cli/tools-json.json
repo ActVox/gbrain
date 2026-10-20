@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 252798,
-    "stdoutSha256": "71b348f0e16ec33eeb7b856a2fa24821a5f971503416d541e00226572381ab56",
+    "stdoutBytes": 253412,
+    "stdoutSha256": "b9e70ca5be2a182ffcd38f87706591de3229831a3fe4222d0b7833caa495b027",
     "toolNames": [
       "remember",
       "entity",
@@ -410,7 +410,7 @@
         "scope": "write"
       },
       {
-        "description": "Read a page by slug. To edit: include_content:true, send `content` to put_page; or edit_page. >256 KB: outline+window, then `next`.",
+        "description": "Read a page; `section` or `grep` reads one part. Edit: include_content:true, `content` to put_page, or edit_page. >256 KB: outline+window, then `next`.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -420,10 +420,12 @@
           "body": "string?",
           "bytes": "object?",
           "content_only": "boolean?",
+          "context": "number?",
           "context_lines": "number?",
           "cursor": "string?",
           "fuzzy": "boolean?",
           "grammar_diagnostics": "boolean?",
+          "grep": "string?",
           "include_content": "boolean?",
           "include_deleted": "boolean?",
           "include_quarantined": "boolean?",
@@ -433,6 +435,7 @@
           "max_bytes": "number?",
           "min_trust": "string?",
           "outline_from": "number?",
+          "section": "string?",
           "slug": "string",
           "source_id": "string?",
           "view": "string?"
@@ -473,8 +476,12 @@
               "type": "object"
             },
             "content_only": {
-              "description": "Round-trip fields only.",
+              "description": "Round-trip fields.",
               "type": "boolean"
+            },
+            "context": {
+              "description": "With grep: paragraphs of context either side (default 1, max 5).",
+              "type": "number"
             },
             "context_lines": {
               "description": "Lines around around_chunk_id (20).",
@@ -485,15 +492,19 @@
               "type": "string"
             },
             "fuzzy": {
-              "description": "Fuzzy slug match.",
+              "description": "Fuzzy match.",
               "type": "boolean"
             },
             "grammar_diagnostics": {
               "description": "Also return every line-grammar finding for the page.",
               "type": "boolean"
             },
+            "grep": {
+              "description": "Only the paragraphs containing this text (case-insensitive substring, not a regex), with line numbers and total_matches.",
+              "type": "string"
+            },
             "include_content": {
-              "description": "Markdown + revision, to edit.",
+              "description": "Markdown + revision.",
               "type": "boolean"
             },
             "include_deleted": {
@@ -505,7 +516,7 @@
               "type": "boolean"
             },
             "include_timeline_entries": {
-              "description": "Timeline rows too.",
+              "description": "Timeline rows.",
               "type": "boolean"
             },
             "known_as_of": {
@@ -548,6 +559,10 @@
             "outline_from": {
               "description": "Outline next_from_index.",
               "type": "number"
+            },
+            "section": {
+              "description": "Only the section under this heading (case-insensitive, first match), with its heading_path.",
+              "type": "string"
             },
             "slug": {
               "description": "Page slug.",
