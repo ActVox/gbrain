@@ -57,6 +57,7 @@ const EXEMPT: Record<string, string> = {
   'src/core/repair/captured-facts.ts': 'owner repair of existing rows',
   'src/core/repair/consolidate-ties.ts': 'owner repair reopening the validity of existing facts (lifecycle)',
   'src/core/repair/extractor-facts.ts': 'owner repair of existing rows',
+  'src/core/repair/redacted-facts.ts': 'owner repair behind a preview hash: puts back into existing fact rows the words a stored source page proves; fenced rows publish through put_page, which runs the gate',
   'src/core/repair/facts-rehome.ts': 'owner repair moving existing facts onto their entity page (placement)',
   'src/core/repair/frontmatter.ts': 'owner repair of existing frontmatter',
   'src/core/persistence/twin-merge.ts': 'owner repair or post-sync heal of verified duplicate-origin twins (#6948): moves rows the twin already stores (links, timeline, raw data, tags, aliases, facts) onto the canonical page with their tiers unchanged, then soft-deletes the twin; no new text, and a tier difference holds the file instead of merging',
