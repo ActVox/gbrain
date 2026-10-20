@@ -302,22 +302,6 @@ ceilings: [scripts/scale/README.md](../scripts/scale/README.md). The import-rate
 gate times PGLite by the import process's CPU time and Postgres by wall time;
 the README says why.
 
-### Sync freshness gate
-
-`.github/workflows/sync-freshness-gate.yml` (nightly and on dispatch, never in
-the PR tier) runs `bun scripts/bench/sync-freshness-gate.ts` on
-`ubicloud-standard-4-ubuntu-2404`. It times commit to keyword-visible through
-`gbrain serve` with `sync.on_commit` on and watch detection, for a single-file
-commit on a 10k-page synthetic brain: Postgres managed, PGLite managed and
-Postgres classic. Each cell runs 11 reps; rep 0 is discarded and the p50 of the
-other 10 must stay within 25% of `scripts/bench/sync-freshness-baseline.json`.
-The baseline is only valid on that runner class: before it was committed, 25
-runs on five fresh Ubicloud standard-4 VMs showed no false failure. Re-record
-it on the same class after an intended latency change:
-`bun scripts/bench/sync-freshness-gate.ts --write-baseline --machine-class ubicloud-standard-4`.
-The full cell matrix (embedding, backlog drain, serve boot, fairness, idle cost,
-poll mode) is a bench, not a gate: `scripts/bench/sync-freshness-matrix.sh pr2b6`.
-
 ### Authoring gate
 
 Before adding a test, answer four questions in the PR description or the test
