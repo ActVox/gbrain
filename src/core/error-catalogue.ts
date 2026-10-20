@@ -103,6 +103,12 @@ export const ERROR_CATALOGUE = {
   sync_drain_capacity_paused: { code: 'capacity_paused', docs: 'docs/guides/write-refusals.md#drain-capacity-paused' },
   sync_drain_head_blocked: { code: 'drain_stalled', docs: 'docs/guides/write-refusals.md#head-blocked' },
   sync_drain_lease_held: { code: 'sync_drain_lease_held', docs: 'docs/guides/write-refusals.md#sync_drain_lease_held' },
+  // #6712 PR 4b: the live pass's stops (design v3.2 §9).
+  sync_drain_not_converged: { code: 'not_converged', docs: 'docs/guides/write-refusals.md#drain-not-converged' },
+  sync_drain_admission_paused: { code: 'admission_paused', docs: 'docs/guides/write-refusals.md#drain-admission-paused' },
+  sync_drain_grant_scope: { code: 'grant_scope', docs: 'docs/guides/write-refusals.md#drain-grant-scope' },
+  sync_drain_reconcile_host_required: { code: 'reconcile_host_required', docs: 'docs/guides/write-refusals.md#drain-reconcile-host-required' },
+  sync_drain_reconcile_read_incomplete: { code: 'reconcile_read_incomplete', docs: 'docs/guides/write-refusals.md#drain-reconcile-read-incomplete' },
   // D8 `gbrain setup <harness>` (src/commands/setup.ts).
   setup_harness_unsupported: { code: 'setup_harness_unsupported', docs: 'docs/guides/repair.md#setup-harness-unsupported' },
   setup_owner_conflict: { code: 'setup_owner_conflict', docs: 'docs/guides/repair.md#setup-owner-conflict' },
