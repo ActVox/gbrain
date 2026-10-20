@@ -263,6 +263,7 @@ import { v259 } from './v259-ingest-log-marked-index.ts';
 import { v260 } from './v260-segmented-page-size-index.ts';
 import { v261 } from './v261-persistence-request-transient-retries.ts';
 import { v262 } from './v262-commit-notifier.ts';
+import { v263 } from './v263-set-based-fact-insert-guards.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -524,4 +525,5 @@ export const MIGRATIONS: Migration[] = [
   v260,
   v261,
   v262,
+  v263,
 ];
