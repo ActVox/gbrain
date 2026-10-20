@@ -25,6 +25,7 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { SYNC_DELETE_TOMBSTONE_OP } from '../src/core/persistence/sync-delete-tombstones.ts';
 import { makePurgeHandler } from '../src/core/minions/handlers/purge.ts';
+import { deleteSafetyConfigRefusal, readPurgeRetentionHours } from '../src/core/sync-reconcile.ts';
 import { runPages } from '../src/commands/pages.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -149,6 +150,23 @@ for (const backend of testBackends()) {
       expect(await page(engine, USER)).toBeDefined();
       await engine.setConfig('purge.retention_hours', '96');
       expect([...(await purgePhase(engine, root)).details.purged_page_slugs as string[]].sort()).toEqual([TWIN, USER]);
+    }, { setup, databaseUrl }), 300_000);
+
+    // Contract for every soft delete that promises a 72-hour restore (an automatic repair's 'restore_72h' undo, such as
+    // an origin-twin merge's losing twin, which has a live twin and so is not held as an unreviewed sync tombstone): no
+    // retention setting lets the automatic purge take it inside 72 hours. A stored value below 72 is ignored (the default
+    // applies) and `gbrain config set` refuses it.
+    test('no purge.retention_hours value purges a soft-deleted page inside 72 hours', () => managedBrain(async ({ engine, ctx, root }) => {
+      await deleteBoth(engine, ctx, root);
+      await age(engine, 71);
+      for (const value of ['24', '48', '71', '0']) {
+        expect(deleteSafetyConfigRefusal('purge.retention_hours', value)).toContain('at least 72');
+        await engine.setConfig('purge.retention_hours', value);
+        expect(await readPurgeRetentionHours(engine)).toBe(72);
+        expect((await purgePhase(engine, root)).details.purged_pages_count).toBe(0);
+      }
+      expect(await page(engine, USER)).toBeDefined();
+      expect(await page(engine, TWIN)).toBeDefined();
     }, { setup, databaseUrl }), 300_000);
   });
 }

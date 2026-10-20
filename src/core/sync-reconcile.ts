@@ -56,10 +56,12 @@ export function deleteSafetyConfigRefusal(key: string, value: string): string | 
 
 /**
  * #7130: how long a soft-deleted page waits before the autopilot purge phase may purge it (`purge.retention_hours`,
- * default 72, at least 24). The manual `gbrain pages purge-deleted` takes its own `--older-than`.
+ * default 72). The setting only lengthens the window: every soft delete promises a 72-hour restore (the 'restore_72h'
+ * undo of an automatic repair, the recovery window sync deletes document), so no value below 72 is accepted. The manual
+ * `gbrain pages purge-deleted` takes its own `--older-than`, under consent.
  */
 export const DEFAULT_PURGE_RETENTION_HOURS = 72;
-export const MIN_PURGE_RETENTION_HOURS = 24;
+export const MIN_PURGE_RETENTION_HOURS = 72;
 export function parsePurgeRetentionHours(raw: string | null | undefined): number | null {
   const text = raw?.trim();
   if (!text) return null;
