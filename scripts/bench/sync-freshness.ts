@@ -250,6 +250,10 @@ async function ensureBrain(mode: 'classic' | 'managed', sources = SOURCES): Prom
     await cloneBrain(cloneFrom, dbName(...from), dir, dbName(mode, sources), mode, mode === 'managed' ? ids : ['bench']);
     build.cloned_from = brainKey(...from);
     build.clone_ms = round1(now() - t);
+    if (mode === 'classic') {
+      makeChange(srcRoot(dir, 'bench'), srcState(dir, 'bench'), 'single', 'bench');
+      build.rebind_sync = await syncUntilDone(home, 'rebind bench to this home', 'bench');
+    }
   } else {
     log('building ' + brainKey(mode, sources) + ': writing ' + PAGES + ' pages');
     let t = now();
