@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.325.0] - 2026-10-20
+## [0.60.326.0] - 2026-10-20
 
 **Managed sync works on Postgres 15 again, and a database error in a write receipt now says what failed.** On a Postgres 15 brain every managed sync stopped at its checkpoint with `storage_error` (PostgreSQL 42601, `syntax_error`), run after run, because the statement that merges `sources.config` used the `IS JSON` predicate, which only Postgres 16 and newer parse. The receipt kept only the error class and SQLSTATE, so nobody could tell which statement failed. Both are fixed. A new CI lane now runs the write, sync, jobs and migration suites on Postgres 15 for every full run, and a unit-tier check refuses Postgres 16+ only SQL in `src/`.
 
@@ -35,6 +35,20 @@ identifiers and attribution are available in the pre-removal Git revision
 - `ownerExceptionFailure` keeps a server-generated database error's redacted `error_text`, `statement` and `position`; `get_write_request` returns `error_detail` to trusted local callers only.
 - CI: an E2E job `postgres15-compat` runs `scripts/e2e-postgres15.txt` on `pgvector/pgvector:pg15` wherever the gated E2E jobs run and gates `e2e-status` (so `e2e-full-suite`); `bun run ci:ubicloud --lanes pg-arms,e2e --pg-image pgvector/pgvector:pg15` reruns the whole corpus on Postgres 15 as a diagnostic; `test/postgres15-sql-compat-7112.test.ts` fails on Postgres 16+ only SQL in `src/`.
 - Reported by @Justinn231 (#7112, who found the failing statement in the server log) and @Kkkkkuro (#6719).
+
+## [0.60.325.0] - 2026-10-20
+
+**The crash robot no longer fails a run because a sync race made one round fewer than its count saw.** `sync_and_connector_race_direct_write` races a sync pass against a direct write to the same page; when the write is still in flight as round 1 reads its level, the page gets a round of its own, so the same schedule makes two or three rounds per pass. The robot counted every round's sync seams, so a fault drawn from a three-round count (`sync:level_chunk#7`, seed 5105) went unreached in a run that made two (#7124). How many chunks one Git read arrived in also followed pipe timing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Round seams (`round_start`, `level_read`, `level_chunk`, `level_result`, `level_take`, `confirm_parallel`, `level_narrow`, `batch_entries`) | counted every time a round reached them | counted in round slots: per pass, round 1 and the first later round; `batch_entries` in round 1 only |
+| A Git level read in a robot worker | arrived in as many chunks as the pipe delivered | re-cut at fixed 512-byte offsets, so every chunk of a read is a slot every run reaches |
+| Crashes between two chunks of one read | only when timing produced a second chunk | always: seed 5105's race scenario now has 30 `level_chunk` slots (was 7) |
+
+No seam is allowlisted, skipped or given more time. Shard weights are refreshed from the latest unit, serial and E2E runs. The `hono` override moves to `^4.13.11` (now 4.13.13), clearing GHSA-5r4p-p66f-jhc7 (medium), which OSV began reporting against 4.13.7.
 
 ## [0.60.324.0] - 2026-10-20
 
