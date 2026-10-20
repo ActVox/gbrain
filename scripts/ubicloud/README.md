@@ -179,7 +179,7 @@ VM). The decision is logged (`fleet: project VMs hold 192 vCPUs, ceiling 448:
 10 VM(s) × 16 vCPUs (burst maximum 10)`). The 64 vCPUs above the ceiling are
 headroom for the managed GitHub runners `usage` can't see. When usage can't
 be read, or the project is busy, the run takes the default. Slots default to
-one per two vCPUs (`--slots`); `--size` picks the VM shape. A full gate runs only in
+three per eight vCPUs (`--slots`, six on a standard-16); `--size` picks the VM shape. A full gate runs only in
 `eu-central-h1` (the default `--location`): test timeouts and the mined shard weights are calibrated on
 its VMs, and on 2026-10-19 two full gates in `us-east-a2` ran about half as fast and timed out tests that
 pass there. Another `--location` is refused unless `--lanes` names a diagnostic subset, whose summary
@@ -192,15 +192,19 @@ at the pull-request scale (`GBRAIN_TEST_EXPORT_SCALE_PAGES=10001`). `--lanes` ru
 subset, `--keep` leaves the VMs up for debugging, and `--diff` follows
 `ci:local:diff` (a doc-only diff runs the doc checks and gitleaks alone).
 
-A full gate is about 16,000 seconds of test compute at 8 slots per VM, and
+A full gate is about 35,000 seconds of test compute at 6 slots per VM, and
 the heaviest-first queue keeps every slot busy almost to the end, so wall
 time is setup plus compute divided by slots. No single file runs much past
 three minutes: the former long poles are split into files of about two
 minutes (`graduation-cli*`, `graduation-crash-*`, `graduation-clients*`,
 `reconcile-crash-*.slow`, `write-attribution-timeline-10k-postgres`), and the
 longest single test left is the 1k-page graduation round trip (about 150
-seconds). More slots per VM do not help: on eight VMs, 12 slots raised
-compute 27% (unit 27%, E2E 25%, serial 31%) and finished in 353 seconds
-against 359 at 8 slots, and 16 slots raised it 52% and took 444 seconds.
-Neither produced a failure, but the extra contention buys no wall time, so 8
-slots (one per two vCPUs) stays the default and bursts add VMs instead.
+seconds). Slots are sized by load, not by vCPU count alone. Each slot's bun process, its child
+processes and its own PostgreSQL and PgBouncer keep about 2.5 threads runnable, so on
+2026-10-20 one slot per two vCPUs (8 on standard-16) measured a 1-minute load of 1.11 per
+vCPU at p50 and 1.39 at p90, ran 45,565 s of test compute and timed out
+`persistence-sync-options-parity` on its PgBouncer pass. Six slots on the same tree
+measured 0.79 and 0.95, ran 35,393 s (22% less) and passed; at eight VMs that is about
+the same wall time. Every gate prints this load line, and warns when p90 passes 1.1:
+test timeouts, `run-e2e.sh`'s per-file cap and the mined shard weights assume a VM
+that is not oversubscribed. More slots do not buy wall time; bursts add VMs instead.
