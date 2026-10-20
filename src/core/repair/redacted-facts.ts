@@ -75,6 +75,10 @@ export interface RedactedFactCandidate {
   restored: string | null;
   /** The texts that proved the restoration (`<slug>` or `<slug>@version:<id>`). */
   evidence: string[];
+  /** The row's visibility, entity and holding page; the publication rewrites the row only while they are unchanged. */
+  visibility: string;
+  entity_slug: string | null;
+  source_markdown_slug: string | null;
   /** Digest of the row's claim, visibility, entity and fence position, so an edited row is not rewritten. */
   fact_hash: string;
 }
@@ -137,7 +141,8 @@ export async function classifyRedactedFacts(db: BrainEngine, sourceIds: string[]
       : proofs.size === 1 ? ['evidenced', 'restorable'] : ['unproven', read ? 'not_in_source' : 'no_source_page'];
     const [restored, evidence] = klass === 'evidenced' ? [...proofs][0]! : [null, [...proofs.values()].flat()];
     candidates.push({ id: Number(row.id), source_id: row.source_id, slug: targetSlug(row), row_num: row.row_num === null ? null : Number(row.row_num),
-      class: klass, reason, fact: row.fact, restored, evidence, fact_hash: factHash(row) });
+      class: klass, reason, fact: row.fact, restored, evidence, visibility: row.visibility, entity_slug: row.entity_slug,
+      source_markdown_slug: row.source_markdown_slug, fact_hash: factHash(row) });
   }
   candidates.sort((a, b) => a.source_id.localeCompare(b.source_id) || a.slug.localeCompare(b.slug) || a.id - b.id);
   return candidates;
@@ -224,13 +229,23 @@ export const redactedFactsRepair: RepairHandler = {
   },
 };
 
-interface Restore { id: number; from: string; to: string }
+/** One approved database-only rewrite: the row as previewed (text, visibility, entity, holding page) and its restored text. */
+export interface Restore { id: number; from: string; to: string; visibility: string; entity_slug: string | null; source_markdown_slug: string | null }
 
-const restoreRows = (tx: BrainEngine, sourceId: string, restores: Restore[]) => tx.executeRaw<{ id: number | string }>(`UPDATE facts f
+/**
+ * Rewrites each row still exactly as previewed. The compare runs in the
+ * UPDATE itself, which locks the row and rechecks it after any concurrent
+ * write, so a row changed after the apply's own recheck is left alone and not
+ * reported restored.
+ */
+export const restoreRedactedRows = (tx: BrainEngine, sourceId: string, restores: Restore[]) => tx.executeRaw<{ id: number | string }>(`UPDATE facts f
     SET fact=r.to_text, context=concat_ws(' | ', NULLIF(f.context,''), $3::text)
-   FROM jsonb_to_recordset($2::text::jsonb) AS r(id bigint, from_text text, to_text text)
-  WHERE f.source_id=$1 AND f.id=r.id AND f.fact=r.from_text AND f.expired_at IS NULL AND f.row_num IS NULL RETURNING f.id`,
-[sourceId, JSON.stringify(restores.map(r => ({ id: r.id, from_text: r.from, to_text: r.to }))), RESTORED_CONTEXT]);
+   FROM jsonb_to_recordset($2::text::jsonb) AS r(id bigint, from_text text, to_text text, visibility text, entity_slug text, source_markdown_slug text)
+  WHERE f.source_id=$1 AND f.id=r.id AND f.fact=r.from_text AND f.visibility=r.visibility AND f.entity_slug IS NOT DISTINCT FROM r.entity_slug
+    AND f.source_markdown_slug IS NOT DISTINCT FROM r.source_markdown_slug AND f.expired_at IS NULL AND f.superseded_by IS NULL AND f.row_num IS NULL
+  RETURNING f.id`,
+[sourceId, JSON.stringify(restores.map(r => ({ id: r.id, from_text: r.from, to_text: r.to, visibility: r.visibility, entity_slug: r.entity_slug,
+  source_markdown_slug: r.source_markdown_slug }))), RESTORED_CONTEXT]);
 
 /**
  * Database-only rows: on a managed brain one database-only maintenance
@@ -238,9 +253,10 @@ const restoreRows = (tx: BrainEngine, sourceId: string, restores: Restore[]) => 
  * unmanaged brain one transaction.
  */
 async function restoreDatabaseRows(engine: BrainEngine, page: RedactedFactsPage, hash: string, facts: RedactedFactCandidate[]): Promise<number[]> {
-  const restores: Restore[] = facts.map(f => ({ id: f.id, from: f.fact, to: f.restored! }));
+  const restores: Restore[] = facts.map(f => ({ id: f.id, from: f.fact, to: f.restored!, visibility: f.visibility, entity_slug: f.entity_slug,
+    source_markdown_slug: f.source_markdown_slug }));
   if (!await managedPersistenceEnabled(engine)) {
-    return (await maintenanceTransaction(engine, tx => restoreRows(tx, page.source_id, restores))).map(row => Number(row.id));
+    return (await maintenanceTransaction(engine, tx => restoreRedactedRows(tx, page.source_id, restores))).map(row => Number(row.id));
   }
   const authority = (await maintenancePreflight(engine, page.source_id))!;
   const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
@@ -254,8 +270,10 @@ async function restoreDatabaseRows(engine: BrainEngine, page: RedactedFactsPage,
 /** Preparer for `managed_maintenance_restore_redacted_facts`: rewrites the named database-only rows still holding their previewed text. */
 export async function prepareRedactedFactsRestore(engine: BrainEngine, row: WriteRequest): Promise<PreparedMutation> {
   const restores = (row.intent as { restores?: unknown } | null)?.restores;
+  const text = (v: unknown) => typeof v === 'string';
   const valid = Array.isArray(restores) && restores.every(r => !!r && typeof r === 'object' && Number.isSafeInteger((r as Restore).id)
-    && typeof (r as Restore).from === 'string' && typeof (r as Restore).to === 'string');
+    && text((r as Restore).from) && text((r as Restore).to) && text((r as Restore).visibility)
+    && ((r as Restore).entity_slug === null || text((r as Restore).entity_slug)) && ((r as Restore).source_markdown_slug === null || text((r as Restore).source_markdown_slug)));
   if (!valid) {
     throw opError('invalid_params', 'The redacted facts restore intent does not name its facts.',
       `Request ${row.request_id} in source ${row.source_id} does not name the facts to restore, so nothing changed. Preview the repair again and apply the new preview after the user approves.`,
@@ -265,7 +283,7 @@ export async function prepareRedactedFactsRestore(engine: BrainEngine, row: Writ
   await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
   return { observedRevision: snapshot?.revision ?? null, noop: true,
     validate: async tx => { await authorizeWrite(tx, row.authority, 'submit_job', row.slug); },
-    apply: async tx => ({ status: 'completed', restored: (await restoreRows(tx, row.source_id, restores as Restore[])).map(r => Number(r.id)) }) };
+    apply: async tx => ({ status: 'completed', restored: (await restoreRedactedRows(tx, row.source_id, restores as Restore[])).map(r => Number(r.id)) }) };
 }
 
 /**

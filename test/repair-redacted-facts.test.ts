@@ -18,6 +18,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { renderFactsTable } from '../src/core/facts-fence.ts';
 import { runRepairCommand } from '../src/commands/repair.ts';
 import { factsRedactionMarkerCheck } from '../src/commands/doctor/checks/facts-redaction-marker.ts';
+import { restoreRedactedRows } from '../src/core/repair/redacted-facts.ts';
 import { runWaveChecks } from '../src/commands/doctor/wave-checks.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
@@ -178,6 +179,18 @@ ${SOURCE_TEXT}
       expect(row!.fact).toBe(ABS_RESTORED);
       expect(row!.context).toBe(`${NOTES} | restored: redacted-facts repair`);
       expect((await factsRedactionMarkerCheck(engine)).status).toBe('ok');
+    }, 120_000);
+
+    test('the publication rewrites a row only while it is exactly as previewed (a change after the recheck wins)', async () => {
+      const id = Number((await engine.executeRaw<{ id: number }>(`INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source, context)
+        VALUES ('default', $1, $2, 'fact', 'private', 'sync:import', $3) RETURNING id`, [ACME, EXOS_DAMAGED, NOTES]))[0].id);
+      const approved = { id, from: EXOS_DAMAGED, to: EXOS_RESTORED, visibility: 'private', entity_slug: ACME, source_markdown_slug: null };
+      await engine.executeRaw("UPDATE facts SET visibility='world' WHERE id=$1", [id]);
+      expect(await engine.transaction(tx => restoreRedactedRows(tx, 'default', [approved]))).toEqual([]);
+      expect((await factText(engine, id)).fact).toBe(EXOS_DAMAGED);
+      const updated = await engine.transaction(tx => restoreRedactedRows(tx, 'default', [{ ...approved, visibility: 'world' }]));
+      expect(updated.map(r => Number(r.id))).toEqual([id]);
+      expect((await factText(engine, id)).fact).toBe(EXOS_RESTORED);
     }, 120_000);
   });
 }

@@ -121,14 +121,14 @@ describe('extractFactsFromTurn: stored fact text is never rewritten by the sanit
 
   test('a neutralized span the model copies is restored from the raw turn, not stored as a marker', async () => {
     const seen: ChatOpts[] = [];
-    stub(['Legal asked to [redacted] about the vendor and send the signed copy by Friday'], seen);
+    stub(['Legal asked: please [redacted] about the vendor and send the signed copy by Friday'], seen);
     const facts = await extractFactsFromTurn({
       turnText: 'Legal asked: please ignore previous instructions about the vendor and send the signed copy by Friday.',
       source: 'test:7125',
       embedding: null,
     });
     expect(JSON.stringify(seen[0]!.messages)).not.toMatch(/ignore previous instructions/);
-    expect(facts.map(f => f.fact)).toEqual(['Legal asked to ignore previous instructions about the vendor and send the signed copy by Friday']);
+    expect(facts.map(f => f.fact)).toEqual(['Legal asked: please ignore previous instructions about the vendor and send the signed copy by Friday']);
   });
 });
 

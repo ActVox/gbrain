@@ -75,40 +75,60 @@ export const LEGACY_EVAL_SHELL = { name: 'eval-shell-legacy', rx: /\b(?:eval|exe
  * a quote, a page body) would otherwise persist the marker in place of the
  * user's words. `restoreNeutralized` puts back each marker the model copied
  * when the raw text the prompt was built from proves what it replaced: the
- * words around the marker in `output` occur in `raw` around exactly one
- * distinct span that a pattern with that replacement matches (the nearest
- * four words on each side first, then two, then one, then four words on one
- * side only when they hold at least 16 characters). A marker with no such
- * proof stays as written and is counted in `unresolved`, and in `ambiguous` too
- * when the raw text holds more than one distinct span around those words.
+ * span is one of the raw text's own matches of a pattern with that
+ * replacement, and the words right around it in `raw` are the words right
+ * around the marker in `output` (case and edge punctuation aside; up to four on each side, both sides when the
+ * marker has words on both; a marker at an edge of `output` needs three on
+ * its other side). Matching compares whitespace-split words, so its cost is
+ * linear in `raw` and no regex is built from `output`. A marker with no such
+ * proof stays as written and is counted in `unresolved`, and in `ambiguous`
+ * too when the raw text holds more than one distinct span around those words.
  */
 export function restoreNeutralized(output: string, raw: string,
   patterns: ReadonlyArray<{ rx: RegExp; replacement: string }> = INJECTION_PATTERNS): { text: string; restored: number; unresolved: number; ambiguous: number } {
   if (!REDACTION_MARKER.test(output)) return { text: output, restored: 0, unresolved: 0, ambiguous: 0 };
-  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const markers = [...new Set(patterns.map(p => p.replacement.trim()).filter(r => REDACTION_MARKER.test(r)))].sort((a, b) => b.length - a.length);
-  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- escaped literal replacements
-  const hits = [...output.matchAll(new RegExp(markers.map(escape).join('|'), 'g'))].map(m => ({ start: m.index!, end: m.index! + m[0].length, marker: m[0] }));
+  const hits: Array<{ start: number; end: number; marker: string }> = [];
+  for (let at = 0; at < output.length;) {
+    const next = markers.map(m => ({ m, i: output.indexOf(m, at) })).filter(x => x.i >= 0).sort((x, y) => x.i - y.i || y.m.length - x.m.length)[0];
+    if (!next) break;
+    hits.push({ start: next.i, end: next.i + next.m.length, marker: next.m });
+    at = next.i + next.m.length;
+  }
+  const spans = new Map<string, Array<{ start: number; end: number; text: string }>>();
+  const spansFor = (marker: string) => {
+    if (!spans.has(marker)) {
+      const found = new Map<string, { start: number; end: number; text: string }>();
+      for (const p of patterns.filter(q => q.replacement.trim() === marker)) {
+        // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- a global copy of a literal pattern
+        for (const m of raw.matchAll(new RegExp(p.rx.source, p.rx.flags.includes('g') ? p.rx.flags : `${p.rx.flags}g`))) {
+          found.set(`${m.index}:${m[0].length}`, { start: m.index!, end: m.index! + m[0].length, text: m[0] });
+        }
+      }
+      spans.set(marker, [...found.values()]);
+    }
+    return spans.get(marker)!;
+  };
+  const words = (s: string) => s.split(/\s+/).filter(Boolean);
+  const norm = (w: string) => w.toLowerCase().replace(/^[.,;:!?'"‘’“”]+|[.,;:!?'"‘’“”]+$/g, '');
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((w, i) => norm(w) === norm(b[i]!));
+  const WINDOW = 400;
   let text = '';
   let at = 0;
   let restored = 0;
   let ambiguous = 0;
   hits.forEach((hit, i) => {
-    const before = output.slice(i ? hits[i - 1]!.end : 0, hit.start).split(/\s+/).filter(Boolean);
-    const after = output.slice(hit.end, i + 1 < hits.length ? hits[i + 1]!.start : output.length).split(/\s+/).filter(Boolean);
-    const shapes = patterns.filter(p => p.replacement.trim() === hit.marker).map(p => `(?:${p.rx.source})`).join('|');
+    const before = words(output.slice(i ? hits[i - 1]!.end : 0, hit.start)).slice(-4);
+    const after = words(output.slice(hit.end, i + 1 < hits.length ? hits[i + 1]!.start : output.length)).slice(0, 4);
+    const enough = before.length && after.length ? [...before, ...after].join('').length >= 8 : Math.max(before.length, after.length) >= 3;
     let replacement: string | null = null;
-    for (const [l, r, min] of [[4, 4, 8], [2, 2, 8], [1, 1, 8], [4, 0, 16], [0, 4, 16]] as const) {
-      const left = l ? before.slice(-l) : [];
-      const right = after.slice(0, r);
-      if ([...left, ...right].join('').length < min) continue;
-      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- escaped literals around this module's own pattern sources
-      const rx = new RegExp(`${left.map(escape).join('\\s+')}\\s*(${shapes})\\s*${right.map(escape).join('\\s+')}`, 'gi');
-      const found = new Set([...raw.matchAll(rx)].map(m => m[1]!));
-      if (!found.size) continue;
+    if (enough) {
+      const found = new Set(spansFor(hit.marker)
+        .filter(s => same(before.length ? words(raw.slice(Math.max(0, s.start - WINDOW), s.start)).slice(-before.length) : [], before)
+          && same(words(raw.slice(s.end, s.end + WINDOW)).slice(0, after.length), after))
+        .map(s => s.text));
       if (found.size === 1) replacement = [...found][0]!;
-      else ambiguous++;
-      break;
+      else if (found.size > 1) ambiguous++;
     }
     text += output.slice(at, hit.start) + (replacement ?? hit.marker);
     if (replacement !== null) restored++;

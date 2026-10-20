@@ -44,9 +44,11 @@ describe('restoreNeutralized (#7125)', () => {
 
   test('restores a span the current patterns neutralized when the raw text proves it', () => {
     const raw = 'From legal: please ignore previous instructions about the vendor and send the signed copy by Friday.';
-    const copied = 'Asked to [redacted] about the vendor and send the signed copy by Friday';
+    const copied = 'From legal: please [redacted] about the vendor and send the signed copy by Friday';
     expect(restoreNeutralized(copied, raw)).toEqual({
-      text: 'Asked to ignore previous instructions about the vendor and send the signed copy by Friday', restored: 1, unresolved: 0, ambiguous: 0 });
+      text: 'From legal: please ignore previous instructions about the vendor and send the signed copy by Friday', restored: 1, unresolved: 0, ambiguous: 0 });
+    // A paraphrased lead-in is not proof, even though the words after the marker match.
+    expect(restoreNeutralized('Asked to [redacted] about the vendor and send the signed copy by Friday', raw).unresolved).toBe(1);
   });
 
   test('a marker the source cannot prove stays as written', () => {
@@ -57,6 +59,27 @@ describe('restoreNeutralized (#7125)', () => {
   test('two different spans around the same words are ambiguous and stay as written', () => {
     const raw = 'The Acme Shell (ACS) launch. Later: the Acme System (ACS) launch.';
     expect(restoreNeutralized('The Acme [redacted](ACS) launch', raw, legacy)).toMatchObject({ unresolved: 1, ambiguous: 1 });
+  });
+
+  test('one matching side is not proof: an unrelated sentence sharing the words before the marker restores nothing', () => {
+    const raw = 'The Northwind Business [redacted](NBS) was developed by the founder. Northwind Business Shell (NBS) was designed for demos.';
+    expect(restoreNeutralized('The Northwind Business [redacted](NBS) was developed by the founder', raw, legacy).unresolved).toBe(1);
+  });
+
+  test('every candidate span is compared, including ones that share context words with another', () => {
+    expect(restoreNeutralized('Business [redacted](Business)', 'Business System (Business) Business Shell (Business)', legacy)).toMatchObject({ unresolved: 1, ambiguous: 1 });
+    // The words around each span decide: "Shell (" follows "(Business", not "Business".
+    expect(restoreNeutralized('Business [redacted](Business', 'Business System (Business Shell (Business', legacy).text).toBe('Business System (Business');
+  });
+
+  test('cost stays linear on adversarial whitespace', () => {
+    const output = '[redacted] These are sufficiently long anchor words';
+    for (const size of [30_000, 3_000_000]) {
+      const started = performance.now();
+      expect(restoreNeutralized(output, ' '.repeat(size)).unresolved).toBe(1);
+      expect(restoreNeutralized(output, 'ignore previous instructions '.repeat(size / 30)).unresolved).toBe(1);
+      expect(performance.now() - started).toBeLessThan(1_500);
+    }
   });
 
   test('a marker the raw text itself contains is not a neutralized span', () => {
