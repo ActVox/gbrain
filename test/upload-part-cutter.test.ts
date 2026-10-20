@@ -81,19 +81,31 @@ describe('cutUploadPart', () => {
   test('the whole text when it fits; a refusal naming the cap when not one character fits', () => {
     expect(cutUploadPart('short', FRAME, 1024 * 1024)).toBe(5);
     expect(() => cutUploadPart('😀', FRAME, frameOf('') + 3)).toThrow(/cannot carry even one character/);
-    try { cutUploadPart('abc', FRAME, 10); } catch (error) { expect((error as { code?: string }).code).toBe('payload_too_large'); }
+    let refusal: unknown;
+    try { cutUploadPart('abc', FRAME, 10); } catch (error) { refusal = error; }
+    expect(refusal).toBeDefined();
+    expect((refusal as { code?: string }).code).toBe('payload_too_large');
   });
 });
 
-/** A fake brain that stores parts the way spec 6.2 says: contiguous, replay-idempotent, sha-checked, frame-capped. */
+/**
+ * A fake brain that stores parts the way spec 6.2 says: contiguous, replay-idempotent, sha-checked, frame-capped.
+ * Every call reaches it as the serialized JSON-RPC request a transport would send (a real, growing id), and it
+ * checks that request's own UTF-8 byte length against the cap, independent of the client's frame measure.
+ */
 function fakeUploadServer(opts: { maxFrame: number; dropReplyAfterStoring?: number[]; dropBeforeStoring?: number[]; refusePart?: number }) {
   const parts: string[] = [];
   const calls: string[] = [];
+  const partFrames: number[] = [];
+  let nextId = 1000;
   let state: 'open' | 'committed' | 'aborted' = 'open';
   let declared = { bytes: 0, sha256: '' };
   const drop = () => new RemoteMcpError('network', 'connection reset', { kind: 'unreachable' });
   const received = () => Buffer.byteLength(parts.join(''), 'utf8');
-  const call: UploadToolCall = async (tool, args) => {
+  const call: UploadToolCall = async (tool, sent) => {
+    const raw = JSON.stringify({ jsonrpc: '2.0', id: nextId++, method: 'tools/call', params: { name: tool, arguments: sent } });
+    const request = JSON.parse(raw) as { params: { arguments: Record<string, unknown> } };
+    const args = request.params.arguments;
     calls.push(tool);
     if (tool === 'begin_page_upload') {
       declared = { bytes: Number(args.total_bytes), sha256: String(args.sha256) };
@@ -102,7 +114,8 @@ function fakeUploadServer(opts: { maxFrame: number; dropReplyAfterStoring?: numb
     if (tool === 'upload_page_part') {
       const part = Number(args.part);
       const text = String(args.text);
-      expect(toolCallFrameBytes('upload_page_part', args)).toBeLessThanOrEqual(opts.maxFrame);
+      partFrames.push(Buffer.byteLength(raw, 'utf8'));
+      expect(Buffer.byteLength(raw, 'utf8')).toBeLessThanOrEqual(opts.maxFrame);
       expect(createHash('sha256').update(text, 'utf8').digest('hex')).toBe(String(args.part_sha256));
       if (part === opts.refusePart) throw opError('payload_too_large', 'part refused', 'smaller part');
       if (opts.dropBeforeStoring?.includes(part)) { opts.dropBeforeStoring.splice(opts.dropBeforeStoring.indexOf(part), 1); throw drop(); }
@@ -122,7 +135,7 @@ function fakeUploadServer(opts: { maxFrame: number; dropReplyAfterStoring?: numb
     }
     throw new Error(`unexpected tool ${tool}`);
   };
-  return { call, parts, calls, state: () => state };
+  return { call, parts, calls, partFrames, state: () => state };
 }
 
 const transient = (error: unknown) => error instanceof RemoteMcpError && error.reason === 'network';
@@ -137,6 +150,8 @@ describe('uploadPageBody', () => {
     expect(server.parts.join('')).toBe(text);
     expect(server.parts.length).toBeGreaterThan(3);
     expect(server.state()).toBe('committed');
+    expect(Math.max(...server.partFrames)).toBeLessThanOrEqual(8192);
+    expect(Math.max(...server.partFrames)).toBeGreaterThan(8192 - 1024 - 64);
   });
 
   test('a reply lost after the part landed resumes at get_page_upload next_part, without resending it', async () => {

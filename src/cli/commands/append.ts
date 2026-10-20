@@ -5,8 +5,10 @@
  *   gbrain put <slug> --file PATH          replace or create a page from a file
  *
  * `append` calls append_page with a generated request_id (`--request-id`
- * replays one); text whose append_page request would not fit the smallest
- * transport cap goes through an upload session with mode `append`.
+ * replays one) whenever the call's encoded frame fits the connection's part
+ * cap (spec 6.2): 4 MiB less 4 KiB locally, on a remote brain the cap its
+ * begin_page_upload reports. Only a larger append goes through an upload
+ * session with mode `append`.
  * `put --file` (and `capture --file`) send one request while the page fits
  * it (the trusted local CLI: the page ceiling; a thin client: the smallest
  * transport cap). A larger file on the trusted local CLI streams through the
@@ -40,6 +42,8 @@ import { callRemoteTool, stringUploadBody, toolCallFrameBytes, unpackToolResult,
 
 /** The smallest inbound cap any transport has (legacy HTTP, 1 MiB) less the 4 KiB envelope reserve: a request this size reaches every brain. */
 export const DIRECT_FRAME_MAX_BYTES = 1024 * 1024 - 4096;
+/** The part cap of a local or stdio connection (4 MiB less the 4 KiB reserve), the largest frame any connection takes in one call. */
+export const LOCAL_FRAME_MAX_BYTES = 4 * 1024 * 1024 - 4096;
 
 /** Where a CLI write goes, plus the transient-failure test the upload driver resumes on. */
 export interface PageWriteCaller {
@@ -172,8 +176,10 @@ Options:
   --json                 Print the receipt as JSON
   --help, -h             Show this help
 
-Text over one request goes through an upload session (begin, parts, commit)
-and appends at the end of the page with region and separator auto.
+Text whose call is over the connection's part cap (4 MiB less 4 KiB locally;
+on a remote brain the cap it reports) goes through an upload session (begin,
+parts, commit), which appends at the end of the page with region and
+separator auto; --expect-tail, --region and --separator are refused there.
 
 Examples:
   echo "- 14:02 the next message" | gbrain append conversations/sessions/2026-10-19-standup
@@ -263,19 +269,31 @@ export async function run(args: string[], ctx: CliDispatchContext): Promise<void
       ...(parsed.region ? { region: parsed.region } : {}),
       ...(parsed.separator ? { separator: parsed.separator } : {}),
     };
+    const frame = toolCallFrameBytes('append_page', params);
+    const begin = { slug: parsed.slug, mode: 'append', request_id: requestId, ...(parsed.expected_revision ? { expected_revision: parsed.expected_revision } : {}) };
+    const body = stringUploadBody(text);
+    let cap = caller.thin ? DIRECT_FRAME_MAX_BYTES : LOCAL_FRAME_MAX_BYTES;
+    let begun: Record<string, unknown> | undefined;
+    if (frame > cap && caller.thin && frame <= LOCAL_FRAME_MAX_BYTES) {
+      begun = await caller.call('begin_page_upload', { ...begin, total_bytes: body.bytes, sha256: body.sha256 });
+      cap = Number(begun.part_max_frame_bytes);
+      if (frame <= cap) {
+        await caller.call('abort_page_upload', { upload_id: begun.upload_id });
+        begun = undefined;
+      }
+    }
     let result: Record<string, unknown>;
-    if (toolCallFrameBytes('append_page', params) <= DIRECT_FRAME_MAX_BYTES) {
+    if (frame <= cap) {
       result = await caller.call('append_page', params);
     } else {
       const unsupported = (['expected_tail_sha256', 'region', 'separator'] as const).filter(key => parsed[key] !== undefined);
       if (unsupported.length) {
-        throw usageError(`${unsupported.map(key => ({ expected_tail_sha256: '--expect-tail', region: '--region', separator: '--separator' })[key]).join(', ')} apply only to an append that fits one request (about ${DIRECT_FRAME_MAX_BYTES} bytes of JSON).`,
-          'A larger append goes through an upload session, which appends at the end with region and separator auto. Drop those flags, or split the text into appends under one request.');
+        if (begun) await caller.call('abort_page_upload', { upload_id: begun.upload_id }).catch(() => undefined);
+        throw usageError(`${unsupported.map(key => ({ expected_tail_sha256: '--expect-tail', region: '--region', separator: '--separator' })[key]).join(', ')} apply only to an append whose call fits this connection's ${cap}-byte part cap; this one is ${frame} bytes.`,
+          'A larger append goes through an upload session, which appends at the end with region and separator auto and cannot check the tail. Drop those flags, or split the text into smaller appends.');
       }
-      result = await uploadPageBody(caller.call, {
-        slug: parsed.slug, mode: 'append', request_id: requestId,
-        ...(parsed.expected_revision ? { expected_revision: parsed.expected_revision } : {}),
-      }, stringUploadBody(text), { transient: caller.transient, wait_ms: Math.min(currentCliWriteWait().waitMs, 30_000) });
+      result = await uploadPageBody(caller.call, begin, body,
+        { transient: caller.transient, wait_ms: Math.min(currentCliWriteWait().waitMs, 30_000), ...(begun ? { begun } : {}) });
     }
     await printAppendReceipt(result, parsed.json);
   } catch (error) {
