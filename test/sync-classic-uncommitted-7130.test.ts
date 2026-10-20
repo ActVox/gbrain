@@ -3,8 +3,6 @@
  * On a real PGLite brain, this protects:
  * - `sync --full` keeps every stale page when Git cannot list the history that proves a file was committed (a dangling
  *   ref fails `git log --all`); it used to skip the #2426 never-committed gate and delete them all;
- * - a file Git stopped tracking (`git rm --cached` plus a .gitignore entry) but that is still on disk keeps its page,
- *   in an incremental sync and under `--full`; a real `git rm` still deletes;
  * - the absolute caps (`sync.max_deletes`, per source too) withhold a classic full reconcile and a working-tree sync
  *   below the 50% valve, and `GBRAIN_ALLOW_MASS_RECONCILE=1` still lets the deletion through.
  */
@@ -57,19 +55,6 @@ describe('#7130 classic sync: a missing file is deletion evidence only when Git 
     rmSync(join(repoPath, '.git/refs/heads/dangling'));
     await sync({ full: true });
     expect(await live()).toEqual(['memories/lost', 'notes/a', 'notes/b']);
-  }, 120_000);
-
-  test('git rm --cached plus .gitignore keeps the page while its file is on disk, incremental and --full', async () => {
-    seed(['a', 'kept', 'gone']);
-    expect(['first_sync', 'synced']).toContain((await sync()).status);
-    git(repoPath, 'rm', '-q', '--cached', 'notes/kept.md');
-    git(repoPath, 'rm', '-q', 'notes/gone.md');
-    writeFileSync(join(repoPath, '.gitignore'), 'notes/kept.md\n');
-    commit(repoPath, 'untrack kept, remove gone');
-    await sync();
-    expect(await live()).toEqual(['notes/a', 'notes/kept']);
-    await sync({ full: true });
-    expect(await live()).toEqual(['notes/a', 'notes/kept']);
   }, 120_000);
 
   test('sync.max_deletes withholds a classic full reconcile below the 50% valve; the env valve lets it through', async () => {

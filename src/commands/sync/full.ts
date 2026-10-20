@@ -2,9 +2,7 @@
 import { assertSourceFilesystemActive } from '../../core/minions/source-filesystem.ts';
 import { currentJobSignal } from '../../core/minions/submission-authority.ts';
 import { currentCompanyBrainSync, softDeleteSyncPages } from '../../core/company-brain/profile.ts';
-import { existsSync } from 'fs';
-import { join, relative } from 'path';
-import { gitIgnoresUntracked } from '../../core/persistence/sync-origin-evidence.ts';
+import { relative } from 'path';
 import type { BrainEngine } from '../../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../../core/engine-constants.ts';
 import { collectSyncableFiles } from '../import.ts';
@@ -479,17 +477,6 @@ async function reconcileFullSyncDeletes(
           const sp = pathBySlug.get(slug);
           if (sp && !everCommitted.has(sp.replace(/\\/g, '/'))) dbOnlySlugs.push(slug);
           else deletableSlugs.push(slug);
-        }
-        // #7130: `git rm --cached` plus a .gitignore entry leaves the file on disk; its history says committed, but nothing was removed.
-        const ignoredOnDisk = new Set<string>();
-        for (const slug of deletableSlugs) {
-          const sp = pathBySlug.get(slug);
-          const abs = sp ? join(slugRoot ?? syncScopeRoot, sp) : null;
-          if (abs && existsSync(abs) && await gitIgnoresUntracked(gitContextRoot, relative(gitContextRoot, abs))) ignoredOnDisk.add(slug);
-        }
-        if (ignoredOnDisk.size > 0) {
-          serr(`\n  Kept ${ignoredOnDisk.size} page(s) whose file .gitignore now excludes but is still on disk; not deleting. Import them with gbrain sync --source ${sid} --full --include-gitignored, or delete the file to delete the page.`);
-          deletableSlugs = deletableSlugs.filter(slug => !ignoredOnDisk.has(slug));
         }
       } else if (!company) {
         // #7130: Git could not list the history (a dangling ref fails `git log --all`), so no stale page is proven
