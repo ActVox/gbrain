@@ -17,8 +17,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import type { EngineConfig } from '../../src/core/types.ts';
+import { createEngine } from '../../src/core/engine-factory.ts';
 import { performSync } from '../../src/commands/sync.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
@@ -64,10 +64,11 @@ describe('GBRA-133 2b-d2: SIGTERM releases the commit notifier lease', () => {
       const repo = join(home, 'repo');
       const git = (...args: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', ...args], { encoding: 'utf8' }).trim();
       const pg = databaseUrl ? await isolatedPersistencePostgres(databaseUrl) : null;
-      const dbConfig = pg ? { engine: 'postgres', database_url: pg.databaseUrl } : { engine: 'pglite', database_path: join(home, 'brain.pglite') };
+      const dbConfig: EngineConfig = pg ? { engine: 'postgres', database_url: pg.databaseUrl } : { engine: 'pglite', database_path: join(home, 'brain.pglite') };
+      // The residents' own config, through the production factory; each handle is disconnected where it is opened.
       const open = async (): Promise<BrainEngine> => {
-        const engine = pg ? new PostgresEngine() : new PGLiteEngine();
-        await engine.connect(pg ? { database_url: pg.databaseUrl } : { database_path: join(home, 'brain.pglite') });
+        const engine = await createEngine(dbConfig);
+        await engine.connect(dbConfig);
         return engine;
       };
       const residents: Resident[] = [];
