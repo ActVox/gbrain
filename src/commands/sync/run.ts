@@ -110,8 +110,7 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
 
   const flags = parseSyncFlags(args);
   noteRetryFailedDeprecated(args);
-  const { repoPath, dryRun, skipFailed, syncAll, jsonOut, breakLock, forceBreakLock, maxAgeSeconds } = flags;
-  let { noEmbed } = flags;
+  const { syncAll, jsonOut, breakLock, forceBreakLock, maxAgeSeconds } = flags;
 
   // v0.41.13.0 (T4 + D1): handle --break-lock / --force-break-lock BEFORE
   // the sync would otherwise contend on the lock. v3's plan dropped the
@@ -119,7 +118,19 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
   // source in one call; runBreakLock now widens to iterate sources when
   // --all is set and accept maxAgeSeconds for age-gated breaks.
   if (breakLock || forceBreakLock) return await runSyncBreakLock(engine, args, { syncAll, jsonOut, forceBreakLock, maxAgeSeconds });
+  // GBRA-133: one single-source run reads its routing rows once (core/sync-dispatch-read.ts); --all and --watch read live.
+  if (syncAll || flags.watch) return runRoutedSync(engine, args, flags);
+  const { syncDispatchRow, withSyncDispatchRead } = await import('../../core/sync-dispatch-read.ts');
+  return withSyncDispatchRead(engine, () => {
+    const explicit = args.find((a, i) => args[i - 1] === '--source');
+    if (explicit) void syncDispatchRow(engine, explicit);
+    return runRoutedSync(engine, args, flags);
+  });
+}
 
+async function runRoutedSync(engine: BrainEngine, args: string[], flags: ReturnType<typeof parseSyncFlags>): Promise<void> {
+  const { repoPath, dryRun, skipFailed, syncAll, jsonOut } = flags;
+  let { noEmbed } = flags;
   const fanout = parseSyncFanoutFlags(args, syncAll);
   await refuseManagedForbiddenFlags(engine, flags, args);
 

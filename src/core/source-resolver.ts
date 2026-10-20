@@ -14,6 +14,7 @@
  */
 
 import { readFileSync, lstatSync, type Stats } from 'fs';
+import { syncDispatchRow } from './sync-dispatch-read.ts';
 import { join, dirname, resolve } from 'path';
 import type { BrainEngine } from './engine.ts';
 import type { ExplicitReadBinding } from './ops/contract.ts';
@@ -627,7 +628,9 @@ export async function assessUnscopedDefaultWrite(
 }
 
 async function assertSourceExists(engine: BrainEngine, id: string): Promise<void> {
-  const rows = await engine.executeRaw<{ id: string }>(
+  // GBRA-133: inside a CLI sync's routing scope the source's routing row answers this (sync-dispatch-read.ts).
+  const routing = await syncDispatchRow(engine, id);
+  const rows = routing ? (routing.id !== null && routing.archived === false ? [routing] : []) : await engine.executeRaw<{ id: string }>(
     `SELECT id FROM sources WHERE id = $1 AND archived = false`,
     [id],
   );
