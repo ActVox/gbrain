@@ -12,30 +12,22 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.323.0] - 2026-10-20
 
-**Agents can now add to a page without rewriting it, and write pages larger than one request.** Before, adding a line to a long conversation log meant sending the whole page back with put_page, which got slower as the page grew, and a remote or thin client could not write a page bigger than its connection's request limit at all. Now `append_page` adds text to the end of a page in time proportional to the text added, upload sessions carry a page of any size up to the page ceiling in parts, and `edit_page` can edit a very large page by rewriting only the stretch it changes.
+**A large Postgres brain stuck at schema 220 now upgrades: migration v221 stamps chunks without a vector in committed batches instead of one ten-minute transaction.** v221 (`chunk_embedding_pending_since`) updated every chunk missing a vector in one statement inside the runner's single migration transaction, which runs under a fixed 10-minute statement budget. On a brain with about 1.7 million such chunks that statement ran out of time on every attempt and rolled back, so the brain stayed at schema 220 and couldn't upgrade past v0.60.112.0. There was no supported way around it.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| Adding to a conversation log | put_page of the whole page every time | `append_page` (or `gbrain append <slug>`): cost grows with the text added, idempotent by `request_id`; `expected_tail_sha256` refuses `tail_changed` when another writer appended first |
-| A remote or thin client writing a page over its request limit (1 MiB on legacy HTTP, 4 MiB on OAuth `/mcp` and stdio) | refused | an upload session: `begin_page_upload`, `upload_page_part`, `commit_page_upload` (`get_page_upload` resumes after a lost reply, `abort_page_upload` discards); `gbrain put --file` and `gbrain capture --file` use it on remote brains |
-| Editing a page stored in segments | the edit read the whole page back | only the segments the match touches are rewritten; `within` restricts a match to a range a window read returned |
-| A local `put --file` or `capture --file` over 24 MiB | read into memory whole | streamed in |
+| v221 on a large brain | one UPDATE over every chunk without a vector; timed out on every attempt and rolled back | the column is added, then chunks are stamped 5,000 per committed batch before v221 runs; v221 then finds nothing left to write |
+| An upgrade interrupted during that backfill | everything rolled back | committed batches stay; `gbrain apply-migrations --yes` continues from the chunks still unstamped |
+| Other published backfills that grow with a table (v011 link sources, v028 chunk keyword vectors, v033 request-log agent names except rows with no token, v116 code-edge sources) | one statement each | batched the same way before their migration |
+| v161's partial pages index, which the migration caps at 30 seconds | could time out on a large `pages` table | built concurrently first (Postgres), under the migration statement budget |
+| A migration that still runs out of its statement budget | "terminate blockers, rerun" even when nothing was blocking, so the rerun failed the same way | apply-migrations (`migrations_pending`) and doctor `schema_version` name the migration, with the fix for the case: it timed out without batching and this release batches it (rerun), idle sessions were open (check them with `gbrain doctor --locks` and end the ones still open once you agree, then rerun), or none were open (once you agree, one run with `--statement-timeout`) |
+| Raising the migration statement budget | not possible | `gbrain apply-migrations --yes --statement-timeout <minutes>` (operator only, that run only; `0` removes it) |
 
-### What to watch for after you upgrade
+v221 still chooses the active embedding column the same way and still records `embedding_pending_since_backfilled_at` only when it stamped a chunk, so doctor's backlog age keeps labelling those ages as a created_at backfill. The schema end state is unchanged, and the published migration files are untouched. The migrations that can't be batched, and why, are in [migration statement timeout](docs/guides/troubleshooting.md#migration-statement-timeout).
 
-- An upload session belongs to the connection, source and page that began it; any other caller gets `upload_not_found`. Staged bytes count against the `persistence.limits` upload quotas (`write_quota_exhausted`), and an idle session expires after an hour.
-- Appends, segmented edits and upload commits from agents go through the same write gate as put_page, so the same text gets the same content flag.
-- A remote replace upload over 24 MiB of a page that has a takes fence or timeline entries is refused with `upload_protected_content` (pass `drop_timeline` to replace a timeline deliberately).
-- `gbrain append` sends one direct call when the text fits the connection's request limit and an upload session above it; `--expect-tail`, `--region` and `--separator` apply only to the direct call and are refused above it.
-
-### Itemized changes
-
-- New operations: `append_page`, `begin_page_upload`, `upload_page_part`, `get_page_upload`, `commit_page_upload`, `abort_page_upload`; new error codes `tail_changed`, `part_too_large`, `part_splits_code_point`, `upload_protected_content`.
-- `edit_page` accepts `within`; a stale `within` refuses `revision_conflict`. On a segmented page an ambiguous match reports `match_count_at_least=2`.
-- New CLI command `gbrain append <slug> [--file f | stdin]`.
-- A `since: 'TBD'` BEHAVIOR_CHANGES row can no longer ship: `bun run check:behavior-since` (in `bun run verify`) refuses one on a stamped tree or master, `bun run release:restamp` stamps them, and the Release workflow refuses one before publishing.
+Reported by @BasedGPT (#7108), whose report included the EXPLAIN and dead-tuple numbers that ruled out bloat.
 
 ## [0.60.322.0] - 2026-10-20
 
