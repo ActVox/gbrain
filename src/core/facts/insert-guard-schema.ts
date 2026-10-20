@@ -1,7 +1,8 @@
 /**
  * Set-based insert guards on facts (#7105). One statement-level AFTER INSERT
  * trigger reads the statement's inserted rows from a transition table and
- * applies both insert-time guards once per statement instead of once per row:
+ * applies both insert-time guards once per statement instead of once per row
+ * (the withdrawal stamp only for inserts that defer it, see below):
  *
  * - Purge refusal (purge-schema.ts `gbrain_refuse_purged_fact`): an inserted
  *   row whose fingerprint has a fact_purges tombstone for its source,
@@ -12,13 +13,20 @@
  * - Withdrawal preservation (withdrawal-schema.ts
  *   `gbrain_preserve_fact_withdrawal`): an inserted active row matching a
  *   fact_withdrawals row (v2 or v1 fingerprint) is stamped expired_at =
- *   min(withdrawn_at) and valid_until = LEAST(valid_until, withdrawn_at), by
- *   an UPDATE of just those rows at the end of the inserting statement. The
- *   UPDATE runs under FACT_WITHDRAWAL_STAMP_SETTING (attribution-schema.ts),
- *   so the row keeps the last_write_* values its INSERT stamped or supplied,
- *   and resets it afterwards. The stamp lands after the INSERT's RETURNING:
- *   `INSERT ... RETURNING expired_at` (or a CTE over it) reads the unstamped
- *   row; the next statement reads the stamp.
+ *   min(withdrawn_at) and valid_until = LEAST(valid_until, withdrawn_at).
+ *   By default the per-row BEFORE INSERT trigger facts_preserve_withdrawal_insert
+ *   stamps the row before it is written, so `INSERT ... RETURNING` reads the
+ *   stamp. An insert made under FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING (the
+ *   bulk fence insert in engine-sql/facts.ts, whose RETURNING reads only ids)
+ *   skips that trigger through its WHEN clause, which calls no function, and
+ *   this guard stamps the rows by an UPDATE of just the matching ones at the
+ *   end of the statement. The setting only moves the stamp, never skips it:
+ *   the guard stamps every inserted active row still matching, whoever set
+ *   it. That UPDATE runs under FACT_WITHDRAWAL_STAMP_SETTING
+ *   (attribution-schema.ts), so the row keeps the last_write_* values its
+ *   INSERT stamped or supplied, and resets it afterwards. A deferred row's
+ *   RETURNING (or a CTE over it) reads it unstamped; the next statement reads
+ *   the stamp.
  *
  * Both take the per-row guards' lock: FOR SHARE on each inserted source row
  * before the ledgers are read, so an insert still serializes with a purge or
@@ -34,6 +42,8 @@
 import { FACT_WITHDRAWAL_STAMP_SETTING } from '../persistence/attribution-schema.ts';
 
 export const FACT_INSERT_GUARD_TRIGGER = 'facts_guard_inserted';
+/** Transaction-local; 'on' defers the withdrawal stamp of the following inserts to facts_guard_inserted. */
+export const FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING = 'gbrain.fact_withdrawal_stamp_deferred';
 export const FACT_INSERT_GUARD_FUNCTION = 'gbrain_guard_inserted_facts';
 
 export const FACT_INSERT_GUARD_SQL = `
@@ -84,4 +94,8 @@ CREATE TRIGGER facts_refuse_purged BEFORE UPDATE OF fact, source_id, visibility,
 DROP TRIGGER IF EXISTS facts_preserve_withdrawal ON facts;
 CREATE TRIGGER facts_preserve_withdrawal BEFORE UPDATE OF fact, source_id, visibility, entity_slug, expired_at ON facts
   FOR EACH ROW EXECUTE FUNCTION gbrain_preserve_fact_withdrawal();
+DROP TRIGGER IF EXISTS facts_preserve_withdrawal_insert ON facts;
+CREATE TRIGGER facts_preserve_withdrawal_insert BEFORE INSERT ON facts FOR EACH ROW
+  WHEN (NEW.expired_at IS NULL AND COALESCE(current_setting('${FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING}', true), '') <> 'on')
+  EXECUTE FUNCTION gbrain_preserve_fact_withdrawal();
 `;

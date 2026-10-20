@@ -20,8 +20,9 @@
  *    the last_write_* attribution the INSERT stamped or supplied (the stamp is
  *    an UPDATE under gbrain.fact_withdrawal_stamp). Updates still go through
  *    the per-row guards.
- * 3. The documented edge: INSERT ... RETURNING reads a withdrawn row before
- *    its stamp.
+ * 3. INSERT ... RETURNING (a CTE included) reads a withdrawn row's stamp, as
+ *    the per-row guard returned it; only an insert under the deferral setting
+ *    the bulk fence insert uses reads it unstamped (the documented edge).
  * Runs on PGLite, and on Postgres when DATABASE_URL is set
  * (test/postgres-unit-arms.txt).
  */
@@ -34,6 +35,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MEMORY_PURGE_GUARD_SQL } from '../src/core/facts/purge-schema.ts';
 import { FACT_WITHDRAWAL_SCHEMA_STATEMENTS } from '../src/core/facts/withdrawal-schema.ts';
+import { FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING } from '../src/core/facts/insert-guard-schema.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
@@ -82,6 +84,7 @@ async function inRolledBack<T>(engine: BrainEngine, perRow: boolean, fn: (tx: Br
     await engine.transaction(async tx => {
       if (perRow) {
         await tx.executeRaw('DROP TRIGGER IF EXISTS facts_guard_inserted ON facts');
+        await tx.executeRaw('DROP TRIGGER IF EXISTS facts_preserve_withdrawal_insert ON facts');
         await tx.runMigration(0, MEMORY_PURGE_GUARD_SQL);
         for (const statement of FACT_WITHDRAWAL_SCHEMA_STATEMENTS) await tx.executeRaw(statement);
       }
@@ -265,6 +268,8 @@ test('a withdrawal stamp keeps the write attribution the INSERT stamped or suppl
         FROM jsonb_to_recordset($3::text::jsonb) AS r(fact text, row_num integer, req text, kind text, principal text, at text)`,
         [sourceId, SLUG, JSON.stringify(rows.map(([i, rowNum, req]) => ({ fact: claim(i), row_num: rowNum, req,
           kind: req && 'local_cli', principal: req && 'principal-supplied', at: req && '2020-01-01T00:00:00Z' })))]);
+      // Deferred, as the bulk fence insert runs: facts_guard_inserted stamps by UPDATE.
+      await tx.executeRaw(`SELECT set_config('${FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING}', 'on', true)`);
       // No actor set (an engine copy or backfill): supplied and absent attribution, withdrawn and not.
       await insert([[1, 1, supplied], [2, 2, null], [3, 3, supplied]]);
       // An actor set (a coordinated write): the INSERT stamps the actor.
@@ -272,7 +277,7 @@ test('a withdrawal stamp keeps the write attribution the INSERT stamped or suppl
         set_config('gbrain.write_principal_id', 'principal-actor', true)`, [actor]);
       await insert([[1, 4, null]]);
       await tx.executeRaw(`SELECT set_config('gbrain.write_request', '', true), set_config('gbrain.write_principal_kind', '', true),
-        set_config('gbrain.write_principal_id', '', true)`);
+        set_config('gbrain.write_principal_id', '', true), set_config('${FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING}', '', true)`);
       // The stamp setting does not outlive the stamp: a later expiry by an unattributed writer moves attribution.
       await tx.executeRaw(`UPDATE facts SET expired_at = '2024-01-01T00:00:00Z' WHERE source_id = $1 AND row_num = 3`, [sourceId]);
       return (await tx.executeRaw<Record<string, unknown>>(`SELECT row_num, expired_at, write_request_id::text AS created_req, write_principal_id AS created_by,
@@ -299,18 +304,26 @@ test('a withdrawal stamp keeps the write attribution the INSERT stamped or suppl
 }, 120_000);
 
 
-test('documented edge: INSERT ... RETURNING reads a withdrawn row before its stamp; the next statement reads the stamp', async () => {
+test('INSERT ... RETURNING reads the withdrawal stamp; only a deferred insert reads it from the next statement', async () => {
   for (const engine of engines) {
     const sourceId = await newSource(engine);
     const seen = await inRolledBack(engine, false, async tx => {
       await tx.executeRaw(`INSERT INTO fact_withdrawals(source_id, visibility, subject, fact_hash, withdrawn_at) VALUES ($1, 'private', '*', gbrain_fact_fingerprint($2), '2023-01-01T00:00:00Z')`,
         [sourceId, claim(1)]);
-      const [returned] = await tx.executeRaw<{ id: number; expired_at: unknown }>(`INSERT INTO facts (source_id, fact, kind, visibility, source)
-        VALUES ($1, $2, 'fact', 'private', 'fixture') RETURNING id, expired_at`, [sourceId, claim(1)]);
-      const [stored] = await tx.executeRaw<{ expired_at: unknown }>('SELECT expired_at FROM facts WHERE id = $1', [returned!.id]);
-      return { returned: iso(returned!.expired_at), stored: iso(stored!.expired_at) };
+      const insert = async () => {
+        const [returned] = await tx.executeRaw<{ id: number; expired_at: unknown }>(`WITH ins AS (INSERT INTO facts (source_id, fact, kind, visibility, source)
+          VALUES ($1, $2, 'fact', 'private', 'fixture') RETURNING id, expired_at) SELECT id, expired_at FROM ins`, [sourceId, claim(1)]);
+        const [stored] = await tx.executeRaw<{ expired_at: unknown }>('SELECT expired_at FROM facts WHERE id = $1', [returned!.id]);
+        return { returned: iso(returned!.expired_at), stored: iso(stored!.expired_at) };
+      };
+      const plain = await insert();
+      await tx.executeRaw(`SELECT set_config('${FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING}', 'on', true)`);
+      const deferred = await insert();
+      await tx.executeRaw(`SELECT set_config('${FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING}', '', true)`);
+      return { plain, deferred };
     });
-    expect(seen).toEqual({ returned: null, stored: '2023-01-01T00:00:00.000Z' });
+    expect(seen).toEqual({ plain: { returned: '2023-01-01T00:00:00.000Z', stored: '2023-01-01T00:00:00.000Z' },
+      deferred: { returned: null, stored: '2023-01-01T00:00:00.000Z' } });
   }
 }, 120_000);
 
