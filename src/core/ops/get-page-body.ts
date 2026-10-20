@@ -45,7 +45,7 @@ import {
 import {
   markdownDigest, markdownHead, readViewLines, segmentedMarkdownDocument, segmentedOutline, segmentedReadDocument, tailDigest, type SegmentedDocument,
 } from '../page-window/segmented.ts';
-import { confirmBodyPin, openSegmentedBody, type BodyPin } from '../page-body/read-range.ts';
+import { confirmBodyPin, hiddenBefore, openSegmentedBody, type BodyPin } from '../page-body/read-range.ts';
 import { inlineRegions, inlineTailDigest } from '../page-body/tail-digest.ts';
 import { TIMELINE_SEPARATOR } from '../page-window/document.ts';
 import { renderTrustedText, type TrustFields } from '../eligibility/labels.ts';
@@ -393,7 +393,6 @@ async function editTarget(ctx: OperationContext, page: Page, doc: WindowDocument
   if (doc.segments) {
     const seg = doc.segments;
     const { rows, truthBytes, bodyBytes } = seg.body;
-    let hidden = false;
     /** Stored offset of read-view byte `p`: a window start (the unit holding p) or end (the unit holding p - 1). */
     const map = (p: number, side: 'start' | 'end') => {
       if (p >= seg.total) return bodyBytes;
@@ -404,11 +403,7 @@ async function editTarget(ctx: OperationContext, page: Page, doc: WindowDocument
       if (u.bytes === row.byteLen && !row.hasFacts) return row.byteStart + Math.min(row.byteLen, p - u.start);
       return side === 'start' ? row.byteStart : row.byteStart + row.byteLen;
     };
-    for (const u of seg.units) {
-      if (u.start >= win.byte_end) break;
-      if (u.row < 0 ? u.text !== TIMELINE_SEPARATOR : (u.bytes !== rows[u.row]!.byteLen || rows[u.row]!.hasFacts)) hidden = true;
-    }
-    if (remote && hidden) return undefined;
+    if (remote && await hiddenBefore(ctx.engine, seg.body, win.byte_end, 'projected')) return undefined;
     const start = map(win.byte_start, 'start');
     return { revision, byte_start: start, byte_end: Math.max(start, map(win.byte_end, 'end')) };
   }
