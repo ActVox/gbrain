@@ -360,6 +360,7 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
   };
 
   const ownership = async () => {
+    if (stopped) return;
     const r = await guard('claiming the notifier lease', () => opts.store.claimLease({ hostId: opts.hostId, ownerId, kind: opts.resident, pid, leaseMs }), undefined);
     if (r === undefined) return;
     if (r === null) { leased = false; if (!owner) { owner = true; log(`owner of this host's notifier (${opts.resident})`); } return; }
@@ -577,11 +578,15 @@ export function startCommitNotifier(opts: CommitNotifierOptions): CommitNotifier
         if (nudgeTimer !== null) clearTimer(nudgeTimer);
         closeAllWatches();
       }
+      // Hand the lease over before settling: a stop on a termination signal has a short cleanup deadline, and a step
+      // still in flight re-checks the lease before any start (and claims nothing once stopped).
+      const release = () => owner && leased ? guard('releasing the notifier lease', () => opts.store.releaseLease(opts.hostId, ownerId), undefined) : undefined;
+      await release();
       if (inflight) {
         await settleWithin(inflight, STOP_SETTLE_MS);
         closeAllWatches();
+        await release();
       }
-      if (owner && leased) await guard('releasing the notifier lease', () => opts.store.releaseLease(opts.hostId, ownerId), undefined);
     },
   };
 }
