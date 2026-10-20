@@ -86,6 +86,7 @@ import { imageEmbeddingCoverageEntry } from './checks/image-embedding-coverage.t
 import { globalMaintenanceTimeoutsEntry } from './checks/global-maintenance-timeouts.ts';
 import { globalMaintenanceStalledEntry } from './checks/global-maintenance-stalled.ts';
 import { embedBackfillStalledEntry } from './checks/embed-backfill-stalled.ts';
+import { contentDriftSweepEntry } from './checks/content-drift-sweep.ts';
 import { connectorAccountMismatchEntry } from './checks/connector-account-mismatch.ts';
 import { legacyJobAuthorityEntry } from './checks/legacy-job-authority.ts';
 import { legacyTokenGrantsEntry } from './checks/legacy-token-grants.ts';
@@ -224,6 +225,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   globalMaintenanceTimeoutsEntry,
   globalMaintenanceStalledEntry,
   embedBackfillStalledEntry,
+  contentDriftSweepEntry,
   connectorAccountMismatchEntry,
   legacyJobAuthorityEntry,
   legacyTokenGrantsEntry,
