@@ -61,6 +61,7 @@ import { addFencesNormalized, clearGitHold, clearGitHoldRetryPaths, countGitHold
 import { clearSyncSlice, writeSyncSlice, type SyncSliceState } from './sync-slices.ts';
 import { CHECKPOINT_MOVED_MESSAGE, emptySyncScope, pinnedSlugModeMismatch, slugModeMismatchCause } from './sync-slug-mode.ts';
 import { readPagePurgeTombstones } from './page-purge.ts';
+import { recordSyncDeleteTombstone } from './sync-delete-tombstones.ts';
 import { fenceWhere } from '../fence-repair/refusal.ts';
 import { recordSyncRunTrend } from '../fence-repair/census-store.ts';
 import { fencesNormalizeEnabled } from '../fence-repair/config.ts';
@@ -769,7 +770,10 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
   }
   if (p.kind === 'managed_sync_delete') return { observedRevision: snapshot?.revision ?? null, noop: !snapshot || snapshot.page.deleted_at != null,
     trust: await ownerImportTrust(engine, row, snapshot?.page.frontmatter, p.sourcePath), validate, apply: async (tx, preimage) => {
-      if (snapshot && snapshot.page.deleted_at == null) { await tx.createVersion(row.slug, preimage ? { ...source, preimage } : source); await tx.softDeletePage(row.slug, source); }
+      if (snapshot && snapshot.page.deleted_at == null) {
+        await tx.createVersion(row.slug, preimage ? { ...source, preimage } : source); await tx.softDeletePage(row.slug, source);
+        await recordSyncDeleteTombstone(tx, row, p); // #7130: the automatic purge holds this tombstone
+      }
       await releaseHold(tx);
       return { status: 'soft_deleted', slug: row.slug, source_id: row.source_id, noop: !snapshot || snapshot.page.deleted_at != null };
     } };
