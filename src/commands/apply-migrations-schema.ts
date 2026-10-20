@@ -143,7 +143,7 @@ export function schemaPendingError(p: SchemaPending, rerunWithYes: Action): Oper
     const advice = migrationTimeoutAdvice(p.timeout, { argv: ['gbrain', 'doctor', '--only', 'schema_version', '--json'] });
     return opError('migrations_pending', `Schema migrations are still behind after an authorized run (${where}). ${advice.message}`,
       advice.fix.user_message ?? advice.fix.why,
-      { reason: p.reason, why: 'A schema migration ran out of its statement budget, so the run stopped below it; what helps depends on the gbrain release that ran it and on whether a session was blocking it.',
+      { reason: p.reason, why: 'A schema migration ran out of its statement budget, so the run stopped below it; what helps depends on the release that ran it and on whether a session was blocking it.',
         fix: advice.fix });
   }
   if (p.reason === 'still_behind') {

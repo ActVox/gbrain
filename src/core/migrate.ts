@@ -554,11 +554,11 @@ async function applyOneMigration(engine: BrainEngine, m: Migration): Promise<voi
             console.error('');
             console.error(`   Cause: no idle-in-transaction session was open, and a lock wait stops at the lock timeout, so its own work`);
             console.error(`   outlasted its ${Math.round(migrationStatementTimeoutMs() / 60_000)}-minute statement budget on this brain; every attempt rolled back.`);
-            console.error('   A plain rerun with this gbrain release repeats the failure (#7108).');
+            console.error('   A plain rerun with this release repeats the failure (#7108).');
             console.error('');
             console.error('   Fix:');
             console.error('     1. gbrain doctor --locks    # confirm no session holds a lock on the table');
-            console.error('     2. If a newer gbrain release exists: gbrain upgrade, then gbrain apply-migrations --yes');
+            console.error('     2. If a newer release exists: gbrain upgrade, then gbrain apply-migrations --yes');
             console.error("     3. Otherwise, with the user's agreement: gbrain apply-migrations --yes --statement-timeout 120, and report it");
             console.error('');
           }
