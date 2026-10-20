@@ -119,6 +119,15 @@ test('a file deleted for real reads deleted once synced and stale_page before; a
   } finally { await engine.setConfig('sync.metafile_pages', ''); }
 }), 240_000);
 
+test('under the default sync.metafile_pages typed, a typed nested index.md resolves as its page; a bare nested README.md still reads skipped', () => each(async engine => {
+  const s = await source(engine, { [NESTED_INDEX]: '---\ntype: project\nstatus: active\n---\nA synthetic project hub.\n', 'people/README.md': 'Folder notes.\n' });
+  await s.sync();
+  const [index, readme] = (await s.resolve(NESTED_INDEX, 'people/README.md')).paths;
+  expect(index).toMatchObject({ path: NESTED_INDEX, slug: 'projects/acme-example/index', in_synced_commit: true, skipped: null, hold: null, page: { slug: 'projects/acme-example/index', deleted: false } });
+  expect(['searchable', 'pending_embedding']).toContain(index!.state);
+  expect(readme).toMatchObject({ state: 'skipped', page: null, skipped: { reason: 'metafile', typed_frontmatter: false } });
+}), 240_000);
+
 test('a committed eligible file with no page and no hold is missing (a real gap) with the re-screen fix; a held file and a not-yet-synced commit read as such', () => each(async engine => {
   const s = await source(engine, { 'notes/a.md': note('A') });
   await s.sync();
