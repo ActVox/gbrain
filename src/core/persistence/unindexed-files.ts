@@ -325,7 +325,9 @@ export async function refreshUnindexedFiles(engine: BrainEngine, sourceId: strin
   const scan = await findUnindexedFiles(engine, sourceId, { ...opts, context, cursor: previous?.cursor ?? null, ...(previous && revisit?.size ? { revisit } : {}) });
   const scheduled = opts.schedule === false ? [] : scan.files.filter(file => !file.slug_taken && !file.deleted_page).map(file => file.path);
   if (scheduled.length) await requestGitHoldRetry(engine, sourceId, context.incarnation, scheduled);
-  const pending = [...new Set([...(previous?.pending ?? []), ...scan.scheduled_paths, ...scheduled])];
+  // Paths the continuation re-examined drop their earlier verdict: one still missing is found again, one deleted or imported is not.
+  const revisited = new Set([...(previous && revisit ? revisit : [])].map(path => eligibility.scope ? path.slice(eligibility.scope.length + 1) : path));
+  const pending = [...new Set([...(previous?.pending ?? []).filter(path => !revisited.has(path)), ...scan.scheduled_paths, ...scheduled])];
   const { scope, slugMode } = eligibility;
   const at = new Date(now()).toISOString();
   const record: UnindexedRecord = {

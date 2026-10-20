@@ -114,6 +114,21 @@ test('a bounded scan converges while commits keep landing: it keeps its cursor a
   expect([...await readGitHoldRetryPaths(engine, s.id, await s.incarnation())].sort()).toEqual(expected);
 }), 240_000);
 
+test('a file the scan found before its cursor and a later commit deleted leaves the continued result; doctor does not report it missing', () => each(async engine => {
+  const s = await source(engine, 'unidx7149-gone', files('notes', 8));
+  await s.sync();
+  await s.legacy({ 'notes/a-legacy.md': note('Legacy') });
+  const first = await refreshUnindexedFiles(engine, s.id, { batch: 2, maxScanned: 2 });
+  expect(first.record).toMatchObject({ complete: false, cursor: 'notes/f00.md', pending: ['notes/a-legacy.md'] });
+  rmSync(join(s.root, 'notes/a-legacy.md'));
+  await s.legacy({});
+  let record = first.record;
+  for (let pass = 0; !record.complete && pass < 10; pass++) record = (await refreshUnindexedFiles(engine, s.id, { batch: 2, maxScanned: 2 })).record;
+  expect(record).toMatchObject({ complete: true, pending: [] });
+  await s.sync();
+  expect((await s.doctor()).details).toMatchObject({ sources: [{ source_id: s.id, still_unindexed: 0, waiting: 0 }] });
+}), 240_000);
+
 test('the maintenance phase serves the least recently scanned source first, so a source a large one starved is scanned on the next run', () => each(async engine => {
   const a = await source(engine, 'unidx7149-a', files('notes', 3));
   const b = await source(engine, 'unidx7149-b', files('notes', 3));
