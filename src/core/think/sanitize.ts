@@ -155,11 +155,12 @@ export const INJECTION_DETECTION_PATTERNS: ReadonlyArray<{ name: string; family:
   .map(p => ({ name: p.name, family: DETECTION_FAMILY[p.name], rx: new RegExp(p.rx.source, p.rx.flags.replace('g', '')) }));
 
 /**
- * Sanitize a single take claim before embedding into a model prompt.
- * Returns the cleaned text + a list of patterns that matched (for telemetry).
+ * Neutralize the known injection phrases in stored text as it is rendered
+ * into a model prompt. Stored text is never rewritten (#7125): every renderer
+ * that puts a stored fact or claim in front of a model calls this on its copy.
  */
-export function sanitizeTakeForPrompt(claim: string): { text: string; matched: string[] } {
-  let text = claim;
+export function neutralizeForPrompt(raw: string): { text: string; matched: string[] } {
+  let text = raw;
   const matched: string[] = [];
   for (const p of INJECTION_PATTERNS) {
     if (p.rx.test(text)) {
@@ -167,6 +168,16 @@ export function sanitizeTakeForPrompt(claim: string): { text: string; matched: s
       text = text.replace(p.rx, p.replacement);
     }
   }
+  return { text, matched };
+}
+
+/**
+ * Sanitize a single take claim before embedding into a model prompt.
+ * Returns the cleaned text + a list of patterns that matched (for telemetry).
+ */
+export function sanitizeTakeForPrompt(claim: string): { text: string; matched: string[] } {
+  const { text: neutralized, matched } = neutralizeForPrompt(claim);
+  let text = neutralized;
   // Final safety: cap absurdly long claims to keep one bad row from hogging
   // the prompt budget. 500 chars is far longer than any natural take.
   if (text.length > 500) {
