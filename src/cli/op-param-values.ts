@@ -28,3 +28,19 @@ export function opParamValue(op: Operation, key: string, def: ParamDef | undefin
   }
   return raw;
 }
+
+/**
+ * An object/array param from its CLI text: JSON, or for a string-item array
+ * a bare value or comma list (`--types company`, `--types person,company`,
+ * the form the op's own errors suggest). Other values pass through.
+ */
+export function opStructuredValue(key: string, def: ParamDef, value: unknown): unknown {
+  const flag = `--${key.replace(/_/g, '-')}`;
+  if ((def.type !== 'object' && def.type !== 'array') || typeof value !== 'string') return value;
+  if (def.type === 'array' && def.items?.type === 'string' && !value.trimStart().startsWith('[')) return value.split(',').map(v => v.trim()).filter(Boolean);
+  const jsonError = () => usageError(`${flag} requires a JSON ${def.type}.`, `Pass JSON, e.g. ${flag} '${def.type === 'array' ? '["a","b"]' : '{"key":"value"}'}'.`);
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw jsonError(); }
+  if (def.type === 'array' ? !Array.isArray(parsed) : parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw jsonError();
+  return parsed;
+}

@@ -49,7 +49,7 @@ import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usage
 import type { Notice } from '../core/agent-output.ts';
 import { opError, opOwnsSource } from '../core/ops/contract.ts';
 import { PAGE_MAX_BYTES } from '../core/page-size-policy.ts';
-import { opParamValue } from './op-param-values.ts';
+import { opParamValue, opStructuredValue } from './op-param-values.ts';
 import { SEGMENTED_STREAMED, formatGetPage, printPagedPage, remoteErrorCode, streamSegmentedGet, wantsWholePage } from './page-render.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from '../core/cli-options.ts';
 import { runCliPreflight } from '../core/cli-preflight.ts';
@@ -1131,12 +1131,7 @@ export function parseOpArgs(op: Operation, args: string[]): Record<string, unkno
   }
 
   for (const [key, def] of Object.entries(op.params)) {
-    if ((def.type !== 'object' && def.type !== 'array') || typeof params[key] !== 'string') continue;
-    let value: unknown;
-    const jsonError = () => usageError(`--${key.replace(/_/g, '-')} requires a JSON ${def.type}.`, `Pass JSON, e.g. --${key.replace(/_/g, '-')} '${def.type === 'array' ? '["a","b"]' : '{"key":"value"}'}'.`);
-    try { value = JSON.parse(params[key] as string); } catch { throw jsonError(); }
-    if (def.type === 'array' ? !Array.isArray(value) : value === null || typeof value !== 'object' || Array.isArray(value)) throw jsonError();
-    params[key] = value;
+    if (params[key] !== undefined) params[key] = opStructuredValue(key, def, params[key]);
   }
   return params;
 }
