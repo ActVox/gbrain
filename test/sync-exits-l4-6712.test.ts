@@ -30,7 +30,7 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
-import { managedBrain } from './helpers/managed-brain.ts';
+import { managedBrain, settleManagedGitEffects } from './helpers/managed-brain.ts';
 import { durableGitRepo } from './helpers/git-publication.ts';
 
 describe('#6712 PR 2 L4: the fault table and source_changed routing', () => {
@@ -223,6 +223,8 @@ describe('#6712 PR 2 L4: ghost pages after a managed sync', () => {
     for (const slug of ['notes/kept', 'notes/gone']) {
       await submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content: `---\ntype: note\ntitle: ${slug}\n---\n\n${slug} body.\n` } });
     }
+    // The files are committed first: a page whose file never reached Git is a working-tree page, which a full pass deletes.
+    await settleManagedGitEffects(engine);
     await disposePersistenceConsumer(engine);
     // GBRA-133 2b.2: the scan runs in the background after a sync (interval 0 here: every sync starts one) and the next
     // sync reports what it found.

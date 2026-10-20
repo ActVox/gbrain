@@ -36,6 +36,7 @@ import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../
 import { installFixtureChunks } from '../helpers/page-projection.ts';
 import { isolatedSharedSkillsEngine } from '../helpers/shared-skills-engine.ts';
 import { durableGitRepo } from '../helpers/git-publication.ts';
+import { settleManagedGitEffects } from '../helpers/managed-brain.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { managedBrain, pathologicalArms } from './harness.ts';
 import { md, record, withProbeEngine, withProbeRepo } from './s-blockers-fixture.ts';
@@ -121,6 +122,8 @@ describe('GBRA-133 2b.2: the ghost report runs after the sync, rate-limited per 
       for (const slug of ['notes/kept', 'notes/gone']) {
         await submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(), content: `---\ntype: note\ntitle: ${slug}\n---\n\n${slug} body.\n` } });
       }
+      // The files are committed first: a page whose file never reached Git is a working-tree page, which a full pass deletes.
+      await settleManagedGitEffects(engine);
       await disposePersistenceConsumer(engine);
       const ghosts = await import('../../src/core/persistence/sync-ghosts.ts') as Partial<typeof import('../../src/core/persistence/sync-ghosts.ts')>;
       const since = ghosts.syncGhostDecisions?.length ?? 0;

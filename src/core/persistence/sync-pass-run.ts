@@ -158,7 +158,13 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   for (const entry of fresh) twinsAt.set(entry.state.level, (twinsAt.get(entry.state.level) ?? 0) + 1);
   const leavingAt = new Map<string, ShadowPath[]>();
   for (const gone of leaving.values()) for (const oid of new Set(gone.state.record?.blobOids ?? [])) { const at = leavingAt.get(oid); if (at) at.push(gone); else leavingAt.set(oid, [gone]); }
-  const slugOf = new Map(fresh.map(entry => [entry.path, resolveSlugForPath(entryPaths(level, entry.path).sourcePath)]));
+  // A first sync's batch is every new file: each loop below yields between stretches, as a level's own loops do.
+  const step = loopYield();
+  const slugOf = new Map<string, string>();
+  for (const entry of fresh) {
+    if (step.due()) await step.pause();
+    slugOf.set(entry.path, resolveSlugForPath(entryPaths(level, entry.path).sourcePath));
+  }
   // #6727, as discovery does: a new origin with no live page at its slug takes the one legacy page (no recorded origin)
   // that folds to it; several, or one the importer cannot write, keep the slug and the freeze holds legacy_slug_conflict.
   const legacySlugs = new Map<string, Pick<SyncEntry, 'legacySlugs' | 'legacyIdVeto'>>();
@@ -170,6 +176,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
       [level.sourceId, [...new Set(adopting.map(entry => slugOf.get(entry.path)!))]]);
     const bySlug = new Map(identities.map(page => [page.slug, page]));
     for (const entry of adopting) {
+      if (step.due()) await step.pause();
       const adopted = named(entry);
       slugOf.set(entry.path, await adoptLegacyPage(engine, discovery, identities, bySlug.get(slugOf.get(entry.path)!), slugOf.get(entry.path)!, adopted));
       if (adopted.legacySlugs) legacySlugs.set(entry.path, { legacySlugs: adopted.legacySlugs, ...(adopted.legacyIdVeto ? { legacyIdVeto: true as const } : {}) });
@@ -187,6 +194,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   const entries: PassEntry[] = [], collisions: SyncSlugCollision[] = [], skipped: ShadowPath[] = [], identity: Array<{ entry: ShadowPath; origin: ShadowPath | null; slug: string; ids: { page: string; file: string } }> = [];
   const claims = new Map<string, ShadowPath[]>();
   for (const entry of imports) {
+    if (step.due()) await step.pause();
     const paths = entryPaths(level, entry.path);
     const base = { ...paths, action: 'import' as const, working: working(entry), level: entry.state.level, ...(entry.result.cls === 'drift' && entry.result.side && entry.result.side !== 'deleted' ? { drift: entry.result.side, ...(driftBaseline(entry) ? { driftBaseline: driftBaseline(entry) } : {}) } : {}) };
     if (entry.state.page) { entries.push({ ...base, slug: entry.slug!, pageId: entry.pageId, revision: entry.revision }); continue; }
@@ -215,6 +223,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     return new Map(manifests.flatMap(manifest => manifest.renamed.map(pair => [pair.to, { from: pair.from, ...(pair.identityHead ? { identityHead: pair.identityHead } : {}) }] as const)));
   })();
   for (const [slug, claimants] of claims) {
+    if (step.due()) await step.pause();
     const holder = holders.get(slug);
     const holderPath = holder?.source_path ? gitPathOfOrigin(holder.source_path) : null;
     const kept = holder && !holder.deleted && holderPath !== null && !leaving.has(holderPath) ? holderPath : null;

@@ -9,7 +9,7 @@ import { loadConfigWithEngine, type GBrainConfig } from '../core/config.ts';
 import { withRequestConfigSnapshot } from '../core/config-snapshot.ts';
 import type { BrainEngine } from '../core/engine.ts';
 
-export async function mergeDbPlaneConfig(engine: BrainEngine, config: GBrainConfig, mergedByEngine: WeakMap<BrainEngine, GBrainConfig>): Promise<void> {
+export async function mergeDbPlaneConfig(engine: BrainEngine, config: GBrainConfig, MERGED_CONFIG_BY_ENGINE: WeakMap<BrainEngine, GBrainConfig>): Promise<void> {
   // v0.27.1 (F3 fix): re-merge DB-plane config now that the engine is up.
   // Flags like `embedding_multimodal` are user-mutable via `gbrain config set`
   // (DB plane) and need to flow into the gateway after connect. Schema-sizing
@@ -26,7 +26,7 @@ export async function mergeDbPlaneConfig(engine: BrainEngine, config: GBrainConf
         // function's per-key config reads on every command (the cost #3980 is
         // about). Keyed on the engine so a mounted brain cannot be served the
         // host brain's merge.
-        mergedByEngine.set(engine, merged);
+        MERGED_CONFIG_BY_ENGINE.set(engine, merged);
         // Stash gate flags on process.env for downstream readers (import-file.ts
         // dispatches on GBRAIN_EMBEDDING_MULTIMODAL, gates OCR on GBRAIN_EMBEDDING_IMAGE_OCR).
         // The OCR *model* reaches the gateway via the re-configure below (#4107); its

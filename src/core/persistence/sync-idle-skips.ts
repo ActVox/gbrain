@@ -38,6 +38,7 @@ export async function readIdleFacts(engine: Pick<BrainEngine, 'executeRaw'>, sou
 
 /** Whether an idle tick with these facts leaves the settles in IDLE_SKIPS nothing to do. */
 export function idleClear(facts: IdleFacts): boolean {
+  // cwd-dotenv-ok: a kill switch that only turns the idle skips off (every settle runs, as before); it names no path.
   return process.env.GBRAIN_SYNC_IDLE_FAST_PATH !== '0' && !facts.tail && facts.holds === 0 && facts.holdSummary === 0 && !facts.failures;
 }
 
