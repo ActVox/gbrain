@@ -396,7 +396,7 @@ export async function buildChecks(
   connectError?: unknown,
   // #6696: the run's deadline (started by the CLI before connecting) and a remote caller's readable sources.
   deadline: DoctorDeadline = startDoctorDeadline(args),
-  remoteScope: { sourceIds?: string[] } = {},
+  remoteScope: { sourceIds?: string[]; remote?: boolean } = {},
 ): Promise<Check[]> {
   const jsonOutput = args.includes('--json');
   const fastMode = args.includes('--fast');
@@ -474,6 +474,7 @@ export async function buildChecks(
     tier: parseDoctorTier(args),
     deadline,
     ...(remoteScope.sourceIds ? { sourceIds: remoteScope.sourceIds } : {}),
+    ...(remoteScope.remote ? { remote: true } : {}),
   };
 
   return runDoctorRegistry(ctx);
