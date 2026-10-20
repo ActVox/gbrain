@@ -81,7 +81,7 @@ every embed drain could cancel every autovacuum of the table before it
 finished, leaving millions of dead rows in every index (#7083). So every
 ANALYZE gbrain runs on Postgres on its own (the import, sync, reindex and
 embed refreshes, the search guard, `gbrain repair planner-stats --apply`
-and migrations) first locks the table with `NOWAIT`: when a vacuum, another
+and the ANALYZE after a migration builds an index) first locks the table with `NOWAIT`: when a vacuum, another
 ANALYZE or an index build holds it, the ANALYZE is deferred with a warning
 (the repair reports the table `deferred`) and never waits. The embed
 drain's chunk refresh also skips a drain that changed fewer than 50 + 10% of
