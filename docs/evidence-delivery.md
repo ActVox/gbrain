@@ -24,16 +24,19 @@ the same call: a window of neighboring chunks, the enclosing section, or the
 whole page, packed into a token budget.
 
 With `return_unit` omitted the unit is `auto`: hits on conversation pages
-(see [Conversation detection](#conversation-detection)) come back as the whole
-page, every other hit stays the ranked chunk it was. A response with no
-conversation hit is byte-identical to earlier releases. `return_unit: "chunk"`
-(or `gbrain config set search.return_unit chunk`) turns the stage off
-entirely.
+(see [Conversation detection](#conversation-detection)) come back as the
+conversation around the hit, every other hit stays the ranked chunk it was.
+On `search` and `query` an implied `auto` block stops at 8,000 characters
+around its matching span (`delivered.truncated` says so), and a chunk row
+returns at most 8,000 characters (`chunk_chars` says so); pass an explicit
+`return_unit` for the whole block, up to 60,000 characters, or
+`snippet_chars: 0` for full chunk text. `return_unit: "chunk"` (or
+`gbrain config set search.return_unit chunk`) turns the stage off entirely.
 
 A budget you pass under `auto` is a hard cap: everything delivered (titles,
 evidence text and every marker in it) fits inside it, on `query`, `search`,
 `recall`'s results and `assemble_evidence`. A call that passes no budget gets
-exactly what earlier releases returned. See [Explicit budgets](#explicit-budgets-the-cap).
+the default budget and the 8,000-character block bound above. See [Explicit budgets](#explicit-budgets-the-cap).
 
 **Say to your agent:** *"Search my brain for what alice-example said about the
 launch date, and read the whole conversation, not just the snippet."*

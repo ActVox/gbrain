@@ -1038,8 +1038,7 @@ export function resolveQueryImage(
 
 export function parseOpArgs(op: Operation, args: string[]): Record<string, unknown> {
   // `gbrain search --explain`: the CLI-local formatter flag also asks the op for score attribution.
-  const explained = (op.name === 'search' || op.name === 'query') && (getCliOptions().explain || args.includes('--explain'));
-  const params: Record<string, unknown> = explained ? { explain: true } : {};
+  const params: Record<string, unknown> = (op.name === 'search' || op.name === 'query') && (getCliOptions().explain || args.includes('--explain')) ? { explain: true } : {};
   const positional = op.cliHints?.positional || [];
   let posIdx = 0;
 
