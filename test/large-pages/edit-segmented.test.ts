@@ -28,6 +28,11 @@ const FENCED = 'notes/edit-fenced';
 const INLINE = 'notes/edit-inline';
 const HIDDEN_A = 'notes/edit-hidden-a';
 const HIDDEN_B = 'notes/edit-hidden-b';
+const WITHDRAWN_A = 'notes/edit-withdrawn-a';
+const WITHDRAWN_B = 'notes/edit-withdrawn-b';
+const BOUNDARY = 'notes/edit-boundary';
+const WITHIN_SEG = 'notes/edit-within-seg';
+const WITHIN_INLINE = 'notes/edit-within-inline';
 const MALFORMED = 'notes/edit-malformed';
 const INLINE_MALFORMED = 'notes/edit-malformed-inline';
 const GATED = 'notes/edit-gated';
@@ -150,6 +155,89 @@ for (const kind of testBackends()) {
       expect(addedLine(trusted.body.diff, 'TRUSTED-EDIT')).toBeGreaterThan(newlines(prefix));
       expect(addedLine(trusted.body.diff, 'TRUSTED-EDIT') - addedLine(remote.body.diff, 'REMOTE-EDIT')).toBe(newlines(prefix) - newlines(view(prefix)));
       expect(newlines(prefix) - newlines(view(prefix))).toBeGreaterThan(0);
+    }, 600_000);
+
+    test('a withdrawn fact row stays out of a segmented edit\'s diff and receipt, local and remote, and is never matched', async () => {
+      const claim = 'Withdrawn world claim';
+      // The withdrawn world row is the fence's last row, so it falls inside the diff's three context lines.
+      const lines = FACTS_BLOCK.split('\n');
+      [lines[3], lines[4]] = [lines[4]!.replace('| 2 |', '| 1 |'), lines[3]!.replace('| 1 | likes tea |', `| 2 | ${claim} |`)];
+      const facts = lines.join('\n');
+      const body = 'Intro.\n\n' + facts + '\nAfter the fence line.\n\n' + conversationBody(1_200_000, { seed: 11 });
+      for (const slug of [WITHDRAWN_A, WITHDRAWN_B]) {
+        await brain.seed(slug, fm('Withdrawn') + body + '\n');
+        expect((await brain.body(slug)).storage).toBe('segmented');
+        await brain.engine.executeRaw("INSERT INTO fact_withdrawals (source_id, visibility, subject, fact_hash) VALUES ('default', 'world', $1, gbrain_fact_fingerprint($2))", [slug, claim]);
+      }
+      const receipt = async (requestId: string) => JSON.stringify((await brain.engine.executeRaw<{ outcome: unknown }>(
+        'SELECT outcome FROM persistence_requests WHERE request_id=$1', [requestId]))[0]?.outcome ?? null);
+      const editRecorded = async (slug: string, remote: boolean, marker: string) => {
+        const request_id = randomUUID();
+        const res = await brain.call('edit_page', { slug, expected_revision: await revision(slug, remote), request_id,
+          edits: [{ old_text: 'After the fence line.', new_text: `After the fence line ${marker}.` }] }, { remote });
+        expect(res).toMatchObject({ isError: false, body: { status: 'created_or_updated' } });
+        expect(res.body.diff).toContain(`+After the fence line ${marker}.`);
+        expect(res.body.diff).toContain('gbrain:facts:end');
+        return { diff: res.body.diff as string, outcome: await receipt(request_id) };
+      };
+      const remote = await editRecorded(WITHDRAWN_A, true, 'R');
+      expect(remote.diff).not.toContain(claim);
+      expect(remote.outcome).toContain('After the fence line R.');
+      expect(remote.outcome).not.toContain(claim);
+      // A trusted caller sees the row as the overlay strikes it, never as a live row.
+      const local = await editRecorded(WITHDRAWN_B, false, 'L');
+      expect(local.diff).toContain('forgotten: memory withdrawn');
+      expect(local.diff).not.toContain(`| ${claim} |`);
+      expect(local.outcome).not.toContain(`| ${claim} |`);
+      expect((await edit(WITHDRAWN_A, await revision(WITHDRAWN_A, true), claim, 'x', undefined, true)).body.error).toBe('edit_no_match');
+      expect((await edit(WITHDRAWN_B, await revision(WITHDRAWN_B), claim, 'x')).body.error).toBe('edit_protected_span');
+    }, 600_000);
+
+    test('a remote edit whose diff context would start on a fence\'s first byte never shows its private rows', async () => {
+      // The edit sits exactly 2048 bytes (the diff context) after the fence begins: line rounding would cut the begin marker off.
+      const lead = 'Intro.\n\n', target = 'Boundary target line.';
+      const filler = 'f'.repeat(2048 - Buffer.byteLength(FACTS_BLOCK) - 1) + '\n';
+      await brain.seed(BOUNDARY, fm('Boundary') + lead + FACTS_BLOCK + filler + target + '\n\n' + conversationBody(1_200_000, { seed: 12 }) + '\n');
+      const truth = Buffer.from((await brain.body(BOUNDARY)).truth);
+      expect(truth.indexOf(Buffer.from(target)) - truth.indexOf(Buffer.from('<!--- gbrain:facts:begin'))).toBe(2048);
+      const res = await edit(BOUNDARY, await revision(BOUNDARY, true), target, 'Boundary target line, edited.', undefined, true);
+      expect(res).toMatchObject({ isError: false });
+      expect(res.body.diff).toContain('+Boundary target line, edited.');
+      expect(res.body.diff).not.toContain('private thing');
+    }, 600_000);
+
+    test('a remote within past hidden text refuses alike for every range and edit; a range get_page returns as edit_target still edits', async () => {
+      const before = 'Visible line before the fence.', after = 'Visible line after the fence.';
+      const fenced = FACTS_BLOCK + '\n' + after + '\n\n';
+      // On the segmented page the fence sits segments after the first line, so a window over that line gets edit_target.
+      await brain.seed(WITHIN_SEG, fm('Within') + before + '\n\n' + conversationBody(300_000, { seed: 14 }) + '\n\n' + fenced + conversationBody(900_000, { seed: 13 }) + '\n');
+      expect(await brain.call('put_page', { slug: WITHIN_INLINE, content: fm('Within inline') + before + '\n\n' + fenced + 'Last line.\n', request_id: randomUUID() })).toMatchObject({ isError: false });
+      expect((await brain.body(WITHIN_SEG)).storage).toBe('segmented');
+      expect((await brain.body(WITHIN_INLINE)).storage).toBe('inline');
+      const refusal = (res: { body: Record<string, any> }) => ({ error: res.body.error, message: res.body.message, detail: res.body.detail });
+      for (const slug of [WITHIN_SEG, WITHIN_INLINE]) {
+        const truth = Buffer.from((await brain.body(slug)).truth);
+        const at = truth.indexOf(Buffer.from(after));
+        const rev = await revision(slug, true);
+        const call = (edits: Array<{ old_text: string; new_text: string }>, within: { byte_start: number; byte_end: number }) =>
+          brain.call('edit_page', { slug, expected_revision: rev, edits, within, request_id: randomUUID() }, { remote: true });
+        // Exactly around the line (base: edited) and one byte short (base: edit_no_match) would measure the hidden rows.
+        const probes = [
+          await call([{ old_text: after, new_text: 'x' }], { byte_start: at, byte_end: at + after.length }),
+          await call([{ old_text: after, new_text: 'x' }], { byte_start: at, byte_end: at + after.length - 1 }),
+          await call([{ old_text: before, new_text: 'y' }, { old_text: after, new_text: 'x' }], { byte_start: 0, byte_end: at + after.length }),
+        ];
+        for (const res of probes) expect(refusal(res)).toEqual({ error: 'edit_invalid', message: refusal(probes[0]!).message, detail: undefined });
+        expect((await brain.body(slug)).truth).toBe(truth.toString('utf8'));
+      }
+      // A range with nothing hidden before it: edit_target is given (segmented) and works, as a range before the fence does inline.
+      const win = (await brain.call('get_page', { slug: WITHIN_SEG, body: 'window', bytes: { offset: 0, length: before.length } }, { remote: true })).body;
+      expect(win.edit_target).toMatchObject({ byte_start: 0 });
+      const ok = await edit(WITHIN_SEG, win.edit_target.revision, before, 'Edited before the fence.', { byte_start: win.edit_target.byte_start, byte_end: win.edit_target.byte_end }, true);
+      expect(ok).toMatchObject({ isError: false });
+      const inline = await edit(WITHIN_INLINE, await revision(WITHIN_INLINE, true), before, 'Edited before the fence.', { byte_start: 0, byte_end: before.length }, true);
+      expect(inline).toMatchObject({ isError: false });
+      for (const slug of [WITHIN_SEG, WITHIN_INLINE]) expect((await brain.body(slug)).truth.startsWith('Edited before the fence.\n')).toBe(true);
     }, 600_000);
 
     test('a stored fence that does not compile refuses the edit as the whole-body path does', async () => {

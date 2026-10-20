@@ -380,7 +380,7 @@ export async function preparePageAdmission(ctx: OperationContext,
     const within = parseEditWithin(p.within);
     // A segmented page is matched by its preparation, which streams the segments (spec 6.3): never read whole here.
     if (!isSegmentedPage(snapshot.page)) applyPageEdits(snapshot.page, snapshot.tags, ctx.remote !== false, parsePageEdits(p.edits), within);
-    else { parsePageEdits(p.edits); await assertSegmentedEditFences(ctx.engine, snapshot.page, within); }
+    else { parsePageEdits(p.edits); await assertSegmentedEditFences(ctx.engine, snapshot.page, within, ctx.remote !== false); }
   }
   // Wave B: an append names an existing page; its preconditions are checked when it is prepared, on the page it extends.
   if (input.operation === 'append_page' && (!snapshot || snapshot.page.deleted_at)) {
