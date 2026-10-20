@@ -241,8 +241,7 @@ for (const backend of backends) describe(`upload sessions over every transport (
     });
   }, 600_000);
 
-  // todo: commit_page_upload with mode append is not wired yet (admitStagedAppend answers unavailable); flip it, and the page count below to 5, when it lands.
-  test.todo('OAuth /mcp: the thin client append over one request rides an upload session (mode append)', async () => {
+  test('OAuth /mcp: the thin client append over one request rides an upload session (mode append)', async () => {
     await withOAuthServe('append', async (_client, thinHome) => {
       const big = escapeHeavy(2 * MIB);
       writeFileSync(join(thinHome, 'big.md'), big);
@@ -280,6 +279,6 @@ for (const backend of backends) describe(`upload sessions over every transport (
       const body = page!.timeline ? `${page!.compiled_truth}\n${page!.timeline}` : page!.compiled_truth;
       expect({ slug, bytes: Buffer.byteLength(body), same: body === text }).toEqual({ slug, bytes: Buffer.byteLength(text), same: true });
     }
-    expect(expected.size).toBe(4);
+    expect(expected.size).toBe(5);
   }, 300_000);
 });

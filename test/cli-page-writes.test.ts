@@ -133,8 +133,7 @@ for (const backend of testBackends()) {
       expect(region.stderr).toContain('--region must be one of: auto, truth, timeline');
     }, 60_000);
 
-    // todo: an append over one request needs commit_page_upload mode append, which is not wired yet; flip when it lands.
-    test.todo('append over one request goes through an upload session and lands whole', async () => {
+    test('append over one request goes through an upload session and lands whole', async () => {
       await cli(['put', 'notes/big-append', '--file', file('big-append.md', '# Big append\n\nstart\n')]);
       const line = `- ${ESCAPE_HEAVY} message\n`;
       const text = line.repeat(Math.ceil((1.5 * 1024 * 1024) / Buffer.byteLength(line)));
@@ -146,8 +145,7 @@ for (const backend of testBackends()) {
       expect(printedBody(read.stdout).trimEnd()).toBe(`# Big append\n\nstart\n${text}`.trimEnd());
     }, 300_000);
 
-    // todo: begin_page_upload refuses total_bytes over PAGE_MAX_BYTES until segmented upload commits land; flip when they do.
-    test.todo('local put --file over the page ceiling on a managed brain goes through an upload session, byte-identical', async () => {
+    test('local put --file over the page ceiling on a managed brain goes through an upload session, byte-identical', async () => {
       const managed = async () => (await sql<{ enabled: boolean }>('SELECT enabled FROM persistence_brain'))[0]!.enabled;
       if (!await managed()) {
         await registerLocalWriter(pg!, 'cli');
