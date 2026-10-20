@@ -21,11 +21,18 @@ import type { BrainHealth } from '../../core/types.ts';
 export const STOP_DOCTOR: unique symbol = Symbol('STOP_DOCTOR');
 
 /**
- * #6696 B1: `--tier ops|standard|deep`. `ops` runs only the entries tagged
- * `ops` (observational, under one absolute deadline); `standard` (default) runs
- * ops entries first, then the rest; `deep` adds the entries tagged `deep`.
+ * #6696 B1: `--tier ops|fast|standard|deep`. `ops` runs only the entries tagged
+ * `ops` (observational, under one absolute deadline); `fast` (#7142) adds the
+ * entries tagged `fast` under its own deadline and reports every other check
+ * from its last known result; `standard` (default) runs ops entries first, then
+ * the rest; `deep` adds the entries tagged `deep`.
  */
-export type DoctorTier = 'ops' | 'standard' | 'deep';
+export type DoctorTier = 'ops' | 'fast' | 'standard' | 'deep';
+
+/** #7142: the tiers that answer from cheap reads only (a round-trip connection check, counter-mode sections). */
+export function quickTier(tier: DoctorTier | undefined): boolean {
+  return tier === 'ops' || tier === 'fast';
+}
 
 export interface DoctorEntry {
   /** The entry's primary check name (an entry that only stops names the check it gates on). */
@@ -80,6 +87,10 @@ export interface DoctorContext {
   sourceIds?: string[];
   /** #6803 C3: the running entry's absolute deadline (scans stop at it and report what they read); undefined: unbounded. */
   entryDeadlineAt?: number;
+  /** #7142: a brain-wide local CLI run (or the background refresh) that reads and records last known results (./last-known.ts). */
+  lastKnown?: 'cli' | 'refresh';
+  /** #7142: the per-entry budget of the background refresh, instead of `doctor.entry_budget_ms`. */
+  entryBudgetOverrideMs?: number;
   /** #6696 B1: one `getHealth()` per run, shared by every entry that reads it (`doctorHealth`). */
   healthMemo?: Promise<BrainHealth>;
 }

@@ -599,6 +599,8 @@ export async function registerBuiltinHandlers(
   worker.register('reindex', makeReindexHandler(engine));
   worker.register('repair-jsonb', repairJsonbHandler);
   worker.register('orphans', makeOrphansHandler(engine));
+  // #7142: measures the slow doctor checks in the background and records them as last known results (read-only otherwise).
+  worker.register('doctor-refresh', async () => (await import('./doctor/last-known.ts')).runDoctorRefresh(engine));
   worker.register('integrity', integrityHandler);
   worker.register('purge', makePurgeHandler(engine));
 

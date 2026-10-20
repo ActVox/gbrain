@@ -269,6 +269,7 @@ async function runPartialEmbedding(ctx: DoctorContext): Promise<Check[]> {
 export const partialEmbeddingEntry: DoctorEntry = {
   name: 'partial_embedding',
   emits: ['partial_embedding'],
+  tier: 'fast',
   run: runPartialEmbedding,
 };
 
