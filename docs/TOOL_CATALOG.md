@@ -4,7 +4,7 @@
 <!-- Regenerate: bun run scripts/generate-tool-catalog.ts -->
 <!-- Freshness-guarded by scripts/check-tool-catalog-fresh.sh (bun run verify). -->
 
-Every non-localOnly operation on the MCP surface: 157 tools across 25 areas. **Starter** marks membership in the ~40-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
+Every non-localOnly operation on the MCP surface: 158 tools across 26 areas. **Starter** marks membership in the ~40-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
 
 ## admin
 
@@ -163,6 +163,12 @@ Every non-localOnly operation on the MCP surface: 157 tools across 25 areas. **S
 | `ontology_dimensions` | Life Chronicle meta-ontology: which dimensions the brain tracks across entities, with entity + observation counts. | read |  |  |
 | `ontology_get` | Life Chronicle: the current resolved per-entity ontology (dimension → value) at `asof` (default now), with provenance + confidence + validity. | read |  |  |
 | `ontology_propose` | Life Chronicle: record one ontology observation (entity has dimension=value), sourced + confidence-weighted + bi-temporal. | write |  |  |
+
+## other
+
+| Tool | Description | Scope | Starter | Gate |
+|---|---|---|---|---|
+| `sources_resolve_path` | Read-only: what gbrain did with each file path of a source, by its own rules. | read |  |  |
 
 ## pages
 

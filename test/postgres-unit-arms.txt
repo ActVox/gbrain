@@ -388,6 +388,7 @@ test/shared-skills-writer-boundary.test.ts
 test/source-lifecycle-dry-run-physical-root-6849.test.ts
 test/source-retire-missing-checkout.test.ts
 test/source-row-diagnostics.test.ts
+test/sources-resolve-path.test.ts
 test/stats-health-source-scope.test.ts
 test/sync-absent-from-worktree-s27.test.ts
 test/sync-admission-6712.test.ts
@@ -408,6 +409,7 @@ test/sync-group-member-order.test.ts
 test/sync-handler-drain-6706.test.ts
 test/sync-import-provenance-disk.test.ts
 test/sync-inexact-rename-6729.test.ts
+test/sync-landing-gaps.test.ts
 test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
 test/sync-legacy-slug-adoption-6727.test.ts

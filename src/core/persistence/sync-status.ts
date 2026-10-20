@@ -155,10 +155,17 @@ export interface SyncStatus {
   convergence_read: SyncStatusRead;
   /** #6712 PR 4b: `sync.admission` (brain-wide), when it was set, and whether it is in effect for this source (sync-admission.ts). */
   admission: import('./sync-admission.ts').SyncAdmissionStatus;
+  /**
+   * GBRA-150: pages this source synced more than its freshness target ago that search still cannot fully see (no vector,
+   * no chunks, quarantined, or gone), each with its reason and fix (landing-gaps.ts). A heavy read: only `--detail`
+   * runs it (`landing_read`); null when not read.
+   */
+  landing: import('./landing-gaps.ts').LandingGaps | null;
+  landing_read: SyncStatusRead;
 }
 export type SyncStatusState = 'synced' | 'resumable' | 'blocked';
 /** Why the source is in its state; one closed list. */
-export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'request_pending',
+export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'held_needs_human', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'request_pending',
   'status_unknown', 'needs_human', 'head_blocked', 'recovery_blocked',
   // #6712 PR 4b (design v3.2 §9): the live pass's reasons.
   'pass_unfinished', 'not_converged', 'settle_mismatch', 'deletes_withheld', 'selection_scoped', 'admission_paused', 'writeback_failed'] as const;
@@ -344,7 +351,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     : { status: 'unknown' as const, reason: 'not_read: run sync status with --detail', recovery_next: recovery.status === 'ok' && recovery.first ? recoveryAction(sourceId, recovery.first) : undefined };
   const connectorLastError = await (await import('./connector-status.ts')).readConnectorLastError(engine, sourceId);
   const gitPushHolds = committed?.git_push_held ? await readGitPushHolds(engine, [sourceId]) : [];
-  const [state, stateReason] = statusState({ human: !!human, oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!lastError, actionable: actionable.length > 0, holds: holds.length > 0, pass: passState });
+  const [state, stateReason] = statusState({ human: !!(lastError?.needs_human), heldForHuman: holds.some(hold => hold.needs_human), oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!lastError, actionable: actionable.length > 0, holds: holds.length > 0, pass: passState });
   const admission = await syncAdmissionStatus(engine, sourceId, source.incarnation,
     { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at });
   const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume, source.writeback_failed) : null;
@@ -363,11 +370,19 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     convergence: passRow ? await passConvergence(engine, { sourceId, incarnation: source.incarnation, row: passRow, holds: records, admission, withheld })
       : detail ? await (await import('./sync-pass.ts')).statusConvergence(engine, sourceId) : null,
     convergence_read: passRow || detail ? { status: 'read' } : notRead('convergence shadow'),
-    admission };
+    admission, landing: detail ? await (await import('./landing-gaps.ts')).readLandingGaps(engine, sourceId) : null,
+    landing_read: detail ? { status: 'read' } : notRead('landing-gap') };
 }
 
-/** #6712 PR 2: the state and its reason, from what this read saw; a probe that did not answer never yields `synced`. */
-function statusState(s: { human: boolean; oldest: SyncStatus['oldest_blocker']; recovery: SyncStatus['recovery']; liveJob: boolean; unfinished: boolean; lastError: boolean;
+/**
+ * #6712 PR 2: the state and its reason, from what this read saw; a probe that did not answer never yields `synced`.
+ * GBRA-150: `blocked` means the source cannot advance without a person or an operator, the same meaning as a sync run's
+ * drain outcome and a sync job's `blocked` progress. A run that stopped on a decision (`human`: the last error needs a
+ * person) blocks; a file hold that waits on a person while the rest of the source keeps syncing (`heldForHuman`) does
+ * not: it reads `synced` with reason `held_needs_human` (or whatever else is pending), and `needs_human`/`next` still
+ * carry the decision.
+ */
+function statusState(s: { human: boolean; heldForHuman: boolean; oldest: SyncStatus['oldest_blocker']; recovery: SyncStatus['recovery']; liveJob: boolean; unfinished: boolean; lastError: boolean;
   actionable: boolean; holds: boolean; pass?: [SyncStatusState, SyncStatusReason] | null }): [SyncStatusState, SyncStatusReason] {
   if (s.human) return ['blocked', 'needs_human'];
   if (s.recovery.status === 'ok' && s.recovery.first?.blocked) return ['blocked', 'recovery_blocked'];
@@ -382,7 +397,7 @@ function statusState(s: { human: boolean; oldest: SyncStatus['oldest_blocker']; 
   if (s.oldest.status === 'ok' && s.oldest.request) return ['resumable', 'request_pending'];
   if (s.oldest.status !== 'ok' || s.recovery.status !== 'ok') return ['resumable', 'status_unknown'];
   if (s.pass) return s.pass;
-  return ['synced', s.holds ? 'held_by_design' : 'nothing_pending'];
+  return ['synced', s.heldForHuman ? 'held_needs_human' : s.holds ? 'held_by_design' : 'nothing_pending'];
 }
 
 /** #6712 PR 2: the source's oldest unfinished request, read through the drain's own bounded head probe. */
