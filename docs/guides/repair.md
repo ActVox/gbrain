@@ -1130,6 +1130,82 @@ database only and are never ghosts. Doctor `undeclared_db_only_pages` is a
 separate audit. A preview lists at most 1,000 ghosts; apply them, then preview
 again for the rest. Sync never removes ghost pages by itself.
 
+<a id="legacy-twins"></a>
+### Legacy twins
+
+Before #6857, a managed sync could fork a second page for a file an older gbrain
+had imported under its raw name: the **legacy page** (the original id, a slug
+such as `notes/foo bar` that the current slug fold spells differently, no
+recorded file, and the page's links, timeline and history) and its **twin**
+(the folded slug `notes/foo-bar`, recording the file). Sync no longer forks
+new pairs, but it leaves the existing ones as they are. Deleting the twin by
+hand withdraws the file, because no other live page records it; deleting the
+legacy page keeps the file but loses the id, links and history.
+`gbrain repair legacy-twins` converges each pair onto the legacy page.
+
+```bash
+gbrain repair legacy-twins --source default        # preview: each pair, decisions, and a hash
+gbrain repair legacy-twins --source default --apply --expect <hash> --yes
+```
+
+The preview writes nothing. It lists every pair with both page ids, slugs and
+revisions, the file the twin records and whether the two pages hold the same
+content, and prints the apply command with its hash. A pair the repair never
+merges on its own is listed as a decision (class `decision:<reason>`), with the
+commands a person uses to decide it:
+
+| Reason | What to decide |
+|---|---|
+| `content_differs` | The two pages hold different content. Compare them (`gbrain get --source <id> -- '<slug>'`); make them the same (edit the file and sync, or edit the legacy page) and preview again, or keep the twin and delete the legacy page. |
+| `several_legacy` | More than one legacy page folds to the twin's slug. Keep one, soft-delete the others, preview again. |
+| `file_missing`, `file_drift`, `file_unverified` | The twin's file is gone, differs from the twin, or cannot be checked. Resolve it with [ghost pages](#ghost-pages) or [file drift](#file-drift) first. |
+| `twin_slug_path_occupied` | A file sits at the twin's own slug path (`<twin-slug>.md`), which the twin's purge would compare or remove. Rename or remove it, sync, preview again. |
+| `twin_has_withdrawals` | Claims were forgotten on the twin. Forget the same claims on the legacy page first, or retire the twin by hand. |
+| `legacy_records_file_uri` | The legacy page records a file URI of its own; reconcile it first. |
+| `twin_evidence_conflicts` | The twin holds a link, relationship date, timeline entry or raw data row that the legacy page holds differently, so the merge would lose it. Make them agree, or retire the twin by hand, then preview again. |
+
+The apply needs the user's consent: without `--yes` a terminal asks, and a
+non-interactive run exits 3 (`ask_user`) with the consent payload and changes
+nothing. Each approved pair is one coordinated write (an unmanaged brain does
+the same in one transaction):
+
+1. The legacy page records the file. It keeps its id, slug, links, timeline,
+   versions and aliases.
+2. The twin merge `gbrain repair origin-twins` uses (#6948) moves the twin's
+   links in every role and their dated transitions (links between the two
+   pages stay on the twin), timeline rows, raw data, attachments, user-added
+   tags, slug aliases and facts other pages assert about it to the legacy page;
+   an exact duplicate of a legacy row is dropped, and a differing one makes the
+   pair a `twin_evidence_conflicts` decision. The twin's slug becomes an alias of the legacy page, so
+   `[[notes/foo-bar]]` and `gbrain get notes/foo-bar` keep resolving.
+3. The twin's sync import record moves to the legacy page, so the next
+   `gbrain sync --source <id>` finds the file and the page unchanged: no new
+   page, no hold, no file write.
+4. The twin is soft-deleted as a shared origin: the file is not touched. Its
+   tombstone forgets the file, so the autopilot purge removes it from the
+   database 72 h later without refusing it as a page whose file another page
+   records.
+
+The legacy page keeps its slug: that is also the slug sync gives a never-forked
+file whose legacy page it takes over (#6727), and the folded slug resolves to it
+through the alias. The twin's import-owned tags, chunks, versions and the facts and takes its
+own body projects stay with the twin (the legacy page has the same ones, from
+the same content). Restoring the twin brings back a page that records no file;
+what moved stays on the legacy page.
+
+Each pair is checked again before its request, in preparation and under the
+publication locks (both page ids, slugs and revisions, the recorded path, the
+owner, the content and the file); a pair that moved is skipped
+`changed_since_preview`. It refuses off the canonical owner host
+([`not_owner_host`](error-codes.md#not_owner_host)), when the checkout cannot
+be read ([`legacy_twins_storage_unknown`](error-codes.md#legacy_twins_storage_unknown)),
+and when the pairs are more than half of the source's file-backed pages on a
+source with more than 20 of them
+([`legacy_twin_mass_merge_refused`](error-codes.md#legacy_twin_mass_merge_refused);
+rerun with `GBRAIN_ALLOW_MASS_RECONCILE=1` only after the user agrees). A
+preview lists at most 1,000 pairs and decisions; apply them, then preview
+again. Trusted local CLI only; it runs only when named.
+
 <a id="ghost-pages-skill-paths"></a>
 **Ghosts under the shared skillpack.** When a source has an adopted shared
 skillpack, its reserved paths (`skills/` and `skillpack.json`) belong to the
@@ -1925,6 +2001,36 @@ reason (run on the owner host, decide the content by hand, preview it alone
 with `--slug`, or rerun the conflict audit). No `--class` preview command is
 printed for unknown pages.
 
+<a id="file-drift-held"></a>**Held drift, one Decision at a time** (#6712). A managed sync holds a
+two-sided change as `file_drift` with a `side` (`both`: the file and the page
+both changed since the last import; `unknown`: the page has no import record
+to tell; `deleted`: one side is a deletion) and, for a deleted side, a
+`state`: `tombstone_edited` (the page was deleted and the file was edited),
+`purged_differs` (a purged page's file differs from what was purged) or
+`file_gone` (the file was deleted and the page changed). `gbrain sources status
+<id> --json` lists each held file with both. `--held` selects those holds:
+
+```bash
+gbrain repair file-drift --source <id> --held --side both --prefer file                              # preview
+gbrain repair file-drift --source <id> --held --side deleted --state tombstone_edited --prefer database
+gbrain repair file-drift --source <id> --held --side both --prefer file --apply --expect <hash>
+```
+
+One preview resolves one Decision, so a selection that spans several sides or
+deleted states refuses [`file_drift_mixed_selection`](error-codes.md#file_drift_mixed_selection),
+and a deleted side refuses without `--state`
+([`file_drift_state_required`](error-codes.md#file_drift_state_required)):
+the two `--prefer` values do opposite things in each state.
+
+| State | `--prefer database` | `--prefer file` |
+|---|---|---|
+| `tombstone_edited` | Keeps the deletion and removes the file. | Restores the page and imports the file. |
+| `purged_differs` | Removes the file. | Imports the file as a new page. |
+| `file_gone` | Recreates the file from the page. | Soft-deletes the page (the mass-delete valve applies). |
+
+`both` and `unknown` resolve as `--slug` does above. `--only` / `--skip` narrow
+the held set by file path, and the preview lists each page's action.
+
 The audit gives every drifted page one class: `structurally_additive`,
 `additive_with_suggestions`, `review_required`, `formatting_only` or `error`.
 `--all-drifted` refuses a selection that mixes classes (the message counts
@@ -1953,17 +2059,16 @@ storage:
     - concepts/
 ```
 
-On the canonical owner host the resident consumer of `gbrain serve`,
-`gbrain jobs work` or `gbrain autopilot` then reconciles each drifted page
-under those prefixes with the database copy winning, the same resolution
-`--prefer database` previews (reconcile's protections and backups apply). It
-submits one request per drifted page, at most 10 every 10 minutes, never
-twice for the same drift (the request id is derived from the page revision
-and file bytes), and stops before an admission that would cross 90% of the
-write-quota stop line. Prefixes match page slugs by whole path segments, like
-`db_tracked` and `db_only`. Nothing else reads the policy: another host, a
-short-lived command, and remote or caller writes keep refusing
-`source_changed` until the page is reconciled. Doctor `maintenance_write_drift`
+The managed sync pass then writes the database copy back to the file for
+each page under those prefixes whose database copy changed since its last
+import (whether or not the file changed too), the same resolution `--prefer database` previews (reconcile's protections and
+backups apply). It does so only in committed mode and for a clean file: the write is
+bound to the bytes the pass froze, and a file with an uncommitted edit is
+held instead. A pass admits at most 200 such writes; the rest wait as
+`keep_db_pending` and go first in the next pass. Prefixes match page slugs by
+whole path segments, like `db_tracked` and `db_only`. A remote caller's sync
+never writes them, and outside a sync a short-lived command or a caller
+write keeps refusing `source_changed` until the page is reconciled. Doctor `maintenance_write_drift`
 echoes each declared policy (`keep_db_policy`: prefixes, how many of the
 drifted pages it checked match, their receipt cost). Remove the block to turn
 the policy off.
@@ -2001,9 +2106,10 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    frontmatter_holds: 1 source(s) are blocked by a file gbrain could not import (notes). The next scheduled or manual sync recovers a blocked source automatically; to do it now run gbrain sync --source notes --no-pull.
    ```
 
-2. The sync converts the blocked request in place: both broken files are held,
-   the readable one imports (after quoting `author`, which gbrain reports so the
-   generator can be fixed), and the checkpoint advances.
+2. The sync recovers the source: both broken files are held, the readable one
+   imports (after quoting `author`, which gbrain reports so the generator can be
+   fixed), and the checkpoint advances. The old failed request stays in the
+   journal as it was; the sync no longer resumes from it.
 
    ```console
    $ gbrain sync --source notes --no-pull
@@ -2011,7 +2117,6 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    Held notes/digest.md: invalid_frontmatter (needs_interpretation) at line 4, key "title"; its page is missing until the file imports. Next: gbrain repair frontmatter --source notes --include-ambiguous (docs/guides/write-refusals.md#invalid_frontmatter-needs_interpretation)
    Held notes/standup.md: invalid_frontmatter (needs_interpretation) at line 2, key "title"; its page keeps its last good revision and is read-only for put_page until the file is repaired. Next: gbrain repair frontmatter --source notes --include-ambiguous (docs/guides/write-refusals.md#invalid_frontmatter-needs_interpretation)
    2 file(s) held this run, 2 held in source notes; they do not block sync. Inspect them with 'gbrain sources status notes'; the repair preview proposes each fix and writes nothing. Preview the repair: gbrain repair frontmatter --source notes
-   Converted 1 failed request(s) of the blocked cursor in place: <id>.
    1 file(s) under notes/ imported only after quoting unquoted frontmatter values: whatever writes them emits YAML other tools refuse. Fix the generator to quote values (or write through put_page); the preview shows the on-disk quoting fix. Preview: gbrain repair frontmatter --source notes
    ```
 
@@ -2086,13 +2191,11 @@ gbrain older than v0.60.47.0 blocks the source on the first file it refuses.
    "held_since": "<time>",
    "actor": "agent",
    "docs": "docs/guides/write-refusals.md#invalid_frontmatter-needs_interpretation"
-   "outcome": "held",
    ```
 
    Every hold carries `code`, `reason`, `key`, `line`, a location-only
    `message` (never a frontmatter value), `stale` (a page exists and keeps its
-   older revision), `fix` (the exact argv) and `docs`. `recent_conversions`
-   records the blocked request the upgrade converted.
+   older revision), `fix` (the exact argv) and `docs`.
 
 7. Later the user approves the digest interpretation (keep the later title).
    The apply creates its page and clears the last hold; the next sync is clean.
@@ -2149,7 +2252,7 @@ environment of the process that syncs and replace the `sync.hold_*` and `sync.pa
 | `sync.holds` | `hold` | `fail` makes sync fail closed: a content refusal blocks the sync. |
 | `GBRAIN_SYNC_HOLD_CAP` | `500` | How many holds a sync result lists in detail; storage is never capped and valid files always import. |
 | `GBRAIN_SYNC_HOLD_ESCALATE_COUNT` / `GBRAIN_SYNC_HOLD_ESCALATE_PCT` | `50` / `5` | A source holding more files, or a run holding more than that share of at least 40 screened imports, reports `holds_escalated` and doctor `git_held_files` fails. A run whose `preparation_stalled` holds would cross it stops as `preparation_systemic` instead of holding them. |
-| `GBRAIN_SYNC_PARSER_REGRESSION` | `stop` | `hold` holds a file whose exact bytes imported under an earlier gbrain (`parser_regression`) instead of stopping the run with `sync_parser_regression`. |
+| `GBRAIN_SYNC_PARSER_REGRESSION` | `hold` | A file whose exact bytes imported under an earlier gbrain is held (`parser_regression`) and the rest syncs; `stop` stops the run with `sync_parser_regression` instead. |
 
 To prevent new broken files, write brain files through `put_page`/`capture`
 or a YAML serializer, check generated content with
@@ -2363,9 +2466,9 @@ exists). An older gbrain blocked the source on the first fence it refused.
    [AGENT]   fence_holds: 1 source(s) are blocked by a file whose facts or takes fence gbrain could not import (notes). The next scheduled or manual sync recovers each with no command; to do it now run gbrain sync --source notes --no-pull. The file is then held and the rest of the source imports. 3 malformed fence(s) are known so far (gbrain doctor --only fence_integrity counts them by tier); nothing repairs them by itself until a maintenance run is active, so preview them and apply the plan the preview prints once the user agrees. Preview (read-only, no model call): gbrain repair fences. Pause automatic fence repair first with: gbrain config set fences.repair.enabled false. Recipe: docs/guides/repair.md#fences
    ```
 
-2. One sync gets the source going again: the blocked request is converted in
-   place, the meeting note's fence is rewritten (claims and row numbers
-   unchanged), and the other two files are held while the rest imports.
+2. One sync gets the source going again: the meeting note's fence is rewritten
+   (claims and row numbers unchanged), and the other two files are held while
+   the rest imports. The old failed request stays in the journal as it was.
 
    ```console
    $ gbrain sync --source notes --no-pull
@@ -2373,8 +2476,7 @@ exists). An older gbrain blocked the source on the first fence it refused.
    Held companies/acme-example.md: invalid_fence (no_header) in the facts fence (body), at line 6; its page is missing until the file imports. Next: gbrain repair fences --source notes --only companies/acme-example.md, then gbrain repair fences --source notes --only companies/acme-example.md --apply (docs/guides/write-refusals.md#fence-no_header)
    Held projects/widget-launch.md: invalid_fence (holder_unresolved) in the takes fence (body), row 1, column who, at line 9; its page is missing until the file imports. Next: gbrain repair fences --source notes --only projects/widget-launch.md, then gbrain repair fences --source notes --only projects/widget-launch.md --apply (docs/guides/write-refusals.md#fence-holder_unresolved)
    2 file(s) held this run, 2 held in source notes; they do not block sync. Inspect them with 'gbrain sources status notes'; then nothing repairs the fence and slug-conflict holds by itself (no maintenance run is active), so preview the content repairs with gbrain repair content --source notes (read-only, no model call: it lists each held file with its planned repair or the exact edit, kind by kind, and prints the apply command with --expect <hash>[,<hash>]), then run the apply command it prints. Preview the repair: gbrain repair content --source notes
-   Converted 1 failed request(s) of the blocked cursor in place: <id>.
-   Normalized fences in 1 file(s) (kind_map x1, close_fence x1). 1 file(s) under meetings/ had a malformed facts or takes fence that sync rewrote losslessly and committed (claims and existing row numbers unchanged); whatever writes them emits fences gbrain has to repair. Write facts with `remember` and takes with `takes_add` (or emit the canonical columns) so rows never need normalizing. Re-read a normalized page before editing it.
+   Normalized fences in 1 file(s) (close_fence x1, kind_map x1). 1 file(s) under meetings/ had a malformed facts or takes fence that sync rewrote losslessly and committed (claims and existing row numbers unchanged); whatever writes them emits fences gbrain has to repair. Write facts with `remember` and takes with `takes_add` (or emit the canonical columns) so rows never need normalizing. Re-read a normalized page before editing it.
    ```
 
 3. `gbrain sources status <id>` lists each fence hold with its fence, section,
@@ -2492,7 +2594,7 @@ the repair is what changes them).
 | Busy (waits as `sync_in_progress`) | Why |
 | --- | --- |
 | A file or page a queued, running or recovering write names, or a finished write whose recovery is still open; both endpoints of a rename | The write is still publishing it. |
-| A file still ahead in the running sync's frozen manifest (from the cursor's index on) | The sync admits it later with the raw hash it reads then; a repair that changed the bytes first would make that entry refuse (`source_changed`). |
+| A file still ahead in a company-brain sync's frozen manifest, or a legacy cursor's that no pass has retired yet (from the cursor's index on) | The sync admits it later with the raw hash it reads then; a repair that changed the bytes first would make that entry refuse (`source_changed`). A live pass adds nothing here: it freezes and admits under the drain lease and re-checks each candidate's revision, so only its open requests (the row above) are busy. |
 | Every candidate, when the busy set cannot be read (a failed query, a cursor whose manifest is missing) | The check fails closed; the hold's text says so. |
 
 The busy set is read when the plan is made, again when each item is applied

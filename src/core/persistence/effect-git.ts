@@ -299,6 +299,18 @@ export async function commitGitTargets(root: string, relativePaths: string[], si
   return results;
 }
 
+/**
+ * #7089: whether `root`'s branch has commits its upstream (the local remote-tracking ref, never fetched) lacks; false
+ * without an upstream. A Git effect whose target is absent asks this before completing: its removal may have been
+ * committed by an earlier attempt whose push failed, and only a root that is ahead owes a push.
+ */
+export async function gitRootAhead(root: string, signal?: AbortSignal): Promise<boolean> {
+  return withSession(root, signal, undefined, false, async session => {
+    const count = await git(session, ['rev-list', '--count', '@{upstream}..HEAD']);
+    return count.code === 0 && Number(count.stdout.trim()) > 0;
+  });
+}
+
 /** Git's refusal of a push because the remote branch moved (LC_ALL=C keeps it untranslated). */
 const NON_FAST_FORWARD = /\[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)/;
 
@@ -385,13 +397,16 @@ export const DURABILITY_NOT_ENABLED = { git: 'skipped', reason: 'durability_not_
  * locked the worktree. Without one, the binding's recorded git_durability
  * decides (#5182): `enabled`/`disabled` never consult the legacy hook probe,
  * and an unrecorded binding falls back to the probe, fail-closed.
+ * #7089: an absent target pushes when the root is ahead of its upstream (an
+ * earlier attempt may have committed its removal and failed to push); on a
+ * root that is not ahead it completes without a push, as before.
  */
 export async function publishGitEffect(root: string, relativePath: string, signal?: AbortSignal,
   hardened?: boolean, note?: GitCommitNote, binding?: Pick<WorktreeBinding, 'git_durability'> | null, owner?: GitEffectOwner): Promise<Record<string, unknown>> {
   if (!(hardened ?? (await gitDurabilityPolicy(binding, root)).durable)) return { ...DURABILITY_NOT_ENABLED };
   const outcome = (await commitGitTargets(root, [relativePath], signal, note ? new Map([[relativePath, note]]) : undefined, owner)).get(relativePath)!;
   if (outcome instanceof OperationError) throw outcome;
-  if (outcome.reason === 'target_absent') return outcome;
+  if (outcome.reason === 'target_absent' && !(await gitRootAhead(root, signal))) return outcome;
   const pushed = await pushGitRoot(root, signal);
-  return { git: outcome.git, ...pushed };
+  return { ...outcome, ...pushed };
 }
