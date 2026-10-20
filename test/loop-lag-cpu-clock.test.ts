@@ -13,7 +13,8 @@
  */
 import { expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { spinCpuMs, threadCpuNow, watchLoopLag } from './helpers/cpu-time.ts';
+import { join } from 'node:path';
+import { threadCpuNow } from './helpers/cpu-time.ts';
 
 /** The bound the loop-lag tests hold. */
 const MAX_LAG_MS = 100;
@@ -33,14 +34,21 @@ test('a thread kept off the CPU with a timer due is not lag; the wall clock read
   expect(Math.round(cpu)).toBeLessThan(MAX_LAG_MS / 4);
 });
 
-test('a stretch of work is lag on the CPU clock, and two stretches in one turn add up', async () => {
-  const one = watchLoopLag();
-  await turn(); spinCpuMs(60); await turn();
-  const single = one.stop();
+test('a stretch of work is lag on the CPU clock, and two stretches in one turn add up', () => {
+  // In a fresh process: the reading covers every task on the thread between two timer runs, and in a shared shard
+  // process work an earlier test file left running lands there too (a 60 ms stretch read 106 ms on a GitHub shard).
+  const helper = JSON.stringify(join(import.meta.dir, 'helpers', 'cpu-time.ts'));
+  const probe = `import { spinCpuMs, watchLoopLag } from ${helper};
+    const turn = () => new Promise(resolve => setTimeout(resolve, 20));
+    const one = watchLoopLag();
+    await turn(); spinCpuMs(60); await turn();
+    const single = one.stop();
+    const two = watchLoopLag();
+    await turn(); spinCpuMs(60); spinCpuMs(60); await turn();
+    console.log(JSON.stringify({ single, two: two.stop() }));`;
+  const { single, two } = JSON.parse(execFileSync(process.execPath, ['-e', probe], { encoding: 'utf8' }).trim().split('\n').pop()!) as Record<'single' | 'two', { maxLag: number; ticks: number }>;
   expect(single.ticks).toBeGreaterThan(0);
   expect(Math.round(single.maxLag)).toBeGreaterThanOrEqual(60);
   expect(Math.round(single.maxLag)).toBeLessThan(MAX_LAG_MS);
-  const two = watchLoopLag();
-  await turn(); spinCpuMs(60); spinCpuMs(60); await turn();
-  expect(Math.round(two.stop().maxLag)).toBeGreaterThanOrEqual(120);
+  expect(Math.round(two.maxLag)).toBeGreaterThanOrEqual(120);
 });
