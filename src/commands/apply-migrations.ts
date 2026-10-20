@@ -54,6 +54,7 @@ import {
   schemaPendingError,
   type SchemaPending,
 } from './apply-migrations-schema.ts';
+import { readMigrationTimeout, setMigrationStatementTimeoutMs, type MigrationTimeoutRecord } from '../core/migration-timeout.ts';
 
 interface ApplyMigrationsArgs {
   list: boolean;
@@ -82,6 +83,8 @@ interface ApplyMigrationsArgs {
   skipVerify?: boolean;
   /** #4364: exit 1 when the DB pre-flight probe fails instead of proceeding filesystem-only. */
   requireDb: boolean;
+  /** #7108: operator-only statement budget (minutes, 0 = none) for this run's schema migrations. */
+  statementTimeoutMinutes?: number;
   help: boolean;
 }
 
@@ -105,6 +108,11 @@ function parseArgs(args: string[]): ApplyMigrationsArgs {
       'Example: gbrain apply-migrations --migration 0.53.0 --accept-reviewed-inventory default=<digest> --yes'), COMMAND);
     accepted[match![1]] = match![2];
   });
+  const budget = val('--statement-timeout');
+  if (has('--statement-timeout') && !/^\d+$/.test(budget ?? '')) {
+    exitCliError(usageError('--statement-timeout takes whole minutes (0 removes the limit) for this run\'s schema migrations.',
+      'Example: gbrain apply-migrations --yes --statement-timeout 120'), COMMAND);
+  }
   if (mode && !['always', 'pain_triggered', 'off'].includes(mode)) {
     exitCliError(usageError(`Invalid --mode "${mode}". Allowed: always, pain_triggered, off.`,
       'Example: gbrain apply-migrations --yes --mode pain_triggered'), COMMAND);
@@ -129,6 +137,7 @@ function parseArgs(args: string[]): ApplyMigrationsArgs {
     forceAll: has('--force-all') || has('--force'),
     skipVerify: has('--skip-verify'),
     requireDb: has('--require-db'),
+    ...(budget !== undefined && has('--statement-timeout') ? { statementTimeoutMinutes: Number(budget) } : {}),
     help: has('--help') || has('-h'),
   };
 }
@@ -186,6 +195,12 @@ Flags:
   --require-db                           Exit 1 when the database is unreachable
                                          instead of continuing with the
                                          filesystem-only migration plan.
+  --statement-timeout <minutes>          Operator escape hatch (#7108): the statement
+                                         budget for this run's schema migrations
+                                         (default 10; 0 removes it). Each one holds
+                                         its table locks that long, so writes wait.
+                                         Use it only when a migration times out with
+                                         nothing blocking it (doctor schema_version).
   --mode <always|pain_triggered|off>     Set minion_mode without prompting.
   --host-dir <path>                      Include this directory in host-file walk
                                          (default scope: \$HOME/.claude + \$HOME/.openclaw).
@@ -526,6 +541,7 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
 export async function applyMigrations(args: string[]): Promise<{ exitCode: number | undefined; failure?: OperationError }> {
   const cli = parseArgs(args);
   if (cli.help) { printHelp(); return { exitCode: undefined }; }
+  if (cli.statementTimeoutMinutes !== undefined) setMigrationStatementTimeoutMs(cli.statementTimeoutMinutes * 60_000);
 
   const installed = VERSION.replace(/^v/, '').trim() || '0.0.0';
   const report: RunReport = { doc: { status: 'ok', installed } };
@@ -693,7 +709,7 @@ async function runLockedMigrations(
   }
 
   // Pre-flight: schema drift (#1530) and the DB probe (#4364); see preflightSchema.
-  const { schemaBehind, dbProbe } = await preflightSchema(cli, migrateSchema);
+  const { schemaBehind, dbProbe, schemaTimeout } = await preflightSchema(cli, migrateSchema);
 
   if (!cli.list && !cli.dryRun) await clearRepoPathWedge(loadCompletedMigrations());
   const completed = loadCompletedMigrations();
@@ -762,7 +778,7 @@ async function runLockedMigrations(
   const pendingWork = [...plan.partial, ...plan.pending, ...plan.pending_fresh_install];
   const authorized = cli.yes || cli.nonInteractive;
   if (schemaBehind && pendingWork.length === 0 && dbProbe.status === 'connected') {
-    return failSchemaBehind(report, args, await schemaBehindAtPreflight(dbProbe.schemaVer, authorized));
+    return failSchemaBehind(report, args, await schemaBehindAtPreflight(dbProbe.schemaVer, authorized, schemaTimeout));
   }
   const toRun: Migration[] = [...pendingWork, ...plan.applied.filter(migration => migration.reconcile)]
     .sort((left, right) => compareVersions(left.version, right.version));
@@ -923,8 +939,9 @@ function failSchemaBehind(report: RunReport, args: readonly string[], pending: S
 async function preflightSchema(
   cli: ApplyMigrationsArgs,
   migrateSchema: (eng: BrainEngine, from: number) => Promise<{ applied: number; current: number }>,
-): Promise<{ schemaBehind: boolean; dbProbe: DbProbeOutcome }> {
+): Promise<{ schemaBehind: boolean; dbProbe: DbProbeOutcome; schemaTimeout?: MigrationTimeoutRecord }> {
   let schemaBehind = false;
+  let schemaTimeout: MigrationTimeoutRecord | undefined;
   let dbProbe: DbProbeOutcome = { status: 'skipped', reason: 'no probe attempted' };
   // Detect schema migrations (migrate.ts) being behind.
   // apply-migrations historically ran orchestrator migrations only; schema
@@ -958,6 +975,7 @@ async function preflightSchema(
           autoApply: (cli.yes || cli.nonInteractive) && !cli.dryRun && !cli.list,
           run: () => migrateSchema(eng, schemaVer),
         });
+        if (schemaBehind) schemaTimeout = (await readMigrationTimeout(eng, parseInt(await eng.getConfig('version') || String(schemaVer), 10))) ?? undefined;
         await eng.disconnect();
       }
     }
@@ -973,7 +991,7 @@ async function preflightSchema(
       access: classifyPgAccessError(err, { url: cfg?.database_url ?? null }).reason,
     };
   }
-  return { schemaBehind, dbProbe };
+  return { schemaBehind, dbProbe, schemaTimeout };
 }
 
 /** #6696 C5: the clearing step for a wedged migration; it needs the user, since the cause behind the partial runs must be fixed first. */
