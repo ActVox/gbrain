@@ -179,8 +179,12 @@ minute, no running gbrain process is building it (a brain with no resident
 writer, or a build that died): `gbrain projections drain`, the fix's fallback,
 builds it now, and doctor `text_projection_readiness` names how many such
 pages wait. A quarantined page says
-`searchable: false`. `gbrain import` waits for the build and reports
-`searchable` in its result the same way.
+`searchable: false`. A managed `gbrain import` or `gbrain sync` of such a
+page replies the same way, when the write commits: its result says
+`searchable: "pending"` and `projection: "pending"` with the `request_id` to read
+again, `searchable_retry_after_ms` and `searchable_fix`, and the build does not
+hold up the source's next write. A new page up to 4 MiB still imports
+searchable (`searchable: true`).
 
 Deleting and restoring a segmented page on a source backed by files works up
 to the page ceiling. A restore reserves room for its file twice (the staging
