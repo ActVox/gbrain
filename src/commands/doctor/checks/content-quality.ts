@@ -14,6 +14,7 @@ import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { agentFix, checkError, doctorVerify, withSkippedSegmented } from '../check-fix.ts';
 import { scanDeadline } from '../budget.ts';
+import { boundUnknownDetails } from '../bounded-unknown.ts';
 
 /** Oversized pages `oversized_pages` lists before it reports a floor. */
 const OVERSIZED_LIST_LIMIT = 100;
@@ -448,6 +449,9 @@ async function runFrontmatter(ctx: DoctorContext): Promise<Check[]> {
       checks.push({
         name: 'frontmatter_integrity',
         status: 'warn',
+        // #7145: a partial walk is a floor with health unknown past it, readable without parsing the message.
+        details: { count: report.total, partial: report.partial, exact: !report.partial,
+          ...(report.partial ? { ...boundUnknownDetails('time'), limit: fmTimeoutMs } : {}) },
         message:
           `${report.total} frontmatter issue(s)` +
           (report.partial ? ` (PARTIAL SCAN — timeout after ${fmTimeoutMs / 1000}s)` : '') +

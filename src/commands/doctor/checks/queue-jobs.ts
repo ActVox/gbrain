@@ -8,6 +8,7 @@ import type { BrainEngine } from '../../../core/engine.ts';
 import { resolveEnvNumber } from '../../../core/env-number.ts';
 import type { Check } from '../../doctor.ts';
 import { checkError, doctorVerify } from '../check-fix.ts';
+import { boundUnknownDetails } from '../bounded-unknown.ts';
 import { queueWorkerAlive, runWaitingJobsFix } from '../../../core/minions/no-worker.ts';
 
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
@@ -574,7 +575,8 @@ export async function computeOrphanedPrivateQueueCheck(engine: BrainEngine): Pro
          EXTRACT(EPOCH FROM min(created_at)) * 1000 AS birth_epoch_ms
        FROM minion_jobs
        WHERE queue LIKE 'dream-inline-%'
-       GROUP BY queue`,
+       GROUP BY queue
+       ORDER BY queue`,
     );
     // Live cycle locks with their acquisition time, for ownership correlation.
     // Liveness matches db-lock's own model: an unexpired TTL, OR a lapsed TTL
@@ -675,6 +677,17 @@ export async function computeOrphanedPrivateQueueCheck(engine: BrainEngine): Pro
       flaggedWaiting += candidateWaiting[i];
     }
     const flagged = recoverable.length + legacyUnowned.length + ownerPending.length;
+    // #7145: candidates past the classification cap were not checked, so none flagged among the first is not clear.
+    if (flagged === 0 && truncatedCandidates > 0) {
+      return {
+        name: 'orphaned_private_queue',
+        status: 'warn',
+        message: `Orphaned private queues unknown: ${truncatedCandidates} candidate queue(s) were left unclassified past the ${CLASSIFY_CAP} classified per run (no setting); `
+          + `none of the ${CLASSIFY_CAP} classified is provably orphaned (${suppressedByLiveLock + suppressedByLiveLease} possibly owned by a live cycle).`,
+        details: { paused_jobs: pausedTotal, suppressed_by_live_lock: suppressedByLiveLock, suppressed_by_live_lease: suppressedByLiveLease,
+          unclassified_candidates: truncatedCandidates, ...boundUnknownDetails('rows'), limit: CLASSIFY_CAP },
+      };
+    }
     if (flagged === 0) {
       const suppressed = suppressedByLiveLock + suppressedByLiveLease;
       return {
@@ -682,16 +695,14 @@ export async function computeOrphanedPrivateQueueCheck(engine: BrainEngine): Pro
         status: 'ok',
         // Truncation must stay visible on the ok path too: 100 live + 50
         // never-classified candidates is NOT a clean bill of health.
-        message: suppressed > 0 || truncatedCandidates > 0
-          ? `No provably-orphaned private queues (${suppressed} possibly owned by a live cycle` +
-            (truncatedCandidates > 0 ? `, ${truncatedCandidates} unclassified — re-run doctor to page through them` : '') + `)`
+        message: suppressed > 0
+          ? `No provably-orphaned private queues (${suppressed} possibly owned by a live cycle)`
           : 'No orphaned private queues',
-        ...(pausedTotal > 0 || suppressed > 0 || truncatedCandidates > 0
+        ...(pausedTotal > 0 || suppressed > 0
           ? { details: {
               paused_jobs: pausedTotal,
               suppressed_by_live_lock: suppressedByLiveLock,
               suppressed_by_live_lease: suppressedByLiveLease,
-              ...(truncatedCandidates > 0 ? { unclassified_candidates: truncatedCandidates } : {}),
             } }
           : {}),
       };
@@ -721,7 +732,8 @@ export async function computeOrphanedPrivateQueueCheck(engine: BrainEngine): Pro
       status: 'fail',
       message:
         `Orphaned private dream queue(s): ${[...recoverable, ...legacyUnowned, ...ownerPending].join('; ')}. ` +
-        `A supervisor restart cannot consume these parent-owned queues. ${remediation.join(' ')}`,
+        `A supervisor restart cannot consume these parent-owned queues. ${remediation.join(' ')}`
+        + (truncatedCandidates > 0 ? ` ${truncatedCandidates} more candidate queue(s) past the ${CLASSIFY_CAP} classified per run were not checked.` : ''),
       details: {
         orphaned_private_queues: flagged,
         recoverable_queues: recoverable.length,
