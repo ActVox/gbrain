@@ -18,8 +18,9 @@ export const MASS_RECONCILE_RATIO = 0.5;
 export const MASS_RECONCILE_MIN_PAGES = 20;
 
 /**
- * #7130: absolute caps on what one managed sync pass deletes, on top of the 50% valve, which a large source never trips
- * (19,325 deletes were 4% of a 478k-page source). A pass over either cap withholds its deletes like the valve does.
+ * #7130: absolute caps on what one sync run deletes (a managed pass, a classic full reconcile, a working-tree sync), on
+ * top of the 50% valve, which a large source never trips (19,325 deletes were 4% of a 478k-page source). A run over
+ * either cap withholds its deletes like the valve does.
  * `sync.max_deletes` (default 500) is a count; `sync.max_delete_ratio` (default 0.01) a share of the source's file-backed
  * pages, applied only to a pass deleting more than `SYNC_DELETE_RATIO_FLOOR` pages so that a small brain's ordinary
  * deletion of a folder is not withheld. A source overrides either with `sync.max_deletes.source.<id>` /

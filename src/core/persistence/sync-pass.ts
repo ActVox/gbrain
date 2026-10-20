@@ -565,6 +565,18 @@ async function readUntracked(gitRoot: string, scope: string): Promise<string[]> 
 
 const timer = () => { const started = performance.now(); return () => Math.round((performance.now() - started) * 10) / 10; };
 
+/** #7130: an absent file is deletion evidence only when Git once committed it (sync-origin-evidence.ts); read for those paths alone. */
+async function reclassifyByOrigin(gitRoot: string, tips: Array<string | null | undefined>, paths: ShadowPath[], step: LoopYield): Promise<boolean> {
+  const absent = await filterYielding(paths, entry => (entry.result.cls === 'delete' || entry.result.cls === 'delete_drift') && entry.state.originEvidence === undefined, step);
+  if (!absent.length) return false;
+  const evidence = await readOriginEvidence(gitRoot, tips, absent.map(entry => entry.path));
+  for (const entry of absent) {
+    const state = { ...entry.state, originEvidence: evidence.get(entry.path) ?? 'unknown' as const };
+    Object.assign(entry, { state, result: classifySyncPath(state) });
+  }
+  return true;
+}
+
 /**
  * The shadow level of a managed source: every path classified, nothing written. Null for a company-brain source, which
  * keeps its frozen manifest (design v3.2 §3.6).
@@ -835,17 +847,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     timings.classify += t();
   }
 
-  // #7130: an absent file is deletion evidence only when Git once committed it (sync-origin-evidence.ts), read for those paths alone.
-  const absent = await filterYielding(paths, entry => (entry.result.cls === 'delete' || entry.result.cls === 'delete_drift') && entry.state.originEvidence === undefined, step);
-  if (absent.length) {
-    t = timer();
-    const evidence = await readOriginEvidence(gitRoot, [head, baselineCommit], absent.map(entry => entry.path));
-    for (const entry of absent) {
-      const state = { ...entry.state, originEvidence: evidence.get(entry.path) ?? 'unknown' as const };
-      Object.assign(entry, { state, result: classifySyncPath(state) });
-    }
-    timings.origin = t();
-  }
+  t = timer();
+  if (await reclassifyByOrigin(gitRoot, [head, baselineCommit], paths, step)) timings.origin = t();
 
   // Adoption by hash needs the level's bytes: committed mode reads the blobs of the candidates that could adopt.
   const needBytes = await filterYielding(paths, entry => !['matched', 'held', 'dirty'].includes(entry.result.cls) && entry.state.levelSha256 === null && entry.state.level !== null
