@@ -137,7 +137,6 @@ for (const kind of testBackends()) {
       const staleId = await staged(stale, slug, { mode: 'replace', expected_revision: await revisionOf(slug) });
       await call('add_tag', { slug, tag: 'moved' });
       expect((await commitRefusal({ upload_id: staleId })).code).toBe('revision_changed');
-      await call('abort_page_upload', { upload_id: staleId });
       const after = await counters();
       for (const [key, value] of Object.entries(after)) expect([key, value]).toEqual([key, prior[key] ?? [0, 0]]);
       const body = await materializeSegmentedBody(engine, Number((await stored(slug)).id), 'default');
@@ -155,6 +154,26 @@ for (const kind of testBackends()) {
       expect(hex(body.compiled_truth)).toBe(hex(original));
       await commit({ upload_id: id, allow_shrink: true });
       await expectStoredBody(slug, smaller);
+    }, 900_000);
+
+    test('a remote replace over 24 MiB of a page with a hidden takes fence or timeline rows refuses upload_protected_content and releases its bytes', async () => {
+      const cases: Array<['takes' | 'timeline', string, () => Promise<unknown>]> = [
+        ['takes', 'notes/huge-with-takes', () => call('takes_add', { slug: 'notes/huge-with-takes', claim: 'Launch slips to Q3.', kind: 'take', holder: 'world', request_id: randomUUID() })],
+        ['timeline', 'notes/huge-with-timeline', () => call('add_timeline_entry', { slug: 'notes/huge-with-timeline', date: '2026-01-02', summary: 'Kickoff held', request_id: randomUUID() })],
+      ];
+      await setConfig('write_gate.agent_mode', 'off');
+      for (const [reason, slug, protect] of cases) {
+        await call('put_page', { slug, content: `---\ntitle: Protected ${reason}\ntype: note\n---\n\n# Protected ${reason}\n\nShort page.\n`, request_id: randomUUID(), wait_ms: 30_000 });
+        await protect();
+        const prior = await counters();
+        const before = await engine.readPageSnapshot(slug, { sourceId: 'default' });
+        const id = await staged(conversation(25 * MiB, `protected-${reason}`), slug, { mode: 'replace', expected_revision: before!.revision });
+        const refused = await commitRefusal({ upload_id: id });
+        expect({ reason, code: refused.code, names: refused.message.includes(reason === 'takes' ? 'takes fence' : 'timeline rows') }).toEqual({ reason, code: 'upload_protected_content', names: true });
+        expect((await engine.readPageSnapshot(slug, { sourceId: 'default' }))!.revision).toBe(before!.revision);
+        const after = await counters();
+        for (const [key, value] of Object.entries(after)) expect([reason, key, value]).toEqual([reason, key, prior[key] ?? [0, 0]]);
+      }
     }, 900_000);
   });
 }

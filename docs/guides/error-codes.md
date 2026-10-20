@@ -4115,6 +4115,16 @@ More: [docs/guides/write-refusals.md#unsupported_path](../../docs/guides/write-r
 |---|---|---|---|---|---|---|
 | No open upload session matches this upload_id for this connection. | A session answers only its creating connection, in its source, while the page it began against is unchanged; every other case gets this same answer so an upload_id reveals nothing. | Begin a new upload with begin_page_upload and a new request_id. | agent | `repeat the read that failed` | 1 | no |
 
+### upload_protected_content
+
+<a id="upload_protected_content"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A remote replace upload over 24 MiB was refused because the page holds content it cannot carry over: a takes fence remote reads hide, or timeline rows. | put_page keeps a hidden takes fence and checks omitted timeline rows by comparing whole bodies; an upload over the single-string ceiling is never held whole, so it refuses instead of dropping them. | Replace the page with content of at most 24 MiB through put_page, write it locally on the brain host, or (timeline only) commit with drop_timeline: true when deleting every entry is intended. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `takes`, `timeline`.
+
 ### upstream
 
 <a id="upstream"></a>

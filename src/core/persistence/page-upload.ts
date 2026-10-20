@@ -102,7 +102,11 @@ const LIVE = `'{${LIVE_STAGING_STATES.join(',')}}'::text[]`;
 /** The session `s` is named by an unfinished write (its staged body is a GC root until that write ends). */
 const REQUEST_HELD_SQL = `EXISTS (SELECT 1 FROM persistence_requests r WHERE r.state IN ('queued','running','recovering')
       AND r.intent->'body_ref'->>'staging_id' = s.id::text)`;
-const LAPSED_SQL = `(s.state = ANY(${LIVE}) AND (s.idle_expires_at <= now() OR s.hard_expires_at <= now()) AND NOT ${REQUEST_HELD_SQL})`;
+/**
+ * The session `s` expires: an open session past either deadline, a sealed (committing) one only past its hard deadline,
+ * which sealing extends by one idle period; never one an unfinished write names. A commit in progress is never expired.
+ */
+const LAPSED_SQL = `(s.state = ANY(${LIVE}) AND (s.hard_expires_at <= now() OR s.state = 'open' AND s.idle_expires_at <= now()) AND NOT ${REQUEST_HELD_SQL})`;
 
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
 const toRow = (raw: Record<string, unknown>): UploadRow => ({
@@ -134,30 +138,36 @@ export async function readUploadByRequest(exec: SqlEngine, principal: Principal,
 }
 
 /**
- * Moves the live upload sessions `where` selects (over alias `s`, binding `params`) to `state` and releases their
- * reservations in the same statement; returns how many moved. A commit records its request.
+ * Moves the live upload sessions `where` selects (over alias `s`, binding `params`) to `state`, deletes their parts and
+ * releases their reservations in the same statement; returns how many moved. A commit records its request.
  */
 export async function transitionUploads(exec: SqlEngine, state: 'aborted' | 'expired' | 'committed', where: string, params: unknown[],
   opts: { commitRequestId?: string } = {}): Promise<number> {
   const commit = opts.commitRequestId !== undefined ? `, commit_request_id = $${params.length + 1}::uuid` : '';
   const [row] = await exec.executeRaw<{ n: number }>(`WITH gone AS (UPDATE page_body_stagings s SET state = '${state}', updated_at = now()${commit}
-      WHERE s.kind = 'upload' AND s.state = ANY(${LIVE}) AND ${where} RETURNING s.kind, s.principal_kind, s.principal_id, s.reserved_bytes),
+      WHERE s.kind = 'upload' AND s.state = ANY(${LIVE}) AND ${where} RETURNING s.id, s.kind, s.principal_kind, s.principal_id, s.reserved_bytes),
     ${RELEASE_STAGED_CTE}
     SELECT count(*)::int AS n FROM gone`, opts.commitRequestId !== undefined ? [...params, opts.commitRequestId] : params);
   return Number(row?.n ?? 0);
 }
 
-/** Expires the session if it lapsed (releasing its reservation); true when it is, or already was, expired. */
+/**
+ * Expires the session if it lapsed (releasing its reservation); true only when it was already expired or this call
+ * expired it. False on a row that moved on meanwhile (a commit sealed it): the caller re-reads it and follows its state.
+ */
 export async function expireIfLapsed(exec: SqlEngine, row: UploadRow): Promise<boolean> {
   if (row.state === 'expired') return true;
   if (!row.lapsed) return false;
-  await transitionUploads(exec, 'expired', `s.id = $1::uuid AND ${LAPSED_SQL}`, [row.id]);
-  return true;
+  return await transitionUploads(exec, 'expired', `s.id = $1::uuid AND ${LAPSED_SQL}`, [row.id]) > 0;
 }
 
-/** Aborts the live session unless a commit was submitted for it; true when it moved (its bytes released). */
+/**
+ * Aborts the live session unless a commit holds it: no commit was submitted, or the submitted one ended without
+ * committing. True when it moved (its parts deleted and its bytes released).
+ */
 export async function abortUpload(exec: SqlEngine, id: string): Promise<boolean> {
-  return await transitionUploads(exec, 'aborted', `s.id = $1::uuid AND s.commit_request_id IS NULL AND NOT ${REQUEST_HELD_SQL}`, [id]) > 0;
+  return await transitionUploads(exec, 'aborted', `s.id = $1::uuid AND NOT ${REQUEST_HELD_SQL} AND (s.commit_request_id IS NULL
+    OR EXISTS (SELECT 1 FROM persistence_requests r WHERE r.id = s.commit_request_id AND r.state IN ('conflict','failed','cancelled')))`, [id]) > 0;
 }
 
 export interface UploadReservation {
@@ -187,7 +197,7 @@ export async function reserveUpload(engine: BrainEngine, input: UploadReservatio
     const staged = Number(usage?.staged ?? 0), brain = Number(usage?.brain ?? 0), uploads = Number(usage?.uploads ?? 0);
     if (uploads + 1 > limits.principalUploads) throw stagedQuotaExhausted('open upload sessions for this connection', 'principalUploads', uploads, limits.principalUploads, 1, 'open_uploads');
     if (staged + input.totalBytes > limits.principalStagedBytes) throw stagedQuotaExhausted('staged upload bytes for this connection', 'principalStagedBytes', staged, limits.principalStagedBytes, input.totalBytes, 'staged_bytes');
-    if (brain + input.totalBytes > limits.brainStagedBytes) throw stagedQuotaExhausted('staged upload bytes for this brain', 'brainStagedBytes', brain, limits.brainStagedBytes, input.totalBytes, 'staged_bytes');
+    if (brain + input.totalBytes > limits.brainStagedBytes) throw stagedQuotaExhausted('staged upload bytes for this brain', 'brainStagedBytes', null, limits.brainStagedBytes, input.totalBytes, 'staged_bytes');
     await tx.executeRaw(`INSERT INTO page_body_stagings (id, kind, principal_kind, principal_id, client_request_id, source_id, source_incarnation, slug,
         page_id, mode, base_revision, base_generation, declared_bytes, declared_sha256, reserved_bytes, idle_expires_at, hard_expires_at)
       VALUES ($1::uuid, 'upload', $2, $3, $4::uuid, $5, $6::uuid, $7, $8::int, $9, $10::uuid, (SELECT body_generation FROM pages WHERE id = $8::int),
@@ -233,8 +243,16 @@ export async function stagedSha256(exec: SqlEngine, row: Pick<UploadRow, 'id' | 
   return at === row.received_bytes ? hash.digest('hex') : null;
 }
 
-export async function sealUpload(exec: SqlEngine, id: string): Promise<void> {
-  await exec.executeRaw(`UPDATE page_body_stagings SET state = 'sealed', updated_at = now() WHERE id = $1::uuid AND state = 'open'`, [id]);
+/**
+ * Seals the open session for its commit: no more parts, and no expiry until its hard deadline, which moves to at least
+ * one idle period from now so the commit can journal. True when this call sealed it; false when it was no longer open.
+ */
+export async function sealUpload(exec: SqlEngine, id: string): Promise<boolean> {
+  const limits = await readUploadLimits(exec);
+  const sealed = await exec.executeRaw<{ id: string }>(`UPDATE page_body_stagings SET state = 'sealed', updated_at = now(),
+      hard_expires_at = GREATEST(hard_expires_at, now() + $2::bigint * interval '1 second')
+    WHERE id = $1::uuid AND state = 'open' RETURNING id::text AS id`, [id, limits.uploadIdleSeconds]);
+  return sealed.length > 0;
 }
 
 /** A journal body reference to a sealed upload session (spec 3.2). */

@@ -25,6 +25,10 @@ import { pageGateTrust, pageWriteTrust, stampPageTrustMarker, storedPageTier } f
 import type { WriteTrust } from '../trust/tier.ts';
 import { sizeStateField } from '../page-embedding-budget.ts';
 import { coreMarking } from '../core-memory.ts';
+import { TAKES_FENCE_BEGIN } from '../takes-fence.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
+import { inlineRegions } from '../page-body/tail-digest.ts';
+import type { PageSnapshot } from '../page-state/types.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { bodyStagingGoneError } from '../engine-sql/page-body.ts';
 import { ownerSourceGateInput, writeTrustOfGate } from './attribution.ts';
@@ -37,6 +41,31 @@ import type { WriteRequest } from './model.ts';
 
 const text = (value: unknown) => (typeof value === 'string' ? value : null);
 
+/**
+ * put_page keeps, for a remote writer, the takes fence remote reads hide (preserveProtectedTakes) and refuses to drop
+ * timeline rows its content omits (assertTimelineNotOmitted); both compare whole bodies. Streamed, this refuses
+ * instead: a remote replace over the ceiling of a page holding a takes fence, or timeline rows (unless drop_timeline),
+ * is `upload_protected_content`. Bounded: one probe of the live manifest and of timeline_entries.
+ */
+async function assertNothingHiddenDropped(engine: BrainEngine, row: WriteRequest, snapshot: PageSnapshot, p: Record<string, unknown>): Promise<void> {
+  const [found] = await engine.executeRaw<{ has_takes: boolean; has_timeline: boolean }>(`SELECT
+      EXISTS (SELECT 1 FROM page_body_manifest m JOIN pages pg ON pg.id = m.page_id WHERE m.page_id = $1 AND m.staging_id IS NULL
+        AND m.gen_from <= pg.body_generation AND (m.gen_to IS NULL OR m.gen_to > pg.body_generation)
+        AND m.protected_regions @> '[{"kind":"takes"}]'::jsonb) AS has_takes,
+      EXISTS (SELECT 1 FROM timeline_entries WHERE page_id = $1) AS has_timeline`, [Number(snapshot.page.id)]);
+  const inlineTakes = !isSegmentedPage(snapshot.page)
+    && Object.values(await inlineRegions(engine, Number(snapshot.page.id))).some(region => region.includes(TAKES_FENCE_BEGIN));
+  const reason = found?.has_takes || inlineTakes ? 'takes' : found?.has_timeline && p.drop_timeline !== true ? 'timeline' : null;
+  if (!reason) return;
+  throw opError('upload_protected_content', reason === 'takes'
+    ? `Page ${row.slug} holds a takes fence that remote reads hide, and a remote replace over ${PAGE_MAX_BYTES} bytes cannot carry it over, so nothing was written.`
+    : `Page ${row.slug} has timeline rows, and a remote replace over ${PAGE_MAX_BYTES} bytes cannot check which of them its content keeps, so nothing was written.`,
+    reason === 'takes'
+      ? `Replace the page with content of at most ${PAGE_MAX_BYTES} bytes (put_page keeps the hidden takes fence), or ask the user to write it locally on the brain host.`
+      : `Upload the page again and commit it with drop_timeline: true only if deleting every timeline entry of the page is intended; otherwise replace it with content of at most ${PAGE_MAX_BYTES} bytes, which put_page checks entry by entry.`,
+    { reason, docs: 'docs/guides/write-refusals.md#upload_protected_content' });
+}
+
 export async function prepareStreamedUpload(engine: BrainEngine, row: WriteRequest, ref: StagingBodyRef): Promise<PreparedMutation> {
   const p = row.intent as Record<string, unknown>;
   const policy = await readPageBodyPolicy(engine);
@@ -48,6 +77,7 @@ export async function prepareStreamedUpload(engine: BrainEngine, row: WriteReque
   assertPageRevision(snapshot, { expectedRevision: text(p.expected_revision) });
   if ((snapshot?.page.id ?? null) !== row.page_id) throw pageIdentityError(!!snapshot, 'The accepted page was deleted or recreated.');
   const remote = row.authority.remote === true;
+  if (remote && snapshot && !snapshot.page.deleted_at) await assertNothingHiddenDropped(engine, row, snapshot, p);
   const storedTier = remote && snapshot ? await storedPageTier(engine, row.source_id, row.slug) : null;
   let trust: WriteTrust | undefined;
   const dir = await mkdtemp(join(tmpdir(), 'gbrain-upload-'));

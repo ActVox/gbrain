@@ -408,10 +408,11 @@ export async function sweepSegments(exec: SqlExecutor, opts: SegmentSweepOptions
       opts.sourceId !== undefined ? sqlFragment`s.source_id = ${opts.sourceId}` : sqlFragment`TRUE`,
     ], ' AND ');
     const { rows: expired } = await exec.run<{ n: number }>(sqlFragment`WITH gone AS (UPDATE page_body_stagings s SET state = 'expired', updated_at = ${now}
-      WHERE s.state = ANY(${LIVE_STAGING_STATES}::text[]) AND (s.idle_expires_at <= ${now} OR s.hard_expires_at <= ${now}) AND ${stagingScope}
+      WHERE s.state = ANY(${LIVE_STAGING_STATES}::text[]) AND ${stagingScope}
+        AND (s.hard_expires_at <= ${now} OR s.idle_expires_at <= ${now} AND (s.kind <> 'upload' OR s.state = 'open'))
         AND NOT EXISTS (SELECT 1 FROM persistence_requests r WHERE r.state = ANY(${NON_TERMINAL_REQUEST_STATES}::text[])
                          AND r.intent->'body_ref'->>'staging_id' = s.id::text)
-      RETURNING s.kind, s.principal_kind, s.principal_id, s.reserved_bytes), ${trustedSql(RELEASE_STAGED_CTE)}
+      RETURNING s.id, s.kind, s.principal_kind, s.principal_id, s.reserved_bytes), ${trustedSql(RELEASE_STAGED_CTE)}
       SELECT count(*)::int AS n FROM gone`);
     stagingsExpired = Number(expired[0]?.n ?? 0);
     await exec.run(sqlFragment`DELETE FROM page_body_staging_parts p USING page_body_stagings s

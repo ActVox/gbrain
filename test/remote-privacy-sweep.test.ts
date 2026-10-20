@@ -197,6 +197,14 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   edit_page: { slug: WORLD_FENCE_SLUG, expected_revision: '00000000-0000-4000-8000-000000000000', edits: [{ old_text: 'x', new_text: 'y' }] },
   // A stale revision on the fence-bearing page: the refusal must not echo it or its tail.
   append_page: { slug: WORLD_FENCE_SLUG, request_id: '6007a5e0-0000-4000-8000-000000000002', expected_revision: '00000000-0000-4000-8000-000000000000', text: 'fresh sweep append' },
+  // An upload replacing the private page: the remote caller cannot see it, so begin answers as put_page does for an
+  // invisible page and stages nothing.
+  begin_page_upload: { slug: PRIV_PAGE_SLUG, mode: 'replace', total_bytes: 32, sha256: '0'.repeat(64), expected_revision: '00000000-0000-4000-8000-000000000000', request_id: '6007a5e0-0000-4000-8000-000000000003' },
+  // A session this caller did not begin: every session op answers upload_not_found.
+  upload_page_part: { upload_id: '6007a5e0-0000-4000-8000-000000000004', part: 0, text: 'fresh sweep part', part_sha256: 'af8002248c8537e357edd4eea4a9cacbaf864c4e5e0e7218f4cd808895fe1363' },
+  get_page_upload: { upload_id: '6007a5e0-0000-4000-8000-000000000004' },
+  commit_page_upload: { upload_id: '6007a5e0-0000-4000-8000-000000000004' },
+  abort_page_upload: { upload_id: '6007a5e0-0000-4000-8000-000000000004' },
   remember: { fact: 'fresh sweep fact', provenance: 'sweep', entity: 'people/sweep-fresh-entity' },
   capture: { content: 'fresh sweep capture' },
   add_tag: { slug: WORLD_PAGE_SLUG, tag: 'sweep-tag' },
@@ -364,6 +372,13 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   revert_version: 'error',
   edit_page: 'error',
   append_page: 'error',
+  // Page uploads: begin on the invisible private page refuses page_not_found like put_page (permission_denied under the
+  // read-only federated grant); the session ops refuse upload_not_found in both shapes.
+  begin_page_upload: 'error',
+  upload_page_part: 'error',
+  get_page_upload: 'error',
+  commit_page_upload: 'error',
+  abort_page_upload: 'error',
   put_raw_data: 'error',
   log_ingest: 'error',
   takes_add: 'ok',
