@@ -5,7 +5,7 @@ import { resolveSchemaLockTimeoutMs, schemaLockBlockedError, withSchemaLockTimeo
 import { MIGRATIONS } from './schema-migrations/registry.generated.ts';
 import { hasPendingMigrations } from './migrate-pending.ts';
 import { setQuietMigrationNotices } from './schema-migrations/helpers.ts';
-import { runMigrationPrelude } from './migration-preludes.ts';
+import { MIGRATION_PRELUDES, runMigrationPrelude } from './migration-preludes.ts';
 import { clearMigrationTimeout, migrationStatementTimeoutMs, recordMigrationTimeout } from './migration-timeout.ts';
 // runMigrations executes while an initialized engine is live. Keep its helper
 // modules in the static graph rather than importing them from async handlers.
@@ -508,7 +508,7 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
         if (quietReplay) process.stderr.write(`  [${m.version}] ${m.name} failed\n`);
         // #7108: apply-migrations and doctor read this to name the migration and the step that helps.
         const timedOut = err instanceof MigrationRetryExhausted ? isStatementTimeoutError(err.lastError) : isStatementTimeoutError(err);
-        if (timedOut) await recordMigrationTimeout(engine, m, err instanceof MigrationRetryExhausted ? err.lastBlockers.map(b => b.pid) : []);
+        if (timedOut) await recordMigrationTimeout(engine, m, MIGRATION_PRELUDES.has(m.version), err instanceof MigrationRetryExhausted ? err.lastBlockers.map(b => b.pid) : []);
         throw err;
       }
 
@@ -552,7 +552,7 @@ async function applyOneMigration(engine: BrainEngine, m: Migration): Promise<voi
             console.error('');
           } else {
             console.error('');
-            console.error(`   Cause: no idle-in-transaction session was blocking it, so the migration's own work`);
+            console.error(`   Cause: no idle-in-transaction session was open, and a lock wait stops at the lock timeout, so its own work`);
             console.error(`   outlasted its ${Math.round(migrationStatementTimeoutMs() / 60_000)}-minute statement budget on this brain; every attempt rolled back.`);
             console.error('   A plain rerun with this gbrain release repeats the failure (#7108).');
             console.error('');

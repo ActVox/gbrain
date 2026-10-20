@@ -24,7 +24,8 @@ import { opError, type OperationError } from '../core/ops/contract.ts';
 import { PgliteBusyError } from '../core/pglite-lock.ts';
 import { connectMigrationEngine } from './migrations/run-engine.ts';
 import { DB_ACCESS_MARKER_PREFIX, shouldEmitDbAccessMarker } from '../core/pg-access-classify.ts';
-import { migrationTimeoutAdvice, readMigrationTimeout, type MigrationTimeoutRecord } from '../core/migration-timeout.ts';
+import { readMigrationTimeout, type MigrationTimeoutRecord } from '../core/migration-timeout.ts';
+import { migrationTimeoutAdvice } from '../core/migration-timeout-advice.ts';
 
 export type SchemaPendingReason = 'not_applied' | 'still_behind' | 'schema_unreadable';
 

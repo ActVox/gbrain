@@ -17,16 +17,16 @@
  * them in batches, and the published migration SQL afterwards rewrites none.
  * Run: DATABASE_URL=... bun test test/e2e/migration-v221-batched-backfill-7108.test.ts
  */
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import postgres from '#postgres';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { LATEST_VERSION, MIGRATIONS, runMigrationSQL, runMigrations } from '../../src/core/migrate.ts';
-import { MIGRATION_TIMEOUT_KEY, migrationTimeoutAdvice, readMigrationTimeout, setMigrationStatementTimeoutMs } from '../../src/core/migration-timeout.ts';
+import { MIGRATION_TIMEOUT_KEY, readMigrationTimeout, setMigrationStatementTimeoutMs } from '../../src/core/migration-timeout.ts';
+import { migrationTimeoutAdvice } from '../../src/core/migration-timeout-advice.ts';
 import { __setBackfillBatchRowsForTests, MIGRATION_PRELUDES, runMigrationPrelude } from '../../src/core/migration-preludes.ts';
 import { schemaPendingError } from '../../src/commands/apply-migrations-schema.ts';
-import { VERSION } from '../../src/version.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const describeE2E = DATABASE_URL ? describe : describe.skip;
@@ -90,6 +90,12 @@ async function rewrittenBy(version: number, table: string): Promise<number[]> {
   await runMigrationSQL(engine!, m, m.sqlFor?.postgres ?? m.sql);
   const after = new Map((await sql<{ id: number; xmin: string }>(`SELECT id, xmin::text AS xmin FROM ${table}`)).map(r => [Number(r.id), r.xmin]));
   return before.filter(r => after.get(Number(r.id)) !== r.xmin).map(r => Number(r.id));
+}
+
+/** Distinct writing transactions among the rows: more than one means the prelude committed more than one batch. */
+async function writers(table: string, where = 'true'): Promise<number> {
+  const [row] = await sql<{ n: number }>(`SELECT count(DISTINCT xmin::text)::int AS n FROM ${table} WHERE ${where}`);
+  return Number(row!.n);
 }
 
 describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
@@ -212,7 +218,7 @@ describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
     await expect(runMigrations(engine!)).rejects.toThrow(/v221/);
     expect(await version()).toBe(220);
     const record = await readMigrationTimeout(engine!, 220);
-    expect(record).toMatchObject({ version: 221, name: 'chunk_embedding_pending_since', blocker_pids: [], gbrain_version: VERSION });
+    expect(record).toMatchObject({ version: 221, name: 'chunk_embedding_pending_since', batched: true, idle_pids: [] });
     const advice = migrationTimeoutAdvice(record!, { argv: ['gbrain', 'doctor', '--json'] });
     expect(advice.fix.ask_user).toBe(true);
     expect(advice.fix.argv).toEqual(['gbrain', 'apply-migrations', '--yes', '--statement-timeout', '120']);
@@ -242,10 +248,9 @@ describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
       SELECT $1, g, 'text ' || g, CASE WHEN g % 3 = 0 THEN 'doc ' || g END, CASE WHEN g % 5 = 0 THEN 'mod.fn' || g END
         FROM generate_series(1, 50) g`, [pageId]);
     chunkIds = (await sql<{ id: number }>('SELECT id FROM content_chunks ORDER BY id')).map(r => Number(r.id));
-    __setBackfillBatchRowsForTests(7);
   }, 120_000);
 
-  afterAll(() => __setBackfillBatchRowsForTests(null));
+  beforeEach(() => __setBackfillBatchRowsForTests(7));
 
   test('every prelude names a registered migration', () => {
     const versions = new Set(MIGRATIONS.map(m => m.version));
@@ -256,6 +261,7 @@ describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
     const expected = `setweight(to_tsvector('english', COALESCE(doc_comment, '')), 'A') || setweight(to_tsvector('english', COALESCE(symbol_name_qualified, '')), 'A') || setweight(to_tsvector('english', COALESCE(chunk_text, '')), 'B')`;
     await sql('UPDATE content_chunks SET search_vector = NULL');
     await runMigrationPrelude(engine!, 28);
+    expect(await writers('content_chunks')).toBeGreaterThan(1);
     const [row] = await sql<{ wrong: number }>(`SELECT count(*)::int AS wrong FROM content_chunks WHERE search_vector IS DISTINCT FROM (${expected})`);
     expect(row!.wrong).toBe(0);
     expect(await rewrittenBy(28, 'content_chunks')).toEqual([]);
@@ -267,6 +273,7 @@ describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
       SELECT CASE g % 3 WHEN 0 THEN 'client-7108' WHEN 1 THEN 'raw-token-' || g END, 'search' FROM generate_series(1, 40) g`);
     await sql('UPDATE mcp_request_log SET agent_name = NULL');
     await runMigrationPrelude(engine!, 33);
+    expect(await writers('mcp_request_log', 'token_name IS NOT NULL')).toBeGreaterThan(1);
     const names = await sql<{ token_name: string | null; agent_name: string | null }>('SELECT token_name, agent_name FROM mcp_request_log');
     for (const r of names) expect(r.agent_name).toBe(r.token_name === 'client-7108' ? 'Agent Example' : r.token_name);
     // A row with no token resolves to NULL, so v033's own predicate keeps selecting it; only those are rewritten.
@@ -283,6 +290,7 @@ describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
     await sql('UPDATE code_edges_symbol SET source_id = NULL');
     await sql('UPDATE code_edges_chunk SET source_id = NULL');
     await runMigrationPrelude(engine!, 116);
+    expect(await writers('code_edges_symbol')).toBeGreaterThan(1);
     for (const table of ['code_edges_symbol', 'code_edges_chunk']) {
       const [row] = await sql<{ wrong: number }>(`SELECT count(*)::int AS wrong FROM ${table} WHERE source_id IS DISTINCT FROM 'default'`);
       expect(row!.wrong).toBe(0);
@@ -296,6 +304,7 @@ describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
     await sql(`INSERT INTO links (from_page_id, to_page_id, link_type, link_source)
       SELECT $1, $2, 'mentions-' || g, NULL FROM generate_series(1, 30) g`, [pageId, other!.id]);
     await runMigrationPrelude(engine!, 11);
+    expect(await writers('links')).toBeGreaterThan(1);
     const [row] = await sql<{ wrong: number }>(`SELECT count(*)::int AS wrong FROM links WHERE link_source IS DISTINCT FROM 'markdown'`);
     expect(row!.wrong).toBe(0);
     expect(await rewrittenBy(11, 'links')).toEqual([]);
@@ -303,6 +312,9 @@ describeE2E('#7108: v221 backfills in resumable batches (Postgres)', () => {
 
   test('v161 builds the pending-projection index without the migration\'s 30-second cap', async () => {
     await sql('DROP INDEX IF EXISTS idx_pages_projection_pending');
+    await runMigrationPrelude(engine!, 161);
+    // An INVALID leftover (an interrupted concurrent build) is dropped and rebuilt, never accepted.
+    await sql(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('idx_pages_projection_pending')`);
     await runMigrationPrelude(engine!, 161);
     const [idx] = await sql<{ valid: boolean }>(`SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass('idx_pages_projection_pending')`);
     expect(idx?.valid).toBe(true);

@@ -54,7 +54,7 @@ import {
   schemaPendingError,
   type SchemaPending,
 } from './apply-migrations-schema.ts';
-import { readMigrationTimeout, setMigrationStatementTimeoutMs, type MigrationTimeoutRecord } from '../core/migration-timeout.ts';
+import { migrationStatementTimeoutMs, readMigrationTimeout, setMigrationStatementTimeoutMs, type MigrationTimeoutRecord } from '../core/migration-timeout.ts';
 
 interface ApplyMigrationsArgs {
   list: boolean;
@@ -541,8 +541,18 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
 export async function applyMigrations(args: string[]): Promise<{ exitCode: number | undefined; failure?: OperationError }> {
   const cli = parseArgs(args);
   if (cli.help) { printHelp(); return { exitCode: undefined }; }
-  if (cli.statementTimeoutMinutes !== undefined) setMigrationStatementTimeoutMs(cli.statementTimeoutMinutes * 60_000);
+  if (cli.statementTimeoutMinutes === undefined) return applyParsed(cli, args);
+  // #7108: the operator's budget covers this run only, whichever way it returns.
+  const prior = migrationStatementTimeoutMs();
+  setMigrationStatementTimeoutMs(cli.statementTimeoutMinutes * 60_000);
+  try {
+    return await applyParsed(cli, args);
+  } finally {
+    setMigrationStatementTimeoutMs(prior);
+  }
+}
 
+async function applyParsed(cli: ApplyMigrationsArgs, args: string[]): Promise<{ exitCode: number | undefined; failure?: OperationError }> {
   const installed = VERSION.replace(/^v/, '').trim() || '0.0.0';
   const report: RunReport = { doc: { status: 'ok', installed } };
 

@@ -16,8 +16,8 @@
  * statement budget. Progress is the data itself: a batch writes only rows the
  * migration's own predicate still selects, so an interrupted run resumes and
  * never rewrites a row it already wrote. The migration's SQL then runs
- * unchanged and finds nothing left to write, which also covers rows another
- * process wrote after the last batch. A prelude adds a column the migration
+ * unchanged and finds nothing the prelude could write, and it still covers rows
+ * another process wrote after the last batch. A prelude adds a column the migration
  * would add first, in the migration's own column order, so fresh and upgraded
  * brains keep the same column ordinals.
  *
@@ -26,7 +26,7 @@
  * the migrations that cannot and the operator budget for them.
  */
 import type { BrainEngine } from './engine.ts';
-import { migrationNotice, buildIndexOnline } from './schema-migrations/helpers.ts';
+import { dropInvalidConcurrentIndex, migrationNotice } from './schema-migrations/helpers.ts';
 import { migrationStatementTimeoutMs } from './migration-timeout.ts';
 import { isLockTimeoutError } from './retry-matcher.ts';
 import { resolveSchemaLockTimeoutMs, schemaLockBlockedError } from './postgres-engine/schema-lock-timeout.ts';
@@ -138,7 +138,11 @@ async function v028(engine: BrainEngine, ctx: PreludeContext): Promise<void> {
   });
 }
 
-/** v033 admin_dashboard_columns_v0_26_3: request-log agent names, resolved as the migration resolves them. */
+/**
+ * v033 admin_dashboard_columns_v0_26_3: request-log agent names, resolved as the
+ * migration resolves them. A row with no token resolves to NULL and would stay
+ * selected, so it is left to the migration's own UPDATE.
+ */
 async function v033(engine: BrainEngine, ctx: PreludeContext): Promise<void> {
   await addColumn(engine, ctx, 'ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS agent_name TEXT');
   await batchedUpdate(engine, ctx, {
@@ -147,7 +151,7 @@ async function v033(engine: BrainEngine, ctx: PreludeContext): Promise<void> {
         (SELECT client_name FROM oauth_clients WHERE client_id = t.token_name LIMIT 1),
         (SELECT name FROM access_tokens WHERE name = t.token_name LIMIT 1),
         t.token_name)`,
-    where: 't.agent_name IS NULL',
+    where: 't.agent_name IS NULL AND t.token_name IS NOT NULL',
   });
 }
 
@@ -163,18 +167,40 @@ async function v116(engine: BrainEngine, ctx: PreludeContext): Promise<void> {
   }
 }
 
+const V161_INDEX = 'idx_pages_projection_pending';
+
 /**
- * v161 index_pending_text_projections: the migration builds this partial index
- * on pages under its own 30-second statement cap, which no runner budget lifts.
- * Built here without blocking writers and without that cap, the migration's
- * CREATE INDEX IF NOT EXISTS finds it and does nothing.
+ * v161 index_pending_text_projections (Postgres): the migration builds this
+ * partial index on pages under its own 30-second statement cap, which no
+ * runner budget lifts. It is built here concurrently, under the migration
+ * statement budget, so the migration's CREATE INDEX IF NOT EXISTS finds a valid
+ * index and does nothing. The budget is a session setting on a reserved
+ * connection, reset afterwards, as runMigrationSQL does for a transaction:false
+ * migration. Another session's build in progress, or a build that ends invalid,
+ * stops the run, because the migration's IF NOT EXISTS would accept an invalid
+ * index. PGLite builds it in the migration itself, which has no cap there.
  */
-async function v161(engine: BrainEngine): Promise<void> {
-  await buildIndexOnline(engine, 161, {
-    name: 'idx_pages_projection_pending', table: 'pages',
-    sql: `CREATE INDEX IF NOT EXISTS idx_pages_projection_pending ON pages(source_id, page_kind, slug)
-      WHERE deleted_at IS NULL AND text_projection_revision IS DISTINCT FROM knowledge_revision`,
-  }, { notice: migrationNotice });
+async function v161(engine: BrainEngine, ctx: PreludeContext): Promise<void> {
+  if (engine.kind !== 'postgres') return;
+  const state = async () => (await engine.executeRaw<{ valid: boolean; building: boolean }>(
+    `SELECT i.indisvalid AS valid, EXISTS (SELECT 1 FROM pg_stat_progress_create_index p
+        WHERE p.relid = i.indrelid AND p.index_relid IN (i.indexrelid, 0)) AS building
+       FROM pg_index i WHERE i.indexrelid = to_regclass($1)`, [V161_INDEX]))[0];
+  const before = await state();
+  if (before?.valid) return;
+  if (before?.building) throw new Error(`Index ${V161_INDEX} is being built by another session; once that build ends, run gbrain apply-migrations --yes again.`);
+  if (before) await dropInvalidConcurrentIndex(engine, 161, V161_INDEX);
+  migrationNotice(`  [161] building ${V161_INDEX} concurrently; this can take minutes and is safe to interrupt (the next run rebuilds it)\n`);
+  await engine.withReservedConnection(async conn => {
+    await conn.executeRaw(`SET statement_timeout = '${ctx.statementTimeoutMs}'`);
+    try {
+      await conn.executeRaw(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${V161_INDEX} ON pages(source_id, page_kind, slug)
+        WHERE deleted_at IS NULL AND text_projection_revision IS DISTINCT FROM knowledge_revision`);
+    } finally {
+      await conn.executeRaw('RESET statement_timeout').catch(() => {});
+    }
+  }, { selfContained: true });
+  if (!(await state())?.valid) throw new Error(`Index ${V161_INDEX} is not valid after its concurrent build; run gbrain apply-migrations --yes again to rebuild it.`);
 }
 
 /**

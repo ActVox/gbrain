@@ -27,7 +27,8 @@ import { connectedEngine, type DoctorContext, type DoctorEntry, doctorHealth } f
 import { embeddingsDisabled } from '../../../core/embedding-disabled.ts';
 import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from '../../../core/search/embedding-column.ts';
 import { agentFix, checkError, doctorVerify, infoCheck, keylessEnablementFix } from '../check-fix.ts';
-import { migrationTimeoutAdvice, readMigrationTimeout } from '../../../core/migration-timeout.ts';
+import { readMigrationTimeout } from '../../../core/migration-timeout.ts';
+import { migrationTimeoutAdvice } from '../../../core/migration-timeout-advice.ts';
 import type { MissingTable, MissingTablesReport } from '../../../core/schema-missing-tables.ts';
 
 const MISSING_TABLES_DOCS = 'docs/guides/repair.md#missing-tables';
