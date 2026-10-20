@@ -40,8 +40,6 @@ import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from
 
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveSyncFreshnessHours = resolveHoursEnv;
-/** Duplicate content-hash groups `content_hash_duplicates` reads. */
-const HASH_GROUP_LIMIT = 50;
 
 /**
  * The extraction-lag threshold and vacuous-skip floor live with the shared read and verdict
@@ -224,11 +222,9 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
         WHERE deleted_at IS NULL AND content_hash IS NOT NULL AND content_hash <> ''
         GROUP BY source_id, content_hash
        HAVING count(*) > 1
-        LIMIT ${HASH_GROUP_LIMIT + 1}`,
+        LIMIT 51`,
     );
-    // #7145: a full page of groups means more exist; the counts below are then floors.
-    const capped = rows.length > HASH_GROUP_LIMIT;
-    const atLeast = capped ? 'At least ' : '';
+    const capped = rows.length > 50, atLeast = capped ? 'At least ' : ''; // #7145: a 51st group makes the counts floors
     if (rows.length === 0) {
       return { name, status: 'ok', message: 'No same-source content-hash duplicate groups' };
     }
@@ -237,7 +233,7 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
     const samples: string[] = [];
     let otherGroupCount = 0;
     const otherSamples: string[] = [];
-    for (const r of rows.slice(0, HASH_GROUP_LIMIT)) {
+    for (const r of rows.slice(0, 50)) {
       const slugs = String(r.slugs).split('|');
       const bare = slugs.filter(s => !s.includes('/'));
       const prefixed = slugs.filter(s => s.includes('/'));
@@ -277,12 +273,10 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
     return {
       name,
       status: 'warn',
-      message: parts.join(' ') + (capped ? ` Only the first ${HASH_GROUP_LIMIT} duplicate groups were read (no setting); fix these and rerun to see the rest.` : ''),
+      message: parts.join(' ') + (capped ? ' Only the first 50 duplicate groups were read (no setting); fix these and rerun to see the rest.' : ''),
       details: {
         pair_count: pairCount,
-        hash_groups: Math.min(rows.length, HASH_GROUP_LIMIT),
-        exact: !capped,
-        ...(capped ? { limit: HASH_GROUP_LIMIT } : {}),
+        hash_groups: Math.min(rows.length, 50), exact: !capped, ...(capped ? { limit: 50 } : {}),
         sample_pairs: samples,
         distinct_slug_group_count: otherGroupCount,
         sample_distinct_slug_groups: otherSamples,

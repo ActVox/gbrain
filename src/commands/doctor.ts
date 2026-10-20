@@ -473,8 +473,7 @@ export async function buildChecks(
     only: parseOnlyChecks(args),
     tier: parseDoctorTier(args),
     deadline,
-    ...(remoteScope.sourceIds ? { sourceIds: remoteScope.sourceIds } : {}),
-    ...(remoteScope.remote ? { remote: true } : {}),
+    ...(remoteScope.sourceIds ? { sourceIds: remoteScope.sourceIds } : {}), ...(remoteScope.remote ? { remote: true } : {}),
   };
 
   return runDoctorRegistry(ctx);
