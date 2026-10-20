@@ -69,6 +69,8 @@ import { fenceFixesWire } from '../fence-repair/tier1.ts';
 import type { FenceFix } from '../fence-repair/types.ts';
 import { VERSION } from '../../version.ts';
 import { bindOrigin } from './origin-guard.ts';
+import { segmentedOutcome } from './searchable.ts';
+import { isQuarantined } from '../quarantine.ts';
 
 /** The options that select a managed sync cursor (its key), recorded so a refusal can print the exact retry. */
 export interface SyncCursorOptions { full: boolean; workingTree: boolean; srcSubpath: string | null; exclude: string[]; includeHidden: string[]; strategy: string | null }
@@ -942,6 +944,7 @@ async function prepareSyncMutation(unbounded: BrainEngine, row: WriteRequest, _c
       const sizeState = applied.noop ? {} : await sizeStateField(tx, row.source_id, row.slug, live?.page);
       return { status: moved ? 'renamed' : applied.noop ? 'skipped' : snapshot ? 'updated' : 'created', slug: row.slug, source_id: row.source_id,
         chunks: applied.result.chunks, noop: applied.noop && !moved, imported_file: true, ...(moved ? { renamed_from: moved.slug } : {}), ...sizeState,
+        ...(applied.noop ? {} : segmentedOutcome(installed?.segmented, isQuarantined(applied.parsedPage?.frontmatter))),
         ...(recovery?.length ? { recovered_frontmatter: true } : {}), ...(commentValue ? { comment_value: true } : {}),
         ...(fenceFixes.length ? { fences_normalized: fenceFixesWire(fenceFixes) } : {}) };
     } };

@@ -108,6 +108,12 @@ export interface PublicationHooks {
   stagingFlushed?(request: WriteRequest): void;
   fileBoundary?(name: 'before_file' | 'staging_flushed' | 'file_replaced' | 'directory_flushed' | 'after_file'
     | 'before_restore' | 'restoration_staging_flushed' | 'restoration_file_replaced' | 'restoration_directory_flushed' | 'after_restore', request: WriteRequest, index: number): void;
+  /**
+   * #7106: a committed write whose outcome says its projection is built after commit (`searchable: 'pending'`): the
+   * caller settles its waiter with `done` now and tracks `afterCommit` (that build) itself, so the reply and the
+   * source's next write do not wait for it. Without this hook the publication awaits afterCommit before it returns.
+   */
+  projectionPending?(done: WriteRequest, afterCommit: Promise<void>): void;
 }
 /** SHA-256 of the file at `path` read in pieces (large-file.ts), null when absent. */
 const fileHash = hashFile;
@@ -439,7 +445,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   let recovery: RecoveryRecord | null = null;
   let published = false;
   let transactionBodyCompleted = false;
-  let afterCommitDue = false;
+  let afterCommitDue: WriteRequest | null = null;
   const skill = prepared.target === 'skill_bundle';
   const files = skill ? prepared.files ?? [] : prepared.file ? [prepared.file] : [];
   const beliefReport = { appended: 0 };
@@ -607,7 +613,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       if (staged.version === 1 && staged.staging?.before) await withFilesystemPublication([staged.root], async () => cleanupRecoveryStaging(staged));
       await clearResolvedRecovery(engine, row.id, done);
     }
-    afterCommitDue = done.state === 'committed';
+    if (done.state === 'committed') afterCommitDue = done;
     return done;
   } catch (error) {
     if (recovery) {
@@ -638,7 +644,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   } finally {
     releaseCapacity?.();
     await lock?.release();
-    if (afterCommitDue) await prepared.afterCommit?.(engine).catch(() => undefined);
+    if (afterCommitDue) {
+      const work = (prepared.afterCommit?.(engine) ?? Promise.resolve()).catch(() => undefined);
+      if (callerHooks.projectionPending && afterCommitDue.outcome?.searchable === 'pending') callerHooks.projectionPending(afterCommitDue, work);
+      else await work;
+    }
   }
 }
 

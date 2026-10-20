@@ -418,8 +418,11 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
    */
   private async publishSingle(row: WriteRequest, prepared: PreparedMutation): Promise<{ done: WriteRequest; settled: boolean }> {
     // A waiter learns of the commit before the recovery record is cleared (the clear still runs under the worktree lock).
+    // #7106: a write whose projection is built after commit settles at commit; the build runs on, tracked until it ends
+    // (stop() waits for it), and holds neither the reply nor the source's next write.
     let settled = false;
-    const hooks = { committed: (rows: WriteRequest[]) => { settled = true; this.settled(rows[0]!); } };
+    const hooks = { committed: (rows: WriteRequest[]) => { settled = true; this.settled(rows[0]!); },
+      projectionPending: (done: WriteRequest, afterCommit: Promise<void>) => { settled = true; this.settled(done); this.keepUntilSettled(afterCommit); } };
     const published = await this.onLane(transaction => publishSingleWrite(this.engine, row, prepared, this.hostId, hooks, transaction));
     const done = published === LANE_BUSY ? await publishSingleWrite(this.engine, row, prepared, this.hostId, hooks) : published;
     return { done, settled: settled && done.state === 'committed' };
