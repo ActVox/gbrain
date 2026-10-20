@@ -191,7 +191,8 @@ async function runExtractionBacklogs(ctx: DoctorContext): Promise<Check[]> {
       probeEnabled = resolveProbeEnabled(dbVal, (cfg as any)?.autopilot?.nightly_quality_probe?.enabled);
     } catch { /* config unavailable → treat as disabled */ }
     const events = readRecentQualityProbeEvents(7);
-    const check = computeNightlyQualityProbeHealthCheck(probeEnabled, events);
+    const { PROBE_QA_DIMENSIONS } = await import('../../../core/cycle/nightly-probe-adapters.ts');
+    const check = computeNightlyQualityProbeHealthCheck(probeEnabled, events, PROBE_QA_DIMENSIONS);
     checks.push(check);
   } catch {
     // Best-effort; audit-log read failure shouldn't stop doctor.
