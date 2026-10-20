@@ -1,7 +1,7 @@
 import type { Migration } from './types.ts';
 import { PAGE_BODY_SCHEMA_SQL, PAGE_GENERATION_BUMP_FN_SQL } from '../page-body/schema.ts';
 import { PAGE_SEARCH_VECTOR_TRIGGER_SQL } from '../page-state/projection-schema.ts';
-import { analyzeYieldingToVacuum, buildIndexOnline, migrationNotice } from './helpers.ts';
+import { buildIndexOnline, migrationNotice } from './helpers.ts';
 
 // Applied by src/core/migrate.ts on the next initSchema(); see docs/ENGINES.md
 // ("Canonical schema sources") for when schema.sql or a TS fragment also changes.
@@ -109,13 +109,8 @@ export const v248: Migration = {
     await buildIndexOnline(engine, 248, CONTENT_CHUNKS_OCCURRENCE_INDEX, { notice: migrationNotice });
     // Search's visibility predicate reads the generation columns; without their statistics Postgres prices it at 0.5%
     // and vector search sorts every candidate instead of walking its HNSW index (projection-statistics.ts).
-    // #7083: an ANALYZE that waited on a running autovacuum cancelled it; a deferred one is left to the search guard and doctor.
     if (engine.kind === 'postgres') {
-      for (const [table, columns] of [['pages', 'body_generation'], ['content_chunks', 'body_generation, retired_generation']] as const) {
-        if (await analyzeYieldingToVacuum(engine, table, columns)) continue;
-        migrationNotice(`  ANALYZE ${table}(${columns}) deferred: another session (a vacuum, an ANALYZE or an index build) holds ${table}. `
-          + 'The search statistics refresh and doctor planner_stats_stale pick it up; no migration step waits on it.');
-      }
+      await engine.runMigration(248, 'ANALYZE pages(body_generation); ANALYZE content_chunks(body_generation, retired_generation);');
     }
   },
 };
