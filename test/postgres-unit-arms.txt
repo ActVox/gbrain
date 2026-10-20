@@ -100,6 +100,7 @@ test/large-pages/forget-scope.test.ts
 test/large-pages/gbra117-segmented-classes-window.test.ts
 test/large-pages/held-budget-count-list.test.ts
 test/large-pages/held-budget-shrink.test.ts
+test/large-pages/managed-commit-handoff.test.ts
 test/large-pages/managed-import-outside-root.test.ts
 test/large-pages/managed-links-timeline-heap.test.ts
 test/large-pages/managed-streamed-import.test.ts
