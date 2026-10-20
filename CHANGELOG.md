@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.319.0] - 2026-10-19
+
+**The native data-safety step's per-suite stall bound now fits each target, so Windows stops killing a backup suite that was passing.** v0.60.317.0 bounded every suite at 300 s, which was calibrated on darwin-x64; on Windows `backup-portability-native` legitimately runs 3.5 to 8 minutes, and one run was killed at 301 s with every test passing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A native data-safety suite on win32-x64 or win32-arm64 | killed at 300 s even when healthy (p99 462 s and 303 s) | bounded at 540 s and 390 s |
+| The bound on every other target | one 300 s number | the slowest suite's measured p99 plus max(60 s, 15%), rounded to 30 s: 120-180 s on Linux and macOS |
+| A matrix target with no bound | n/a | the step fails before running any suite |
+| The stall message | said files take "under 60 s" | names the target's bound; the process table and macOS stack sample are unchanged |
+
+## [0.60.318.0] - 2026-10-20
+
+**On large Postgres brains, autovacuum can finish again, and a page delete's Git commit now reaches the remote.** gbrain refreshed `content_chunks` statistics after every embed drain and import. That ANALYZE waited for the table's lock, and Postgres cancels an autovacuum whenever another session waits on it for a second, so on a brain of about 10M chunks no autovacuum of the table ever finished: millions of dead rows stayed in every index, the vector index included. Separately, on a managed brain with Git durability on, a page delete whose first push failed left its removal commit local-only, while writer status and doctor reported nothing pending. Reported by @DaCal90 (#7083) and @MMichot (#7089).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An ANALYZE gbrain runs on Postgres (import, sync, reindex and embed refreshes, the search guard, `gbrain repair planner-stats --apply`, the ANALYZE after a migration builds an index) meets a running vacuum | waited up to 2 s, and Postgres cancelled the autovacuum after 1 s | takes the table's lock with `NOWAIT` and defers at once with a warning; the autovacuum keeps running (the repair reports the table `deferred`) |
+| An embed drain that embedded a few chunks of a large, already-sampled `content_chunks` | a 2 to 6 s ANALYZE after every drain | skipped below 50 + 10% of the table's chunks; autovacuum's own analyze covers what small drains add up to, and missing statistics still refresh |
+| A hot table of at least 100,000 rows whose autovacuum keeps being cancelled | noticed only from the server log | `gbrain doctor` `planner_stats_stale` warns when its dead rows pass the vacuum threshold and no vacuum has completed in 24 h |
+| A page delete on a managed brain whose first push failed | the retry found nothing to commit and completed without pushing; the branch stayed ahead | the retry pushes while the checkout is ahead of its upstream; a push that keeps failing stays queued and then parks, visible in writer status |
+| A managed checkout with Git durability on that is ahead of its upstream with no Git effect pending | doctor `git_convergence` warned only after 6 h | warns at once (`stranded`), with `gbrain git commit-push --push-only --keep-checkout --path <root>` as the fix |
+
 ## [0.60.317.0] - 2026-10-19
 
 **Two CI flakes are closed at their source, and a stuck native safety suite now leaves a log instead of a silent timeout.** `test-reads-source-smell` failed with `ENOENT` when `import-file.test.ts` removed its scratch directory from `test/` mid-walk; scratch now lives in the system temp directory and a lint rule keeps it there. The native data-safety suites no longer wait inside `Bun.spawnSync`, where Bun 1.4.0 to 1.4.2 can poison a process (oven-sh/bun#34069).
