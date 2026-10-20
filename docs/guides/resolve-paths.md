@@ -10,7 +10,8 @@ ask gbrain what it did with each file, not re-implement gbrain's rules. A copied
   delete looks failed because the twin's page is live. Checked by origin (the page that records the file as its
   `source_path`), it is a clean delete.
 - **Skipped scaffolding.** Sync skips folder scaffolding names (`index.md`, `README.md`, `schema.md`, `log.md`, `RESOLVER.md`; root
-  `AGENTS.md` and `CLAUDE.md`). Waiting for a page there waits forever.
+  `AGENTS.md` and `CLAUDE.md`) unless the file sits below the source root and its frontmatter has `type:` or `title:`
+  (`sync.metafile_pages`, default `typed`; `off` skips them all). Waiting for a page on a skipped file waits forever.
 
 ## The command
 

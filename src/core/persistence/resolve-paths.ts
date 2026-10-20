@@ -181,7 +181,7 @@ export async function resolveSourcePaths(engine: BrainEngine, sourceId: string, 
     if (skippedBy) {
       const typed = skippedBy === 'metafile' && content !== undefined ? frontmatter.type != null || frontmatter.title != null : undefined;
       push('skipped', live ? liveSearch : false, skippedBy === 'metafile'
-        ? `Sync never imports ${p.rootPath.split('/').pop()} files: they are folder scaffolding (SYNC_SKIP_FILES), so this path has no page by design${typed ? ', even though its frontmatter has a type: or title:' : ''}.`
+        ? `Sync never imports ${p.rootPath.split('/').pop()} files: they are folder scaffolding (SYNC_SKIP_FILES), so this path has no page by design${typed ? ', even though its frontmatter has a type: or title: (sync.metafile_pages is off; gbrain config set sync.metafile_pages typed imports it)' : ''}.`
         : `Sync does not import this path (${skippedBy}); it has no page by design.`, null, { skipped: { reason: skippedBy, ...(typed !== undefined ? { typed_frontmatter: typed } : {}) } });
       continue;
     }
