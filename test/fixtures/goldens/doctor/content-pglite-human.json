@@ -164,6 +164,7 @@
       "  [OK] global_maintenance_timeouts: Brain-wide maintenance jobs are finishing within their deadline.",
       "  [OK] global_maintenance_stalled: Brain-wide maintenance has not run yet.",
       "  [OK] embed_backfill_stalled: No automatic embed-backfill is repeating the same failure.",
+      "  [OK] content_drift_sweep: The content-drift sweep has not run yet; it runs inside embed --stale and the embed jobs.",
       "  [OK] connector_account_mismatch: No connector source is waiting for its account to be repinned.",
       "  [OK] legacy_job_authority: No queued job predates submission authority.",
       "  [OK] legacy_token_grant_shape: Every active legacy token uses the unified grant columns. The permissions mirror for older gbrain binaries is kept until 2026-11-04.",
