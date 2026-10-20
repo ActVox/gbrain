@@ -24,7 +24,8 @@ import { FULL_ROBOT_SECONDS, ROBOT_TOPOLOGY, restrict, runRobotPhase, type Robot
 import { robotFailure, robotFullGate, runValidation, spawnWorker } from '../scripts/persistence/validate.ts';
 import { faultPoint, installFaultHook, type FaultDetail, type FaultPoint } from '../src/core/persistence/fault-points.ts';
 import { shrinkRun } from '../scripts/persistence/shrink.ts';
-import { finish, runSchedule, runSteps, seamCounter } from '../scripts/persistence/crash-robot.ts';
+import { finish, fixedChunks, LEVEL_CHUNK_BYTES, runSchedule, runSteps, seamCounter } from '../scripts/persistence/crash-robot.ts';
+import type { hardenedGitStream } from '../src/core/hardened-git.ts';
 import { installLockOrderTrace, lockOrderReport } from '../scripts/persistence/lock-order.ts';
 import { prepareTopology } from '../scripts/persistence/history-fixture.ts';
 import { claimPersistenceEffect, releaseAbandonedClaims } from '../src/core/persistence/effect-journal.ts';
@@ -469,11 +470,27 @@ process.stdout.write('{"event":"continued"}\\n');
       }
       reader.releaseLock();
       expect(lines).toEqual([
-        { event: 'counts', counts: { 'sync:round_start': 4, 'sync:level_chunk': 6, 'sync:level_read': 4, 'sync:batch_entries': 2 } },
-        { event: 'fault', point: 'sync:level_chunk', nth: 6, detail: { read: 'ls-files' } },
+        { event: 'counts', counts: { 'sync:round_start': 4, 'sync:level_chunk': 8, 'sync:level_read': 4, 'sync:batch_entries': 2 } },
+        { event: 'fault', point: 'sync:level_chunk', nth: 8, detail: { read: 'ls-files' } },
       ]);
     } finally { child.kill('SIGKILL'); await child.exited; rmSync(dir, { recursive: true, force: true }); }
   }, 90_000);
+
+  test('#7124: robot workers cut a Git level read at fixed offsets, so its chunk ordinals do not follow the pipe', async () => {
+    const bytes = Buffer.from(Array.from({ length: 1300 }, (_, i) => i % 251));
+    const cut = async (sizes: number[]) => {
+      const pieces: Buffer[] = [];
+      const runner = (async (_root: string, _args: string[], opts: { onChunk?: (chunk: Buffer) => void | Promise<void> }) => {
+        let at = 0;
+        for (const size of sizes) { await opts.onChunk!(bytes.subarray(at, at + size)); at += size; }
+        return { ok: true, bytes: at, endsWithNul: false } as never;
+      }) as unknown as typeof hardenedGitStream;
+      await fixedChunks(runner)('/', ['ls-tree'], { timeoutMs: 1000, onChunk: async chunk => { await Bun.sleep(1); pieces.push(chunk); } });
+      return pieces.map(piece => piece.length);
+    };
+    expect(await cut([1300])).toEqual([LEVEL_CHUNK_BYTES, LEVEL_CHUNK_BYTES, 1300 - 2 * LEVEL_CHUNK_BYTES]);
+    expect(await cut([7, 600, 1, 692])).toEqual(await cut([1300]));
+  });
 
   test('#6957: finish waits for the claim pass after its probe, so the last claim epoch a count role sees is reached in every run', async () => {
     await robotBrain(async ({ world }) => {
