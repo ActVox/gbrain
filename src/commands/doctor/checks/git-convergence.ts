@@ -51,7 +51,8 @@ async function unwatchedDurableRoots(engine: BrainEngine): Promise<Set<string>> 
   const hostId = existingLocalHostId();
   if (!hostId) return new Set();
   const bindings = await engine.executeRaw<{ local_path: string; git_durability: 'enabled' | 'disabled' | null }>(
-    `SELECT h.local_path,h.git_durability FROM persistence_host_bindings h WHERE h.host_id=$1::uuid AND NOT EXISTS (
+    `SELECT h.local_path,h.git_durability FROM persistence_host_bindings h JOIN persistence_worktrees w ON w.id=h.worktree_id
+     WHERE h.host_id=$1::uuid AND w.owner_host_id=$1::uuid AND w.state='active' AND NOT EXISTS (
        SELECT 1 FROM persistence_effects e WHERE e.worktree_id=h.worktree_id AND e.kind='git' AND e.state IN ('queued','running','failed'))`,
     [hostId]).catch(() => []);
   const roots = new Set<string>();

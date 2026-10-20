@@ -107,16 +107,26 @@ async function analyzeChunkColumns(tx: BrainEngine): Promise<boolean> {
 
 /**
  * #7083: whether a drain that changed `changedRows` chunks can leave the chunk statistics alone: content_chunks was
- * sampled with rows, its `SEARCH_STATISTICS_COLUMNS` statistics exist, and the drain changed fewer than 50 + 10% of
- * its sampled rows (autovacuum's analyze threshold, as `statisticsStillCurrent` for pages). Such a drain barely moves
- * them, and autovacuum's own analyze covers what small drains add up to. Without this, every import's embed drain on
- * a 10M-chunk table ran a 2-6 s ANALYZE.
+ * sampled with rows, its `SEARCH_STATISTICS_COLUMNS` statistics exist, the configured embedding model (the
+ * provenance the drain writes to content_chunks.model) is among the sampled common models, and the drain changed fewer
+ * than 50 + 10% of the sampled rows (autovacuum's analyze threshold, as `statisticsStillCurrent` for pages). Such a
+ * drain barely moves them, and autovacuum's own analyze covers what small drains add up to. A model the sample has
+ * never seen (a partial or source-scoped model switch) refreshes, or vector search would estimate one row for it and
+ * sort every candidate. An unknown model refreshes too. Without this, every import's embed drain on a 10M-chunk
+ * table ran a 2-6 s ANALYZE.
  */
 async function chunkStatisticsStillCurrent(engine: BrainEngine, changedRows: number): Promise<boolean> {
   if (!Number.isFinite(changedRows)) return false;
-  const [state] = await engine.executeRaw<{ reltuples: number }>(`SELECT reltuples::float8 AS reltuples FROM pg_class WHERE oid = 'content_chunks'::regclass`);
+  let model: string | null = null;
+  try { model = (await import('../ai/gateway.ts')).getEmbeddingModelProvenance(); } catch { return false; } // engine-dynamic-import-ok
+  if (!model) return false;
+  const [state] = await engine.executeRaw<{ reltuples: number; sampled: boolean }>(
+    `SELECT c.reltuples::float8 AS reltuples,
+            EXISTS (SELECT 1 FROM pg_stats s WHERE s.schemaname = current_schema() AND s.tablename = 'content_chunks' AND s.attname = 'model'
+                      AND $1 = ANY (s.most_common_vals::text::text[])) AS sampled
+       FROM pg_class c WHERE c.oid = 'content_chunks'::regclass`, [model]);
   const rows = Number(state?.reltuples ?? -1);
-  if (rows <= 0 || changedRows >= 50 + 0.1 * rows) return false;
+  if (rows <= 0 || !state?.sampled || changedRows >= 50 + 0.1 * rows) return false;
   return !(await missingSearchStatistics(engine)).some(column => column.startsWith('content_chunks.'));
 }
 

@@ -40,7 +40,7 @@
       "PLANNER_REPAIR_TABLES": "008725595e099adba279d4292661eb4a59930b777c35db43c340220f7f12e093",
       "TOKEN_TTL_MAX_SECONDS": "f4a45bec6ec0bacc859dc57732ceb76cec7eb72f242b5a6c89d47190d0525ab4",
       "TOKEN_TTL_MIN_SECONDS": "441d8ce6bd21f753de90abd3013eaa9992a469ea60c590f1005533618199aa25",
-      "analyzeAfterIndexBuild": "d887a794c622b620d7543e6a36b9434d5560451634b3da02716f05c930d7f38d",
+      "analyzeAfterIndexBuild": "8d627df6b496e1c197a244f8519aeaf3aebcd23e3f7cf514576d453a4270e33a",
       "analyzeDeferred": "e627ca5e77ce0b79cf5eae7c749a0c9275f04bc186704e3f3a6e05121bb78442",
       "analyzeYieldingToVacuum": "edba1beff1547ea5c2e9f902efe44ab24e8d7016b2253603dcbba92d4137ca9a",
       "backfillChunkVectors": "1c8cc09a28aa3e906fe2f112b71cd3aa61f750a99984e35a029cff9458272aa1",

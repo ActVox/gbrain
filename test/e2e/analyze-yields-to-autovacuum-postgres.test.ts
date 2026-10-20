@@ -95,6 +95,18 @@ async function vacuumingPid(): Promise<number | null> {
     expect(await chunkStatisticsXmin()).not.toBe(sampled);
   }, 60_000);
 
+  test('a small drain under a model the sample has never seen still refreshes (a partial model switch)', async () => {
+    const sampled = await chunkStatisticsXmin();
+    configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: {} });
+    try {
+      await engine.executeRaw(`UPDATE content_chunks SET model = 'openai:text-embedding-3-large' WHERE page_id <= 10`);
+      expect(await refreshChunkStatistics(engine, 10 * CHUNKS_PER_PAGE)).toBe(true);
+      expect(await chunkStatisticsXmin()).not.toBe(sampled);
+    } finally {
+      configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536, env: {} });
+    }
+  }, 60_000);
+
   test('doctor reports a hot table whose autovacuum never completes', async () => {
     await engine.executeRaw(`DELETE FROM content_chunks WHERE chunk_index >= ${CHUNKS_PER_PAGE - 12}`);
     let starved = await readVacuumStarvation(engine);

@@ -140,6 +140,17 @@ for (const kind of testBackends()) describe(`#7089 removal commits are pushed on
     expect(remoteHead(repo)).toBe(head(repo));
     expect((await gitConvergenceCheck(engine))?.status).toBe('ok');
   }), 300_000);
+
+  test('doctor git_convergence never calls a checkout stranded on a host that no longer owns it (its binding outlives a transfer)', () => withBrain(kind, async ({ engine, home }) => {
+    const repo = await managedRepo(engine, home);
+    localCommit(repo);
+    expect((await gitConvergenceCheck(engine))?.status).toBe('warn');
+    await engine.executeRaw("UPDATE persistence_worktrees SET owner_host_id='00000000-0000-4000-8000-0000000000ff'::uuid");
+    const moved = await gitConvergenceCheck(engine);
+    expect(moved?.status).toBe('ok');
+    expect(moved?.fix).toBeUndefined();
+    expect((moved!.details as { roots: Array<{ stranded?: boolean }> }).roots[0]!.stranded).toBeUndefined();
+  }), 300_000);
 });
 
 if (testBackends().includes('pglite')) describe('#7089 publishGitEffect on an absent target', () => {
