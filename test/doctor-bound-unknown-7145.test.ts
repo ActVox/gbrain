@@ -16,6 +16,10 @@ import { __setMissingFilesScanLimitForTests } from '../src/core/persistence/deta
 import { CONVERSATION_EXTRACTOR_VERSION, TERMINAL_AUDIT_SOURCE } from '../src/core/facts/audit-sources.ts';
 import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
+import { connectorsHealthCheck } from '../src/commands/doctor/checks/connectors.ts';
+import { saveCredential } from '../src/core/connectors/credentials.ts';
+import { withEnv } from './helpers/with-env.ts';
+import { checkLinkResolutionOpportunity } from '../src/commands/doctor/checks/calibration.ts';
 
 const dirs: string[] = [];
 const tmp = (label: string) => {
@@ -115,4 +119,42 @@ describe('conversation_outcomes_stale and missing_recorded_files stopped at thei
     expect(found.details).toMatchObject({ count: 1, exact: false });
     expect(found.message).toStartWith('At least 1 live page(s)');
   }, 60_000);
+});
+
+describe('connectors drift is read from the newest connector receipt, not a 20-row window', () => {
+  test('a drift receipt behind more than 20 newer ingest rows of other types still warns', async () => {
+    const home = tmp('connectors-home');
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    try {
+      await engine.executeRaw("INSERT INTO ingest_log(source_type, source_ref, summary, created_at) VALUES('connector', 'chatgpt', 'synced 3; DRIFT: 2 conversations skipped', now() - interval '1 hour')");
+      await engine.executeRaw("INSERT INTO ingest_log(source_type, source_ref, summary) SELECT 'facts:absorb', 'synthetic-' || g, 'ok' FROM generate_series(1, 25) g");
+      const check = await withEnv({ GBRAIN_HOME: home, GBRAIN_CONNECTOR_CHATGPT_COOKIE: undefined }, async () => {
+        saveCredential({ provider: 'chatgpt', strategy: 'browser-session', cookie: 'x', savedAt: '2026-08-25T00:00:00.000Z' });
+        return connectorsHealthCheck(engine);
+      });
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('format drift');
+    } finally {
+      await engine.disconnect();
+    }
+  }, 60_000);
+});
+
+describe('link_resolution_opportunity names its sample on every verdict', () => {
+  test('a brain larger than the sample: the clean verdict says it read a sample and carries exact: false', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    try {
+      await engine.executeRaw("INSERT INTO pages(source_id, slug, type, title, compiled_truth, timeline, frontmatter) SELECT 'default', 'notes/n-' || g, 'note', 'n', 'plain text', '', '{}'::jsonb FROM generate_series(1, 1001) g");
+      const check = await checkLinkResolutionOpportunity(engine);
+      expect(check.status).toBe('ok');
+      expect(check.message).toBe('No bare wikilinks found (scanned the 1000 most-recent of 1001 pages)');
+      expect(check.details).toMatchObject({ exact: false, bound: 'sample', limit: 1000, total_pages: 1001 });
+    } finally {
+      await engine.disconnect();
+    }
+  }, 120_000);
 });
