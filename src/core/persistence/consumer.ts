@@ -191,6 +191,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   private besideLanes = new Set<string>();
   /** #5984 lanes: running lane tasks per worktree. */
   private laneTasks = new Map<string, number>();
+  /** #6278: roots an abandoned preparation still holds, by the number of holds; nothing on them is claimed until each settles or passes the ceiling. */
+  private barredRoots = new Map<string, number>();
   private foregroundCounts = new Map<string, number>();
   /** #5984 Phase 4.5: the newest sequence when this process last claimed a head of each lane run (one head per foreground commit). */
   private laneHeadSeen = new Map<string, string>();
@@ -310,7 +312,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
    */
   private async hasWork(): Promise<boolean> {
     const now = Date.now();
-    const excluded = [...this.activeRoots, ...[...this.rootRetryAfter].filter(([, at]) => at > now).map(([root]) => root)];
+    const excluded = [...this.activeRoots, ...this.barredRoots.keys(), ...[...this.rootRetryAfter].filter(([, at]) => at > now).map(([root]) => root)];
     for (const [id, at] of this.topologyRetryAfter) if (at <= now) this.topologyRetryAfter.delete(id);
     const retryingTopologies = [...this.topologyRetryAfter.keys()];
     // On the direct route the probe needs no reserved pool lane: the direct pool is small and keeps its connections.
@@ -626,7 +628,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     const concurrency = this.opts.concurrency ?? 2;
     // #5984: on a root whose lane groups run here, only a foreground write is claimed, to publish beside them.
     const laneRootKeys = [...this.laneTasks.keys()];
-    const attemptedRoots = new Set([...this.activeRoots, ...this.rootRetryAfter.keys()]);
+    const attemptedRoots = new Set([...this.activeRoots, ...this.barredRoots.keys(), ...this.rootRetryAfter.keys()]);
     while (!this.stopping && this.active.size - this.laneTaskCount() < concurrency) {
       const claimed = laneClaim();
       try {
@@ -679,7 +681,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   /** #5984 lanes: claims the next group heads of every open lane run in this process, up to its effective lane count. */
   private async claimLanes(): Promise<void> {
     for (const { worktreeId, run, capacity } of laneRoots()) {
-      if (this.rootRetryAfter.has(worktreeId) || this.activeRoots.has(worktreeId) && !this.besideLanes.has(worktreeId)) continue;
+      if (this.rootRetryAfter.has(worktreeId) || this.barredRoots.has(worktreeId) || this.activeRoots.has(worktreeId) && !this.besideLanes.has(worktreeId)) continue;
       while (!this.stopping && (this.laneTasks.get(worktreeId) ?? 0) < capacity) {
         const claimed = laneClaim();
         try {
@@ -708,9 +710,16 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       if (!progressed) this.rootRetryAfter.set(key, Date.now() + (root.retryAfterMs ?? this.opts.pollMs ?? 250));
       else { this.progressWake = true; this.publishedSinceMaintenance++; }
       this.active.delete(task);
-      // The slot is free now; the root (or lane slot) waits for an abandoned preparation so nothing on it overtakes that work.
-      if (root.until) void root.until.then(() => { done(); this.schedule(0); });
-      else done();
+      // The slot is free now; the root waits for an abandoned preparation so nothing on it overtakes that work. A lane task frees
+      // only its own lane slot, so the root is barred from claims too: another lane would claim the abandoned member again.
+      if (root.until) {
+        this.barredRoots.set(key, (this.barredRoots.get(key) ?? 0) + 1);
+        void root.until.then(() => {
+          const holds = (this.barredRoots.get(key) ?? 1) - 1;
+          if (holds > 0) this.barredRoots.set(key, holds); else this.barredRoots.delete(key);
+          done(); this.schedule(0);
+        });
+      } else done();
       this.schedule(progressed ? 0 : this.opts.pollMs ?? 250);
     });
     this.active.add(task);
