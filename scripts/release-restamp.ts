@@ -35,9 +35,9 @@
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
-  COLLISION_DOCS, MIGRATION_FILE_RE, MIGRATIONS_DIR, RESTAMP_DOCS, RestampError, STAMPS,
+  BEHAVIOR_NOTICE_FILE, COLLISION_DOCS, MIGRATION_FILE_RE, MIGRATIONS_DIR, RESTAMP_DOCS, RestampError, STAMPS,
   branchEntrySections, fail, findLeftoverRefs, isGenerated, migrationPayloadKey, nextPatchVersion, parseAddedLines,
-  isVersionToken, planRenumber, rebuildChangelog, renumberMigrationText, resolveVersionOnlyHunks, restampTodoLines, versionOfHeader,
+  isVersionToken, planRenumber, rebuildChangelog, renumberMigrationText, resolveVersionOnlyHunks, restampTodoLines, stampTbdSince, versionOfHeader,
   type BranchMigration, type ChangelogSection, type LeftoverRef, type Renumber,
 } from './lib/restamp.ts';
 import { offlineEnv } from './regen-all.ts';
@@ -72,6 +72,7 @@ export const DEFAULT_CHECKS: Step[] = [
   { name: 'bootstrap template drift', argv: ['bash', 'scripts/check-bootstrap-templates.sh'] },
   { name: 'schema migration registry fresh', argv: ['bash', 'scripts/check-schema-migrations-fresh.sh'] },
   { name: 'schema migration order', argv: ['bun', 'scripts/check-schema-migration-order.ts'] },
+  { name: "no since: 'TBD' BEHAVIOR_CHANGES row", argv: ['bun', 'scripts/check-behavior-since.ts', '--stamped'] },
 ];
 
 interface State {
@@ -343,6 +344,11 @@ function restampTree(ctx: Ctx, state: State, opts: { acceptRefs: boolean; date: 
     if (!existsSync(join(ctx.root, stamp.file))) fail(`${stamp.file} is missing`, 'it is a required row of the CLAUDE.md "Version locations" table.', `restore it from ${state.masterRef} (git checkout ${state.masterRef} -- ${stamp.file}), then rerun with --continue`);
     const text = ctx.read(stamp.file);
     if (stamp.read(text) !== version) ctx.write(stamp.file, stamp.write(text, version));
+  }
+  if (existsSync(join(ctx.root, BEHAVIOR_NOTICE_FILE))) {
+    const notice = ctx.read(BEHAVIOR_NOTICE_FILE);
+    const stamped = stampTbdSince(notice, version);
+    if (stamped !== notice) ctx.write(BEHAVIOR_NOTICE_FILE, stamped);
   }
   const olds = new Set([state.branchVersion, state.entry ? versionOfHeader(state.entry.header) ?? '' : ''].filter((v) => v && v !== version && isVersionToken(v)));
   if (state.entry) {
