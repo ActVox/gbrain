@@ -153,6 +153,11 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     slug: entry.slug!, pageId: entry.pageId, revision: entry.revision, level: null }]));
   const leaving = new Map(deletes.map(entry => [entry.path, entry]));
   const fresh = imports.filter(entry => !entry.state.page);
+  // Same-blob twins per level, and the leaving pages per recorded blob, counted once: a scan per winner was quadratic.
+  const twinsAt = new Map<string | null | undefined, number>();
+  for (const entry of fresh) twinsAt.set(entry.state.level, (twinsAt.get(entry.state.level) ?? 0) + 1);
+  const leavingAt = new Map<string, ShadowPath[]>();
+  for (const gone of leaving.values()) for (const oid of new Set(gone.state.record?.blobOids ?? [])) { const at = leavingAt.get(oid); if (at) at.push(gone); else leavingAt.set(oid, [gone]); }
   const slugOf = new Map(fresh.map(entry => [entry.path, resolveSlugForPath(entryPaths(level, entry.path).sourcePath)]));
   // #6727, as discovery does: a new origin with no live page at its slug takes the one legacy page (no recorded origin)
   // that folds to it; several, or one the importer cannot write, keep the slug and the freeze holds legacy_slug_conflict.
@@ -249,12 +254,12 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
       entries.push({ ...base, pageId: null, revision: null, ...(origin.revision === held.revision ? { renameFrom: held } : { renameHeld: held }) });
       continue;
     }
-    const moved = [...leaving.values()].filter(gone => deleteEntries.has(gone.path) && !renamed.has(gone.path) && gone.state.record?.blobOids.includes(winner.state.level ?? ''));
-    const twins = fresh.filter(other => other.state.level === winner.state.level);
+    const moved = (leavingAt.get(winner.state.level ?? '') ?? []).filter(gone => deleteEntries.has(gone.path) && !renamed.has(gone.path));
+    const twins = twinsAt.get(winner.state.level) ?? 0;
     // #6729: a Git rename with an edit keeps its page when Git pairs it and the identity is confirmed, as discovery's delta does.
-    const inexact = moved.length === 1 && twins.length === 1 ? null : (await gitRenames())?.get(winner.path);
+    const inexact = moved.length === 1 && twins === 1 ? null : (await gitRenames())?.get(winner.path);
     const gitMoved = inexact && deleteEntries.has(inexact.from) && !renamed.has(inexact.from) ? leaving.get(inexact.from) : undefined;
-    if (gitMoved?.pageId != null || (moved.length === 1 && twins.length === 1)) {
+    if (gitMoved?.pageId != null || (moved.length === 1 && twins === 1)) {
       const gone = gitMoved ?? moved[0]!;
       const origin = entryPaths(level, gone.path).sourcePath;
       entries.push({ ...base, pageId: null, revision: null, renameFrom: { sourcePath: origin, slug: gone.slug!, pageId: gone.pageId!, revision: gone.revision! },
