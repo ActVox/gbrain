@@ -72,9 +72,11 @@ export async function readPurgeRetentionHours(engine: { getConfig(key: string): 
 
 /** The caps in effect for `sourceId`: its own key, else the brain's, else the default. */
 export async function readSyncDeleteCaps(engine: { getConfig(key: string): Promise<string | null> }, sourceId: string): Promise<SyncDeleteCaps> {
-  const read = async (key: typeof SYNC_MAX_DELETES_KEY | typeof SYNC_MAX_DELETE_RATIO_KEY, fallback: number) =>
-    parseSyncDeleteCap(key, await engine.getConfig(`${key}.source.${sourceId}`)) ?? parseSyncDeleteCap(key, await engine.getConfig(key)) ?? fallback;
-  return { maxDeletes: await read(SYNC_MAX_DELETES_KEY, DEFAULT_SYNC_MAX_DELETES), maxDeleteRatio: await read(SYNC_MAX_DELETE_RATIO_KEY, DEFAULT_SYNC_MAX_DELETE_RATIO) };
+  const maxDeletes = parseSyncDeleteCap(SYNC_MAX_DELETES_KEY, await engine.getConfig(`sync.max_deletes.source.${sourceId}`))
+    ?? parseSyncDeleteCap(SYNC_MAX_DELETES_KEY, await engine.getConfig(SYNC_MAX_DELETES_KEY)) ?? DEFAULT_SYNC_MAX_DELETES;
+  const maxDeleteRatio = parseSyncDeleteCap(SYNC_MAX_DELETE_RATIO_KEY, await engine.getConfig(`sync.max_delete_ratio.source.${sourceId}`))
+    ?? parseSyncDeleteCap(SYNC_MAX_DELETE_RATIO_KEY, await engine.getConfig(SYNC_MAX_DELETE_RATIO_KEY)) ?? DEFAULT_SYNC_MAX_DELETE_RATIO;
+  return { maxDeletes, maxDeleteRatio };
 }
 
 /** The limit `deletes` deletions out of `reconcilable` file-backed pages go over, or null. */
