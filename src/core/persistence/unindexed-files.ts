@@ -75,6 +75,7 @@ export const UNINDEXED_REVISIT_CAP = 5_000;
 /** A stored result older than this is stale. */
 export const UNINDEXED_STALE_MS = 7 * 24 * 3_600_000;
 const BATCH = 1_000;
+const SYMLINK_MODE = '120000';
 /** Blob bytes one screening slice holds in memory at most (a single larger blob is read alone); each slice is released before the next. */
 const SCREEN_SLICE_BYTES = 32 * 1024 ** 2;
 
@@ -144,7 +145,7 @@ export interface UnindexedRecord extends Omit<UnindexedScan, 'files' | 'schedule
   source_prefix: string;
 }
 
-interface TreeEntry { path: string; oid: string; size: number }
+interface TreeEntry { path: string; oid: string; size: number; mode: string }
 
 /** Reads `entries` in slices of at most `SCREEN_SLICE_BYTES` and visits each with its text (undefined when too large to read); stops before a slice once `stop()` is true. */
 function visitBlobSlices<T extends TreeBlob>(gitRoot: string, entries: T[], visit: (entry: T, content: string | undefined) => void, stop: () => boolean): void {
@@ -172,10 +173,10 @@ async function* treeBatches(gitRoot: string, target: string, scope: string, afte
         const row = pending.subarray(0, nul).toString('utf8');
         pending = pending.subarray(nul + 1);
         const tab = row.indexOf('\t');
-        const [, kind, oid, bytes] = row.slice(0, tab).split(/\s+/);
+        const [mode, kind, oid, bytes] = row.slice(0, tab).split(/\s+/);
         const path = row.slice(tab + 1);
         if (kind !== 'blob' || floor && Buffer.compare(Buffer.from(path, 'utf8'), floor) <= 0 && !revisit?.has(path)) continue;
-        batch.push({ path, oid: oid!, size: Number(bytes) });
+        batch.push({ path, oid: oid!, size: Number(bytes), mode: mode! });
         if (batch.length >= size) { yield batch; batch = []; }
       }
     }
@@ -244,9 +245,10 @@ export async function findUnindexedFiles(engine: BrainEngine, sourceId: string, 
         'SELECT slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND slug = ANY($2::text[])', [sourceId, slugs])).map(page => page.slug) : []);
       const deleted = new Set(fresh.length ? (await engine.executeRaw<{ source_path: string }>(
         'SELECT source_path FROM pages WHERE source_id=$1 AND deleted_at IS NOT NULL AND source_path = ANY($2::text[])', [sourceId, fresh.map(row => row.origin)])).map(page => page.source_path) : []);
-      const toScreen = fresh.slice(0, Math.max(0, screenLimit - screened));
+      // #7149: a committed symlink's blob is its target path, not page content; it is named as one instead of screened.
+      const codes = new Map<string, string>(fresh.filter(row => row.mode === SYMLINK_MODE).map(row => [row.root, 'symlink']));
+      const toScreen = fresh.filter(row => row.mode !== SYMLINK_MODE).slice(0, Math.max(0, screenLimit - screened));
       screened += toScreen.length;
-      const codes = new Map<string, string>();
       visitBlobSlices(gitRoot, toScreen, (row, content) => {
         if (content === undefined) { codes.set(row.root, 'file_too_large'); return; }
         const result = screenImportContent({ content, path: row.origin, byteLength: row.size, expectedSlug: resolveSlugForPath(row.origin) || null });

@@ -13,7 +13,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -25,7 +25,7 @@ import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
-import { readGitHoldRetryPaths, requestGitHoldRetry } from '../src/core/persistence/sync-holds.ts';
+import { readGitHoldRetryPaths, readGitSourceHolds, requestGitHoldRetry } from '../src/core/persistence/sync-holds.ts';
 import { readUnindexedFiles, refreshUnindexedFiles, unindexedBudgetForPages } from '../src/core/persistence/unindexed-files.ts';
 import { unindexedFilesEntry } from '../src/commands/doctor/checks/unindexed-files.ts';
 import { runUnindexedFilesPhase } from '../src/core/cycle/unindexed-files.ts';
@@ -147,6 +147,19 @@ test('the maintenance phase serves the least recently scanned source first, so a
   const second = await run();
   expect(scannedIds(second)[0]).toBe(b.id);
   expect((await readUnindexedFiles(engine, [b.id])).get(b.id)).toMatchObject({ unindexed: 1, pending: ['notes/legacy-b.md'] });
+}), 240_000);
+
+test('a committed symlink with no page is named symlink, not screened as page content; the next sync holds it, so it ends in a terminal state', () => each(async engine => {
+  const s = await source(engine, 'unidx7149-link', files('notes', 2));
+  await s.sync();
+  symlinkSync('/nonexistent/elsewhere/target.md', join(s.root, 'notes/link.md'));
+  await s.legacy({});
+  const found = await refreshUnindexedFiles(engine, s.id);
+  expect(found.scan).toMatchObject({ complete: true, unindexed: 1, by_code: { symlink: 1 } });
+  expect(found.scheduled).toEqual(['notes/link.md']);
+  await s.sync();
+  expect(((await readGitSourceHolds(engine, { sourceIds: [s.id] }))[0]?.holds ?? []).map(hold => hold.path)).toEqual(['notes/link.md']);
+  expect((await s.doctor()).details).toMatchObject({ sources: [{ source_id: s.id, state: 'ok', still_unindexed: 0, waiting: 0 }] });
 }), 240_000);
 
 test('a source gets one minute of scan budget per started 100k live pages, at most five', () => {
