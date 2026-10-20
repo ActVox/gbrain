@@ -124,6 +124,7 @@ async function runStubGuard(ctx: DoctorContext): Promise<Check[]> {
 export const stubGuardEntry: DoctorEntry = {
   name: 'stub_guard_24h',
   emits: ['stub_guard_24h', 'sync_failures', 'managed_sync_backlog', 'slug_fallback_audit'],
+  engineChecks: ['sync_failures', 'managed_sync_backlog'],
   run: runStubGuard,
 };
 
