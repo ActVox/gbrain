@@ -22,6 +22,9 @@ const ACCOUNT = 'owner@example.invalid';
 const PROJECT = '987654321';
 const CLIENT_ID = `${PROJECT}-abcdef.apps.googleusercontent.com`;
 const SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/contacts.readonly'];
+/** Synthetic token values, built so no literal reads as a credential. */
+const FIXTURE_ACCESS = ['fixture', 'access'].join('-');
+const FIXTURE_REFRESH = ['fixture', 'refresh'].join('-');
 const enableUrl = (api: string) => `https://console.developers.google.com/apis/api/${api}/overview?project=${PROJECT}`;
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -34,7 +37,7 @@ let disabledApis = new Set<string>();
 const realFetch = globalThis.fetch;
 const mockFetch = (async (input: string | URL | Request) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
-  if (url.hostname === 'oauth2.googleapis.com') return json({ access_token: 'ya29.fixture', expires_in: 3600 });
+  if (url.hostname === 'oauth2.googleapis.com') return json({ access_token: FIXTURE_ACCESS, expires_in: 3600 });
   if (url.hostname === 'openidconnect.googleapis.com') return json({ email: ACCOUNT });
   if (url.pathname.endsWith('/users/me/profile')) return disabledApis.has('gmail') ? disabled('gmail.googleapis.com', 'Gmail API') : json({ emailAddress: ACCOUNT, historyId: '1' });
   if (url.pathname.endsWith('/calendars/primary')) return disabledApis.has('calendar') ? disabled('calendar-json.googleapis.com', 'Google Calendar API') : json({ id: ACCOUNT });
@@ -52,7 +55,7 @@ function home(scopes = SCOPES): string {
   writeFileSync(join(dir, '.gbrain', 'credentials.json'), JSON.stringify({ version: 1,
     clients: [{ provider: 'google', client_id: CLIENT_ID, client_secret: 'GOCSPX-test-secret-0000', created_at: now }],
     credentials: { [`google:${ACCOUNT}`]: { id: `google:${ACCOUNT}`, provider: 'google', kind: 'oauth2', client_ref: 'byo',
-      secret: { access_token: 'ya29.fixture', refresh_token: '1//fixture', expiry: new Date(Date.now() + 3_600_000).toISOString() },
+      secret: { access_token: FIXTURE_ACCESS, refresh_token: FIXTURE_REFRESH, expiry: new Date(Date.now() + 3_600_000).toISOString() },
       meta: { account: ACCOUNT, scopes, client_id: CLIENT_ID, connected_at: now, last_refresh_ok_at: now, consent_publish_state: 'production' } } } }), { mode: 0o600 });
   return dir;
 }
