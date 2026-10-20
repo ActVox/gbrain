@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS sources (
 -- IS JSON and pg_input_is_valid() are Postgres 16+. Migration v263 installs it
 -- on existing brains.
 CREATE OR REPLACE FUNCTION gbrain_try_jsonb(input text) RETURNS jsonb
-  LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog AS \$fn\$
+  LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, public AS \$fn\$
 BEGIN
   RETURN input::jsonb;
 EXCEPTION WHEN data_exception THEN

@@ -162,3 +162,41 @@ describe('#6719 owner_exception diagnostics', () => {
   });
 });
 
+describe('#7112 a database error keeps its redacted server text and statement, owner-only', () => {
+  const serverError = async (sql: string, params: unknown[] = []): Promise<Error> => {
+    try { await engine.executeRaw(sql, params); } catch (error) { return error as Error; }
+    throw new Error('expected the statement to fail');
+  };
+
+  test('a syntax error names the token, the first statement line with literals replaced and the position; parameters never appear', async () => {
+    const error = await serverError("SELECT id FROM sources\n WHERE name = $1 AND config->>'k' = 'secret-literal' AND (config #>> '{}') IS JSONX", ['secret-param']);
+    const { row } = await failingWrite(error);
+    expect(row.error_message).toBe(OWNER_EXCEPTION_MESSAGE);
+    const detail = row.error_detail as Record<string, any>;
+    expect(detail).toMatchObject({ origin: 'owner_exception', errno: '42601', statement: 'SELECT id FROM sources' });
+    expect(detail.error_text).toMatch(/^syntax error at or near "[A-Z]+"$/);
+    expect(detail.position).toBeGreaterThan(0);
+    expect(JSON.stringify(row)).not.toContain('secret-literal');
+    expect(JSON.stringify(row)).not.toContain('secret-param');
+    expect((receiptFor(row) as Record<string, any>).write_error_detail).toEqual({ origin: 'owner_exception', stage: 'publication' });
+    const receipt = await withEnv({ GBRAIN_HOME: join(dir, 'home') }, () =>
+      operationsByName.get_write_request.handler(ctx(), { request_id: row.request_id })) as Record<string, any>;
+    expect(receipt.error_detail).toMatchObject({ errno: '42601', error_text: detail.error_text, statement: 'SELECT id FROM sources', position: detail.position });
+  });
+
+  test('a value the server quotes into its message is replaced, an object it names is kept', async () => {
+    const { row } = await failingWrite(await serverError("SELECT $1::uuid AS id WHERE 'alice-example' <> ''", ['alice-example-secret']));
+    expect(row.error_detail).toMatchObject({ errno: '22P02', error_text: 'invalid input syntax for type uuid: "…"', statement: "SELECT $1::uuid AS id WHERE '…' <> '…'" });
+    expect(JSON.stringify(row)).not.toContain('alice-example');
+    const notNull = await failingWrite(await serverError("INSERT INTO sources(id, name) VALUES (NULL, 'alice-example')"));
+    expect(notNull.row.error_detail).toMatchObject({ errno: '23502', error_text: 'null value in column "id" of relation "sources" violates not-null constraint' });
+  });
+
+  test('a PL/pgSQL RAISE keeps no text: it carries caller values', async () => {
+    const { row } = await failingWrite(await serverError("DO $$ BEGIN RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'secret-title of a page'; END $$"));
+    const detail = row.error_detail as Record<string, any>;
+    expect(detail).toMatchObject({ origin: 'owner_exception', errno: '22023' });
+    expect(detail.error_text).toBeUndefined();
+    expect(JSON.stringify(row)).not.toContain('secret-title');
+  });
+});

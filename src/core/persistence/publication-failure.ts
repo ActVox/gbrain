@@ -43,11 +43,14 @@ export interface PublicationFailureDetail {
 export type FenceRefusalDetail = FenceFailureDetail & Pick<PublicationFailureDetail, 'stage' | 'attempt'>;
 /**
  * #5929: an unexpected exception in the owner. Fixed identifiers only, never
- * the message, SQL or values: the error class, its errno and the top gbrain
- * source frame (repo-relative). All three are owner-only.
+ * application error text or values: the error class, its errno and the top gbrain
+ * source frame (repo-relative). #7112: a database server error also keeps its
+ * redacted primary message, the first line of the failing statement and the
+ * error position (`databaseErrorText`). All of it is owner-only.
  */
 export interface OwnerExceptionDetail extends Pick<PublicationFailureDetail, 'stage' | 'attempt'> {
   origin: 'owner_exception'; error_class?: string; errno?: string; frame?: string;
+  error_text?: string; statement?: string; position?: number;
 }
 /** A `fact_withdrawn` refusal's `withdrawn` object (`facts/withdrawal.ts`), plus the attempt stamp. */
 export type WithdrawalRefusalDetail = WithdrawalFailureDetail & Pick<PublicationFailureDetail, 'stage' | 'attempt'>;
@@ -171,9 +174,54 @@ function gbrainFrame(stack: unknown): string | undefined {
  * #5929: the public message of an unexpected owner exception. Remote submitters read it, so it names no class,
  * errno or build; those stay in the owner-only detail, `gbrain write-request <id>` on the brain host and the consumer log.
  */
-export const OWNER_EXCEPTION_MESSAGE = 'Publication failed on an unexpected owner exception. On the brain host, gbrain write-request <request_id> and the persistence consumer log name its class, source frame and owner build.';
+export const OWNER_EXCEPTION_MESSAGE = 'Publication failed on an unexpected owner exception. On the brain host, gbrain write-request <request_id> and the persistence consumer log name its class, database error text, statement, source frame and owner build.';
 
-/** #5929: the bounded identity of an unexpected owner exception (class, errno, frame), kept owner-only. */
+const ERROR_TEXT_MAX = 240;
+const STATEMENT_MAX = 160;
+/** The words after which a server message's double-quoted token names an object (or the token a syntax error stopped at), not a value. */
+const IDENTIFIER_CONTEXT = /\b(?:near|column|relation|constraint|table|index|type|schema|function|sequence|role|database|extension|trigger|view|parameter|operator|policy|cursor|savepoint|prepared statement|portal)\s*$/i;
+
+/**
+ * The first non-blank line with every quoted run replaced: a single-quoted literal or dollar-quoted body becomes `'…'`
+ * or `$…$`, a double-quoted token stays only when `keepQuoted` says it names an object, and an unterminated quote ends
+ * the text. Control characters become spaces; at most `max` characters.
+ */
+function redactLine(text: string, max: number, keepQuoted: (inner: string, before: string) => boolean): string | undefined {
+  const line = text.split('\n').map(part => part.trim()).find(part => part.length > 0);
+  if (!line) return undefined;
+  let out = '';
+  for (let i = 0; i < line.length;) {
+    const ch = line[i]!;
+    const tag = ch === '$' ? /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(line.slice(i))?.[0] : undefined;
+    if (ch !== "'" && ch !== '"' && !tag) { out += ch; i++; continue; }
+    const open = tag ?? ch;
+    let close = line.indexOf(open, i + open.length);
+    while (!tag && close >= 0 && line[close + 1] === ch) close = line.indexOf(ch, close + 2);
+    if (close < 0) { out += '…'; break; }
+    const inner = line.slice(i + open.length, close);
+    out += ch === '"' && keepQuoted(inner, out) ? `"${inner}"` : tag ? '$…$' : `${ch}…${ch}`;
+    i = close + open.length;
+  }
+  const clean = out.replace(/[\x00-\x1f\x7f]/g, ' ');
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+/**
+ * #7112: what a database server error says, without the values it can carry. Only a server-generated error qualifies
+ * (a five-character SQLSTATE and a severity); a PL/pgSQL RAISE carries caller text and is skipped, like `databaseRefusal`.
+ * The message keeps a double-quoted token only where the server names an object or the token a syntax error stopped at;
+ * the statement keeps its first line with literals replaced, never its parameters.
+ */
+function databaseErrorText(e: Record<string, unknown>): Pick<OwnerExceptionDetail, 'error_text' | 'statement' | 'position'> {
+  if (typeof e.code !== 'string' || !/^[0-9A-Z]{5}$/.test(e.code) || typeof e.severity !== 'string' || e.routine === 'exec_stmt_raise') return {};
+  const errorText = typeof e.message === 'string'
+    ? redactLine(e.message, ERROR_TEXT_MAX, (inner, before) => IDENT.test(inner) && IDENTIFIER_CONTEXT.test(before.trimEnd())) : undefined;
+  const statement = typeof e.query === 'string' ? redactLine(e.query, STATEMENT_MAX, inner => IDENT.test(inner)) : undefined;
+  const position = Number(e.position);
+  return { ...(errorText ? { error_text: errorText } : {}), ...(statement ? { statement } : {}), ...(Number.isInteger(position) && position > 0 ? { position } : {}) };
+}
+
+/** #5929: the bounded identity of an unexpected owner exception (class, errno, frame, and a database error's redacted text), kept owner-only. */
 export function ownerExceptionFailure(error: unknown): PublicationFailure {
   const e = (error && typeof error === 'object' ? error : {}) as { constructor?: { name?: unknown }; code?: unknown; errno?: unknown; stack?: unknown; osError?: unknown };
   const errorClass = ident(e.constructor?.name);
@@ -182,14 +230,17 @@ export function ownerExceptionFailure(error: unknown): PublicationFailure {
   const errno = raw && ERRNO.test(raw) ? raw : undefined;
   const frame = gbrainFrame(e.stack);
   return { code: 'storage_error', message: OWNER_EXCEPTION_MESSAGE,
-    detail: { origin: 'owner_exception', ...(errorClass ? { error_class: errorClass } : {}), ...(errno ? { errno } : {}), ...(frame ? { frame } : {}) } };
+    detail: { origin: 'owner_exception', ...(errorClass ? { error_class: errorClass } : {}), ...(errno ? { errno } : {}), ...(frame ? { frame } : {}),
+      ...databaseErrorText(e as Record<string, unknown>) } };
 }
 
-/** Owner-side text for the consumer log: the class and frame of an owner exception, else nothing. */
+/** Owner-side text for the consumer log: the class, frame and database error text of an owner exception, else nothing. */
 export function ownerExceptionLogText(detail: unknown): string {
   const d = detail as Partial<OwnerExceptionDetail> | null;
   if (!d || d.origin !== 'owner_exception') return '';
-  return [d.error_class ? ` class=${d.error_class}` : '', d.errno ? ` errno=${d.errno}` : '', d.frame ? ` frame=${d.frame}` : ''].join('');
+  return [d.error_class ? ` class=${d.error_class}` : '', d.errno ? ` errno=${d.errno}` : '', d.frame ? ` frame=${d.frame}` : '',
+    d.error_text ? ` error_text=${JSON.stringify(d.error_text)}` : '', d.statement ? ` statement=${JSON.stringify(d.statement)}` : '',
+    d.position ? ` position=${d.position}` : ''].join('');
 }
 
 /**
