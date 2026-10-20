@@ -77,6 +77,11 @@ interface BatchedUpdate {
   onWritten?: (tx: BrainEngine) => Promise<unknown>;
 }
 
+/**
+ * The cursor and batch size are inlined, not bound: a named prepared statement
+ * switches to a generic plan after a few runs, and a generic `id > $1 LIMIT $2`
+ * can plan a sequential scan and sort of the whole table for every batch.
+ */
 async function batchedUpdate(engine: BrainEngine, ctx: PreludeContext, u: BatchedUpdate): Promise<void> {
   const [keyed] = await engine.executeRaw<{ ok: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = 'id') AS ok`, [u.table]);
@@ -89,10 +94,9 @@ async function batchedUpdate(engine: BrainEngine, ctx: PreludeContext, u: Batche
     const row = await boundedTransaction(engine, ctx, async tx => {
       const [batch] = await tx.executeRaw<{ last_id: number | null; written: number }>(
         `-- chunk-visibility-ok: a migration backfill writes every row its published UPDATE writes, staged and retired chunks included
-         WITH b AS (SELECT id FROM ${u.table} WHERE id > $1 ORDER BY id LIMIT $2),
+         WITH b AS (SELECT id FROM ${u.table} WHERE id > ${Math.trunc(cursor)} ORDER BY id LIMIT ${Math.trunc(backfillBatchRows)}),
               w AS (UPDATE ${u.table} t SET ${u.set} FROM b${u.from ? `, ${u.from}` : ''} WHERE t.id = b.id AND (${u.where}) RETURNING 1)
-         SELECT (SELECT max(id) FROM b) AS last_id, (SELECT count(*) FROM w)::int AS written`,
-        [cursor, backfillBatchRows]);
+         SELECT (SELECT max(id) FROM b) AS last_id, (SELECT count(*) FROM w)::int AS written`);
       if (Number(batch?.written ?? 0) > 0) await u.onWritten?.(tx);
       return batch;
     });
