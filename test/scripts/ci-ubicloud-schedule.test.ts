@@ -105,6 +105,22 @@ describe("parseItemLog", () => {
       { lane: "unit", file: "test/b.test.ts", rc: 1, ms: 45, output: "b failed" },
     ]);
   });
+
+  it("attaches the VM load sampled after an item to that item, never to its output or the next item", () => {
+    const log = [
+      "__ubi_item_begin__ e2e test/e2e/a.test.ts",
+      "a output",
+      "__ubi_item__ rc=0 ms=120 lane=e2e file=test/e2e/a.test.ts",
+      "__ubi_load__ load1=18.40 vcpus=16",
+      "__ubi_item_begin__ e2e test/e2e/b.test.ts",
+      "b output",
+      "__ubi_item__ rc=0 ms=45 lane=e2e file=test/e2e/b.test.ts",
+    ].join("\n");
+    expect(parseItemLog(log)).toEqual([
+      { lane: "e2e", file: "test/e2e/a.test.ts", rc: 0, ms: 120, output: "a output", load: 1.15 },
+      { lane: "e2e", file: "test/e2e/b.test.ts", rc: 0, ms: 45, output: "b output" },
+    ]);
+  });
 });
 
 describe("burst fleet sizing", () => {

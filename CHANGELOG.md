@@ -10,6 +10,17 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.322.0] - 2026-10-20
+
+**The full Ubicloud gate stops oversubscribing its VMs, and every gate now reports how loaded they were.** Each gate slot runs a bun process, its children and its own PostgreSQL and PgBouncer, about 2.5 runnable threads, so one slot per two vCPUs ran a 16-vCPU VM at a 1-minute load of 1.39 per vCPU at p90. Timing-sensitive files then ran up to twice their usual time, and `persistence-sync-options-parity` hit `run-e2e.sh`'s 180 s per-file cap.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Slots per standard-16 gate VM | 8 (one per two vCPUs): load p50 1.11, p90 1.39 per vCPU, 45,565 s of test compute, the parity file killed on its PgBouncer pass | 6 (three per eight vCPUs): p50 0.79, p90 0.95, 35,393 s, passed; about the same wall time at eight VMs |
+| Seeing VM load | inferred from timing flakes and shard overruns | each item's log ends with the VM's load; the summary prints p50, p90 and max per vCPU and warns above 1.1 at p90 |
+
 ## [0.60.321.0] - 2026-10-20
 
 **With Git durability on, a page edit or delete on a source whose root sits below its Git repository's top (a brain in `<repo>/brain`) is now committed and pushed.** Before, the Git effect read file lists from Git with two different bases: `git ls-files` printed paths relative to the source root, while `git status` and `git diff --cached` printed them relative to the repository top. An edit to an already-tracked page, and every page delete, therefore completed as `unchanged`, and nothing was committed or pushed. Writer status and doctor showed nothing pending. A source whose root is the repository top was not affected.
