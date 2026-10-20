@@ -13,6 +13,8 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { resetDreamBreakerKey, DREAM_BREAKER_RESETS_KEY } from '../src/core/cycle/dream-breaker.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { repairJsonb } from '../src/commands/repair-jsonb.ts';
+import * as db from '../src/core/db.ts';
 
 const SOURCE = 'cfg-7112';
 const NUL_OBJECT = '{"label":"\\u0000"}';
@@ -20,8 +22,9 @@ const NUL_OBJECT = '{"label":"\\u0000"}';
 for (const kind of testBackends()) describe(`portable jsonb guard (${kind})`, () => {
   let engine: BrainEngine;
   let close: (() => Promise<void>) | undefined;
+  let databaseUrl = '';
   beforeAll(async () => {
-    if (kind === 'postgres') ({ engine, close } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
+    if (kind === 'postgres') ({ engine, close, databaseUrl } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
     else { const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engine = lite; close = () => lite.disconnect(); }
     await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1) ON CONFLICT (id) DO NOTHING', [SOURCE]);
   }, 120_000);
@@ -60,6 +63,17 @@ for (const kind of testBackends()) describe(`portable jsonb guard (${kind})`, ()
     await resetDreamBreakerKey(engine, 'synthesize:cfg-7112');
     const [row] = await engine.executeRaw<{ value: string }>('SELECT value FROM config WHERE key=$1', [DREAM_BREAKER_RESETS_KEY]);
     expect(Object.keys(JSON.parse(row!.value))).toEqual(['synthesize:cfg-7112']);
+  });
+
+  if (kind === 'postgres') test('repair-jsonb refuses on a database without gbrain_try_jsonb instead of reporting 0 rows', async () => {
+    const engineConfig = { engine: 'postgres' as const, database_url: databaseUrl };
+    try {
+      expect((await repairJsonb({ dryRun: true, engineConfig })).total_repaired).toBe(0);
+      await engine.executeRaw('DROP FUNCTION gbrain_try_jsonb(text)');
+      await expect(repairJsonb({ dryRun: true, engineConfig })).rejects.toThrow(/gbrain_try_jsonb[\s\S]*gbrain apply-migrations/);
+    } finally {
+      await db.disconnect();
+    }
   });
 });
 

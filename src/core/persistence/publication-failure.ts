@@ -45,7 +45,7 @@ export type FenceRefusalDetail = FenceFailureDetail & Pick<PublicationFailureDet
  * #5929: an unexpected exception in the owner. Fixed identifiers only, never
  * application error text or values: the error class, its errno and the top gbrain
  * source frame (repo-relative). #7112: a database server error also keeps its
- * redacted primary message, the first line of the failing statement and the
+ * redacted primary message, the failing statement with every literal replaced and the
  * error position (`databaseErrorText`). All of it is owner-only.
  */
 export interface OwnerExceptionDetail extends Pick<PublicationFailureDetail, 'stage' | 'attempt'> {
@@ -178,47 +178,126 @@ export const OWNER_EXCEPTION_MESSAGE = 'Publication failed on an unexpected owne
 
 const ERROR_TEXT_MAX = 240;
 const STATEMENT_MAX = 160;
-/** The words after which a server message's double-quoted token names an object (or the token a syntax error stopped at), not a value. */
-const IDENTIFIER_CONTEXT = /\b(?:near|column|relation|constraint|table|index|type|schema|function|sequence|role|database|extension|trigger|view|parameter|operator|policy|cursor|savepoint|prepared statement|portal)\s*$/i;
+const SQL_NAME = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
+const SQL_TOKEN = {
+  space: /\s+/y,
+  lineComment: /--[^\n]*(?:\n|$)/y,
+  param: /\$[0-9]+/y,
+  dollar: /\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/y,
+  number: /(?:[0-9]|\.[0-9])[0-9A-Za-z_.]*/y,
+  word: /[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*/y,
+  punct: /[(),;.*=<>!+\-/%:[\]|&~^@#?{}]/y,
+};
 
 /**
- * The first non-blank line with every quoted run replaced: a single-quoted literal or dollar-quoted body becomes `'…'`
- * or `$…$`, a double-quoted token stays only when `keepQuoted` says it names an object, and an unterminated quote ends
- * the text. Control characters become spaces; at most `max` characters.
+ * #7112: a SQL statement reduced to its keywords, identifiers, parameter markers and operators. Every string literal,
+ * dollar-quoted body and number becomes a placeholder, comments drop, and anything unrecognized or unterminated ends
+ * the text, so no literal value survives. `names` holds the statement's identifiers, lower-cased.
  */
-function redactLine(text: string, max: number, keepQuoted: (inner: string, before: string) => boolean): string | undefined {
-  const line = text.split('\n').map(part => part.trim()).find(part => part.length > 0);
-  if (!line) return undefined;
+function sqlShape(query: string): { text: string; names: Set<string> } {
+  const names = new Set<string>();
   let out = '';
-  for (let i = 0; i < line.length;) {
-    const ch = line[i]!;
-    const tag = ch === '$' ? /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(line.slice(i))?.[0] : undefined;
-    if (ch !== "'" && ch !== '"' && !tag) { out += ch; i++; continue; }
-    const open = tag ?? ch;
-    let close = line.indexOf(open, i + open.length);
-    while (!tag && close >= 0 && line[close + 1] === ch) close = line.indexOf(ch, close + 2);
-    if (close < 0) { out += '…'; break; }
-    const inner = line.slice(i + open.length, close);
-    out += ch === '"' && keepQuoted(inner, out) ? `"${inner}"` : tag ? '$…$' : `${ch}…${ch}`;
-    i = close + open.length;
+  let space = false;
+  const emit = (token: string) => { out += (space && out ? ' ' : '') + token; space = false; };
+  const at = (re: RegExp, i: number) => { re.lastIndex = i; return re.exec(query)?.[0]; };
+  let i = 0;
+  scan: while (i < query.length) {
+    const ch = query[i]!;
+    let token: string | undefined;
+    if ((token = at(SQL_TOKEN.space, i)) || (token = at(SQL_TOKEN.lineComment, i))) { space = true; i += token.length; continue; }
+    if (query.startsWith('/*', i)) {
+      let depth = 0;
+      for (let j = i; j < query.length; j++) {
+        if (query.startsWith('/*', j)) { depth++; j++; } else if (query.startsWith('*/', j)) { depth--; j++; if (depth === 0) { i = j + 1; space = true; continue scan; } }
+      }
+      break;
+    }
+    if (ch === "'") {
+      const backslash = /(?:^|[^A-Za-z0-9_$\u0080-\uffff])[eE]$/.test(query.slice(Math.max(0, i - 2), i));
+      for (let j = i + 1; j < query.length; j++) {
+        if (backslash && query[j] === '\\') { j++; continue; }
+        if (query[j] !== "'") continue;
+        if (query[j + 1] === "'") { j++; continue; }
+        emit("'…'"); i = j + 1; continue scan;
+      }
+      out += '…'; break;
+    }
+    if (ch === '"') {
+      for (let j = i + 1; j < query.length; j++) {
+        if (query[j] !== '"') continue;
+        if (query[j + 1] === '"') { j++; continue; }
+        const name = query.slice(i + 1, j).replace(/""/g, '"');
+        if (SQL_NAME.test(name)) { names.add(name.toLowerCase()); emit(`"${name}"`); } else emit('"…"');
+        i = j + 1; continue scan;
+      }
+      out += '…'; break;
+    }
+    if ((token = at(SQL_TOKEN.param, i))) { emit(token); i += token.length; continue; }
+    if ((token = at(SQL_TOKEN.dollar, i))) {
+      const close = query.indexOf(token, i + token.length);
+      if (close < 0) { out += '…'; break; }
+      emit('$…$'); i = close + token.length; continue;
+    }
+    if ((token = at(SQL_TOKEN.number, i))) { emit('?'); i += token.length; continue; }
+    if ((token = at(SQL_TOKEN.word, i))) { names.add(token.toLowerCase()); emit(token); i += token.length; continue; }
+    if ((token = at(SQL_TOKEN.punct, i))) { emit(token); i += token.length; continue; }
+    out += '…'; break;
   }
-  const clean = out.replace(/[\x00-\x1f\x7f]/g, ' ');
-  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+  return { text: out.length > STATEMENT_MAX ? `${out.slice(0, STATEMENT_MAX - 1)}…` : out, names };
+}
+
+const quotedName = (template: string) => new RegExp(`^${template.replace(/"N"/g, '"([A-Za-z_][A-Za-z0-9_$]{0,62})"')}$`);
+/** Server messages whose every double-quoted token is a catalog name: a bound or literal value cannot appear in them. */
+const CATALOG_NAMED = [
+  'null value in column "N" of relation "N" violates not-null constraint',
+  'duplicate key value violates unique constraint "N"',
+  'new row for relation "N" violates check constraint "N"',
+  'insert or update on table "N" violates foreign key constraint "N"',
+  'update or delete on table "N" violates foreign key constraint "N" on table "N"',
+].map(quotedName);
+/**
+ * Server messages whose quoted token is a name from the statement text, kept only when the statement holds it as an
+ * identifier: a bound value cast to regclass or regtype yields the same message with the value in it.
+ */
+const STATEMENT_NAMED = [
+  'syntax error at or near "N"',
+  '(?:relation|column|type|function|schema|index|constraint|table) "N" does not exist',
+  'column "N" of relation "N" does not exist',
+].map(quotedName);
+
+/**
+ * #7112: a server message without the values it can carry. A message that matches a known template keeps its object
+ * names; any other message loses everything from its first quote to its last (Postgres does not escape a quote inside
+ * a quoted value, so the value's own quotes cannot be told apart) and every hexadecimal byte run.
+ */
+function serverMessageText(message: string, statementNames: Set<string>): string {
+  const line = message.replace(/[\x00-\x1f\x7f]+/g, ' ').trim();
+  const kept = CATALOG_NAMED.some(re => re.test(line))
+    || STATEMENT_NAMED.some(re => { const m = re.exec(line); return !!m && m.slice(1).every(name => statementNames.has(name.toLowerCase())); });
+  let text = line;
+  if (!kept) {
+    const first = line.search(/["']/);
+    const last = Math.max(line.lastIndexOf('"'), line.lastIndexOf("'"));
+    if (first >= 0) text = first === last ? `${line.slice(0, first)}"…` : `${line.slice(0, first)}"…"${line.slice(last + 1)}`;
+    text = text.replace(/\b0x[0-9a-f]+/gi, '0x…');
+  }
+  return text.length > ERROR_TEXT_MAX ? `${text.slice(0, ERROR_TEXT_MAX - 1)}…` : text;
 }
 
 /**
- * #7112: what a database server error says, without the values it can carry. Only a server-generated error qualifies
- * (a five-character SQLSTATE and a severity); a PL/pgSQL RAISE carries caller text and is skipped, like `databaseRefusal`.
- * The message keeps a double-quoted token only where the server names an object or the token a syntax error stopped at;
- * the statement keeps its first line with literals replaced, never its parameters.
+ * #7112: what a database server error says, without the values it can carry. Only an error the server itself generated
+ * qualifies: a five-character SQLSTATE, a severity and a C routine that is neither a PL/pgSQL RAISE nor ASSERT (their
+ * text is the caller's) nor any other class P0 condition. The message goes through `serverMessageText`; the statement
+ * keeps its tokens with every literal replaced, never its parameters.
  */
 function databaseErrorText(e: Record<string, unknown>): Pick<OwnerExceptionDetail, 'error_text' | 'statement' | 'position'> {
-  if (typeof e.code !== 'string' || !/^[0-9A-Z]{5}$/.test(e.code) || typeof e.severity !== 'string' || e.routine === 'exec_stmt_raise') return {};
-  const errorText = typeof e.message === 'string'
-    ? redactLine(e.message, ERROR_TEXT_MAX, (inner, before) => IDENT.test(inner) && IDENTIFIER_CONTEXT.test(before.trimEnd())) : undefined;
-  const statement = typeof e.query === 'string' ? redactLine(e.query, STATEMENT_MAX, inner => IDENT.test(inner)) : undefined;
+  if (typeof e.code !== 'string' || !/^[0-9A-Z]{5}$/.test(e.code) || e.code.startsWith('P0') || typeof e.severity !== 'string'
+    || typeof e.routine !== 'string' || /^exec_stmt_(?:raise|assert)$/.test(e.routine)) return {};
+  const shape = typeof e.query === 'string' ? sqlShape(e.query) : undefined;
+  const errorText = typeof e.message === 'string' ? serverMessageText(e.message, shape?.names ?? new Set()) : undefined;
   const position = Number(e.position);
-  return { ...(errorText ? { error_text: errorText } : {}), ...(statement ? { statement } : {}), ...(Number.isInteger(position) && position > 0 ? { position } : {}) };
+  return { ...(errorText ? { error_text: errorText } : {}), ...(shape?.text ? { statement: shape.text } : {}),
+    ...(Number.isInteger(position) && position > 0 ? { position } : {}) };
 }
 
 /** #5929: the bounded identity of an unexpected owner exception (class, errno, frame, and a database error's redacted text), kept owner-only. */

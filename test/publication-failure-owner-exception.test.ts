@@ -168,20 +168,20 @@ describe('#7112 a database error keeps its redacted server text and statement, o
     throw new Error('expected the statement to fail');
   };
 
-  test('a syntax error names the token, the first statement line with literals replaced and the position; parameters never appear', async () => {
+  test('a syntax error names the token, the statement with literals replaced and the position; parameters never appear', async () => {
     const error = await serverError("SELECT id FROM sources\n WHERE name = $1 AND config->>'k' = 'secret-literal' AND (config #>> '{}') IS JSONX", ['secret-param']);
     const { row } = await failingWrite(error);
     expect(row.error_message).toBe(OWNER_EXCEPTION_MESSAGE);
     const detail = row.error_detail as Record<string, any>;
-    expect(detail).toMatchObject({ origin: 'owner_exception', errno: '42601', statement: 'SELECT id FROM sources' });
-    expect(detail.error_text).toMatch(/^syntax error at or near "[A-Z]+"$/);
+    expect(detail).toMatchObject({ origin: 'owner_exception', errno: '42601', error_text: 'syntax error at or near "JSONX"',
+      statement: "SELECT id FROM sources WHERE name = $1 AND config->>'…' = '…' AND (config #>> '…') IS JSONX" });
     expect(detail.position).toBeGreaterThan(0);
     expect(JSON.stringify(row)).not.toContain('secret-literal');
     expect(JSON.stringify(row)).not.toContain('secret-param');
     expect((receiptFor(row) as Record<string, any>).write_error_detail).toEqual({ origin: 'owner_exception', stage: 'publication' });
     const receipt = await withEnv({ GBRAIN_HOME: join(dir, 'home') }, () =>
       operationsByName.get_write_request.handler(ctx(), { request_id: row.request_id })) as Record<string, any>;
-    expect(receipt.error_detail).toMatchObject({ errno: '42601', error_text: detail.error_text, statement: 'SELECT id FROM sources', position: detail.position });
+    expect(receipt.error_detail).toMatchObject({ errno: '42601', error_text: detail.error_text, statement: detail.statement, position: detail.position });
   });
 
   test('a value the server quotes into its message is replaced, an object it names is kept', async () => {
@@ -190,6 +190,43 @@ describe('#7112 a database error keeps its redacted server text and statement, o
     expect(JSON.stringify(row)).not.toContain('alice-example');
     const notNull = await failingWrite(await serverError("INSERT INTO sources(id, name) VALUES (NULL, 'alice-example')"));
     expect(notNull.row.error_detail).toMatchObject({ errno: '23502', error_text: 'null value in column "id" of relation "sources" violates not-null constraint' });
+  });
+
+  test('a bound value with its own quotes is replaced whole: Postgres does not escape them', async () => {
+    const { row } = await failingWrite(await serverError('SELECT $1::uuid', ['prefix"PRIVATE_SECRET"suffix']));
+    expect(row.error_detail).toMatchObject({ errno: '22P02', error_text: 'invalid input syntax for type uuid: "…"', statement: 'SELECT $1::uuid' });
+    expect(JSON.stringify(row)).not.toContain('PRIVATE_SECRET');
+  });
+
+  test('a bound value the server reports as an object name is replaced: the statement does not name it', async () => {
+    const value = await failingWrite(await serverError('SELECT $1::regtype', ['PRIVATE_SECRET']));
+    expect(value.row.error_detail).toMatchObject({ error_text: 'type "…" does not exist', statement: 'SELECT $1::regtype' });
+    expect(JSON.stringify(value.row).toLowerCase()).not.toContain('private_secret');
+  });
+
+  test('escape strings, Unicode dollar tags, numbers and comments never reach the statement', async () => {
+    const statements = [
+      "SELECT E'prefix\\'PRIVATE_SECRET'::uuid",
+      'SELECT $é$PRIVATE-SECRET$é$::uuid',
+      'SELECT 4111111111111111 AS PRIVATE_x, $1::uuid -- PRIVATE_SECRET',
+      "SELECT /* PRIVATE_SECRET /* nested */ still */ $1::uuid, U&'PRIVATE_SECRET'",
+    ];
+    const shapes = [];
+    for (const sql of statements) {
+      const { row } = await failingWrite(await serverError(sql, sql.includes('$1') ? ['x'] : []));
+      expect(JSON.stringify(row)).not.toContain('PRIVATE_SECRET');
+      expect(JSON.stringify(row)).not.toContain('PRIVATE-SECRET');
+      expect(JSON.stringify(row)).not.toContain('4111');
+      shapes.push((row.error_detail as Record<string, unknown>).statement);
+    }
+    expect(shapes).toEqual(["SELECT E'…'::uuid", 'SELECT $…$::uuid', 'SELECT ? AS PRIVATE_x, $1::uuid', "SELECT $1::uuid, U&'…'"]);
+  });
+
+  test('a PL/pgSQL ASSERT keeps no text: its message is the caller\'s', async () => {
+    const { row } = await failingWrite(await serverError("DO $$ BEGIN ASSERT false, 'PRIVATE_SECRET'; END $$"));
+    expect(row.error_detail).toMatchObject({ origin: 'owner_exception', errno: 'P0004' });
+    expect((row.error_detail as Record<string, unknown>).error_text).toBeUndefined();
+    expect(JSON.stringify(row)).not.toContain('PRIVATE_SECRET');
   });
 
   test('a PL/pgSQL RAISE keeps no text: it carries caller values', async () => {
