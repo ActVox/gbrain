@@ -5,28 +5,32 @@
  * the shared-budget test read 156-257 ms; per-gap schedstat showed the excess as run-queue wait plus sleeps behind a
  * spawned Git that had not reached exec, with the thread's own CPU at 61-69 ms. `watchLoopLag` reads the thread's CPU.
  *
- * Forced probe (deterministic): the thread sleeps 150 ms with a timer due (`Atomics.wait`, as it does on a run queue
- * or behind a child's exec). The wall clock reads it as 150 ms of lag; the CPU clock does not. The CPU clock still sees a
- * stretch of work, and two stretches in one turn, the regression the bounds exist to catch.
+ * Forced probe (deterministic): the thread blocks 150 ms in a synchronous child process with a timer due, as it does
+ * behind a spawned Git that has not reached exec. The wall clock reads it as 150 ms of lag; the thread's CPU clock, read
+ * on both sides of the call, does not move (nothing else can run on the thread during a synchronous call, so work left
+ * over from an earlier test file in the same process cannot land in the reading). The CPU clock still sees a stretch of
+ * work, and two stretches in one turn, the regression the bounds exist to catch.
  */
 import { expect, test } from 'bun:test';
-import { spinCpuMs, watchLoopLag } from './helpers/cpu-time.ts';
+import { execFileSync } from 'node:child_process';
+import { spinCpuMs, threadCpuNow, watchLoopLag } from './helpers/cpu-time.ts';
 
 /** The bound the loop-lag tests hold. */
 const MAX_LAG_MS = 100;
 const turn = () => new Promise<void>(resolve => setTimeout(resolve, 20));
-const offCpu = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+/** Blocks the thread off the CPU for `ms` in a synchronous child; returns the thread CPU the call itself cost. */
+const offCpu = (ms: number) => { const start = threadCpuNow(); execFileSync('sleep', [String(ms / 1000)]); return threadCpuNow() - start; };
 
 test('a thread kept off the CPU with a timer due is not lag; the wall clock reads it as lag', async () => {
-  const lag = watchLoopLag();
   let last = performance.now(), wallLag = 0;
   const wall = setInterval(() => { const now = performance.now(); wallLag = Math.max(wallLag, now - last - 5); last = now; }, 5);
   await turn();
-  offCpu(150);
+  const cpu = offCpu(150);
   await turn();
   clearInterval(wall);
   expect(Math.round(wallLag)).toBeGreaterThanOrEqual(MAX_LAG_MS + 40);
-  expect(Math.round(lag.stop().maxLag)).toBeLessThan(MAX_LAG_MS);
+  // The spawn itself costs a few ms of the thread's CPU (fork, pipes); the 150 ms off the CPU cost none.
+  expect(Math.round(cpu)).toBeLessThan(MAX_LAG_MS / 4);
 });
 
 test('a stretch of work is lag on the CPU clock, and two stretches in one turn add up', async () => {
