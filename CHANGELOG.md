@@ -22,7 +22,7 @@ identifiers and attribution are available in the pre-removal Git revision
 | A Git level read in a robot worker | arrived in as many chunks as the pipe delivered | re-cut at fixed 512-byte offsets, so every chunk of a read is a slot every run reaches |
 | Crashes between two chunks of one read | only when timing produced a second chunk | always: seed 5105's race scenario now has 30 `level_chunk` slots (was 7) |
 
-No seam is allowlisted, skipped or given more time. Shard weights are refreshed from the latest unit, serial and E2E runs.
+No seam is allowlisted, skipped or given more time. Shard weights are refreshed from the latest unit, serial and E2E runs. The `hono` override moves to `^4.13.11` (now 4.13.13), clearing GHSA-5r4p-p66f-jhc7 (medium), which OSV began reporting against 4.13.7.
 
 ## [0.60.324.0] - 2026-10-20
 
