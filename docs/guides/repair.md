@@ -146,6 +146,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `contextual-mode` | `contextual_retrieval_coverage` (pages with no recorded mode) | Stamps the contextual retrieval mode on markdown pages imported without one (for example by a large `--no-embed` sync, or by a connector source on an older gbrain), exactly as a fresh import of the page would: the page, source and brain settings decide, and the per-chunk synopsis tier lands at the free title tier. It rebuilds projections only: no page write, no new page version and no request ID. A page whose stored vectors already match the stamped convention keeps them and queues no re-embedding; a page whose embedding input changes has only those vectors cleared and is re-embedded once, unless you pass `--no-embed`. | `unsealed_projection`: pages whose chunks lag their text; `gbrain embed --stale` or `safe-chunks` seals them first, and the next run stamps them. `embed_skip`: pages marked to skip embedding keep their stored vectors and are not stamped. |
 | `file-drift` | `maintenance_write_drift` | Explicit-only, preview-bound. Resolves pages whose canonical file differs from the database copy (`source_changed` / `file_database_drift`) through canonical reconciliation, preferring the file or the database copy within reconcile's protections. `--all-drifted` refuses mixed drift classes unless `--class` keeps one; `--only`/`--skip` narrow by canonical file path glob. Opt-in `storage.keep_db` lets the owner host's resident consumer resolve drift under declared prefixes with the database copy. A page whose file is gone from the last commit: `--prefer database` recreates the file, `--prefer file` soft-deletes the page ([deleted canonical files](#deleted-canonical-files)). See [file drift](#file-drift). | Protected metadata, the tag union and protected takes or private fact rows, listed per page as `exceptions`; pages changed after the preview (`changed_since_preview`). |
 | `ghost-pages` | `ghost_pages` | Explicit-only, preview-bound, destructive consent. Soft-deletes live pages whose canonical file is missing on the owner host (ghost pages: every write refuses `canonical_file_missing` and no sync can import a file that is not there), through `delete_page` bound to the previewed owner, path and revision. `--apply --expect <hash> --yes`. See [ghost pages](#ghost-pages). | Declared db_only and never-filed derived pages (never listed); a page whose file came back before the apply (`file_restored`); pages changed after the preview (`changed_since_preview`). |
+| `uncommitted-deletions` | `uncommitted_sync_deletions` | Explicit-only, preview-bound, consent. Restores soft-deleted pages a managed sync removed before #7130 although Git never held their recorded file (`.gitignore` excludes it, or no commit holds it and it is not on the disk), one `restore_page` with `detach` each, published database-only: the page comes back live, forgets its recorded file, and no file is written. `--apply --expect <hash> --yes`. See [uncommitted deletions](#uncommitted-deletions). | Pages another writer deleted (listed, restored only with `--include-ambiguous`); tombstones whose file Git once committed or that is on the disk again; paths Git could not answer for (`unknown`); purged pages (only a backup brings them back). |
 | `receipt-compaction` | `persistence_capacity` (terminal bytes) | Explicit-only, preview-bound, destructive consent. Compacts terminal write receipts now instead of on the idle maintenance tick (#6696): the intent and error message are dropped, the outcome, error code and detail stay, and the unused reservation returns to the receipt-bytes counters. `--older-than <72h\|30d>` is floored at the configured retention unless `--force`; committed receipts only unless `--include-failures`. No admission, so it runs at a full cap. See [receipt compaction](#receipt-compaction). | `failures_kept`: failed, conflict and cancelled receipts left without `--include-failures`. Receipts of a run whose sync cursor is still open, and the newest sync receipt of each worktree, are never listed. |
 | `aliases` | `dangling_aliases` (orphaned rows) | Explicit-only. Deletes free-text page aliases and slug redirects whose target page has no row at all (a page purged before purge removed its aliases, #6619, or a hard-deleted page), each target rechecked under its page lock; a coordinated maintenance write on a managed brain. A redirect from an old name of a page that still exists is never touched. See [aliases](#aliases). | `soft_deleted_target`: aliases of a soft-deleted page, kept for `gbrain restore` and removed when the page is purged. |
 | `rename-identity` | `rename_identity_downgrades` | Explicit-only, preview-bound, destructive consent. For an inexact Git rename that sync split into a delete plus an add (#6729): carries the old page's identity (id, version history, timeline, links, facts, aliases) onto the new slug, imports the new file onto it as an edit and retires the provisional page; or, with `--close`, settles the pair and moves nothing. `--slug <new-slug>` (and `--from <old-slug>`) names one pair; `--apply --expect <hash> --yes`. See [rename identity](#rename-identity). | `fact_rows_collide` (a fence row of the old page the new file does not keep with the same claim); `managed_remedy_unavailable` (a carry on a managed source; `--close` is the remedy there); pages changed after the preview (`changed_since_preview`). |
@@ -1129,6 +1130,51 @@ mirror pages and pages written while their source was unbound publish to the
 database only and are never ghosts. Doctor `undeclared_db_only_pages` is a
 separate audit. A preview lists at most 1,000 ghosts; apply them, then preview
 again for the rest. Sync never removes ghost pages by itself.
+
+<a id="uncommitted-deletions"></a>
+### Uncommitted deletions
+
+Before #7130 a managed sync read any absent recorded file as a deletion, even a
+file Git never committed: an agent's write-through file in a directory
+`.gitignore` excludes, or an untracked file removed before any commit. It
+soft-deleted those pages, and the purge removes a tombstone for good after its
+retention window. Sync now holds such a page instead
+([file drift](#file-drift), side `deleted`, reason `never_committed` or
+`ignored`). For a brain already hit, doctor `uncommitted_sync_deletions`
+counts, on each source's owner host, the tombstones a sync deleted whose file
+`.gitignore` excludes or no commit of HEAD's history holds (and that is not on
+the disk). It reads at most 20,000 tombstones per source and the Git evidence
+of 2,000 files per run, sync deletions first, and says when it was bounded.
+Off the owner host, or on a brain without managed sync, it is `ok` and not
+applicable. To restore them, preview, then apply after the user agrees:
+
+```bash
+gbrain repair uncommitted-deletions --source default        # preview: slug, recorded path, deletion time, evidence, who deleted it, and a hash
+gbrain repair uncommitted-deletions --source default --apply --expect <hash> --yes
+```
+
+**Pages already purged cannot be restored by this command; only a backup
+(`pg_dump`, or a `gbrain backup create` taken before the purge) can bring them
+back.** Restore what is still there before the purge runs.
+
+The preview writes nothing. Its default set is the pages a sync deleted (a
+committed `managed_sync_delete` request is the newest deletion of the slug);
+pages another writer deleted are listed apart and join the hashed set only with
+`--include-ambiguous`. The apply needs the user's consent: without `--yes` a
+terminal asks, and a non-interactive run exits 3 with the consent payload and
+changes nothing. It restores exactly the previewed set, bound to the owner and
+each page's revision, through one coordinated `restore_page` with
+`detach: true` per page, published database-only: the page comes back live
+with no recorded file (`database_only_reason='detached'`) and no file is
+written, so no later sync reads its file as missing. A page that moved since
+the preview is skipped `changed_since_preview`; one whose file is in the
+checkout again is skipped `file_restored` (commit it and sync instead); one
+purged in between is skipped `purged`. A wrong or stale hash refuses
+[`preview_changed`](#preview-changed), and off the owner host the preview and
+the apply refuse [`not_owner_host`](error-codes.md#not_owner_host). Undo one
+page with `gbrain delete <slug>`. A preview lists at most 1,000 pages; apply
+them, then preview again. The repair runs only when named, never on upgrade or
+from a maintenance cycle.
 
 <a id="legacy-twins"></a>
 ### Legacy twins

@@ -79,6 +79,7 @@ import { overwrittenEditsRepair } from './overwritten-edits.ts';
 import { missingTablesRepair } from './missing-tables.ts';
 import { urlCloneFencesRepair } from './url-clone-fences.ts';
 import { segmentedMirrorRepair } from './segmented-mirror.ts';
+import { uncommittedDeletionsRepair, UNCOMMITTED_DELETIONS_CONSENT_TEXT } from './uncommitted-deletions.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
 
@@ -477,6 +478,17 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'of the canonical render (gbrain export\'s bytes). A file that differs from the database for another reason is listed held '
       + '(file_database_drift) and never rewritten. Preview-bound and destructive: --apply --expect <hash> --yes re-checks each page and commits, per '
       + 'page, one receipted request whose withdrawal-mirror and Git effects rewrite and commit the file. Runs only when named; never on upgrade.',
+  },
+  'uncommitted-deletions': {
+    handler: uncommittedDeletionsRepair, embeds: 'none', checks: ['uncommitted_sync_deletions'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: UNCOMMITTED_DELETIONS_CONSENT_TEXT,
+    summary: 'Restore soft-deleted pages whose recorded file Git never held (.gitignore excludes it, or no commit holds it and it is not on the disk), which a managed '
+      + 'sync deleted before #7130 because it read the absent file as a deletion. Needs --source; refused off the canonical owner host (not_owner_host). The preview '
+      + 'lists each page (slug, recorded path, deletion time, evidence, whether a sync deleted it) and prints the apply command with its hash; pages another writer '
+      + 'deleted are listed apart and join the set only with --include-ambiguous. --apply --expect <hash> --yes restores exactly that set, one coordinated '
+      + 'restore_page with detach per page, published database-only: each comes back live, forgets its recorded file and no file is written, so the next sync '
+      + 'never deletes it again. Pages already purged cannot be restored by this command; only a backup (pg_dump, or gbrain backup create) can bring them back. '
+      + 'Runs only when named; never on upgrade.',
   },
 };
 
