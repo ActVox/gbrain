@@ -130,11 +130,13 @@ export function isStagedCounterKey(key: string): boolean {
 }
 
 /**
- * The CTE that releases the reservations of the upload stagings a preceding CTE named `gone` (columns kind,
- * principal_kind, principal_id, reserved_bytes) moved out of a live state, locking the counter rows in key order as
- * admission does. Constant SQL; the caller ends the statement.
+ * The CTE that deletes the parts and releases the reservations of the upload stagings a preceding CTE named `gone`
+ * (columns id, kind, principal_kind, principal_id, reserved_bytes) moved out of a live state, in the same statement so
+ * capacity is never free while its bytes remain; it locks the counter rows in key order as admission does. Constant
+ * SQL; the caller ends the statement.
  */
-export const RELEASE_STAGED_CTE = `released_keys AS (
+export const RELEASE_STAGED_CTE = `released_parts AS (DELETE FROM page_body_staging_parts p USING gone g WHERE p.staging_id = g.id AND g.kind = 'upload' RETURNING 1),
+  released_keys AS (
     SELECT key, SUM(bytes)::bigint AS bytes, SUM(n)::bigint AS n FROM (
       SELECT 'principal:'||principal_kind||':'||principal_id||':staged' AS key, reserved_bytes AS bytes, 0 AS n FROM gone WHERE kind='upload'
       UNION ALL SELECT '${BRAIN_STAGED_KEY}', reserved_bytes, 0 FROM gone WHERE kind='upload'
@@ -145,14 +147,16 @@ export const RELEASE_STAGED_CTE = `released_keys AS (
     FROM released_keys d JOIN released_locked l ON l.key=d.key WHERE c.key=d.key RETURNING c.key)`;
 
 /**
- * `write_quota_exhausted` for an upload-session cap: staged bytes or open sessions. Committing, aborting or letting a
+ * `write_quota_exhausted` for an upload-session cap: staged bytes or open sessions. `used` is null for the brain-wide
+ * cap, whose usage counts other principals' uploads and is never reported. Committing, aborting or letting a
  * session expire frees it; the host can raise the cap (reversible).
  */
-export function stagedQuotaExhausted(resource: string, setting: keyof UploadLimits, used: number, limit: number, need: number,
+export function stagedQuotaExhausted(resource: string, setting: keyof UploadLimits, used: number | null, limit: number, need: number,
   reason: 'staged_bytes' | 'open_uploads'): OperationError {
   const key = uploadLimitKey(setting);
-  const value = Math.max(limit * 2, used + need);
-  return opError('write_quota_exhausted', `Upload capacity exhausted: ${resource} (${used} used of ${limit}, this upload needs ${need}).`,
+  const value = Math.max(limit * 2, (used ?? 0) + need);
+  const usage = used === null ? `limit ${limit}` : `${used} used of ${limit}`;
+  return opError('write_quota_exhausted', `Upload capacity exhausted: ${resource} (${usage}, this upload needs ${need}).`,
     `Commit or abort your open uploads (abort_page_upload), or let them expire, then begin again with the same request_id. `
     + `The brain host can raise the cap: gbrain config set ${key} ${value} (undo with gbrain config unset ${key}).`,
     { reason, detail: key.slice('persistence.limits.'.length), docs: 'docs/guides/write-refusals.md#write_quota_exhausted',

@@ -20,9 +20,11 @@ import { CONTENT_ORIGIN_PARAM, PAGE_MUTATION_PARAMS, WRITE_WAIT_PARAM } from '..
 import { parseWriteRequestId } from '../persistence/preconditions.ts';
 import { isWriteRequestId } from '../persistence/types.ts';
 import { getWriteRequest } from '../persistence/journal.ts';
+import { submissionAuthority } from '../persistence/authority.ts';
+import { pageNotVisibleError } from '../persistence/page-visibility.ts';
 import { assertLargePageAdmission } from '../persistence/large-page-guard.ts';
 import { sha256 } from '../persistence/digest.ts';
-import { isTerminal, type Principal } from '../persistence/model.ts';
+import { isTerminal, type Principal, type WriteRequest } from '../persistence/model.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { contentSizeHold } from '../markdown.ts';
 import { readPageBodyPolicy } from '../page-body/limits.ts';
@@ -48,25 +50,45 @@ async function callerPrincipal(ctx: OperationContext): Promise<Principal> {
  * its read scope); the source still active at the incarnation the session began under; and, until the session is
  * committed, the page it began against (for create: still no page at the slug).
  */
-function callerMayUse(ctx: OperationContext, principal: Principal, row: UploadRow): boolean {
+function callerMayUse(ctx: OperationContext, principal: Principal, row: UploadRow, opts: { ownerOnly?: boolean } = {}): boolean {
   if (row.principal_kind !== principal.kind || row.principal_id !== principal.id) return false;
   if (ctx.remote !== false) {
     const scope = sourceScopeOpts(ctx);
     const readable = scope.sourceIds ?? (scope.sourceId !== undefined ? [scope.sourceId] : null);
     if (row.source_id !== (ctx.auth?.sourceId ?? ctx.sourceId ?? 'default') || (readable && !readable.includes(row.source_id))) return false;
   }
+  try {
+    enforceClientSlugFence(ctx, row.slug, 'begin_page_upload');
+    enforceSubagentSlugFence(ctx, row.slug, 'begin_page_upload');
+  } catch { return false; }
+  if (opts.ownerOnly) return true;
   if (row.source_archived !== false || row.current_incarnation !== row.source_incarnation) return false;
   const uncommitted = row.commit_request_id === null && ['open', 'sealed', 'prepared'].includes(row.state);
   if (uncommitted && (row.mode === 'create' ? row.current_page_id !== null : row.current_page_id !== row.page_id)) return false;
   return true;
 }
 
-async function boundUpload(ctx: OperationContext, principal: Principal, uploadId: unknown, opts: { exec?: OperationContext['engine']; lock?: boolean } = {}): Promise<UploadRow> {
+async function boundUpload(ctx: OperationContext, principal: Principal, uploadId: unknown, opts: { exec?: OperationContext['engine']; lock?: boolean; ownerOnly?: boolean } = {}): Promise<UploadRow> {
   if (!isWriteRequestId(uploadId)) throw uploadNotFound();
   const row = await readUpload(opts.exec ?? ctx.engine, uploadId.toLowerCase(), { lock: opts.lock });
-  if (!row || !callerMayUse(ctx, principal, row)) throw uploadNotFound();
+  if (!row || !callerMayUse(ctx, principal, row, { ownerOnly: opts.ownerOnly })) throw uploadNotFound();
   return row;
 }
+
+/**
+ * A lapsed session expires here (`upload_expired`); when another call moved it on first (a commit sealed it), the row
+ * is read again and the caller follows its real state instead of reporting an expiry that did not happen.
+ */
+async function settleLapse(ctx: OperationContext, principal: Principal, row: UploadRow, opts: { ownerOnly?: boolean } = {}): Promise<UploadRow> {
+  if (await expireIfLapsed(ctx.engine, row)) throw uploadExpired(row);
+  if (!row.lapsed) return row;
+  const current = await boundUpload(ctx, principal, row.id, opts);
+  if (current.state === 'expired') throw uploadExpired(current);
+  return current;
+}
+
+/** @internal Forced-race seam of the commit test: runs after commit sealed the session and hashed its parts. */
+export const uploadCommitProbe: { afterHash?: (uploadId: string) => Promise<void> } = {};
 
 function sessionStatus(ctx: OperationContext, row: UploadRow) {
   return { upload_id: row.id, state: row.state, next_part: row.next_part, received_bytes: row.received_bytes, total_bytes: row.declared_bytes,
@@ -158,8 +180,7 @@ const begin_page_upload: Operation = {
         throw opError('idempotency_conflict', 'This request_id already began a different upload.', 'Begin this upload with a new request_id; reuse a request_id only to resume the same upload.');
       }
       if (!callerMayUse(ctx, principal, row)) throw uploadNotFound();
-      if (await expireIfLapsed(ctx.engine, row)) throw uploadExpired(row);
-      return sessionStatus(ctx, row);
+      return sessionStatus(ctx, await settleLapse(ctx, principal, row));
     };
     const prior = await readUploadByRequest(ctx.engine, principal, clientRequestId);
     if (prior) return resumed(prior);
@@ -167,12 +188,15 @@ const begin_page_upload: Operation = {
     if (!source || source.archived) {
       throw opError('source_changed', 'The write source is not active.', `Source ${sourceId} is archived or not registered, so nothing was staged. Write to an active source (sources_list shows them).`);
     }
+    // put_page's grant and visibility checks first: a page this caller may not see answers as put_page does, before any read of it.
+    await submissionAuthority(ctx, mode === 'append' ? 'append_page' : 'put_page', sourceId, source.incarnation, slug);
     const snapshot = await ctx.engine.readPageSnapshot(slug, { sourceId, includeDeleted: true });
     if (mode === 'create' && snapshot) {
       throw opError('revision_required', `Page ${slug} already exists, so an upload with mode create cannot write it; nothing was staged.`,
         "Read the page with get_page body: 'none', then begin with mode replace and its revision as expected_revision.", { fix: pageFix(slug, sourceId) });
     }
     if (mode !== 'create' && (!snapshot || snapshot.page.deleted_at)) {
+      if (ctx.remote !== false) throw pageNotVisibleError();
       throw opError('page_not_found', `Page not found: ${slug}`, `An upload with mode ${mode} writes an existing page; begin with mode create to make it.`);
     }
     if (mode !== 'create' && want.baseRevision !== null && snapshot!.revision !== want.baseRevision) throw revisionChanged(slug, sourceId);
@@ -240,8 +264,8 @@ const upload_page_part: Operation = {
       return { state: await appendPart(tx, row, bytes, partSha) };
     });
     if ('expired' in outcome) {
-      await expireIfLapsed(ctx.engine, outcome.expired);
-      throw uploadExpired(outcome.expired);
+      const current = await settleLapse(ctx, principal, outcome.expired);
+      throw opError('invalid_params', `This upload is ${current.state}, so it takes no more parts.`, 'Commit it with commit_page_upload, or begin a new upload.', { fix: statusFix(current.id) });
     }
     return outcome.state;
   },
@@ -257,9 +281,8 @@ const get_page_upload: Operation = {
   scope: 'write',
   area: 'pages',
   handler: async (ctx, p) => {
-    const row = await boundUpload(ctx, await callerPrincipal(ctx), p.upload_id);
-    if (await expireIfLapsed(ctx.engine, row)) throw uploadExpired(row);
-    return sessionStatus(ctx, row);
+    const principal = await callerPrincipal(ctx);
+    return sessionStatus(ctx, await settleLapse(ctx, principal, await boundUpload(ctx, principal, p.upload_id)));
   },
 };
 
@@ -274,10 +297,16 @@ const abort_page_upload: Operation = {
   area: 'pages',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'abort_page_upload', upload_id: p.upload_id };
-    const row = await boundUpload(ctx, await callerPrincipal(ctx), p.upload_id);
-    if (await expireIfLapsed(ctx.engine, row)) throw uploadExpired(row);
-    if (row.state === 'aborted' && row.commit_request_id === null) return { upload_id: row.id, state: 'aborted' };
-    if (row.state !== 'committed' && row.commit_request_id === null && await abortUpload(ctx.engine, row.id)) return { upload_id: row.id, state: 'aborted' };
+    // The creating principal in its source may always abort, even after the page, slug or source incarnation moved on.
+    const principal = await callerPrincipal(ctx);
+    const row = await settleLapse(ctx, principal, await boundUpload(ctx, principal, p.upload_id, { ownerOnly: true }), { ownerOnly: true });
+    if (row.state === 'aborted') return { upload_id: row.id, state: 'aborted' };
+    if (row.state !== 'committed' && await abortUpload(ctx.engine, row.id)) return { upload_id: row.id, state: 'aborted' };
+    const [request] = row.commit_request_id ? await ctx.engine.executeRaw<Pick<WriteRequest, 'state'>>('SELECT state FROM persistence_requests WHERE id = $1::uuid', [row.commit_request_id]) : [];
+    if (row.state !== 'committed' && request && !isTerminal(request)) {
+      throw opError('write_pending', 'A commit of this upload is still being written, so it cannot be aborted now.',
+        'Call commit_page_upload again with this upload_id to wait for its result; abort it only if that commit ends without writing.', { fix: statusFix(row.id) });
+    }
     throw opError('invalid_params', 'This upload was already committed, so it cannot be aborted.', 'Read the write with commit_page_upload (it returns the receipt again).', { fix: statusFix(row.id) });
   },
 };
@@ -301,22 +330,33 @@ const commit_page_upload: Operation = {
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'commit_page_upload', upload_id: p.upload_id };
     const principal = await callerPrincipal(ctx);
-    const row = await boundUpload(ctx, principal, p.upload_id);
-    const submitted = row.state === 'committed' || row.commit_request_id !== null;
-    if (!submitted) {
-      if (await expireIfLapsed(ctx.engine, row)) throw uploadExpired(row);
-      if (row.state === 'aborted') throw uploadNotFound();
-      if (row.state === 'open') {
-        if (row.received_bytes !== row.declared_bytes) {
-          throw opError('invalid_params', `This upload has ${row.received_bytes} of its ${row.declared_bytes} bytes, so it cannot be committed yet.`,
-            `Send part ${row.next_part} and the rest, then commit.`, { fix: statusFix(row.id) });
-        }
-        if (await stagedSha256(ctx.engine, row) !== row.declared_sha256) {
-          throw opError('invalid_params', 'The uploaded bytes do not match the sha256 declared at begin, so nothing was written.',
-            'Abort this upload, then begin again with the SHA-256 of exactly the content you send.');
-        }
-        await sealUpload(ctx.engine, row.id);
+    let row = await boundUpload(ctx, principal, p.upload_id);
+    const isSubmitted = (r: UploadRow) => r.state === 'committed' || r.commit_request_id !== null;
+    if (!isSubmitted(row)) row = await settleLapse(ctx, principal, row);
+    // Sealing is the commit's claim: an atomic open -> sealed that takes the session out of idle expiry. A call that
+    // loses it (another commit sealed first, or the session ended) reads the session again and follows its real state.
+    if (!isSubmitted(row) && row.state === 'open') {
+      if (row.received_bytes !== row.declared_bytes) {
+        throw opError('invalid_params', `This upload has ${row.received_bytes} of its ${row.declared_bytes} bytes, so it cannot be committed yet.`,
+          `Send part ${row.next_part} and the rest, then commit.`, { fix: statusFix(row.id) });
       }
+      if (!await sealUpload(ctx.engine, row.id)) row = await boundUpload(ctx, principal, row.id);
+      else {
+        const hashed = await stagedSha256(ctx.engine, row);
+        await uploadCommitProbe.afterHash?.(row.id);
+        if (hashed !== row.declared_sha256) {
+          await abortUpload(ctx.engine, row.id);
+          throw opError('invalid_params', 'The uploaded bytes do not match the sha256 declared at begin, so the upload was discarded and nothing was written.',
+            'Begin again with the SHA-256 of exactly the content you send.');
+        }
+        row = { ...row, state: 'sealed' };
+      }
+    }
+    const submitted = isSubmitted(row);
+    if (!submitted) {
+      if (row.state === 'expired') throw uploadExpired(row);
+      if (row.state === 'aborted') throw uploadNotFound();
+      if (row.state === 'open') throw opError('write_pending', 'Another call is committing this upload.', 'Call commit_page_upload again with this upload_id.', { fix: statusFix(row.id) });
     }
     const bodyRef: StagingBodyRef = { kind: 'staging', staging_id: row.id, sha256: row.declared_sha256, bytes: row.declared_bytes };
     if (row.mode === 'append') {
@@ -333,7 +373,10 @@ const commit_page_upload: Operation = {
       ...(p.wait_ms !== undefined ? { wait_ms: p.wait_ms } : {}) };
     if (!submitted && row.mode === 'replace') {
       const current = await ctx.engine.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
-      if (current?.revision !== row.base_revision) throw revisionChanged(row.slug, row.source_id);
+      if (current?.revision !== row.base_revision) {
+        await abortUpload(ctx.engine, row.id);
+        throw revisionChanged(row.slug, row.source_id);
+      }
       if (ctx.remote !== false) await assertLargePageAdmission(ctx.engine, row.slug, row.source_id, params);
     }
     try {
