@@ -398,7 +398,7 @@ export async function buildChecks(
   connectError?: unknown,
   // #6696: the run's deadline (started by the CLI before connecting) and a remote caller's readable sources.
   deadline: DoctorDeadline = startDoctorDeadline(args),
-  remoteScope: { sourceIds?: string[]; lastKnown?: 'cli' | 'refresh'; entryBudgetOverrideMs?: number; refreshOnly?: boolean } = {},
+  remoteScope: { sourceIds?: string[]; remote?: boolean; lastKnown?: 'cli' | 'refresh'; entryBudgetOverrideMs?: number; refreshOnly?: boolean } = {},
 ): Promise<Check[]> {
   const jsonOutput = args.includes('--json');
   const fastMode = args.includes('--fast');
@@ -475,7 +475,7 @@ export async function buildChecks(
     only: parseOnlyChecks(args),
     tier: parseDoctorTier(args),
     deadline,
-    ...(remoteScope.sourceIds ? { sourceIds: remoteScope.sourceIds } : {}),
+    ...(remoteScope.sourceIds ? { sourceIds: remoteScope.sourceIds } : {}), ...(remoteScope.remote ? { remote: true } : {}),
     ...(remoteScope.lastKnown ? { lastKnown: remoteScope.lastKnown } : {}),
     ...(remoteScope.entryBudgetOverrideMs ? { entryBudgetOverrideMs: remoteScope.entryBudgetOverrideMs } : {}),
   };

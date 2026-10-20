@@ -85,6 +85,8 @@ export interface DoctorContext {
   deadline?: DoctorDeadline;
   /** #6696 B2: the remote caller's readable sources (run_doctor tier/only); undefined: brain-wide or `--source`. */
   sourceIds?: string[];
+  /** #7146: the run serves a remote caller (run_doctor tier/only): checks that name pages or paths confine them. */
+  remote?: boolean;
   /** #6803 C3: the running entry's absolute deadline (scans stop at it and report what they read); undefined: unbounded. */
   entryDeadlineAt?: number;
   /** #7142: a brain-wide local CLI run (or the background refresh) that reads and records last known results (./last-known.ts). */

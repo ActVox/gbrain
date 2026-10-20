@@ -47,9 +47,11 @@ test/cycle/synthesize-concepts-merge.test.ts
 test/decide/conflict-proposals-managed.test.ts
 test/declared-lineage-visibility.test.ts
 test/derived-link-reconciliation.test.ts
+test/doctor-capped-counts-7145.test.ts
 test/doctor-frontmatter-holds.test.ts
 test/doctor-image-embedding-coverage.test.ts
 test/doctor-keyword-plan-6495.test.ts
+test/doctor-managed-guard-columns-7145.test.ts
 test/doctor-routing-skill-pack-source.test.ts
 test/doctor-sync-freshness-skill-pack-6076.test.ts
 test/embed-stale-images-managed-6529.test.ts
