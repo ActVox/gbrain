@@ -73,6 +73,7 @@ export const DEFAULT_CHECKS: Step[] = [
   { name: 'schema migration registry fresh', argv: ['bash', 'scripts/check-schema-migrations-fresh.sh'] },
   { name: 'schema migration order', argv: ['bun', 'scripts/check-schema-migration-order.ts'] },
   { name: "no since: 'TBD' BEHAVIOR_CHANGES row", argv: ['bun', 'scripts/check-behavior-since.ts', '--stamped'] },
+  { name: 'CHANGELOG keeps every master release heading', argv: ['bun', 'scripts/check-changelog-headings.ts'] },
 ];
 
 interface State {
