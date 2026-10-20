@@ -12,6 +12,7 @@ import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readShadowLevel } from '../src/core/persistence/sync-pass.ts';
 import { resolveManagedSyncContext } from '../src/core/persistence/sync-discovery.ts';
+import { loadActivePackForEngine } from '../src/core/schema-pack/engine-resolution.ts';
 import { watchLoopLag } from './helpers/cpu-time.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 
@@ -35,6 +36,9 @@ describe('#6712 PR 4b ruling 4: a level read yields to the event loop', () => {
   test(`reading and classifying a ${PATHS}-path level never blocks a timer for ${MAX_LAG_MS} ms`, () => managedBrain(async ({ engine }) => {
     // A pass resolves its context once, before its rounds; each round's level read is what this times.
     const context = await resolveManagedSyncContext(engine, { sourceId: 'default', noPull: true, dryRun: true });
+    // The schema pack loads once per process (8 ms here, 45-55 ms on a 4-vCPU CI VM) in a stretch no yield budget governs;
+    // on a VM whose kernel charges host steal to the thread's CPU, that one stretch read 145 ms. A round reads it cached.
+    await loadActivePackForEngine(engine, { remote: false, sourceId: 'default' });
     // Lag as the thread's own CPU between timer runs (the stretch that ends the read counts too): the stretches the read
     // holds, not what a loaded VM adds while the thread is off the CPU.
     let level: Awaited<ReturnType<typeof readShadowLevel>>;
