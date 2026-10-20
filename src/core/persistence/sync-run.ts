@@ -67,6 +67,7 @@ import { receiptClass, recordedStop, replaysContentRefusal, resumableStop, stopR
 import { advanceHeld, committedPast, deletionSettled, entryOf, indexOf, promoteWindow, waivedCursor, withHeldKeys, withoutPending } from './sync-cursor-moves.ts';
 import { withSyncTail } from './sync-tail.ts';
 import { assertDrainLease, currentDrainLease, leaseHeldResult, readDrainHolder, withDrainLease } from './sync-lease.ts';
+import { idleSkips } from './sync-idle-skips.ts';
 import { LockStolenError, LockUnavailableError, syncLockId } from '../db-lock.ts';
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { assertPassAdmission, isPassBatchKey, passBatchStep, passedOverBefore, passRequestId, readPassBatch, setPassBatch, type PassEntry } from './sync-pass-batch.ts';
@@ -1266,9 +1267,11 @@ export async function performManagedSync(engine: BrainEngine, opts: SyncOpts, sl
 }
 async function performManagedPass(engine: BrainEngine, opts: SyncOpts, slice?: { maxPages: number; maxMs: number }): Promise<SyncResult> {
   const state: HoldRunState = {};
+  const lease = currentDrainLease(opts.sourceId ?? 'default');
+  if (lease) lease.idleClear = false;
   // #6729: every managed entry point (CLI, drain, owner slice, worktree refresh) records the renames whose identity it did not keep.
   const synced = await noteIdentityDowngrades(engine, opts.sourceId ?? 'default', await runManagedSync(engine, opts, slice, state), serr);
-  if (!state.sourceId || !state.incarnation || synced.status === 'dry_run') return synced;
+  if (!state.sourceId || !state.incarnation || synced.status === 'dry_run' || idleSkips(state.sourceId).has('hold_report')) return synced;
   const cursor = state.cursor?.() ?? null;
   try {
     const report = await buildHoldReport(engine, { sourceId: state.sourceId, incarnation: state.incarnation, runId: cursor?.runId ?? '', remote: state.remote === true,

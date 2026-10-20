@@ -22,6 +22,7 @@ import { assertSyncApplicable } from '../../core/sync-applicability.ts';
 import { noteIdentityDowngrades } from '../../core/sync-identity-downgrades.ts';
 import { SyncLockBusyError, formatLockBusyMessage, buildPartialResult } from '../../core/sync-lock.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
+import type { IdleSkip } from '../../core/persistence/sync-idle-skips.ts';
 import { runConnectorSync } from './connector.ts';
 import { performSyncInner } from './incremental.ts';
 
@@ -111,6 +112,8 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
   const sourceId = outer.sourceId ?? 'default';
   const { withDrainLease } = await import('../../core/persistence/sync-lease.ts');
   const lockKey = syncLockId(sourceId);
+  // GBRA-133: the settles an idle-clear tick leaves nothing to do (persistence/sync-idle-skips.ts), read inside the lease.
+  let skips: ReadonlySet<IdleSkip> = new Set();
   const work = async (leaseSignal: AbortSignal | undefined): Promise<SyncResult> => {
     const opts: SyncOpts = leaseSignal ? { ...outer, signal: outer.signal ? AbortSignal.any([outer.signal, leaseSignal]) : leaseSignal } : outer;
     let result = opts.drain
@@ -135,16 +138,18 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
       if (!next.staged) serr(`[sync] staged catch-up reached HEAD after ${stages} stages.`);
     }
     printInheritedOptions(result);
-    if (!opts.dryRun) await recordUpstreamObservation(engine, opts.sourceId ?? 'default', opts.repoPath);
-    if (!opts.dryRun && ['synced', 'first_sync', 'up_to_date'].includes(result.status)) await clearSettledFailures(engine, opts.sourceId ?? 'default');
-    if (!opts.dryRun) {
-      const replayed = await replayImportedRemembers(engine, opts.sourceId ?? 'default');
-      if (replayed) result = { ...result, replayedRemembers: replayed };
-      const ghosts = await reportSyncGhosts(engine, opts.sourceId ?? 'default');
-      if (ghosts) result = { ...result, ghostPages: ghosts };
-      // #6712 PR 2: holds that turned needs_human (or file_drift content decisions) since the last count, for the soak counters.
-      await (await import('../../core/persistence/soak-counters.ts')).sweepNeedsHumanHolds(engine, opts.sourceId ?? 'default').catch(() => undefined);
-    }
+    if (opts.dryRun) return result;
+    skips = (await import('../../core/persistence/sync-idle-skips.ts')).idleSkips(sourceId);
+    // GBRA-133: the ghost-page scan reads only pages and the source's config, so it runs beside the settles before it; its line still prints after theirs.
+    const ghostScan = countSyncGhosts(engine, sourceId);
+    await recordUpstreamObservation(engine, sourceId, opts.repoPath);
+    if (['synced', 'first_sync', 'up_to_date'].includes(result.status) && !skips.has('settled_failures')) await clearSettledFailures(engine, sourceId);
+    const replayed = await replayImportedRemembers(engine, sourceId);
+    if (replayed) result = { ...result, replayedRemembers: replayed };
+    const ghosts = reportSyncGhosts(await ghostScan);
+    if (ghosts) result = { ...result, ghostPages: ghosts };
+    // #6712 PR 2: holds that turned needs_human (or file_drift content decisions) since the last count, for the soak counters.
+    if (!skips.has('needs_human_sweep')) await (await import('../../core/persistence/soak-counters.ts')).sweepNeedsHumanHolds(engine, sourceId).catch(() => undefined);
     return result;
   };
   // A dry run reads and previews only; it never waits for, or keeps out, a drainer.
@@ -152,7 +157,8 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
   const { withSyncTail } = await import('../../core/persistence/sync-tail.ts');
   try {
     const { healOriginTwinsAfterManagedSync } = await import('../../core/repair/origin-twins-heal.ts');
-    return await healOriginTwinsAfterManagedSync(engine, outer, await (await import('../../core/repair/slug-autoheal.ts')).healAfterManagedSync(engine, outer, await withSyncTail(engine, sourceId, await withDrainLease(engine, sourceId, {
+    const { healAfterManagedSync } = await import('../../core/repair/slug-autoheal.ts');
+    const drained = await withDrainLease(engine, sourceId, {
       holder: outer.drainHolder ?? { kind: 'cli', id: null }, remote: currentSubmissionAuthority()?.kind === 'remote_generic',
       ...(outer.followDrainLease ? { follow: { signal: outer.signal, deadlineAtMs: outer.deadlineAtMs } } : {}),
       tty: process.stderr.isTTY === true,
@@ -163,7 +169,10 @@ async function performManagedBranch(engine: BrainEngine, outer: SyncOpts): Promi
           ? `[sync] source ${sourceId} is being drained by ${who}; following it until it finishes or this run's budget ends (one drainer per source; it resumes the same cursor). Ctrl-C stops following and leaves it running.`
           : `[sync] following ${who}: ${done}.`);
       },
-    }, work), { signal: outer.signal, deadlineAtMs: outer.deadlineAtMs })));
+    }, work);
+    const tailed = skips.has('sync_tail') ? drained : await withSyncTail(engine, sourceId, drained, { signal: outer.signal, deadlineAtMs: outer.deadlineAtMs });
+    const healed = skips.has('slug_heal') ? tailed : await healAfterManagedSync(engine, outer, tailed);
+    return skips.has('origin_heal') ? healed : await healOriginTwinsAfterManagedSync(engine, outer, healed);
   } catch (err) {
     if (err instanceof LockUnavailableError && err.lockId === lockKey) throw new SyncLockBusyError(await formatLockBusyMessage(engine, lockKey), lockKey);
     throw err;
@@ -202,8 +211,12 @@ async function replayImportedRemembers(engine: BrainEngine, sourceId: string): P
 }
 
 /** #6712 PR 2 (L4): the source's ghost pages (live pages whose file is gone), counted and named, never deleted by sync. */
-async function reportSyncGhosts(engine: BrainEngine, sourceId: string): Promise<SyncResult['ghostPages'] | null> {
-  const ghosts = await (await import('../../core/persistence/sync-ghosts.ts')).countSyncGhosts(engine, sourceId).catch(() => null);
+async function countSyncGhosts(engine: BrainEngine, sourceId: string): Promise<{ sourceId: string; ghosts: SyncResult['ghostPages'] | null }> {
+  return { sourceId, ghosts: await (await import('../../core/persistence/sync-ghosts.ts')).countSyncGhosts(engine, sourceId).catch(() => null) };
+}
+
+/** Prints the ghost-page line of a scan and returns its report. */
+function reportSyncGhosts({ sourceId, ghosts }: Awaited<ReturnType<typeof countSyncGhosts>>): SyncResult['ghostPages'] | null {
   if (ghosts) serr(`[sync] ${ghosts.count}${ghosts.truncated ? '+' : ''} live page(s) of ${sourceId} have no canonical file (ghost pages${ghosts.samples.length ? `, e.g. ${ghosts.samples.join(', ')}` : ''}); `
     + `sync leaves them in place. Preview with ${ghosts.fix.argv!.join(' ')} (read-only), or restore the files and sync.`);
   return ghosts;
