@@ -225,7 +225,7 @@ consent. When one is not:
 
 - `gbrain google setup` probes every service it is about to register before
   it registers anything. A disabled API or an ungranted scope stops setup
-  with one report (exit 3, `status: api_access_blocked` under `--json`)
+  with one report (exit 2, `status: api_access_blocked` under `--json`)
   that names each API, the Google Cloud project, and the enable link from
   Google's own error, plus the narrower `--services` command for the
   services that already work;

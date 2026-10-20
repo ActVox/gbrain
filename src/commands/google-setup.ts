@@ -72,7 +72,7 @@ export async function runGoogleSetup(args: string[]): Promise<void> {
           'Then re-run: gbrain google setup', ...(narrower ? [`Or set up only the services it can reach now: ${narrower}`] : [])].join('\n') + '\n'
           + agentBlock({ why: fix.why, actor: fix.actor, next: fix.next, verify: 'gbrain google status --json' }, { showUser: fix.user_message ?? '' }));
       }
-      setCliExitVerdict(3);
+      setCliExitVerdict(2);
       return;
     }
   }

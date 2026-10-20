@@ -114,7 +114,7 @@ describe('#7073 gbrain google status probes every service at once', () => {
 });
 
 describe('#7073 gbrain google setup probes before registering anything', () => {
-  test('two disabled APIs and an ungranted scope stop setup with one report and exit 3', async () => {
+  test('two disabled APIs and an ungranted scope stop setup with one report and exit 2', async () => {
     disabledApis = new Set(['gmail', 'people']);
     const dir = home(SCOPES.filter(s => !s.includes('calendar')));
     const r = await withEnv(env(dir), () => run(() => runGoogleSetup(['--json'])));
@@ -122,7 +122,7 @@ describe('#7073 gbrain google setup probes before registering anything', () => {
     expect(body).toMatchObject({ ok: false, status: 'api_access_blocked' });
     expect(body.api_access.problems.map(p => `${p.service}:${p.code}`)).toEqual(['gmail:api_not_enabled', 'calendar:scope_missing', 'contacts:api_not_enabled']);
     expect(body.api_access.fix.next).toBe('ask_user');
-    expect(r.verdict).toBe(3);
+    expect(r.verdict).toBe(2);
   });
 
   test('human output names every API and the narrower setup, with the fix in one [SHOW USER] relay', async () => {
@@ -133,7 +133,7 @@ describe('#7073 gbrain google setup probes before registering anything', () => {
     expect(r.err).toContain(`People API (people.googleapis.com) is disabled for Google Cloud project ${PROJECT}. Enable it: ${enableUrl('people.googleapis.com')}`);
     expect(r.err).toContain(`gbrain google setup --account ${ACCOUNT} --services gmail,calendar`);
     expect(r.err).not.toContain('Registered source');
-    expect(r.verdict).toBe(3);
+    expect(r.verdict).toBe(2);
   });
 
   test('every API reachable: setup continues past the probe to the brain step', async () => {
