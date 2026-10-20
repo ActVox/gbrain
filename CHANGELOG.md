@@ -10,34 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.327.0] - 2026-10-20
+## [0.60.326.0] - 2026-10-20
 
-**Facts keep their words again, and a brain whose facts already lost them can get them back. The embed sweep for changed chunks now finishes on large brains.** Fact extraction ran the prompt-injection filter over the text it saved, and one rule matched the word "System" before a parenthesis, so "Acme Business System (ABS)" was saved as "Acme Business [redacted](ABS)" in the fact, its page's `## Facts` fence and its search chunks. Separately, the sweep that re-embeds chunks whose text changed was one statement over the whole brain; on a large brain it hit the statement timeout every run, from embed jobs and from the hourly maintenance pass, and kept nothing.
+**Managed sync works on Postgres 15 again, and a database error in a write receipt now says what failed.** On a Postgres 15 brain every managed sync stopped at its checkpoint with `storage_error` (PostgreSQL 42601, `syntax_error`), run after run, because the statement that merges `sources.config` used the `IS JSON` predicate, which only Postgres 16 and newer parse. The receipt kept only the error class and SQLSTATE, so nobody could tell which statement failed. Both are fixed. A new CI lane now runs the write, sync, jobs and migration suites on Postgres 15 for every full run, and a unit-tier check refuses Postgres 16+ only SQL in `src/`.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| A fact names "Business System (ABS)" or similar | saved as "Business [redacted](ABS)" | saved as written; the filter rule matches only a code call such as `os.system("…")` |
-| A stored fact holding an injection phrase reaches a model prompt (standing questions, turn context, proactive briefs) | sent as stored | the phrase is neutralized in the prompt copy; the stored fact is unchanged |
-| Facts damaged before this release | stayed damaged | doctor `facts_redaction_marker` counts them; `gbrain repair redacted-facts` previews each restoration a source page proves, and `--apply --expect <hash>` writes exactly that set |
-| The content-drift embed sweep on a large brain | one statement over every chunk; cancelled by the statement timeout on every run | 5,000-chunk batches with a saved cursor, at most 60 seconds per run, a new pass once a day (`embed.content_drift.pass_interval_hours`, default 24) |
+| Managed sync, put_page with a slug-root mode, source config updates, archive/restore and the shared-skills opt-out on Postgres 15 | every statement that merges `sources.config` failed to parse (42601); the managed sync checkpoint never committed | the merge uses `gbrain_try_jsonb(text)` (migration v263), which parses on Postgres 15, 16 and 17 and PGLite |
+| Doctor `jsonb_integrity` and `gbrain repair-jsonb` on Postgres 15 | `pg_input_is_valid` (Postgres 16+) failed the check | the same `gbrain_try_jsonb` guard |
+| A double-encoded config or dream-breaker map whose text is JSON but not jsonb (a `\u0000` escape) | passed `IS JSON`, then the cast raised and the whole update failed, on every server | reads as an empty object, like other unparseable text |
+| A write that failed on an unexpected database error | the receipt named the class and SQLSTATE only | owner-side the receipt also keeps `error_text` (the server message; object names survive only in known catalog messages or when the statement names them, any other quoted run is replaced by `…`), `statement` (the SQL's keywords, identifiers and operators, every literal, number and comment replaced, never parameters) and `position`; `gbrain write-request <id> --json` on the brain host prints `error_detail`, and the consumer log line carries the same fields |
 
 ### What to watch for after you upgrade
 
-- Nothing is repaired on upgrade. Run `gbrain doctor --only facts_redaction_marker`; if it warns, `gbrain repair redacted-facts` shows what it can restore and changes nothing until you apply the printed command.
-- The repair restores a fact only when the words on both sides of every marker occur in a page the fact came from. A fact with no such page, with two possible spans, or with its row in the fence of a page stored in segments is listed and left for you to edit by hand.
-- A restored database-only fact gets `restored: redacted-facts repair` appended to its context, and its vector is re-embedded by the next `gbrain embed`.
-- On a large brain the first drift pass now spans several runs; `gbrain doctor --only content_drift_sweep` shows each pass, its cursor and any error.
+- On Postgres 15 the first sync after the upgrade publishes the checkpoint that kept failing. The failed checkpoint receipts from before then count as superseded and stop warning; nothing needs replaying.
+- Remote and agent readers of a receipt see no new field. A PL/pgSQL `RAISE` (a trigger refusal) keeps no text, because it can carry page values.
+- #6719's older `0A000` receipts were written before error text was stored, so their cause stays unknown; once a later checkpoint of the source commits they count as historical (since #6834). A new failure of that kind now records its statement.
 
 ### Itemized changes
 
-- New repair kind `redacted-facts` (explicit-only, preview-bound) and maintenance intent `managed_maintenance_restore_redacted_facts`.
-- New doctor checks `facts_redaction_marker` and `content_drift_sweep`; new setting `embed.content_drift.pass_interval_hours`.
-- Embed and embed-backfill job results report the sweep's state (`content_drift`).
-- Google loops and `gbrain enrich` keep the raw text and quote instead of the filtered copy.
-
-Reported by @mje-xyz (#7125) and @DaCal90 (#7117).
+- New SQL function `gbrain_try_jsonb(text) RETURNS jsonb` (schema.sql and migration v263), used by the `sources.config` normalizer (`src/core/source-config-sql.ts`), the dream-breaker reset, doctor `jsonb_integrity` and `gbrain repair-jsonb`.
+- `ownerExceptionFailure` keeps a server-generated database error's redacted `error_text`, `statement` and `position`; `get_write_request` returns `error_detail` to trusted local callers only.
+- CI: an E2E job `postgres15-compat` runs `scripts/e2e-postgres15.txt` on `pgvector/pgvector:pg15` wherever the gated E2E jobs run and gates `e2e-status` (so `e2e-full-suite`); `bun run ci:ubicloud --lanes pg-arms,e2e --pg-image pgvector/pgvector:pg15` reruns the whole corpus on Postgres 15 as a diagnostic; `test/postgres15-sql-compat-7112.test.ts` fails on Postgres 16+ only SQL in `src/`.
+- Reported by @Justinn231 (#7112, who found the failing statement in the server log) and @Kkkkkuro (#6719).
 
 ## [0.60.325.0] - 2026-10-20
 
