@@ -2541,6 +2541,16 @@ Reasons: `not_owner_host`, `not_applicable`.
 
 More: [docs/guides/repair.md#ghost-pages](../../docs/guides/repair.md#ghost-pages)
 
+### notifier_stalled
+
+<a id="notifier_stalled"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The commit notifier kept a source due through every retry tier (5 s, 15 s, 1 min, 5 min) without the sync making progress; it keeps retrying every 5 minutes. | A commit-triggered sync failed or was refused the same way on every attempt, so the commit is still not searchable; the notifier block in gbrain sync status names the last error and the trace file with every attempt. | Run gbrain sync --source <id> --no-pull in the foreground to see the error, fix its cause, then read gbrain sync status --source <id> --json (the notifier block) to confirm the source is current. | agent | `repeat the read that failed` | 1 | yes |
+
+More: [docs/guides/on-commit-sync.md#notifier-stalled](../../docs/guides/on-commit-sync.md#notifier-stalled)
+
 ### origin_twin_mass_merge_refused
 
 <a id="origin_twin_mass_merge_refused"></a>
@@ -3194,6 +3204,16 @@ More: [docs/guides/write-refusals.md#refresh_not_managed](../../docs/guides/writ
 | This process does not own the worktree it would refresh. | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
 
 More: [docs/guides/write-refusals.md#refresh_not_owner](../../docs/guides/write-refusals.md#refresh_not_owner)
+
+### refresh_required
+
+<a id="refresh_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A GitHub push arrived for a managed source: a managed source never pulls, so the pushed commit is recorded as wanted and waits for a refresh. | Managed sync imports the checkout's own HEAD; remote commits come in through gbrain sources refresh, which updates the worktree under the writer lock. The push's commit is kept as a wanted marker until the source reaches it. | Run gbrain sources refresh <id> on the brain host, then gbrain sync --source <id> --no-pull (a resident notifier runs the sync on its own). | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/on-commit-sync.md#refresh-required](../../docs/guides/on-commit-sync.md#refresh-required)
 
 ### refresh_source_changed
 
