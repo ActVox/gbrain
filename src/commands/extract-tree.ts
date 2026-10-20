@@ -12,6 +12,7 @@ import { pathToSlug, pruneDir, isSyncable } from '../core/sync.ts';
 /** The walk behind `walkMarkdownFiles`, in its order; yields after each directory it finishes. */
 export function* markdownWalk(dir: string, d: string, emit: (file: { path: string; relPath: string }) => void): Generator<void> {
   for (const entry of readdirSync(d)) {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- d is the walk's own directory (the brain root or one of its subdirectories, never a symlink: lstat below) and entry is a directory entry read from it; moved unchanged from extract.ts walkMarkdownFiles
     const full = join(d, entry);
     try {
       const st = lstatSync(full);
