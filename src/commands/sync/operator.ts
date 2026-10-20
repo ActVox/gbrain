@@ -24,8 +24,10 @@ export function printSyncStatusHelp(): void {
   console.log(`Usage: gbrain sync status --source <id> [--detail] [--json]
 
 Where a managed catch-up stands and what to do next, for an operator agent:
-the cursor (index/total, pinned target, last advance), pages committed in the
-last 10 minutes, every held file and the last recorded failure, each with
+the newest sync pass (convergence: outcome, round, candidates, settled,
+remaining, classes) or, for a company-brain source, the cursor (index/total,
+pinned target, last advance), pages committed in the last 10 minutes, every
+held file and the last recorded failure, each with
   class         page | connection | systemic
   safe_actions  retry | retry_when_clean | repair | reconcile | upgrade | none
   needs_human   whether a person has to decide or act (human_reason says why)
@@ -44,6 +46,16 @@ The loop: run this every few minutes; when committed_last_10m is 0 and
 needs_human is false, run \`gbrain sync unblock --source <id> --apply\`, then
 the sync it prints; when needs_human is true, page a person with the slug it
 names; when a *_read field is not_read and you need it, run its fix.
+
+convergence.classes counts the newest round's paths by class, each with an
+action (who finishes it):
+  none    matched, adopt, kept, untracked, gone, deleted_same, legacy_same, db_ahead
+  owner   sync finishes it: in_flight, import, reparse, delete, keep_db,
+          keep_db_pending, legacy_unverified, paused_keep_db
+  repair  a person decides: held, drift, delete_drift, deleted_edited, dirty,
+          spelling, deletes_withheld
+Committed mode reads a file's working-copy dirtiness only for candidates, so
+dirty counts only paths sync would otherwise admit.
 
 Decision table: docs/guides/sync-unblock-runbook.md
 `);
@@ -190,6 +202,13 @@ export function syncStatusHeadline(status: Pick<SyncStatus, 'source_id' | 'state
     case 'needs_human': return `Source ${status.source_id} is blocked: a person has to decide (see NEEDS HUMAN below).`;
     case 'head_blocked': return `Source ${status.source_id} is blocked: its oldest write waits on something only an operator clears.`;
     case 'recovery_blocked': return `Source ${status.source_id} is blocked: a write's recovery record found changed bytes on disk.`;
+    case 'pass_unfinished': return `Source ${status.source_id} is resumable: the newest sync pass did not finish; the next sync continues it.`;
+    case 'not_converged': return `Source ${status.source_id} is resumable: the newest sync pass ran out of rounds before every path settled.`;
+    case 'settle_mismatch': return `Source ${status.source_id} is resumable: a path keeps settling without reading settled; three passes in a row hold it.`;
+    case 'deletes_withheld': return `Source ${status.source_id} is blocked: sync withheld a mass delete; the rest of the source is synced.`;
+    case 'selection_scoped': return `Source ${status.source_id} is synced at a narrower selection; the plain sync runs the configured one.`;
+    case 'admission_paused': return `Source ${status.source_id} is resumable: sync.admission pauses what sync admits.`;
+    case 'writeback_failed': return `Source ${status.source_id} is blocked: the Git effect of a file sync rewrote failed and is parked; the checkout lags the brain.`;
   }
 }
 
