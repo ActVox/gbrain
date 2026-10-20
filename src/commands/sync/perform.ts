@@ -12,6 +12,7 @@ import {
 } from '../../core/minions/source-filesystem.ts';
 import { currentJobSignal, currentSubmissionAuthority } from '../../core/minions/submission-authority.ts';
 import { currentCompanyBrainSync, getCompanyBrainProfile } from '../../core/company-brain/profile.ts';
+import { endSyncDispatchRead, syncDispatchRow } from '../../core/sync-dispatch-read.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import type { OperationContext } from '../../core/ops/contract.ts';
 import { refreshProjectionStatistics } from '../../core/search/projection-statistics.ts';
@@ -51,11 +52,14 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   };
   const company = !opts.signal?.aborted && opts.sourceId && !currentCompanyBrainSync(opts.sourceId) && await getCompanyBrainProfile(engine, opts.sourceId);
   assertSyncDispatchActive();
+  const mayBeConnector = managed && await mayBeConnectorSource(engine, opts);
+  // GBRA-133: the route is chosen; the work reads live (core/sync-dispatch-read.ts).
+  endSyncDispatchRead();
   if (company) {
     if (opts.signal?.aborted) return finish(await interruptedBeforeWork());
     return (await import('../../core/company-brain/runtime.ts')).performCompanyBrainSync(engine, opts);
   }
-  if (managed) {
+  if (mayBeConnector) {
     const connector = await runConnectorSync(engine, opts, true);
     if (connector) return connector;
   }
@@ -101,6 +105,17 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     }
     throw err;
   }
+}
+
+/** Whether `runConnectorSync` may sync this source: false only when the routing row shows a source it returns null for. */
+async function mayBeConnectorSource(engine: BrainEngine, opts: SyncOpts): Promise<boolean> {
+  const routing = opts.sourceId && !opts.githubItem && !opts.resetCheckpoint ? await syncDispatchRow(engine, opts.sourceId) : undefined;
+  if (!routing) return true;
+  if (routing.id === null) return false;
+  try {
+    const config = typeof routing.config === 'string' ? JSON.parse(routing.config) : routing.config ?? {};
+    return config.kind === 'google' || config.kind === 'github';
+  } catch { return true; }
 }
 
 /**
