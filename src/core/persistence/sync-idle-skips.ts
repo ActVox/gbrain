@@ -15,7 +15,7 @@ import { currentDrainLease } from './sync-lease.ts';
 
 /** Each settle an idle-clear tick skips, with why it has nothing to do then. */
 export const IDLE_SKIPS = {
-  hold_report: 'no hold of the incarnation and a zero hold summary, so buildHoldReport returns no fields',
+  hold_report: 'no hold of the incarnation and a zero hold summary, so buildHoldReport returns no fields (performManagedPass reads lease.idleClear itself)',
   settled_failures: 'no managed-sync-failure row of the source and no ledger row of the source, so nothing is cleared, settled or pruned',
   needs_human_sweep: 'no hold of the incarnation, so no hold turns needs_human and no soak event is counted',
   sync_tail: 'the pin read no owed tail under the lease (tailClear), so withSyncTail reads none',

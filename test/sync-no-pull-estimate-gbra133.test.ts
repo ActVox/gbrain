@@ -1,9 +1,9 @@
 /**
- * GBRA-133 PR 2b (lane D's run.ts hunk): \`gbrain sync --no-pull\` syncs local HEAD, so its inline cost estimate prices
+ * GBRA-133 PR 2b (lane D's run.ts hunk): `gbrain sync --no-pull` syncs local HEAD, so its inline cost estimate prices
  * local HEAD and runs no git fetch. The control (the same command without --no-pull) fetches, so the check is not
  * vacuous. The sync is stopped right after the cost gate, before it would pull.
  */
-import { afterAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,7 +17,9 @@ import { withEnv } from './helpers/with-env.ts';
 import { chunkerStamp } from '../src/core/chunkers/code.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-no-pull-estimate-'));
-afterAll(() => { resetGateway(); rmSync(home, { recursive: true, force: true }); });
+let engine: PGLiteEngine;
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
+afterAll(async () => { resetGateway(); await engine?.disconnect(); rmSync(home, { recursive: true, force: true }); });
 const sh = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', ...args], { cwd, encoding: 'utf8' }).trim();
 const page = (name: string) => '---\ntitle: ' + name + '\n---\nA note about acme-example named ' + name + '.\n';
 
@@ -30,8 +32,6 @@ test('gbrain sync --no-pull runs no git fetch during the cost estimate; without 
   const base = sh(local, 'rev-parse', 'HEAD');
   writeFileSync(join(writer, 'b.md'), page('b')); sh(writer, 'add', '-A'); sh(writer, 'commit', '-qm', 'b'); sh(writer, 'push', '-q', 'origin', 'HEAD:main');
 
-  const engine = new PGLiteEngine();
-  await engine.connect({}); await engine.initSchema();
   await engine.executeRaw("INSERT INTO sources(id,name,local_path,config,last_commit,chunker_version) VALUES('estimate','estimate',$1,'{}',$2,$3)", [local, base, chunkerStamp()]);
   const fetches = spyOn(gitRemote, 'fetchRemote');
   const real = embedBackfill.resolveSingleSyncEmbedPlan;
@@ -55,6 +55,5 @@ test('gbrain sync --no-pull runs no git fetch during the cost estimate; without 
     });
   } finally {
     fetches.mockRestore(); gate.mockRestore();
-    await engine.disconnect();
   }
 }, 60_000);

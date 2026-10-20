@@ -616,7 +616,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
   const remote = authority.writer.remote;
   const lease = currentDrainLease(sourceId);
   if (!lease) throw new Error(`The live sync pass of ${sourceId} runs only under the source's drain lease.`);
-  lease.tailClear = false;
+  lease.tailClear = false; lease.idleClear = false;
   const started = Date.now(), startedAt = new Date(started).toISOString();
   const pinned = await pinPass(engine, input, lease, started);
   if (pinned.ended) return pinned.ended;
