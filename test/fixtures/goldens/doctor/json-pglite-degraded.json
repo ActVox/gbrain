@@ -1529,6 +1529,18 @@
           "status": "ok"
         },
         {
+          "category": "ops",
+          "details": {
+            "count": 0,
+            "docs": "docs/guides/google-connect.md#api-access",
+            "sources": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No Google source recorded a disabled API or missing scope at its last sync.",
+          "name": "google_api_access",
+          "status": "ok"
+        },
+        {
           "category": "brain",
           "details": {
             "by_source": [],
@@ -1602,6 +1614,18 @@
           "elapsed_ms": "<volatile>",
           "message": "No active fact from a gbrain self-capture or paste candidate remains. This counts facts in the database; the self_capture check counts corpus files.",
           "name": "captured_facts_active",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "affected": 0,
+            "docs": "docs/guides/repair.md#redacted-facts",
+            "repair": "redacted-facts"
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No active fact holds a redaction marker.",
+          "name": "facts_redaction_marker",
           "status": "ok"
         },
         {
@@ -1900,6 +1924,18 @@
           "elapsed_ms": "<volatile>",
           "message": "No automatic embed-backfill is repeating the same failure.",
           "name": "embed_backfill_stalled",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "code": "content_drift_sweep",
+            "docs": "docs/guides/troubleshooting.md#content-drift-sweep",
+            "scopes": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "The content-drift sweep has not run yet; it runs inside embed --stale and the embed jobs.",
+          "name": "content_drift_sweep",
           "status": "ok"
         },
         {

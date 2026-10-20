@@ -60,6 +60,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #7013: atoms an empty managed re-extraction retired that atoms-restore can bring back (doctor/checks/atom-retirements.ts).
   'atom_retirements_restorable',
   'captured_facts_active',
+  // #7125: facts whose stored text holds a pre-fix sanitizer redaction marker (doctor/checks/facts-redaction-marker.ts).
+  'facts_redaction_marker',
   'conversation_label_facts',
   'conversation_outcomes_stale',
   'connector_checkpoints',
@@ -282,6 +284,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'google_file_modes',
   // #5012 item 9: a Google source's configured calendar was unreadable at its last sync (doctor/checks/google-calendar.ts).
   'google_calendar_readable',
+  // #7073: a Google source's last sync could not reach a service (API disabled, scope not granted) (doctor/checks/google-api-access.ts).
+  'google_api_access',
   'google_oauth',
   'home_dir_in_worktree',
   'index_audit',
@@ -345,6 +349,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   // GBRA-130 C-6: no completed brain-wide pass while jobs fail or a phase keeps blocking it.
   'global_maintenance_stalled',
   'embed_backfill_stalled',
+  // #7117: the content-drift sweep's latest batch failed.
+  'content_drift_sweep',
   'connector_account_mismatch',
   // #5157: queued jobs from before the v0.50 authority cutover block every worker.
   'legacy_job_authority',
