@@ -62,6 +62,17 @@ describe('where filter (#7159)', () => {
     expect(rows.map(r => r.slug)).toEqual(['deals/acme-example', 'deals/gamma-example']);
   });
 
+  test('list_pages slug_prefix is a literal prefix, composes with type, where and sort, and stays private-filtered', async () => {
+    expect((await run('list_pages', { slug_prefix: 'deals/' }, true)).slugs).toEqual(['deals/acme-example', 'deals/beta-example', 'deals/gamma-example']);
+    expect((await run('list_pages', { slug_prefix: 'deals/' }, false)).slugs).toContain('deals/private-example');
+    expect((await run('list_pages', { slug_prefix: 'deal%' }, true)).slugs).toEqual([]);
+    expect((await run('list_pages', { slug_prefix: 'deals_' }, true)).slugs).toEqual([]);
+    const ctx = searchCtx(engine, true);
+    const rows = await op('list_pages').handler(ctx as never, { type: 'deal', slug_prefix: 'deals/', where: { stage: 'seed' }, sort: 'slug', updated_after: '2000-01-01' }) as Array<{ slug: string }>;
+    expect(rows.map(r => r.slug)).toEqual(['deals/acme-example', 'deals/gamma-example']);
+    expect(parseOpArgs(op('list_pages') as never, ['--slug-prefix', 'deals/', '--sort', 'slug']).slug_prefix).toBe('deals/');
+  });
+
   test('an invalid key or value is invalid_params on every op', async () => {
     for (const name of ['search', 'query', 'list_pages']) {
       for (const where of [{ 'bad key': 'x' }, { "k'); DROP TABLE pages; --": 'x' }, { stage: [] }, { stage: { nested: 1 } }, 'stage=seed', ['stage']]) {

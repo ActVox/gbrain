@@ -519,6 +519,7 @@ const list_pages: Operation = {
       enum: [...LIST_PAGES_SORT_VALUES],
     },
     include_deleted: { type: 'boolean', description: 'Include soft-deleted pages.' },
+    slug_prefix: { type: 'string', description: "Slugs starting with this literal text, e.g. 'deals/' (% and _ match themselves)." },
     where: WHERE_PARAM,
     // #4400 — list_pages had no source-scoping param at all: unlike
     // search/query it silently ignored any caller-supplied source and always
@@ -614,6 +615,7 @@ const list_pages: Operation = {
       excludePrivate,
       listColumnsOnly: true,
       where: whereOpParam(ctx, 'list_pages', p.where),
+      ...(typeof p.slug_prefix === 'string' && p.slug_prefix ? { slugPrefix: p.slug_prefix } : {}),
       ...scope,
     }).catch((e: unknown) => {
       // #6103: an updated_after the database cannot parse is the caller's input, not a server fault.

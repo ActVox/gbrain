@@ -2940,7 +2940,7 @@ const OP_HELP_EXAMPLES: Record<string, string[]> = {
   ],
   search: ['gbrain search "acme-example pricing" --types company,deal --where stage=seed  # --where key=value, repeat for AND; key=a,b matches any', 'gbrain search "acme-example pricing" --json --timings  # {results, timings_ms, cost}'],
   query: ['gbrain query "what changed at acme-example" --types meeting --since 2026-01-01 --until 2026-03-31', 'gbrain query "open deals" --where stage=seed,series-a --json --timings'],
-  list_pages: ['gbrain list --type deal --where stage=seed --where partner=alice-example --updated-after 2026-01-01 --sort updated_asc'],
+  list_pages: ['gbrain list --type deal --slug-prefix deals/ --where stage=seed --updated-after 2026-01-01 --sort updated_asc'],
   // #6255: the receipt command's routing flags and states.
   get_write_request: ['gbrain write-request --brain host -- <request_id> [--json]  # queued/running: pending, read again after retry_after_ms; committed/conflict/failed/cancelled: final'],
   traverse_graph: [

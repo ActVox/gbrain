@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 253571,
-    "stdoutSha256": "31c6500d8507ce0715716ce0fe98260cc3e9ca6a68224775308bdab5325add64",
+    "stdoutBytes": 253788,
+    "stdoutSha256": "aced261f1a8bf90d1fc1c3d32e7cf472997f3bfafba85d9c7a6890c639b7a5fa",
     "toolNames": [
       "remember",
       "entity",
@@ -718,7 +718,7 @@
         "scope": "write"
       },
       {
-        "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row. Filters: type, tag, updated_after, where (frontmatter fields); sort: updated_desc, updated_asc, created_desc, slug.",
+        "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row. Filters: type, tag, slug_prefix, updated_after, where (frontmatter fields); sort: updated_desc, updated_asc, created_desc, slug.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -727,6 +727,7 @@
           "include_deleted": "boolean?",
           "limit": "number?",
           "offset": "number?",
+          "slug_prefix": "string?",
           "sort": "string?",
           "source_id": "string?",
           "tag": "string?",
@@ -749,6 +750,10 @@
             "offset": {
               "description": "Rows to skip.",
               "type": "number"
+            },
+            "slug_prefix": {
+              "description": "Slugs starting with this literal text, e.g. 'deals/' (% and _ match themselves).",
+              "type": "string"
             },
             "sort": {
               "description": "Default updated_desc.",

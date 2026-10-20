@@ -512,7 +512,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "list_pages",
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row. Filters: type, tag, updated_after, where (frontmatter fields); sort: updated_desc, updated_asc, created_desc, slug.",
+    "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row. Filters: type, tag, slug_prefix, updated_after, where (frontmatter fields); sort: updated_desc, updated_asc, created_desc, slug.",
     "params": {
       "type": {
         "type": "string",
@@ -551,6 +551,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "include_deleted": {
         "type": "boolean",
         "description": "Include soft-deleted pages."
+      },
+      "slug_prefix": {
+        "type": "string",
+        "description": "Slugs starting with this literal text, e.g. 'deals/' (% and _ match themselves)."
       },
       "where": {
         "type": "object",
