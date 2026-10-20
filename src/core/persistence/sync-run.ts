@@ -1525,9 +1525,7 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
         assertSyncDispatchActive(); stampDrainStep('await_receipt', signal);
         // #5762: a checkpoint's validation runs under the coordinator's 5 s statement timeout, so its wait outlasts that
         // budget; a timed-out checkpoint then reports its terminal refusal and hint in this run instead of the next.
-        // #5984: a drain re-enters anyway, so it waits longer per page instead of paying a full re-entry. The run's stop signal
-        // bounds every wait: an aborted run reads the receipt once and returns, and an accepted write it did not see commit
-        // stays queued under its request id for the next run.
+        // #5984: a drain re-enters anyway, so it waits longer per page instead of paying a full re-entry; the stop signal bounds every wait (awaitWrite).
         const waited = await awaitWrite(engine, row, config, opts.drainStartedAt ? { waitMs: 30_000, signal } : { waitMs: pending.intent.kind === 'managed_sync_checkpoint' ? 8000 : 5000, signal, ...whileHeld });
         const done = waited.row;
         assertSyncDispatchActive();
