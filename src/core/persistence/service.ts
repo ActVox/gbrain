@@ -206,6 +206,12 @@ export const BLOCKED_WRITE_REASONS = ['recovery_required', 'owner_unavailable', 
 const FATAL_READ_REASONS: readonly PgAccessReason[] = ['auth_failed', 'permission_denied', 'tenant_not_found', 'db_missing', 'schema_missing', 'storage_corrupt'];
 /** CEO-A7: the first poll waits this long (at most half the wait) for an in-process handoff, or not at all when this process already settled the request; later polls back off from 50 to 250 ms. */
 export const WRITE_POLL_START_MS = 200;
+/**
+ * A request this process's consumer holds reaches its waiter by handoff, after the publication's post-commit work (a
+ * segmented page's projection) ends. In the last this-many ms of the wait the waiter reads the receipt anyway, so a write
+ * that committed while that work still runs is reported committed, never write_pending.
+ */
+export const HELD_RECHECK_MS = 1000;
 export type WriteWait =
   | { kind: 'terminal' | 'pending'; row: WriteRequest }
   | { kind: 'blocked'; row: WriteRequest; request_id: string; cause: typeof BLOCKED_WRITE_REASONS[number]; command: string }
@@ -250,7 +256,7 @@ export async function awaitWrite(engine: BrainEngine, row: WriteRequest, config:
       });
       if (handed || service.stopping || opts.signal?.aborted || performance.now() >= deadline) continue;
       delay = delay === firstPoll ? 50 : Math.min(250, delay * 2);
-      if (consumer.holds(id)) continue;
+      if (consumer.holds(id) && deadline - performance.now() > HELD_RECHECK_MS) continue;
       const read = await readProgress(engine, id, deadline - performance.now());
       if ('cancelled' in read) continue;
       if ('error' in read) {

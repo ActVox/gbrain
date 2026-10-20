@@ -16,7 +16,9 @@
  *    batches over a segment, or a drifted file is taken for a match.
  * 3. Existing coverage: page-purge-segments.test.ts purges on a source with
  *    no worktree, so no file is compared; no test restores such a page.
- * 4. No production seam: bodyDigestWork is the module's own work counter.
+ * 4. No production seam: bodyDigestWork is the module's own work counter. On a loaded host an import's projection can
+ *    outlast its wait, which then replies committed while the consumer still projects; importHuge waits that out (the
+ *    consumer's stop) so the counted segment reads and the timed writes that follow are the drift check's alone.
  * Runs on PGLite, and on Postgres when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
@@ -89,6 +91,7 @@ async function importHuge(engine: BrainEngine, f: Fixture, slug: string): Promis
   const [row] = await engine.executeRaw<{ body_storage: string; body_bytes: string }>('SELECT body_storage, body_bytes::text AS body_bytes FROM pages WHERE source_id=$1 AND slug=$2', [f.sourceId, slug]);
   expect(row?.body_storage).toBe('segmented');
   expect(Number(row?.body_bytes)).toBeGreaterThan(PAGE_MAX_BYTES);
+  await disposePersistenceConsumer(engine);
   return file;
 }
 
