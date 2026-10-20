@@ -555,7 +555,8 @@ async function extractAffectedPages(run: SyncRun, plan: Pick<SyncPlan, 'opts' | 
   let extractError: string | undefined;
   if (!opts.noExtract && totalChanges <= 100 && pagesAffected.length > 0) {
     try {
-      const { extractLinksForSlugs, extractTimelineForSlugs, indexMarkdownTree, stampExtracted, slugsSafeToStamp } = await import('../extract.ts');
+      const { extractLinksForSlugs, extractTimelineForSlugs, stampExtracted, slugsSafeToStamp } = await import('../extract.ts');
+      const { indexMarkdownTree } = await import('../extract-tree.ts');
       // #774: pages' source_path is git-root-relative, so extract resolves
       // files from gitContextRoot (== repoPath realpath when unscoped).
       // GBRA-133 2b.1: one tree walk per run, shared by both hooks.

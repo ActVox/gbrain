@@ -38,7 +38,7 @@
  * whole corpus through getPage.
  */
 
-import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
 import { join, relative, dirname } from 'path';
@@ -76,7 +76,8 @@ import { managedPersistenceEnabled } from '../core/persistence/ownership.ts';
 import { addProjectedTimelineBatch, addProjectedTimelineEntry } from '../core/trust/timeline-projection.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
-import { pathToSlug, slugifyPath, slugifySegment, pruneDir, isSyncable } from '../core/sync.ts';
+import { pathToSlug, slugifyPath, slugifySegment } from '../core/sync.ts';
+import { indexMarkdownTree, indexSlugPath, markdownWalk, withEndpointPageTypes, type MarkdownTree, type PageTypeLookup } from './extract-tree.ts';
 // v0.41.18.0: withRetry + isRetryableConnError + WithRetryOpts moved to
 // src/core/retry.ts as the canonical primitive. Engine methods
 // (addLinksBatch/addTimelineEntriesBatch/upsertChunks) now self-retry via
@@ -300,50 +301,6 @@ export function walkMarkdownFiles(dir: string): { path: string; relPath: string 
   return files;
 }
 
-/** The walk behind `walkMarkdownFiles`, in its order; yields after each directory it finishes. */
-function* markdownWalk(dir: string, d: string, emit: (file: { path: string; relPath: string }) => void): Generator<void> {
-  for (const entry of readdirSync(d)) {
-    const full = join(d, entry);
-    try {
-      const st = lstatSync(full);
-      if (st.isDirectory()) {
-        // v0.37.7.0 #1169: pass parentDir so pruneDir can detect git
-        // submodule pointers (`.git` as a file inside the candidate).
-        if (!pruneDir(entry, d)) continue;
-        yield* markdownWalk(dir, full, emit);
-      } else if (entry.endsWith('.md') && !entry.startsWith('_')) {
-        const rel = relative(dir, full);
-        if (!isSyncable(rel, { strategy: 'markdown' })) continue;
-        emit({ path: full, relPath: rel });
-      }
-    } catch { /* skip unreadable */ }
-  }
-  yield;
-}
-
-/** A source tree as the sync hooks read it: `walkMarkdownFiles` entries with their slugs, and `buildSlugPathIndex` of them. */
-export interface MarkdownTree { files: Array<{ path: string; relPath: string; slug: string }>; slugToPath: Map<string, string> }
-
-/**
- * GBRA-133 2b.1/2b.3: `walkMarkdownFiles` plus `buildSlugPathIndex` for a sync, the same entries in the same order,
- * yielding to the event loop after each directory, so a resident's commit-triggered sync never holds its event loop
- * for the whole walk (about 0.75 s at 100k files). The sync hooks share one tree per run.
- */
-export async function indexMarkdownTree(dir: string): Promise<MarkdownTree> {
-  const tree: MarkdownTree = { files: [], slugToPath: new Map() };
-  const emit = (file: { path: string; relPath: string }) => {
-    const slug = pathToSlug(file.relPath);
-    tree.files.push({ ...file, slug });
-    indexSlugPath(tree.slugToPath, slug, file.relPath);
-  };
-  for (const _ of markdownWalk(dir, dir, emit)) await new Promise<void>(resolve => setImmediate(resolve));
-  return tree;
-}
-
-function indexSlugPath(index: Map<string, string>, slug: string, relPath: string): void {
-  if (!index.has(slug) || relPath === `${slug}.md`) index.set(slug, relPath);
-}
-
 /**
  * Slug → real on-disk relPath, for every markdown file under a brain dir.
  *
@@ -518,9 +475,6 @@ async function loadSourceLinkPacks(engine: BrainEngine, sourceIds: string[], pac
   }
 }
 
-/** What link extraction reads a page type through: a whole-tree map (full `gbrain extract`) or the sync hook's endpoint lookup. */
-export type PageTypeLookup = Pick<ReadonlyMap<string, string>, 'get'>;
-
 function loadFsPageTypes(files: ReadonlyArray<{ path: string; relPath: string }>, pack: LinkExtractionPack | null): Map<string, string> {
   const types = new Map<string, string>();
   const activePack = pack?.page_types ? { page_types: pack.page_types } : undefined;
@@ -529,38 +483,6 @@ function loadFsPageTypes(files: ReadonlyArray<{ path: string; relPath: string }>
     catch { types.set(pathToSlug(file.relPath), 'unknown'); }
   }
   return types;
-}
-
-/**
- * GBRA-133 2b.1: the sync hook's page types, parsed from the files of the link endpoints its pages actually look up
- * instead of from every file in the tree (`loadFsPageTypes`, which full `gbrain extract` keeps). `pass` runs the
- * extraction against the lookup; a walked slug it asks for and has no type yet is recorded, its file parsed, and the
- * pass repeated until one asks for nothing new (an answer can make extraction ask for more, e.g. a person target
- * prompts the attendance candidates). Each answer is what `loadFsPageTypes` gives that slug: the parse under the
- * active pack, `unknown` when the file cannot be read, and the last walked file on a slug collision. So the links
- * match the whole-tree parse, held and never-imported targets included, and a pack page-type change applies at once.
- */
-export async function withEndpointPageTypes<T>(repoPath: string, tree: MarkdownTree, pack: LinkExtractionPack | null,
-  pass: (pageTypes: PageTypeLookup) => Promise<T>): Promise<T> {
-  const { files, slugToPath } = tree;
-  const lastWalked = slugToPath.size === files.length ? null : new Map(files.map(file => [file.slug, file.relPath]));
-  const activePack = pack?.page_types ? { page_types: pack.page_types } : undefined;
-  const types = new Map<string, string>();
-  for (;;) {
-    const missing = new Set<string>();
-    const result = await pass({ get: (slug) => {
-      const type = types.get(slug);
-      if (type === undefined && slugToPath.has(slug)) missing.add(slug);
-      return type;
-    } });
-    if (!missing.size) return result;
-    for (const slug of missing) {
-      const relPath = lastWalked?.get(slug) ?? slugToPath.get(slug)!;
-      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- relPath is an entry of the walkMarkdownFiles(repoPath) walk the caller indexed, never caller input
-      try { types.set(slug, parseMarkdown(readFileSync(join(repoPath, relPath), 'utf-8'), relPath, { activePack }).type); }
-      catch { types.set(slug, 'unknown'); }
-    }
-  }
 }
 
 /**
