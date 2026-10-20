@@ -756,7 +756,7 @@
         "",
         "Examples:",
         "  gbrain query \"what changed at acme-example\" --types meeting --since 2026-01-01 --until 2026-03-31",
-        "  gbrain query \"open deals\" --where stage=seed,series-a"
+        "  gbrain query \"open deals\" --where stage=seed,series-a --json --timings"
       ]
     },
     {

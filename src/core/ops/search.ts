@@ -36,6 +36,7 @@ import { redactRetrievalOutput } from '../search/output-redaction.ts';
 import { leanRowsKeepId, projectRows, resultRowsFor } from '../search/lean-rows.ts';
 import { buildScoreDetails } from '../search/explain-formatter.ts';
 import { SearchTimings } from '../search/stage-timings.ts';
+import { searchCostSnapshot, withSearchCost } from '../search/search-cost.ts';
 import { keepFrontmatterMatches } from '../search/frontmatter-where.ts';
 import { WHERE_PARAM, whereOpParam } from './where-param.ts';
 import { searchFilterHint } from '../search/filter-hint.ts';
@@ -124,7 +125,8 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // Stage timings are read last, after the returned rows are assembled (meta only, never content).
   const emit = (output: { meta: Record<string, unknown> }, returned: SearchResult[]) => {
     recordRecallOutcome(returned);
-    ctx.emitResponseMeta?.('retrieval', { ...output.meta, timings: timings.snapshot() });
+    const cost = searchCostSnapshot();
+    ctx.emitResponseMeta?.('retrieval', { ...output.meta, timings: timings.snapshot(), ...(cost ? { cost } : {}) });
     return returned;
   };
   if (!evidence) {
@@ -1384,9 +1386,12 @@ const cache_stats: Operation = {
   },
 };
 
+/** Each search/query call runs under its own model-call cost meter (search/search-cost.ts). */
+const metered = (op: Operation): Operation => ({ ...op, handler: (ctx, p) => withSearchCost(() => op.handler(ctx, p)) });
+
 // Ops in EXACTLY the canonical `operations` array order.
 export const searchOperations: Operation[] = [
-  search, query, assemble_evidence, search_stats, search_modes, search_tune, cache_stats,
+  metered(search), metered(query), assemble_evidence, search_stats, search_modes, search_tune, cache_stats,
 ];
 
 /**

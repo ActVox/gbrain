@@ -2494,6 +2494,7 @@
         "kind": "interface",
         "members": [
           "cacheWriteTtl?: \"5m\" | \"1h\" | undefined",
+          "estimatedInputTokens?: number | undefined",
           "kind: \"embedding\" | \"rerank\" | \"chat\" | \"transcription\" | \"multimodal\" | \"decide\"",
           "maxInputTokens?: number | undefined",
           "maxOutputTokens?: number | undefined",
@@ -2620,6 +2621,13 @@
         "name": "withAIInvocationGuard",
         "signature": [
           "<T>(guard: AIInvocationGuard, run: () => Promise<T>, opts?: { inherit?: boolean; }) => Promise<T>"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "withAIInvocationMeter",
+        "signature": [
+          "<T>(meter: AIInvocationObserver, run: () => Promise<T>) => Promise<T>"
         ]
       },
       {

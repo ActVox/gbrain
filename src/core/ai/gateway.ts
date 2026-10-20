@@ -1766,7 +1766,7 @@ async function embedSubBatch(
 ): Promise<{ embeddings: Float32Array[]; reportedTokens: number | null }> {
   try {
     const callTransport = () => invokeAI({ operation: 'gateway.embed', kind: 'embedding', model: `${recipe.id}:${modelId}`,
-      maxInputTokens: embedRequestMaxInputTokens(texts, recipe, modelId), maxOutputTokens: 0 }, () => _embedTransport({
+      maxInputTokens: embedRequestMaxInputTokens(texts, recipe, modelId), maxOutputTokens: 0, estimatedInputTokens: Math.ceil(texts.reduce((n, text) => n + text.length, 0) / (recipe.touchpoints.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN)) }, () => _embedTransport({
       model,
       values: texts,
       providerOptions: providerOpts,
@@ -4442,7 +4442,7 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
   try {
     const transport: RerankTransport = _rerankTransport ?? ((u, init) => fetch(u, init));
     const maxInputTokens = rerankRequestMaxInputTokens(input.query, input.documents);
-    const resp = await invokeAI({ operation: 'gateway.rerank', kind: 'rerank', model: modelStr, maxInputTokens }, () => transport(url, {
+    const resp = await invokeAI({ operation: 'gateway.rerank', kind: 'rerank', model: modelStr, maxInputTokens, estimatedInputTokens: Math.ceil(rerankChars / (recipe.touchpoints.embedding?.chars_per_token ?? 4)) }, () => transport(url, {
       method: 'POST',
       headers,
       body,

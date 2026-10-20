@@ -77,6 +77,7 @@ import {
 } from './command-table.ts';
 import { formatRememberResult } from './remember-format.ts';
 import { applyCliOpNotices, captureCapacityNotices, captureOpNotice } from './op-notices.ts';
+import { searchTimingsDocument, searchTimingsLine, timeCliPhase } from './search-timings.ts';
 
 // db-availability loop: best-effort brain-id for the GBRAIN_DB_ACCESS marker,
 // so a MOUNT's DB failure reads as `brain=<id>` instead of masquerading as a
@@ -619,7 +620,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
   }
 
   // No live serve owns the selected brain; connect through the normal lock path.
-  const engine = await connectEngine({ oneShotRead: op.scope === 'read' });
+  const engine = await timeCliPhase('connect', () => connectEngine({ oneShotRead: op.scope === 'read' }));
   // #2084: the teardown contract (bounded drain of every background-work sink,
   // bounded disconnect, computed-deadline backstop) lives in finishCliTeardown
   // — see src/core/cli-force-exit.ts for the full design. The hard-deadline
@@ -661,7 +662,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
     let ctx: Awaited<ReturnType<typeof makeContext>>;
     try {
       ctx = await withTimeout(
-        makeContext(engine, params, op),
+        timeCliPhase('context', () => makeContext(engine, params, op)),
         wallclockMs,
         `gbrain ${command}: context`,
       );
@@ -796,7 +797,7 @@ async function runThinClientRouted(
 
   try {
     const { callRemoteTool, unpackToolResult } = await import('../core/mcp-client.ts');
-    const raw = await callRemoteTool(cfg, op.name, params, {
+    const raw = await timeCliPhase('remote', () => callRemoteTool(cfg, op.name, params, {
       timeoutMs,
       signal: sigintController.signal,
       ...(op.mutating ? { writeWaitMs: currentCliWriteWait().waitMs } : {}),
@@ -804,7 +805,7 @@ async function runThinClientRouted(
       if (op.name !== 'get_page' || remoteErrorCode(e) !== 'page_too_large_for_inline' || !wantsWholePage(params)) throw e;
       await printPagedPage(async p => unpackToolResult(await callRemoteTool(cfg, 'get_page', p, { timeoutMs, signal: sigintController.signal })), params, writeStdoutFinal);
       return null;
-    });
+    }));
     if (raw === null) return;
     // T15/FOV-1: lift the server's retrieval meta off the envelope before
     // unpacking (old servers lack _meta — capture is simply skipped).
@@ -1661,12 +1662,13 @@ export function formatResult(
         if (incompleteNotice) process.stderr.write(incompleteNotice);
         // --explain --json: the same per-row score_details object MCP `explain: true` returns.
         if (getCliOptions().explain) for (const r of results) r.score_details ??= require('../core/search/explain-formatter.ts').buildScoreDetails(r);
-        return JSON.stringify(answerId ? results.map(r => ({ ...r, answer_id: answerId })) : results, null, 2) + '\n';
+        return JSON.stringify(searchTimingsDocument(answerId ? results.map(r => ({ ...r, answer_id: answerId })) : results, meta), null, 2) + '\n';
       }
       // T15/FOV-1: an empty result names its cause when the pipeline told us
       // (degradation stages from _meta.retrieval / the local meta capture) —
       // a bare "No results." was indistinguishable from a degraded pipeline.
       const cliOpts = getCliOptions();
+      process.stderr.write(searchTimingsLine(meta));
       const timingsLine = cliOpts.explain && meta?.timings ? require('../core/search/stage-timings.ts').formatTimingsSummary(meta.timings) + '\n' : '';
       if (results.length === 0) return `No results.${describeEmptyRetrieval()}\n` + timingsLine;
       // v0.40.4 — --explain switches to per-stage attribution formatter.
@@ -2936,8 +2938,8 @@ const OP_HELP_EXAMPLES: Record<string, string[]> = {
     'gbrain backlinks companies/acme-example --source-id business',
     'gbrain backlinks companies/acme-example --all-sources --json',
   ],
-  search: ['gbrain search "acme-example pricing" --types company,deal --where stage=seed  # --where key=value, repeat for AND; key=a,b matches any'],
-  query: ['gbrain query "what changed at acme-example" --types meeting --since 2026-01-01 --until 2026-03-31', 'gbrain query "open deals" --where stage=seed,series-a'],
+  search: ['gbrain search "acme-example pricing" --types company,deal --where stage=seed  # --where key=value, repeat for AND; key=a,b matches any', 'gbrain search "acme-example pricing" --json --timings  # {results, timings_ms, cost}'],
+  query: ['gbrain query "what changed at acme-example" --types meeting --since 2026-01-01 --until 2026-03-31', 'gbrain query "open deals" --where stage=seed,series-a --json --timings'],
   list_pages: ['gbrain list --type deal --where stage=seed --where partner=alice-example --updated-after 2026-01-01 --sort updated_asc'],
   // #6255: the receipt command's routing flags and states.
   get_write_request: ['gbrain write-request --brain host -- <request_id> [--json]  # queued/running: pending, read again after retry_after_ms; committed/conflict/failed/cancelled: final'],
