@@ -118,6 +118,7 @@ function parseFlags(args: string[]): ParsedFlags {
     watchSeconds: null,
   };
   let positional = '';
+  let entityFlag: string | null = null;
   let rawBudget: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -146,6 +147,19 @@ function parseFlags(args: string[]): ParsedFlags {
       }
       out.sessionId = raw;
       i++;
+      continue;
+    }
+    // #7166: --entity matches the recall op's `entity` parameter (same as the bare positional).
+    if (a === '--entity' || a.startsWith('--entity=')) {
+      const raw = a === '--entity' ? args[i + 1] : a.slice('--entity='.length);
+      if (raw === undefined || raw.trim() === '' || (a === '--entity' && raw.startsWith('--'))) {
+        throw usageError('--entity requires an entity name or slug.', 'Pass it after the flag, e.g. --entity people/alice-example.', {
+          why: 'An empty entity must not silently widen recall to every fact.',
+          fix: { argv: ['gbrain', 'recall', '--help'], consent: [], actor: 'agent', why: 'Shows the recall selectors.', requires_exclusive: false },
+        });
+      }
+      entityFlag = raw;
+      if (a === '--entity') i++;
       continue;
     }
     if (a === '--grep') { out.grep = (args[++i] ?? '').toLowerCase(); continue; }
@@ -198,7 +212,15 @@ function parseFlags(args: string[]): ParsedFlags {
     if (a.startsWith('--')) continue; // skip unknown flags silently
     if (!positional) positional = a;
   }
-  if (positional) out.entity = positional;
+  if (entityFlag !== null && positional && positional !== entityFlag) {
+    throw usageError(`--entity "${entityFlag.slice(0, 60)}" and the positional "${positional.slice(0, 60)}" name different entities.`,
+      'Pass the entity once: either --entity <name> or the bare positional.', {
+        why: 'recall reads one entity per call; two different names would silently drop one.',
+        fix: { argv: ['gbrain', 'recall', '--entity', entityFlag], consent: [], actor: 'agent', why: 'Recall the --entity value only.', requires_exclusive: false },
+      });
+  }
+  if (entityFlag !== null) out.entity = entityFlag;
+  else if (positional) out.entity = positional;
   out.budgetTokens = (out.budgetPolicy === 'query_first' && out.query?.trim()
     ? Number(rawBudget)
     : parseInt(rawBudget ?? '', 10)) || null;
@@ -284,7 +306,7 @@ const RECALL_HELP = `Usage: gbrain recall [<entity>] [options]
 Find saved facts (MEMORY_VERBS v1). A question goes in --question; the bare
 positional is an entity name, then a literal piece of fact text.
 
-  gbrain recall <entity>                 facts about one entity (person, company, "user")
+  gbrain recall <entity>                 facts about one entity (person, company, "user"); same as --entity <entity>
   gbrain recall --question "<q>"         facts ranked by relevance to a natural-language question
   gbrain recall --query "<q>"            facts plus matching pages
   gbrain recall --grep <text>            facts whose text contains <text>
