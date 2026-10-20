@@ -3129,6 +3129,16 @@ More: [docs/guides/pinned-questions.md#who-can-see-pinned-questions](../../docs/
 |---|---|---|---|---|---|---|
 | The bounded queue is full; existing requests keep their place. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
+### rank_entities_timeout
+
+<a id="rank_entities_timeout"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| rank_entities did not finish within its statement deadline (Postgres statement_timeout); nothing was ranked. | The ranking aggregates every edge in scope in one statement; a whole-brain ranking on a large graph can exceed the deadline, and a partial ranking would misstate the top rows. | Narrow the ranking with source_id, types or link_type, then call rank_entities again. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/graph-ranking.md#rank_entities_timeout](../../docs/guides/graph-ranking.md#rank_entities_timeout)
+
 ### rate_limited
 
 <a id="rate_limited"></a>

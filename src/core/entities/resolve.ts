@@ -213,7 +213,7 @@ export function retiredPageSql(p: string): string {
     OR lower(COALESCE(${p}.frontmatter->>'status', '')) ~ '(^|[^a-z])(alias|redirect|redirected)([^a-z]|$)')`;
 }
 
-const MAX_RETIREMENT_HOPS = 5;
+export const MAX_RETIREMENT_HOPS = 5;
 
 /** A frontmatter redirect value as a slug: `[[people/x|X]]`, `people/x.md` and `/people/x` are `people/x`. */
 function redirectSlug(value: string): string | null {
