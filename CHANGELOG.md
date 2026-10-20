@@ -10,6 +10,39 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.327.0] - 2026-10-20
+
+**Facts keep their words again, and a brain whose facts already lost them can get them back. The embed sweep for changed chunks now finishes on large brains.** Fact extraction ran the prompt-injection filter over the text it saved, and one rule matched the word "System" before a parenthesis, so "Acme Business System (ABS)" was saved as "Acme Business [redacted](ABS)" in the fact, its page's `## Facts` fence and its search chunks. Separately, the sweep that re-embeds chunks whose text changed was one statement over the whole brain; on a large brain it hit the statement timeout every run, from embed jobs and from the hourly maintenance pass, and kept nothing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A fact names "Business System (ABS)" or similar | saved as "Business [redacted](ABS)" | saved as written; the filter rule matches only a code call such as `os.system("…")` |
+| A stored fact holding an injection phrase reaches a model prompt (standing questions, turn context, proactive briefs) | sent as stored | the phrase is neutralized in the prompt copy; the stored fact is unchanged |
+| Facts damaged before this release | stayed damaged | doctor `facts_redaction_marker` counts them; `gbrain repair redacted-facts` previews each restoration a source page proves, and `--apply --expect <hash>` writes exactly that set |
+| The content-drift embed sweep on a large brain | one statement over every chunk; cancelled by the statement timeout on every run | 5,000-chunk batches with a saved cursor, at most 60 seconds per run, a new pass once a day (`embed.content_drift.pass_interval_hours`, default 24) |
+
+### What to watch for after you upgrade
+
+- Nothing is repaired on upgrade. Run `gbrain doctor --only facts_redaction_marker`; if it warns, `gbrain repair redacted-facts` shows what it can restore and changes nothing until you apply the printed command.
+- The repair restores a fact only when the words on both sides of every marker occur in a page the fact came from. A fact with no such page, with two possible spans, or with its row in the fence of a page stored in segments is listed and left for you to edit by hand.
+- A restored database-only fact gets `restored: redacted-facts repair` appended to its context, and its vector is re-embedded by the next `gbrain embed`.
+- On a large brain the first drift pass now spans several runs; `gbrain doctor --only content_drift_sweep` shows each pass, its cursor and any error.
+
+### Itemized changes
+
+- New repair kind `redacted-facts` (explicit-only, preview-bound) and maintenance intent `managed_maintenance_restore_redacted_facts`.
+- New doctor checks `facts_redaction_marker` and `content_drift_sweep`; new setting `embed.content_drift.pass_interval_hours`.
+- Embed and embed-backfill job results report the sweep's state (`content_drift`).
+- Google loops and `gbrain enrich` keep the raw text and quote instead of the filtered copy.
+- Dependencies: `@modelcontextprotocol/sdk` 1.31.0 → 1.32.1 and the admin console's `vite` 6.4.3 → 6.4.4.
+  - GHSA-22jm-h49p-29qw (high): the SDK's experimental task store did not tie a task to the session that created it, so clients sharing one store could list, read and cancel each other's tasks. gbrain's servers (`gbrain serve`, `serve --http`, `mcp expose`) never pass `taskStore`, so they were not exposed.
+  - GHSA-6prh-2h8m-c8cw (medium): the SDK's HTTP client transport followed redirects to any origin, re-sending custom headers, the `mcp-session-id` and, on a 307 or 308, the request body. gbrain uses that transport as a client: the thin client, `gbrain connect`'s probe, harness verify and the shared-skills installer. Bun drops the `Authorization` header across origins, so a redirect could not take the bearer token. It could take the tool-call body (for example, page text sent to `put_page`), but only when the configured brain URL redirected to another origin. Redirects now stay on the same origin.
+  - GHSA-698v-4r3x-3vcv (medium) is in the admin console's build tool (`vite`) and affects development servers only.
+
+Reported by @mje-xyz (#7125) and @DaCal90 (#7117).
+
 ## [0.60.326.0] - 2026-10-20
 
 **Managed sync works on Postgres 15 again, and a database error in a write receipt now says what failed.** On a Postgres 15 brain every managed sync stopped at its checkpoint with `storage_error` (PostgreSQL 42601, `syntax_error`), run after run, because the statement that merges `sources.config` used the `IS JSON` predicate, which only Postgres 16 and newer parse. The receipt kept only the error class and SQLSTATE, so nobody could tell which statement failed. Both are fixed. A new CI lane now runs the write, sync, jobs and migration suites on Postgres 15 for every full run, and a unit-tier check refuses Postgres 16+ only SQL in `src/`.

@@ -54,6 +54,7 @@ import { atomsRestoreRepair } from './atoms-restore.ts';
 import { extractorFactsRepair } from './extractor-facts.ts';
 import { conversationLabelsRepair } from './conversation-labels.ts';
 import { capturedFactsRepair } from './captured-facts.ts';
+import { redactedFactsRepair } from './redacted-facts.ts';
 import { loopFactsRepair } from './loop-facts.ts';
 import { ontologyFactsRepair } from './ontology-facts.ts';
 import { factsRehomeRepair } from './facts-rehome.ts';
@@ -227,6 +228,14 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'corpus file and expire only with --include-ambiguous. A claim that also has an active copy from another lane is kept. Preview-bound: --apply '
       + '--expect <hash> expires exactly the previewed set; a fact that changed since reports changed_since_preview. Rows are expired, never withdrawn, '
       + 'so remember can save the same claim again; fenced rows are struck in their page, which is re-embedded by its publication.',
+  },
+  'redacted-facts': {
+    handler: redactedFactsRepair, embeds: 'effect', checks: ['facts_redaction_marker'], explicit_only: true,
+    summary: 'Restore the words the prompt sanitizer deleted from stored facts before the fix (#7125: "Business System (ABS)" stored as '
+      + '"Business [redacted](ABS)"). A fact is restored only when a page it came from (the page its context names, or the page that '
+      + 'holds it, now or in a retained version) proves the original words around every marker; the rest are listed and left unchanged. '
+      + 'Preview-bound: --apply --expect <hash> restores exactly the previewed set; a fact that changed since reports changed_since_preview. '
+      + 'A fenced row is rewritten in its page, which is re-embedded by its publication; page history keeps the damaged revisions.',
   },
   'loop-facts': {
     handler: loopFactsRepair, embeds: 'effect', checks: ['loop_facts_drift'], explicit_only: true,
