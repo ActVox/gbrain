@@ -2705,7 +2705,9 @@ the next maintenance run, so pause first if you want to keep the original.
 A file an older gbrain refused before refusals became holds has no page and no
 hold; incremental sync never revisits it. The
 maintenance phase `unindexed_files` finds such files (bounded, never
-clean while incomplete) and schedules a re-screen; doctor
+clean while incomplete; each run continues the stored scan, also after new
+commits, and serves the least recently scanned source first) and schedules a
+re-screen, which the next sync consumes once it imports or holds the file; doctor
 `unindexed_files` reports them. Run `gbrain sources retry-held <id> --unindexed`, then the sync it prints: each file imports or becomes a
 [hold](#held-files). `slug_taken` (the path slug belongs to another page) and `deleted_page`
 (the page was deleted while the file stayed committed) are never scheduled:

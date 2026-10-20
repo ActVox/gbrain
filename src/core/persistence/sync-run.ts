@@ -545,10 +545,17 @@ async function adoptCursor(engine: BrainEngine, key: string, cursor: Cursor, inp
   return saved;
 }
 /** #5988: a managed dry run lists the holds the pending (or newly discovered) imports would earn, read-only. */
+export interface DryRunWriterState { open_requests: number; oldest_open_age_seconds: number | null; next: string[] }
+
 async function managedDryRun(engine: BrainEngine, value: Cursor, base: Cursor, run: { company: boolean; processingOptions: SyncProcessingOptions;
   syncOptions: SyncCursorOptions; repoPath?: string; remote: boolean }): Promise<SyncResult> {
   const screen = run.company ? null : await loadSyncScreenRun(engine, value.sourceId, value.processingOptions ?? run.processingOptions, run.remote);
-  return { ...result(base, 'dry_run'), ...await dryRunScreen(engine, value, screen,
+  // #7167: the writer's state is reported, never waited on.
+  const [open] = await engine.executeRaw<{ n: number | string; age: number | string | null }>(`SELECT count(*) AS n, EXTRACT(EPOCH FROM now() - min(created_at)) AS age
+    FROM persistence_requests WHERE source_id=$1 AND state IN ('queued','running','recovering')`, [value.sourceId]);
+  const writer: DryRunWriterState = { open_requests: Number(open?.n ?? 0), oldest_open_age_seconds: open?.age == null ? null : Math.round(Number(open.age)),
+    next: ['gbrain', 'sources', 'writer', 'status', '--source', value.sourceId, '--json'] };
+  return { ...result(base, 'dry_run'), writer, ...await dryRunScreen(engine, value, screen,
     checkpointRetryCommand({ sourceId: value.sourceId, processingOptions: value.processingOptions, syncOptions: value.syncOptions ?? run.syncOptions, repoPath: run.repoPath })) };
 }
 

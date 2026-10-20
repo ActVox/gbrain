@@ -223,6 +223,7 @@ test/migration-persistence-request-id-index.test.ts
 test/migration-persistence-request-slug-index.test.ts
 test/on-commit-embedding.serial.test.ts
 test/origin-guard-6948.test.ts
+test/origin-twin-sequence-7150.test.ts
 test/origin-twins-6948.test.ts
 test/overwritten-edits-6712.test.ts
 test/owner-refusal.test.ts
@@ -398,6 +399,7 @@ test/sync-drain-effect-recovery-blocked.test.ts
 test/sync-drain-head-blocked-6543.test.ts
 test/sync-drain-inpass-stall.test.ts
 test/sync-drain-write-capacity.test.ts
+test/sync-dry-run-drain-7167.test.ts
 test/sync-exits-l4-6712.test.ts
 test/sync-freshness-6858.test.ts
 test/sync-frontmatter-recovery.test.ts
@@ -433,6 +435,7 @@ test/trust-guarded-supersession.test.ts
 test/trust-held-removals.test.ts
 test/trust-owner-actions.test.ts
 test/unbound-source-6536.test.ts
+test/unindexed-files-convergence-7149.test.ts
 test/unindexed-files.test.ts
 test/vector-manifest-probe-bound.test.ts
 test/withdrawal-overlay-concurrency.test.ts
