@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 252798,
-    "stdoutSha256": "71b348f0e16ec33eeb7b856a2fa24821a5f971503416d541e00226572381ab56",
+    "stdoutBytes": 253109,
+    "stdoutSha256": "52884f634d8625753ff796aab76902ff1c4faf428fe04f7a03cc6857f157c24f",
     "toolNames": [
       "remember",
       "entity",
@@ -306,7 +306,8 @@
           "name": "string?",
           "names": "array?",
           "prefer_source_id": "string?",
-          "source_id": "string?"
+          "source_id": "string?",
+          "variants": "boolean?"
         },
         "required_scopes": [],
         "schema": {
@@ -329,6 +330,10 @@
             "source_id": {
               "description": "Read only this source. Default: your source first, then every source you can read.",
               "type": "string"
+            },
+            "variants": {
+              "description": "Default true: when no exact name matches, resolve one unambiguous name variant (nickname, initial, title, order, surname typo, unique surname; card.match says which). false: exact names only.",
+              "type": "boolean"
             }
           },
           "required": [],

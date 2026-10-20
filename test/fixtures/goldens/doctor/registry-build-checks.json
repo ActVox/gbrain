@@ -926,6 +926,10 @@
         "name": "fence_integrity"
       },
       {
+        "category": "brain",
+        "name": "person_title_duplicates"
+      },
+      {
         "category": "ops",
         "name": "search_mode"
       },
