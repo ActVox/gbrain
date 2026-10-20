@@ -1600,7 +1600,7 @@ maintenance request per page on a managed brain). Nothing is withdrawn, so
 
 Before the fix for #7125, fact extraction ran the prompt-injection patterns
 over the text it stored, and one pattern matched the English word "system"
-before a parenthesis. "Acme Business System (ABS)" was stored as "Danaher
+before a parenthesis. "Acme Business System (ABS)" was stored as "Acme
 Business [redacted](ABS)", in the fact, its page's `## Facts` fence, the
 page's search chunks and its history, and `trust scan` flags the marker as
 instruction-like. Extraction no longer rewrites stored text, and the pattern
@@ -1625,13 +1625,14 @@ pages it came from: the page its context names (the page or transcript the
 turn came from) and the page that holds it, as each reads now and in up to 50
 retained versions. A text proves a restoration when the words around every
 marker in the fact occur there around exactly one span the marker's pattern
-matches.
+matches. A page stored in segments is read as evidence up to 16 MiB.
 
 | Class | Meaning | Restored |
 | --- | --- | --- |
 | `evidenced` | Every text that proves a restoration proves the same one. | By `--apply --expect <hash>` |
 | `ambiguous` | A text holds two different spans around the same words, or two texts prove different restorations. | Never; listed |
 | `unproven` | No page it came from exists any more (`no_source_page`), or none still holds the words around the marker (`not_in_source`). | Never; listed |
+| `segmented` | Proved, but the fact's row sits in the `## Facts` fence of a page stored in segments, which this repair does not rewrite (`segmented_page`). The listing shows the restored text. | Never; listed |
 
 The apply restores exactly the previewed set. A fact that changed since the
 preview reports `changed_since_preview` and keeps its text. A fact with a row
@@ -1641,8 +1642,8 @@ page); a fact with no fence row is rewritten database-only (one maintenance
 request per page on a managed brain) and gets `restored: redacted-facts
 repair` appended to its context; its vector no longer matches its text, so
 the next `gbrain embed` re-embeds it. Page history keeps the damaged
-revisions. Edit an `ambiguous` or `unproven` fact by hand if you know the
-missing word.
+revisions. Edit an `ambiguous`, `unproven` or `segmented` fact by hand if you know
+the missing word.
 
 <a id="loop-facts"></a>
 ### Loop facts

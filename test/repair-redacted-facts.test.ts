@@ -27,6 +27,7 @@ import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
+import { createSegmentedPage } from './helpers/segmented-page.ts';
 
 const ACME = 'companies/acme-example';
 const NOTES = 'notes/operating-models';
@@ -106,7 +107,7 @@ ${fence}
         expect(wave.spec.count(wave.check.details!)).toBe(5);
 
         const preview = await repair(engine, []);
-        expect(preview.results[0].residuals).toEqual({ evidenced: 2, ambiguous: 1, unproven: 2 });
+        expect(preview.results[0].residuals).toEqual({ evidenced: 2, ambiguous: 1, unproven: 2, segmented: 0 });
         const classes = Object.fromEntries(preview.results[0].listing!.map(l => [Number(l.item.split('#')[1]), l.class]));
         expect(classes).toEqual({ [fencedId]: 'evidenced', [dbOnly]: 'evidenced', [unproven]: 'unproven', [noPage]: 'unproven', [conflicting]: 'ambiguous' });
         expect(preview.results[0].listing!.find(l => l.item.endsWith(`#${fencedId}`))!.detail).toContain(ABS_RESTORED);
@@ -132,7 +133,7 @@ ${fence}
         expect((await factText(engine, conflicting)).fact).toBe('The Acme [redacted](ACS) launch');
 
         expect((await factsRedactionMarkerCheck(engine)).details).toMatchObject({ affected: 3 });
-        expect((await repair(engine, [])).results[0].residuals).toEqual({ evidenced: 0, ambiguous: 1, unproven: 2 });
+        expect((await repair(engine, [])).results[0].residuals).toEqual({ evidenced: 0, ambiguous: 1, unproven: 2, segmented: 0 });
       }, { databaseUrl });
     }, 180_000);
 
@@ -172,13 +173,35 @@ ${SOURCE_TEXT}
       const id = Number((await engine.executeRaw<{ id: number }>(`INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source, context)
         VALUES ('default', $1, $2, 'fact', 'private', 'sync:import', $3) RETURNING id`, [ACME, ABS_DAMAGED, NOTES]))[0].id);
       const preview = await repair(engine, []);
-      expect(preview.results[0].residuals).toEqual({ evidenced: 1, ambiguous: 0, unproven: 0 });
+      expect(preview.results[0].residuals).toEqual({ evidenced: 1, ambiguous: 0, unproven: 0, segmented: 0 });
       expect(preview.results[0].listing![0].detail).toContain(`${NOTES}@version:`);
       expect((await repair(engine, applyArgs(preview))).results[0].outcomes).toEqual({ restored: 1 });
       const [row] = await engine.executeRaw<{ fact: string; context: string }>('SELECT fact, context FROM facts WHERE id=$1', [id]);
       expect(row!.fact).toBe(ABS_RESTORED);
       expect(row!.context).toBe(`${NOTES} | restored: redacted-facts repair`);
       expect((await factsRedactionMarkerCheck(engine)).status).toBe('ok');
+    }, 120_000);
+
+    test('a segmented source page proves a restoration from its second segment; a proved fenced row on a segmented page is listed, never rewritten', async () => {
+      const source = 'notes/segmented-models';
+      const held = 'companies/segmented-example';
+      await createSegmentedPage(engine, { slug: source, truth: `${'Filler line.\n'.repeat(90_000)}${SOURCE_TEXT}\n` });
+      await createSegmentedPage(engine, { slug: held, truth: 'Segmented example notes.\n' });
+      const insert = async (fact: string, rowNum: number | null, holder: string | null) => Number((await engine.executeRaw<{ id: number }>(`INSERT INTO facts
+        (source_id, entity_slug, fact, kind, visibility, source, context, row_num, source_markdown_slug)
+        VALUES ('default', $1, $2, 'fact', 'private', 'sync:import', $3, $4, $5) RETURNING id`, [held, fact, source, rowNum, holder]))[0].id);
+      const dbOnly = await insert(EXOS_DAMAGED, null, null);
+      const fenced = await insert(ABS_DAMAGED, 1, held);
+      const preview = await repair(engine, []);
+      expect(preview.results[0].residuals).toEqual({ evidenced: 1, ambiguous: 0, unproven: 0, segmented: 1 });
+      const listed = Object.fromEntries(preview.results[0].listing!.map(l => [Number(l.item.split('#')[1]), l]));
+      expect(listed[dbOnly]!.class).toBe('evidenced');
+      expect(listed[fenced]!.class).toBe('segmented');
+      expect(listed[fenced]!.detail).toContain(ABS_RESTORED);
+      expect((await repair(engine, applyArgs(preview))).results[0].outcomes).toEqual({ restored: 1 });
+      expect((await factText(engine, dbOnly)).fact).toBe(EXOS_RESTORED);
+      expect((await factText(engine, fenced)).fact).toBe(ABS_DAMAGED);
+      await engine.executeRaw('DELETE FROM facts WHERE id=$1', [fenced]);
     }, 120_000);
 
     test('the publication rewrites a row only while it is exactly as previewed (a change after the recheck wins)', async () => {

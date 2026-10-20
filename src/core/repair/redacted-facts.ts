@@ -24,6 +24,11 @@
  *     or texts prove different restorations; listed, never changed.
  *   - unproven: no text proves one (no source page, or the words are gone);
  *     listed, never changed.
+ *   - segmented: proved, but the row sits in the facts fence of a page
+ *     stored in segments, which this repair does not rewrite; listed with
+ *     its restoration, never changed.
+ * A segmented source page is read as evidence through the segment reader
+ * (up to 16 MiB).
  *
  * The apply rewrites only the evidenced facts that are still exactly as
  * previewed. A fenced row (`row_num` on its page) gets its claim rewritten in
@@ -52,14 +57,18 @@ import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, sa
 import { INJECTION_PATTERNS, LEGACY_EVAL_SHELL, restoreNeutralized } from '../think/sanitize.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairScope } from './core.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
+import { isSegmentedPage } from '../page-body/page-shape.ts';
+import { readBodyRange } from '../page-body/read-range.ts';
 
 export const REDACTED_FACTS_INTENT = 'managed_maintenance_restore_redacted_facts';
 const RESTORE_PATTERNS = [...INJECTION_PATTERNS, LEGACY_EVAL_SHELL];
 const RESTORED_CONTEXT = 'restored: redacted-facts repair';
 /** Retained versions read per source page, newest first. */
 const VERSIONS_PER_PAGE = 50;
+/** A segmented source body longer than this is not read as evidence. */
+const TEXT_MAX_BYTES = 16 * 1024 * 1024;
 
-export type RedactedFactClass = 'evidenced' | 'ambiguous' | 'unproven';
+export type RedactedFactClass = 'evidenced' | 'ambiguous' | 'unproven' | 'segmented';
 
 export interface RedactedFactCandidate {
   id: number;
@@ -68,9 +77,9 @@ export interface RedactedFactCandidate {
   slug: string;
   row_num: number | null;
   class: RedactedFactClass;
-  /** `restorable`, `conflicting_sources`, `no_source_page` or `not_in_source`. */
+  /** `restorable`, `conflicting_sources`, `no_source_page`, `not_in_source` or `segmented_page`. */
   reason: string;
-  /** The stored text, and the restored text when evidenced. */
+  /** The stored text, and the restored text when evidenced (or proved on a segmented page). */
   fact: string;
   restored: string | null;
   /** The texts that proved the restoration (`<slug>` or `<slug>@version:<id>`). */
@@ -100,6 +109,44 @@ const contextSlug = (context: string | null) => {
   return /^[^\s|]+$/.test(first) ? first : null;
 };
 
+interface PageTexts { segmented: boolean; texts: Array<{ label: string; text: string }> }
+
+/** A segmented body's stored text, read segment by segment; null when it is over TEXT_MAX_BYTES (it proves nothing). */
+async function segmentedText(db: BrainEngine, pageId: number): Promise<string | null> {
+  const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
+  let bytes = 0;
+  let text = '';
+  for await (const piece of readBodyRange(db, { pageId, space: 'stored', start: 0, end: Infinity, audience: 'trusted' })) {
+    bytes += piece.bytes.length;
+    if (bytes > TEXT_MAX_BYTES) return null;
+    text += decoder.decode(piece.bytes, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+/**
+ * The texts a page offers as evidence: its body as it reads now and its
+ * retained versions that hold a body copy. A segmented page's body is read
+ * through the segment reader; a segmented version carries no body copy and is
+ * not read.
+ */
+async function pageTexts(db: BrainEngine, sourceId: string, slug: string): Promise<PageTexts> {
+  const snapshot = await db.readPageSnapshot(slug, { sourceId }).catch(() => null);
+  if (!snapshot) return { segmented: false, texts: [] };
+  const texts: PageTexts['texts'] = [];
+  const segmented = isSegmentedPage(snapshot.page);
+  if (segmented) {
+    const text = await segmentedText(db, snapshot.page.id);
+    if (text !== null) texts.push({ label: slug, text });
+  } else {
+    texts.push({ label: slug, text: [snapshot.page.compiled_truth ?? '', snapshot.page.timeline ?? ''].join('\n') });
+  }
+  const versions = await db.executeRaw<{ id: number | string; compiled_truth: string }>(`SELECT id, compiled_truth FROM page_versions
+    WHERE page_id=$1 AND compiled_truth IS NOT NULL ORDER BY id DESC LIMIT ${VERSIONS_PER_PAGE}`, [snapshot.page.id]);
+  for (const v of versions) texts.push({ label: `${slug}@version:${v.id}`, text: v.compiled_truth });
+  return { segmented, texts };
+}
+
 /** Read-only: every active fact of these sources whose text holds a redaction marker, classified, in (source, page, id) order. */
 export async function classifyRedactedFacts(db: BrainEngine, sourceIds: string[], opts: { ids?: number[] } = {}): Promise<RedactedFactCandidate[]> {
   const rows = await db.executeRaw<FactRow>(`
@@ -108,20 +155,11 @@ export async function classifyRedactedFacts(db: BrainEngine, sourceIds: string[]
      WHERE f.source_id=ANY($1::text[]) AND f.expired_at IS NULL AND f.superseded_by IS NULL
        AND f.fact LIKE '%[redacted%' AND ($2::bigint[] IS NULL OR f.id=ANY($2::bigint[]))
      ORDER BY f.source_id, f.id`, [sourceIds, opts.ids ?? null]);
-  const texts = new Map<string, Array<{ label: string; text: string }>>();
+  const pages = new Map<string, PageTexts>();
   const sourceTexts = async (sourceId: string, slug: string) => {
     const key = `${sourceId}\u0000${slug}`;
-    if (texts.has(key)) return texts.get(key)!;
-    const found: Array<{ label: string; text: string }> = [];
-    const snapshot = await db.readPageSnapshot(slug, { sourceId }).catch(() => null);
-    if (snapshot) {
-      found.push({ label: slug, text: [snapshot.page.compiled_truth ?? '', snapshot.page.timeline ?? ''].join('\n') });
-      const versions = await db.executeRaw<{ id: number | string; compiled_truth: string }>(`SELECT id, compiled_truth FROM page_versions
-        WHERE page_id=$1 AND compiled_truth IS NOT NULL ORDER BY id DESC LIMIT ${VERSIONS_PER_PAGE}`, [snapshot.page.id]);
-      for (const v of versions) found.push({ label: `${slug}@version:${v.id}`, text: v.compiled_truth });
-    }
-    texts.set(key, found);
-    return found;
+    if (!pages.has(key)) pages.set(key, await pageTexts(db, sourceId, slug));
+    return pages.get(key)!;
   };
   const candidates: RedactedFactCandidate[] = [];
   for (const row of rows) {
@@ -130,16 +168,19 @@ export async function classifyRedactedFacts(db: BrainEngine, sourceIds: string[]
     let read = 0;
     let conflicting = false;
     for (const slug of slugs) {
-      for (const { label, text } of await sourceTexts(row.source_id, slug)) {
+      for (const { label, text } of (await sourceTexts(row.source_id, slug)).texts) {
         read++;
         const result = restoreNeutralized(row.fact, text, RESTORE_PATTERNS);
         if (result.ambiguous) conflicting = true;
         else if (result.restored && !result.unresolved) proofs.set(result.text, [...(proofs.get(result.text) ?? []), label]);
       }
     }
+    const proved = !conflicting && proofs.size === 1;
+    const held = proved && row.row_num !== null && row.source_markdown_slug !== null
+      && (await sourceTexts(row.source_id, row.source_markdown_slug)).segmented;
     const [klass, reason]: [RedactedFactClass, string] = conflicting || proofs.size > 1 ? ['ambiguous', 'conflicting_sources']
-      : proofs.size === 1 ? ['evidenced', 'restorable'] : ['unproven', read ? 'not_in_source' : 'no_source_page'];
-    const [restored, evidence] = klass === 'evidenced' ? [...proofs][0]! : [null, [...proofs.values()].flat()];
+      : held ? ['segmented', 'segmented_page'] : proved ? ['evidenced', 'restorable'] : ['unproven', read ? 'not_in_source' : 'no_source_page'];
+    const [restored, evidence] = proved ? [...proofs][0]! : [null, [...proofs.values()].flat()];
     candidates.push({ id: Number(row.id), source_id: row.source_id, slug: targetSlug(row), row_num: row.row_num === null ? null : Number(row.row_num),
       class: klass, reason, fact: row.fact, restored, evidence, visibility: row.visibility, entity_slug: row.entity_slug,
       source_markdown_slug: row.source_markdown_slug, fact_hash: factHash(row) });
@@ -152,6 +193,7 @@ const DETAILS: Record<string, string> = {
   conflicting_sources: 'its source texts hold different spans around the same words, so nothing proves one restoration; left unchanged',
   no_source_page: 'no page it came from exists any more, so nothing can prove the original words; left unchanged',
   not_in_source: 'the words around the marker are not in any page it came from, so nothing proves the original words; left unchanged',
+  segmented_page: 'its row sits in the facts fence of a page stored in segments, and this repair rewrites a fence by publishing the whole body; left unchanged',
 };
 
 function previewCommand(scope: RepairScope, all: string[]): string {
@@ -191,9 +233,10 @@ export const redactedFactsRepair: RepairHandler = {
       if (approved.length) await saveApprovedSet(engine, { command: 'redacted-facts', hash }, approved);
       const count = (klass: RedactedFactClass) => candidates.filter(c => c.class === klass).length;
       const listing: RepairListing[] = candidates.map(c => ({ item: `${c.source_id}:${c.slug}#${c.id}`, class: c.class,
-        detail: c.class === 'evidenced' ? `"${c.fact}" -> "${c.restored}" (proved by ${c.evidence.join(', ')})` : `"${c.fact}": ${DETAILS[c.reason]}` }));
+        detail: c.class === 'evidenced' ? `"${c.fact}" -> "${c.restored}" (proved by ${c.evidence.join(', ')})`
+          : c.restored ? `"${c.fact}" -> "${c.restored}" (proved by ${c.evidence.join(', ')}): ${DETAILS[c.reason]}` : `"${c.fact}": ${DETAILS[c.reason]}` }));
       return { items: approved.map((page, i) => pageItem(page, hash, i, i === approved.length - 1)), preview_hash: hash, listing,
-        residuals: { evidenced: count('evidenced'), ambiguous: count('ambiguous'), unproven: count('unproven') } };
+        residuals: { evidenced: count('evidenced'), ambiguous: count('ambiguous'), unproven: count('unproven'), segmented: count('segmented') } };
     }
     if (!opts.expect) {
       throw new OperationError('invalid_params', 'gbrain repair redacted-facts --apply restores only the set a preview printed.',
@@ -295,7 +338,7 @@ export async function prepareRedactedFactsRestore(engine: BrainEngine, row: Writ
 async function restoreFencedRows(ctx: Parameters<RepairHandler['apply']>[0], item: RepairItem, page: RedactedFactsPage, facts: RedactedFactCandidate[]): Promise<number[]> {
   const engine = ctx.engine;
   const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
-  if (!snapshot) return [];
+  if (!snapshot || isSegmentedPage(snapshot.page)) return [];
   let body = snapshot.page.compiled_truth ?? '';
   const rewritten: RedactedFactCandidate[] = [];
   for (const fact of facts) {
