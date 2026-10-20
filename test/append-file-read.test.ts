@@ -24,11 +24,15 @@ describe('gbrain append --file reads by size', () => {
 
   async function append(args: string[]): Promise<{ code: number; stderr: string }> {
     _resetCliExitVerdictForTests();
+    const priorExitCode = process.exitCode;
     let stderr = '';
     const write = process.stderr.write.bind(process.stderr);
     process.stderr.write = ((chunk: string | Uint8Array) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
     try { await withEnv({ GBRAIN_HOME: dir, HOME: dir }, () => run(args, ctx)); } finally { process.stderr.write = write; }
-    return { code: currentExitCode(), stderr };
+    const code = currentExitCode();
+    _resetCliExitVerdictForTests();
+    process.exitCode = priorExitCode ?? 0;
+    return { code, stderr };
   }
 
   beforeAll(() => {
