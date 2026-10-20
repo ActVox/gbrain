@@ -223,7 +223,7 @@ const entity: Operation = {
     names: { type: 'array', items: { type: 'string' }, description: 'Or up to 50 names/codes at once: compact rows.' },
     source_id: { type: 'string', description: 'Read only this source. Default: your source first, then every source you can read.', fullSurfaceOnly: true },
     prefer_source_id: { type: 'string', description: 'Source to try first (thin clients send .gbrain-source here); never narrows.', fullSurfaceOnly: true },
-    variants: { type: 'boolean', description: 'Default true: when no exact name matches, resolve one unambiguous name variant (nickname, initial, title, order, surname typo, unique surname; card.match says which). false: exact names only.' },
+    variants: { type: 'boolean', description: 'false: exact names only. Default true: with no exact match, one unambiguous name variant (card.match says which).', fullSurfaceOnly: true },
   },
   scope: 'read',
   verb: true,

@@ -76,7 +76,7 @@ import {
   type CliDispatchContext,
 } from './command-table.ts';
 import { formatRememberResult } from './remember-format.ts';
-import { formatEntityResult } from './entity-format.ts';
+import { formatEntityResult, markEntityMiss } from './entity-format.ts';
 import { applyCliOpNotices, captureCapacityNotices, captureOpNotice } from './op-notices.ts';
 
 // db-availability loop: best-effort brain-id for the GBRAIN_DB_ACCESS marker,
@@ -724,6 +724,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
       );
       setCliExitVerdict(1);
     }
+    markEntityMiss(op.name, result);
     maybePrintConceptNudge(op.name, params);
   } catch (e: unknown) {
     // v0.42.20.0 (codex D4): on error, set exitCode + return so the `finally`
@@ -819,6 +820,7 @@ async function runThinClientRouted(
     const output = formatResult(op.name, result, params);
     // Awaited delivery (#3423) — same contract as the local-engine path.
     if (output) await writeStdoutFinal(output);
+    markEntityMiss(op.name, result);
     maybePrintConceptNudge(op.name, params);
   } catch (e: unknown) {
     if (e instanceof RemoteMcpError) {

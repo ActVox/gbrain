@@ -3,14 +3,14 @@
  * Pure detection and containment, then the probe on PGLite. Synthetic data.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { identifierKeywordQuery, parseIdentifier, textContainsIdentifier } from '../src/core/search/identifier-query.ts';
+import { identifierKeywordQuery, parseIdentifier, textContainsIdentifier, type IdentifierKind } from '../src/core/search/identifier-query.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { seedPage } from './helpers/keyword-paging-fixture.ts';
 import { structuralExactLookup } from '../src/core/search/exact-lookup.ts';
 
 describe('parseIdentifier', () => {
-  const cases: Array<[string, string | null]> = [
+  const cases: Array<[string, IdentifierKind | null]> = [
     ['alice@example.com', 'email'],
     ['+1 415 555 0142', 'phone'],
     ['(415) 555-0142', 'phone'],

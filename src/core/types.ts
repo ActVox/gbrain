@@ -1106,8 +1106,7 @@ export interface SearchResult {
   keyword_hit?: boolean;
   /**
    * #1663 — set when the structural exact-lookup tier promoted/injected this
-   * result (query was the page's slug or exact normalized title, or #7163 an
-   * identifier the page's text contains). Drives the
+   * result (the page's slug or exact title, or #7163 an identifier its text holds). Drives the
    * autocut preserve predicate (tier hits carry no rerank_score) and
    * `--explain` telemetry; evidence still reads via alias_hit /
    * title_match_boost so the frozen EVIDENCE_ENUM is untouched.

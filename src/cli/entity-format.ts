@@ -4,19 +4,29 @@
  * ratchet), like remember-format.ts.
  */
 
+import { markNoResults } from './no-results.ts';
+
 /* eslint-disable @typescript-eslint/no-explicit-any -- renders the verb's JSON envelope */
+
+/** #7177: `gbrain entity` found no page and no text mention: with GBRAIN_FAIL_ON_EMPTY=1, exit NO_RESULTS_EXIT_CODE (human and --json alike). */
+export function markEntityMiss(opName: string, r: any): void {
+  if (opName === 'entity' && r && r.found === false && !r.text_mentions?.total) markNoResults('entity');
+}
+
 export function formatEntityResult(r: any): string {
   if (!r.found) {
-    const coverage = r.coverage && r.coverage.state !== 'complete' ? ` Mention coverage: ${r.coverage.state}, ${r.coverage.pending_pages} page(s) pending.` : '';
     const tm = r.text_mentions;
     const lines = tm?.total
-      ? [`No entity page. The name appears in the text of ${tm.total}${tm.capped ? '+' : ''} page(s) (unlinked text matches). (${r.latency_ms}ms)${coverage}`,
+      ? [`No entity page. The name appears in the text of ${tm.total}${tm.capped ? '+' : ''} page(s) (unlinked text matches).`,
         ...tm.pages.map((p: any) => `  ${p.date ?? '          '}  ${p.slug} — ${p.title}`)]
-      : [`No entity found. (${r.latency_ms}ms)${coverage}${tm?.unread ? ` Text matches not checked (${tm.unread}); search the name with gbrain search.` : ''}`];
+      : ['No entity found.'];
     if (Array.isArray(r.suggestions) && r.suggestions.length) {
       lines.push(r.ambiguous ? 'Several entities match this name; pick one:' : 'Did you mean:');
       for (const s of r.suggestions) lines.push(`  ${s.slug} — ${s.title} [${s.create_safety}]`);
     }
+    if (!tm?.total && tm?.unread) lines.push(`  text matches not checked (${tm.unread}); search the name with gbrain search`);
+    if (r.coverage && r.coverage.state !== 'complete') lines.push(`  mention coverage: ${r.coverage.state}, ${r.coverage.pending_pages} page(s) pending`);
+    lines.push(`  (${r.latency_ms}ms)`);
     return lines.join('\n') + '\n';
   }
   const c = r.card;

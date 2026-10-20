@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 253109,
-    "stdoutSha256": "52884f634d8625753ff796aab76902ff1c4faf428fe04f7a03cc6857f157c24f",
+    "stdoutBytes": 253031,
+    "stdoutSha256": "30e63509c2ccc1987bb7de17c1cb0bcb6ca952d30592836975eae34b0e0ac47b",
     "toolNames": [
       "remember",
       "entity",
@@ -332,7 +332,7 @@
               "type": "string"
             },
             "variants": {
-              "description": "Default true: when no exact name matches, resolve one unambiguous name variant (nickname, initial, title, order, surname typo, unique surname; card.match says which). false: exact names only.",
+              "description": "false: exact names only. Default true: with no exact match, one unambiguous name variant (card.match says which).",
               "type": "boolean"
             }
           },
