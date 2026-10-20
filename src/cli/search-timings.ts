@@ -77,7 +77,7 @@ export function searchTimingsLine(meta: Record<string, unknown> | null): string 
   const parts = (['startup', 'connect', 'context', 'remote', 'op'] as const).flatMap(k => t[k] === undefined ? [] : [`${k} ${t[k]}`]);
   const stages = Object.entries(t.stages ?? {}).map(([k, v]) => `${k} ${v}`);
   const cost = (meta?.cost as SearchCostMeta | undefined) ?? { calls: 0 };
-  const calls = (['embedding', 'rerank', 'chat', 'decide'] as const).flatMap(k => cost[k] ? [`${k} ${cost[k]!.calls} (${cost[k]!.input_tokens} tokens)`] : []);
+  const calls = (['embedding', 'rerank', 'expansion', 'chat', 'decide'] as const).flatMap(k => cost[k] ? [`${k} ${cost[k]!.calls} (${cost[k]!.input_tokens} tokens)`] : []);
   return `timings: ${t.total}ms total — ${[...parts, `cli_other ${t.cli_other}`].join(', ')}`
     + (stages.length ? ` | op stages: ${stages.join(', ')}` : '')
     + ` | cost: ${calls.length ? calls.join(', ') : 'no model calls'}${cost.estimated_usd !== undefined && cost.calls > 0 ? `, ~$${cost.estimated_usd}` : ''}\n`;

@@ -80,7 +80,8 @@ phase that did not run is absent; `0` means it took under half a
 millisecond. On a thin client `op` and `stages` are the server's.
 
 `cost` (also `_meta.retrieval.cost` over MCP) counts every model call the
-request made, by kind (`embedding`, `rerank`, `chat`, `decide`), each with
+request made, by kind (`embedding`, `rerank`, `expansion`, `chat`, `decide`;
+`expansion` is the same call `chat_usage_log` records with phase `expansion`), each with
 `calls`, `input_tokens`, `output_tokens` and `usd`, plus `calls` and
 `estimated_usd` in total. Tokens are what the provider reported; a call it
 reported none for counts its request estimate and is tallied in

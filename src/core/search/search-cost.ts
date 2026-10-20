@@ -3,7 +3,9 @@
  * the CLI's `--timings` document). One meter per op call, scoped with
  * AsyncLocalStorage, so concurrent MCP requests never see each other's calls.
  *
- * Every embedding, rerank, chat and decide call inside the request counts,
+ * Every embedding, rerank, query-expansion, chat and decide call inside the
+ * request counts (expansion is its own line, the calls chat_usage_log
+ * records with phase `expansion`),
  * failed ones included (a provider can bill a failed call); a call a budget
  * guard refused was never sent and does not count. Tokens are the provider's
  * reported usage; a call whose provider reported none counts its request
@@ -15,7 +17,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { withAIInvocationMeter, type AIInvocationEvent } from '../ai/invocation-guard.ts';
 import { usageCostUsd, type BudgetKind } from '../budget/reservation-cost.ts';
 
-export type SearchCostKind = 'embedding' | 'rerank' | 'chat' | 'decide';
+export type SearchCostKind = 'embedding' | 'rerank' | 'expansion' | 'chat' | 'decide';
 
 export interface SearchCostLine {
   calls: number;
@@ -47,7 +49,8 @@ class SearchCost {
   add(event: AIInvocationEvent): void {
     const kind = KIND[event.call.kind];
     if (!kind || event.outcome === 'refused') return;
-    const tally = this.tallies.get(kind.line) ?? { calls: 0, input_tokens: 0, output_tokens: 0, usd: 0, unpriced: false };
+    const line = event.call.operation === 'gateway.expand' ? 'expansion' : kind.line;
+    const tally = this.tallies.get(line) ?? { calls: 0, input_tokens: 0, output_tokens: 0, usd: 0, unpriced: false };
     const input = event.usage?.inputTokens ?? event.call.estimatedInputTokens ?? 0;
     const output = event.usage?.outputTokens ?? 0;
     tally.calls += 1;
@@ -57,7 +60,7 @@ class SearchCost {
     const usd = usageCostUsd(event.call.model, input, output, kind.budget);
     if (usd === null) tally.unpriced = true;
     else tally.usd += usd;
-    this.tallies.set(kind.line, tally);
+    this.tallies.set(line, tally);
   }
 
   snapshot(): SearchCostMeta {
