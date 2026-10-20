@@ -44,9 +44,11 @@ const pending = (slug: string, sourceId = 'default') =>
   engine.executeRaw('UPDATE pages SET text_projection_revision = NULL WHERE slug = $1 AND source_id = $2', [slug, sourceId]);
 
 /** A large page (over the inline limit) whose embedding budget is held: no vectors. */
-async function embeddingHeldPage(sourceId: string, slug: string, type: string, title: string) {
+async function embeddingHeldPage(sourceId: string, slug: string, type: string, title: string, embedSkip: string | null = null) {
   await page(slug, type, title, 'a long recording transcript', sourceId);
-  await engine.executeRaw(`UPDATE pages SET compiled_truth = repeat('x', 1100000) WHERE slug = $1 AND source_id = $2`, [slug, sourceId]);
+  await engine.executeRaw(`UPDATE pages SET compiled_truth = repeat('x', 1100000),
+    frontmatter = CASE WHEN $3::text IS NULL THEN frontmatter ELSE COALESCE(frontmatter, '{}'::jsonb) || jsonb_build_object('embed_skip', $3::text) END
+    WHERE slug = $1 AND source_id = $2`, [slug, sourceId, embedSkip]);
   await engine.executeRaw('UPDATE pages SET text_projection_revision = knowledge_revision WHERE slug = $1 AND source_id = $2', [slug, sourceId]);
   await engine.executeRaw(`INSERT INTO page_embedding_budget(page_id, state, reason) SELECT id, 'held', 'upgrade_backfill' FROM pages WHERE slug = $1 AND source_id = $2`, [slug, sourceId]);
 }
@@ -186,6 +188,18 @@ describe('pages held from embedding are named in coverage and the held_files lin
     expect(notice.why).toContain('2 page(s) in this scope are held from embedding');
     expect(notice.why).toContain('1 of them could match this query');
     expect(notice.fix).toMatchObject({ argv: ['gbrain', 'embed', '--held', '--dry-run'], actor: 'agent' });
+  }));
+
+  test('an embed_skip page with an applying budget row is not counted: no embedding path releases it', eachEngine(async () => {
+    await embeddingHeldPage('embed-a', 'notes/acme-example-renewal-held', 'note', 'Acme-example renewal held');
+    const before = call('embed-a');
+    await search.handler(before.ctx, { query: QUERY });
+    const counted = before.meta.retrieval.coverage;
+    expect(counted.could_affect.embedding_held).toBeGreaterThan(0);
+    await embeddingHeldPage('embed-a', 'notes/acme-example-renewal-skipped', 'note', 'Acme-example renewal skipped', 'content_sanity');
+    const c = call('embed-a');
+    await search.handler(c.ctx, { query: QUERY });
+    expect(c.meta.retrieval.coverage).toEqual(counted);
   }));
 });
 

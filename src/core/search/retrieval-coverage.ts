@@ -106,7 +106,8 @@ export function countPendingProjections(engine: Pick<BrainEngine, 'executeRaw'>,
     `p.text_projection_revision IS DISTINCT FROM p.knowledge_revision AND ${projectionClassSql('p', 's')} NOT IN ('protected','archived')`);
 }
 
-/** Pages in scope held from embedding: a held or capped budget row that still applies. */
+/** Pages in scope held from embedding: a held or capped budget row that still applies, on a page no `embed_skip` marker keeps out of embedding for good. */
 export function countEmbeddingHeld(engine: Pick<BrainEngine, 'executeRaw'>, scope: ProjectionReadinessScope, relevance: CoverageRelevance): Promise<ScopedCount | null> {
-  return countInScope(engine, scope, relevance, 'JOIN page_embedding_budget b ON b.page_id = p.id', budgetRowAppliesFilter('b', 'p'));
+  return countInScope(engine, scope, relevance, 'JOIN page_embedding_budget b ON b.page_id = p.id',
+    `${budgetRowAppliesFilter('b', 'p')} AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
 }
