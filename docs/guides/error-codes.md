@@ -4249,9 +4249,19 @@ More: [docs/guides/write-refusals.md#unsupported_path](../../docs/guides/write-r
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A remote replace upload over 24 MiB was refused because the page holds content it cannot carry over: a takes fence remote reads hide, or timeline rows. | put_page keeps a hidden takes fence and checks omitted timeline rows by comparing whole bodies; an upload over the single-string ceiling is never held whole, so it refuses instead of dropping them. | Replace the page with content of at most 24 MiB through put_page, write it locally on the brain host, or (timeline only) commit with drop_timeline: true when deleting every entry is intended. | agent | `repeat the read that failed` | 1 | no |
+| A remote replace upload over 24 MiB was refused because the page holds content it cannot carry over: a takes fence or facts rows remote reads hide, or timeline rows. | put_page keeps a hidden takes fence and hidden facts rows and checks omitted timeline rows by comparing whole bodies; an upload over the single-string ceiling is never held whole, so it refuses instead of dropping them. | Replace the page with content of at most 24 MiB through put_page, write it locally on the brain host, or (timeline only) commit with drop_timeline: true when deleting every entry is intended. | agent | `repeat the read that failed` | 1 | no |
 
-Reasons: `takes`, `timeline`.
+Reasons: `takes`, `facts`, `timeline`.
+
+### upload_too_many_parts
+
+<a id="upload_too_many_parts"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An upload part was refused because the session reached its part limit (64 plus one per 64 KiB of total_bytes) without completing the content. | Each part is a stored row; the limit keeps a session of tiny parts from growing without bound, and a client cutting parts near part_max_frame_bytes never reaches it. | Send the rest of the content in that part (within part_max_frame_bytes), or abort and begin again cutting parts near part_max_frame_bytes. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#upload_too_many_parts](../../docs/guides/write-refusals.md#upload_too_many_parts)
 
 ### upstream
 

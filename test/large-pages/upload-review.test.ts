@@ -183,6 +183,51 @@ for (const kind of testBackends()) {
       }
     }, 120_000);
 
+    test('a begin request_id that already named a put_page attaches no session to that write, and abort still frees the session', async () => {
+      const requestId = randomUUID();
+      const other = slugOf();
+      await call('put_page', { slug: other, content: pageText('other'), request_id: requestId, wait_ms: 30_000 });
+      const prior = await counters();
+      const slug = slugOf();
+      const text = pageText('reused');
+      const session = await begin(slug, text, { request_id: requestId });
+      await send(session.upload_id, halves(text));
+      expect((await refusal('commit_page_upload', { upload_id: session.upload_id, wait_ms: 30_000 })).code).toBe('idempotency_conflict');
+      const [row] = await engine.executeRaw<{ commit_request_id: string | null }>('SELECT commit_request_id::text AS commit_request_id FROM page_body_stagings WHERE id = $1::uuid', [session.upload_id]);
+      expect(row!.commit_request_id).toBeNull();
+      expect((await call('abort_page_upload', { upload_id: session.upload_id })).state).toBe('aborted');
+      await expectReleased(prior);
+      expect(await engine.readPageSnapshot(slug, { sourceId: 'default' })).toBeNull();
+    }, 120_000);
+
+    test("another principal's lapsed session does not count against the brain-wide cap at begin", async () => {
+      const heldText = pageText('lapsed', 5000);
+      const text = pageText('fits', 5000);
+      const cap = Buffer.byteLength(heldText) + Buffer.byteLength(text) - 1;
+      await engine.executeRaw("INSERT INTO config (key, value) VALUES ('persistence.limits.brain_staged_bytes', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", [String(cap)]);
+      try {
+        const held = await begin(slugOf(), heldText, {}, ctx('review-b'));
+        await engine.executeRaw("UPDATE page_body_stagings SET idle_expires_at = now() - interval '1 second' WHERE id = $1::uuid", [held.upload_id]);
+        const session = await begin(slugOf(), text);
+        expect(session.state).toBe('open');
+        expect((await refusal('get_page_upload', { upload_id: held.upload_id }, ctx('review-b'))).code).toBe('upload_expired');
+      } finally {
+        await engine.executeRaw("DELETE FROM config WHERE key = 'persistence.limits.brain_staged_bytes'");
+      }
+    }, 120_000);
+
+    test('a session of tiny parts stops at its part limit unless the part completes the content', async () => {
+      const text = 'x'.repeat(200);
+      const session = await begin(slugOf(), text);
+      for (let part = 0; part < 65; part++) await call('upload_page_part', { upload_id: session.upload_id, part, text: 'x', part_sha256: hex('x') });
+      const refused = await refusal('upload_page_part', { upload_id: session.upload_id, part: 65, text: 'x', part_sha256: hex('x') });
+      expect(refused.code).toBe('upload_too_many_parts');
+      expect(refused.message).toContain('at most 65 parts');
+      expect(wire(refused)).toContain('get_page_upload');
+      const rest = text.slice(65);
+      expect((await call('upload_page_part', { upload_id: session.upload_id, part: 65, text: rest, part_sha256: hex(rest) })).received_bytes).toBe(200);
+    }, 120_000);
+
     test('a slug fence the caller gained after begin closes the session to part, status and abort', async () => {
       const slug = slugOf();
       const text = pageText('fenced');

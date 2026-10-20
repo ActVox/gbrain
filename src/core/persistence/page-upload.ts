@@ -50,6 +50,15 @@ export function partMaxFrameBytes(ctx: Pick<OperationContext, 'remote' | 'transp
   return Math.min(inbound, UPLOAD_PART_FRAME_CAP_BYTES) - UPLOAD_FRAME_RESERVE_BYTES;
 }
 
+/**
+ * The most parts one session takes: 64 plus one per 64 KiB of its declared bytes (one per eighth of the part limit on a
+ * connection whose limit is under 512 KiB), so a client cutting parts near part_max_frame_bytes, even of fully escaped
+ * text, never reaches it while a session of tiny parts cannot grow its part rows without bound.
+ */
+export function uploadPartLimit(declaredBytes: number, partFrameBytes: number): number {
+  return 64 + Math.ceil(declaredBytes / Math.min(64 * 1024, Math.floor(partFrameBytes / 8)));
+}
+
 /** The encoded size of one `upload_page_part` call's arguments, the measure clients cut parts by (egress-budget.ts). */
 export function uploadPartFrameBytes(args: { upload_id: string; part: number; text: string; part_sha256: string }): number {
   return encodedFrameBytes({ upload_id: args.upload_id, part: args.part, text: args.text, part_sha256: args.part_sha256 });
@@ -177,7 +186,8 @@ export interface UploadReservation {
 
 /**
  * Begin: in one transaction, lock the caller's and the brain's staged counters (key order), expire the caller's lapsed
- * sessions, recount every live session, refuse past a cap (`write_quota_exhausted`), insert the session and store the
+ * sessions, recount every live session (the brain sum leaves out other principals' lapsed sessions, which the sweep
+ * expires and which nothing revives: a lapsed session takes no part and cannot be sealed), refuse past a cap (`write_quota_exhausted`), insert the session and store the
  * counts with its reservation.
  */
 export async function reserveUpload(engine: BrainEngine, input: UploadReservation): Promise<void> {
@@ -190,10 +200,10 @@ export async function reserveUpload(engine: BrainEngine, input: UploadReservatio
     await tx.executeRaw(LOCK_COUNTERS_SQL, [all]);
     await transitionUploads(tx, 'expired', `s.principal_kind = $1 AND s.principal_id = $2 AND ${LAPSED_SQL}`, owner);
     const [usage] = await tx.executeRaw<{ staged: unknown; brain: unknown; uploads: unknown }>(`SELECT
-        COALESCE(SUM(reserved_bytes) FILTER (WHERE principal_kind = $1 AND principal_id = $2), 0)::text AS staged,
-        COALESCE(SUM(reserved_bytes), 0)::text AS brain,
-        (count(*) FILTER (WHERE principal_kind = $1 AND principal_id = $2))::text AS uploads
-      FROM page_body_stagings WHERE kind = 'upload' AND state = ANY(${LIVE})`, owner);
+        COALESCE(SUM(s.reserved_bytes) FILTER (WHERE s.principal_kind = $1 AND s.principal_id = $2), 0)::text AS staged,
+        COALESCE(SUM(s.reserved_bytes) FILTER (WHERE NOT ${LAPSED_SQL}), 0)::text AS brain,
+        (count(*) FILTER (WHERE s.principal_kind = $1 AND s.principal_id = $2))::text AS uploads
+      FROM page_body_stagings s WHERE s.kind = 'upload' AND s.state = ANY(${LIVE})`, owner);
     const staged = Number(usage?.staged ?? 0), brain = Number(usage?.brain ?? 0), uploads = Number(usage?.uploads ?? 0);
     if (uploads + 1 > limits.principalUploads) throw stagedQuotaExhausted('open upload sessions for this connection', 'principalUploads', uploads, limits.principalUploads, 1, 'open_uploads');
     if (staged + input.totalBytes > limits.principalStagedBytes) throw stagedQuotaExhausted('staged upload bytes for this connection', 'principalStagedBytes', staged, limits.principalStagedBytes, input.totalBytes, 'staged_bytes');
@@ -249,9 +259,9 @@ export async function stagedSha256(exec: SqlEngine, row: Pick<UploadRow, 'id' | 
  */
 export async function sealUpload(exec: SqlEngine, id: string): Promise<boolean> {
   const limits = await readUploadLimits(exec);
-  const sealed = await exec.executeRaw<{ id: string }>(`UPDATE page_body_stagings SET state = 'sealed', updated_at = now(),
-      hard_expires_at = GREATEST(hard_expires_at, now() + $2::bigint * interval '1 second')
-    WHERE id = $1::uuid AND state = 'open' RETURNING id::text AS id`, [id, limits.uploadIdleSeconds]);
+  const sealed = await exec.executeRaw<{ id: string }>(`UPDATE page_body_stagings s SET state = 'sealed', updated_at = now(),
+      hard_expires_at = GREATEST(s.hard_expires_at, now() + $2::bigint * interval '1 second')
+    WHERE s.id = $1::uuid AND s.state = 'open' AND NOT ${LAPSED_SQL} RETURNING s.id::text AS id`, [id, limits.uploadIdleSeconds]);
   return sealed.length > 0;
 }
 
