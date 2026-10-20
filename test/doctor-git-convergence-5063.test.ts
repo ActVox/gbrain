@@ -12,6 +12,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { gitConvergenceCheck, trackedOwnershipMarkerCheck } from '../src/commands/doctor/checks/git-convergence.ts';
 import { DOCTOR_CHECK_REGISTRY } from '../src/commands/doctor/registry.ts';
 import { categorizeCheck } from '../src/core/doctor-categories.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 const dir = mkdtempSync(join(tmpdir(), 'gbrain-git-convergence-'));
@@ -38,12 +39,18 @@ function commitAt(work: string, file: string, ageMs: number) {
   git(work, ['commit', '-q', '-m', file], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
 }
 
+/** #7145: a brain with only the slow checkout, so no other root waits on the slow git. */
+let solo: PGLiteEngine;
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  solo = new PGLiteEngine();
+  await solo.connect({});
+  await solo.initSchema();
 });
 afterAll(async () => {
+  await solo.disconnect();
   await engine.disconnect();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -89,19 +96,12 @@ test('#7145: a git call past its timeout is health unknown, not a converged chec
   const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   const bin = join(dir, 'slow-bin'); mkdirSync(bin);
   writeFileSync(join(bin, 'git'), `#!/bin/sh\ncase " $* " in *" status "*|*" ls-files "*) sleep 8 ;; esac\nexec ${realGit} "$@"\n`); chmodSync(join(bin, 'git'), 0o755);
-  const solo = new PGLiteEngine();
-  await solo.connect({}); await solo.initSchema();
-  const path = process.env.PATH;
-  try {
-    await solo.executeRaw("INSERT INTO sources(id,name,local_path) VALUES('slow','slow',$1)", [slow]);
-    process.env.PATH = `${bin}:${path}`;
+  await solo.executeRaw("INSERT INTO sources(id,name,local_path) VALUES('slow','slow',$1)", [slow]);
+  await withEnv({ PATH: `${bin}:${process.env.PATH}` }, async () => {
     const check = await gitConvergenceCheck(solo);
     expect(check).toMatchObject({ name: 'git_convergence', status: 'warn', details: { health: 'unknown', reason: 'bound', bound: 'time', exact: false, limit: 5000 } });
     expect(check!.message).toContain('Git convergence unknown');
     const marker = await trackedOwnershipMarkerCheck(solo);
     expect(marker).toMatchObject({ name: 'tracked_ownership_marker', status: 'warn', details: { health: 'unknown', bound: 'time' } });
-  } finally {
-    process.env.PATH = path;
-    await solo.disconnect();
-  }
+  });
 }, 60_000);

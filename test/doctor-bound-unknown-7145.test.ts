@@ -143,18 +143,14 @@ describe('connectors drift is read from the newest connector receipt, not a 20-r
 });
 
 describe('link_resolution_opportunity names its sample on every verdict', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
+  afterAll(async () => { await engine.disconnect(); });
   test('a brain larger than the sample: the clean verdict says it read a sample and carries exact: false', async () => {
-    const engine = new PGLiteEngine();
-    await engine.connect({});
-    await engine.initSchema();
-    try {
-      await engine.executeRaw("INSERT INTO pages(source_id, slug, type, title, compiled_truth, timeline, frontmatter) SELECT 'default', 'notes/n-' || g, 'note', 'n', 'plain text', '', '{}'::jsonb FROM generate_series(1, 1001) g");
-      const check = await checkLinkResolutionOpportunity(engine);
-      expect(check.status).toBe('ok');
-      expect(check.message).toBe('No bare wikilinks found (scanned the 1000 most-recent of 1001 pages)');
-      expect(check.details).toMatchObject({ exact: false, bound: 'sample', limit: 1000, total_pages: 1001 });
-    } finally {
-      await engine.disconnect();
-    }
+    await engine.executeRaw("INSERT INTO pages(source_id, slug, type, title, compiled_truth, timeline, frontmatter) SELECT 'default', 'notes/n-' || g, 'note', 'n', 'plain text', '', '{}'::jsonb FROM generate_series(1, 1001) g");
+    const check = await checkLinkResolutionOpportunity(engine);
+    expect(check.status).toBe('ok');
+    expect(check.message).toBe('No bare wikilinks found (scanned the 1000 most-recent of 1001 pages)');
+    expect(check.details).toMatchObject({ exact: false, bound: 'sample', limit: 1000, total_pages: 1001 });
   }, 120_000);
 });

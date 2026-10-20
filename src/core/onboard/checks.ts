@@ -30,7 +30,7 @@ import { loadConfig } from '../config.ts';
 import { MIN_ENTITY_PAGES_FOR_COVERAGE } from '../types.ts';
 import { ORPHANED_ALIAS_COUNTS_SQL, SOFT_DELETED_ALIAS_COUNT_SQL } from '../repair/aliases.ts';
 import { repairPreviewCommand } from '../repair/registry.ts';
-import { isUndefinedTableError } from '../utils.ts';
+import { isMissingSchemaObject } from '../utils.ts';
 
 /** Shared shape returned by all four checks. */
 export interface OnboardCheckResult {
@@ -757,7 +757,7 @@ export async function checkDanglingAliases(
     if (row) soft = row;
   } catch (error) {
     // #7145: only a pre-v105 brain (no alias tables) has nothing to report; any other failure is unknown, not clear.
-    if (!isUndefinedTableError(error)) {
+    if (!isMissingSchemaObject(error, 'table', ['slug_aliases', 'page_aliases'])) {
       return { check: { name: 'dangling_aliases', status: 'warn', details: { health: 'unknown' },
         message: `Dangling aliases unknown: the alias read failed (${redactConnectionInfo(error instanceof Error ? error.message : String(error))}); rerun doctor.` }, remediations: [] };
     }
