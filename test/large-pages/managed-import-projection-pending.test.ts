@@ -33,6 +33,8 @@ import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 import { registerLocalWriter, withVerifiedLocalRegistration } from '../../src/core/persistence/identity.ts';
 import { importManagedFile } from '../../src/core/persistence/import-mutations.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
+import { DETACHED_PROJECTION_BUILDS } from '../../src/core/persistence/consumer.ts';
+import { DEFAULT_FLIP_RETIRE_MAX_ROWS } from '../../src/core/page-body/limits.ts';
 import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { testBackends } from '../helpers/test-backends.ts';
@@ -150,5 +152,86 @@ for (const kind of testBackends()) {
       expect(reached).toBe(false);
       await disposePersistenceConsumer(engine);
     }), 120_000);
+
+    test('detached builds run at most DETACHED_PROJECTION_BUILDS at a time (beside the resident drain\'s one page); every page seals and stop() drains them', () => withEnv(env, async () => {
+      const f = await managedSource();
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const building = new Set<string>();
+      let peak = 0;
+      installFaultHook(async (point, detail) => {
+        if (detail.sourceId !== f.sourceId || typeof detail.slug !== 'string') return;
+        if (point === 'segmented:projection_staged') { building.delete(detail.slug); return; }
+        if (point !== 'segmented:projection_batch' || building.has(detail.slug)) return;
+        building.add(detail.slug);
+        peak = Math.max(peak, building.size);
+        await held;
+      });
+      const slugs = Array.from({ length: 6 }, (_, i) => `notes/many-${i}`);
+      try {
+        for (const [i, slug] of slugs.entries()) {
+          expect(await importFile(f, slug, conversationPage(SEGMENTED_CREATE_SEAL_MAX_BYTES + 256 * 1024, { seed: 90 + i })))
+            .toMatchObject({ slug, status: 'imported', searchable: 'pending' });
+        }
+        expect(peak).toBeLessThanOrEqual(DETACHED_PROJECTION_BUILDS + 1);
+        release();
+        await disposePersistenceConsumer(engine);
+        expect(building.size).toBe(0);
+        for (const slug of slugs) expect([slug, await pageRow(f.sourceId, slug)]).toMatchObject([slug, { body_storage: 'segmented', sealed: true }]);
+        expect(peak).toBeLessThanOrEqual(DETACHED_PROJECTION_BUILDS + 1);
+      } finally {
+        release();
+        installFaultHook(undefined);
+        await disposePersistenceConsumer(engine);
+      }
+    }), 300_000);
+
+    test('an edit whose retirement is deferred (pages.flip_retire_max_rows 1) still replies sealed: only a new page detaches its build', () => withEnv(env, async () => {
+      const f = await managedSource();
+      const slug = 'notes/edited';
+      await engine.setConfig('pages.flip_retire_max_rows', '1');
+      try {
+        expect(await importFile(f, slug, conversationPage(2 * 1024 * 1024, { seed: 84 }))).toMatchObject({ slug, status: 'imported', searchable: true });
+        const reply = await importFile(f, slug, conversationPage(2 * 1024 * 1024, { seed: 85 }));
+        expect(reply).toMatchObject({ slug, status: 'imported', searchable: true });
+        expect(reply.projection).toBeUndefined();
+        expect(await pageRow(f.sourceId, slug)).toMatchObject({ body_storage: 'segmented', sealed: true });
+        const [edit] = await engine.executeRaw<{ outcome: Record<string, unknown> }>(
+          'SELECT outcome FROM persistence_requests WHERE source_id=$1 AND slug=$2 ORDER BY sequence DESC LIMIT 1', [f.sourceId, slug]);
+        expect(edit!.outcome).toMatchObject({ projection: 'pending' });
+      } finally {
+        await engine.setConfig('pages.flip_retire_max_rows', String(DEFAULT_FLIP_RETIRE_MAX_ROWS));
+        await disposePersistenceConsumer(engine);
+      }
+    }), 120_000);
+
+    test('a quarantined new page over 4 MiB replies at commit (searchable false) while its projection is held', () => withEnv(env, async () => {
+      const f = await managedSource();
+      const slug = 'notes/quarantined';
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      let reached!: () => void;
+      const entered = new Promise<void>(resolve => { reached = resolve; });
+      installFaultHook(async (point, detail) => {
+        if (point !== 'segmented:projection_staged' || detail.sourceId !== f.sourceId || detail.slug !== slug) return;
+        reached();
+        await held;
+      });
+      try {
+        const body = midsize.replace('title: Conversation log\n', 'title: Conversation log\nquarantine:\n  reason: test\n  detail: held for review\n');
+        expect(body).not.toBe(midsize);
+        const reply = await importFile(f, slug, body);
+        expect(reply).toMatchObject({ slug, status: 'imported', searchable: false });
+        await entered;
+        expect(await pageRow(f.sourceId, slug)).toEqual({ body_storage: 'segmented', sealed: false, chunks: 0 });
+        release();
+        await disposePersistenceConsumer(engine);
+        expect(await pageRow(f.sourceId, slug)).toEqual({ body_storage: 'segmented', sealed: true, chunks: 0 });
+      } finally {
+        release();
+        installFaultHook(undefined);
+        await disposePersistenceConsumer(engine);
+      }
+    }), 300_000);
   });
 }

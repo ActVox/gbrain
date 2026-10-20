@@ -99,6 +99,8 @@ function previousToken(stamp: unknown): string | null {
 export const RESIDENT_PROJECTION_PAGES = 100;
 export const RESIDENT_PROJECTION_BUDGET_MS = 250;
 export const WRITE_WAITING_PROJECTION_PAGES = 2;
+/** #7106: projection builds a consumer runs after replying (new pages over SEGMENTED_CREATE_SEAL_MAX_BYTES) at once; more wait in order. */
+export const DETACHED_PROJECTION_BUILDS = 1;
 
 export async function runResidentProjectionInvocation(engine: BrainEngine, hostId: string, excludeRoots: string[],
   now: () => number = Date.now, signal?: AbortSignal) {
@@ -229,6 +231,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   private preparationAttempts = 0;
   private preparing = new Map<string, { request_id: string; started_at: string; deadline_exceeded: boolean; attempt: number }>();
   private executing = new Set<string>();
+  private detachedBuilds = 0;
+  private detachedQueue: Array<() => void> = [];
   private abandonedReleased = false;
   /** #6317: the engine the tick's own statements run through (the direct route when the engine has one; consumer-lane.ts). */
   private readonly statements: BrainEngine;
@@ -418,11 +422,11 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
    */
   private async publishSingle(row: WriteRequest, prepared: PreparedMutation): Promise<{ done: WriteRequest; settled: boolean }> {
     // A waiter learns of the commit before the recovery record is cleared (the clear still runs under the worktree lock).
-    // #7106: a write whose projection is built after commit settles at commit; the build runs on, tracked until it ends
-    // (stop() waits for it), and holds neither the reply nor the source's next write.
+    // #7106: a new page whose projection is built after commit settles at commit; the build runs through the bounded
+    // detached-build queue and holds neither the reply nor the source's next write.
     let settled = false;
     const hooks = { committed: (rows: WriteRequest[]) => { settled = true; this.settled(rows[0]!); },
-      projectionPending: (done: WriteRequest, afterCommit: Promise<void>) => { settled = true; this.settled(done); this.keepUntilSettled(afterCommit); } };
+      projectionPending: (done: WriteRequest, afterCommit: () => Promise<void>) => { settled = true; this.settled(done); this.detachBuild(afterCommit); } };
     const published = await this.onLane(transaction => publishSingleWrite(this.engine, row, prepared, this.hostId, hooks, transaction));
     const done = published === LANE_BUSY ? await publishSingleWrite(this.engine, row, prepared, this.hostId, hooks) : published;
     return { done, settled: settled && done.state === 'committed' };
@@ -883,6 +887,19 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       + '; unfinished work remains tracked; fix: gbrain sources writer status --json; docs: docs/ENGINES.md#persistence-consumer-log\n');
   }
   /** #5373: tracks work that outlived its claim until it settles; the returned promise never rejects. */
+  /**
+   * #7106: runs a detached projection build (PublicationHooks.projectionPending) at most DETACHED_PROJECTION_BUILDS at
+   * a time, queued builds in order; each is tracked until it ends, so stop() waits for queued and running builds.
+   */
+  private detachBuild(build: () => Promise<void>): void {
+    this.keepUntilSettled(new Promise<void>(resolve => {
+      const start = () => {
+        this.detachedBuilds++;
+        void build().finally(() => { this.detachedBuilds--; resolve(); this.detachedQueue.shift()?.(); });
+      };
+      if (this.detachedBuilds < DETACHED_PROJECTION_BUILDS) start(); else this.detachedQueue.push(start);
+    }));
+  }
   private keepUntilSettled(work: Promise<unknown>): Promise<void> {
     const settled = work.then(() => undefined, () => undefined);
     this.outlived.add(settled);
