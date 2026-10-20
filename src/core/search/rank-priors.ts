@@ -92,17 +92,23 @@ export function applyRankPriors(rows: SearchResult[], query: string): SearchResu
     const image = isImageRow(r) ? { image_page: true as const } : {};
     return priors[i] === 1 && !image.image_page ? r : { ...r, ...image, ...(priors[i] !== 1 ? { rank_prior: priors[i] } : {}) };
   });
-  const scored = stamped.map((r, i) => (Number.isFinite(r.rerank_score) ? i : -1)).filter(i => i >= 0);
-  if (scored.length > 0) {
-    if (priors.every(p => p === 1)) return stamped;
-    for (const i of scored) stamped[i] = { ...stamped[i], rank_score: stamped[i].rerank_score! * priors[i] };
-    const reordered = scored.map(i => stamped[i]).map((r, n) => ({ r, n })).sort((a, b) => (b.r.rank_score! - a.r.rank_score!) || (a.n - b.n)).map(x => x.r);
-    scored.forEach((slot, n) => { stamped[slot] = reordered[n]; });
-    return stamped;
-  }
   if (priors.every(p => p === 1)) return stamped;
-  return stamped
-    .map((r, n) => ({ r: priors[n] === 1 ? r : { ...r, score: r.score * priors[n] }, n }))
-    .sort((a, b) => (b.r.score - a.r.score) || (a.n - b.n))
-    .map(x => x.r);
+  const reranked = stamped.some(r => Number.isFinite(r.rerank_score));
+  for (let i = 0; i < stamped.length; i++) {
+    if (priors[i] === 1) continue;
+    if (!reranked) stamped[i] = { ...stamped[i], score: stamped[i].score * priors[i] };
+    else if (Number.isFinite(stamped[i].rerank_score)) stamped[i] = { ...stamped[i], rank_score: stamped[i].rerank_score! * priors[i] };
+  }
+  const value = (r: SearchResult) => (reranked ? r.rank_score ?? r.rerank_score! : r.score);
+  // Pinned rows and (in a reranked list) rows without a rerank score keep their slots.
+  const slots = stamped.map((r, i) => i).filter(i => !stamped[i].relational_pinned && (!reranked || Number.isFinite(stamped[i].rerank_score)));
+  // Unchanged rows keep their relative order (feedback and any later adjustment included); a demoted row moves
+  // down to before the first unchanged-or-placed row whose order value is below its own.
+  const seq = slots.filter(i => priors[i] === 1).map(i => stamped[i]);
+  for (const i of slots.filter(i => priors[i] !== 1)) {
+    const at = seq.findIndex(r => value(r) < value(stamped[i]));
+    seq.splice(at < 0 ? seq.length : at, 0, stamped[i]);
+  }
+  slots.forEach((slot, n) => { stamped[slot] = seq[n]; });
+  return stamped;
 }

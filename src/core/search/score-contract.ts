@@ -14,9 +14,9 @@ import type { SearchResult } from '../types.ts';
 
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
 
-export function scoresFollowRank<T extends Pick<SearchResult, 'score' | 'rerank_score' | 'rank_score' | 'fused_score'>>(rows: T[]): T[] {
+export function scoresFollowRank<T extends Pick<SearchResult, 'score' | 'rerank_score' | 'rank_score' | 'fused_score' | 'relational_pinned'>>(rows: T[]): T[] {
   const reranked = rows.some(r => finite(r.rerank_score));
-  const order = rows.map(r => (reranked ? (finite(r.rank_score) ? r.rank_score : r.rerank_score) : r.score));
+  const order = rows.map(r => (reranked ? (r.relational_pinned ? undefined : finite(r.rank_score) ? r.rank_score : r.rerank_score) : r.score));
   const first = order.find(finite);
   if (first === undefined) return rows;
   let prev = Infinity;

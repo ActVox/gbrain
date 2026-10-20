@@ -103,3 +103,34 @@ describe('scoresFollowRank (#7156)', () => {
     expect(scoresFollowRank(rows)).toBe(rows);
   });
 });
+
+describe('pins and feedback order survive the priors (review)', () => {
+  const r = (slug: string, type: string, extra: Partial<SearchResult> = {}) => ({ slug, type, title: slug, chunk_text: slug, score: 0.5, page_id: 1, chunk_id: 1, chunk_index: 0, chunk_source: 'compiled_truth', stale: false, source_id: 'default', ...extra }) as SearchResult;
+  test('a relational pin keeps rank 1 when an image row below it is demoted', () => {
+    const rows = [
+      r('people/alice-example', 'person', { relational_pinned: true, rerank_score: 0.05 }),
+      r('images/badge.jpg', 'image', { rerank_score: 0.9, chunk_text: 'badge' }),
+      r('notes/harbor-plan', 'note', { rerank_score: 0.7 }),
+    ];
+    const out = applyRankPriors(rows, 'who invested in harbor plan');
+    expect(out[0].slug).toBe('people/alice-example');
+    expect(out.map(x => x.slug)).toEqual(['people/alice-example', 'notes/harbor-plan', 'images/badge.jpg']);
+  });
+  test('unchanged rows keep their relative order even when it differs from rerank order', () => {
+    const rows = [
+      r('notes/b', 'note', { rerank_score: 0.6 }),
+      r('notes/a', 'note', { rerank_score: 0.8 }),
+      r('images/x.png', 'image', { rerank_score: 0.9, chunk_text: 'x' }),
+    ];
+    const out = applyRankPriors(rows, 'harbor depot rota');
+    expect(out.map(x => x.slug)).toEqual(['notes/b', 'notes/a', 'images/x.png']);
+  });
+  test('a pinned row with a low rerank score does not flatten the column', () => {
+    const out = scoresFollowRank([
+      { score: 0.1, rerank_score: 0.1, relational_pinned: true },
+      { score: 0.4, rerank_score: 0.9 },
+      { score: 0.5, rerank_score: 0.7 },
+    ]);
+    expect(out.map(x => x.score)).toEqual([0.9, 0.9, 0.7]);
+  });
+});
