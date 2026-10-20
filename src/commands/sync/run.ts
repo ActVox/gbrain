@@ -462,7 +462,7 @@ async function runSyncAll(
     catch (error) { policyFailures.set(source.id, error); }
   }
   const embedPlan = await resolveSyncAllEmbedPlan(engine, runnableSources.filter(src => !policyFailures.has(src.id) && !companyPolicies.get(src.id)), {
-    v2Enabled, serialFlag, noEmbed: noEmbed || !!embeddingCredentialError, noAutoEmbed, dryRun, jsonOut, yesFlag, full, includeGitignored,
+    v2Enabled, serialFlag, noEmbed: noEmbed || !!embeddingCredentialError, noAutoEmbed, dryRun, jsonOut, yesFlag, full, includeGitignored, noPull,
   });
   if (embedPlan.stop) return;
   const {
@@ -845,7 +845,7 @@ async function runSingleSourceSync(
         chunker_version: gateRows[0].chunker_version,
       }, {
         dryRun: false,
-        jsonOut, yesFlag, full, includeGitignored, noAutoEmbed,
+        jsonOut, yesFlag, full, includeGitignored, noAutoEmbed, noPull,
       });
       singleSourceNoWorkerSurface = gate.workerSurface.status === 'no_worker_surface';
       singleCostGate = gate.costGate;
