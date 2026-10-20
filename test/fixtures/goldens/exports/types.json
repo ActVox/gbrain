@@ -962,7 +962,8 @@
           "tag?: string | undefined",
           "type?: string | undefined",
           "updatedAfterKeyset?: { updatedAt: string; slug: string; } | undefined",
-          "updated_after?: string | undefined"
+          "updated_after?: string | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "PageFilters"
       },
@@ -1464,7 +1465,8 @@
           "until?: string | undefined",
           "useCache?: boolean | undefined",
           "vectorLegacyGuard?: boolean | undefined",
-          "walkDepth?: number | undefined"
+          "walkDepth?: number | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "SearchOpts"
       },
@@ -6465,6 +6467,7 @@
       {
         "kind": "interface",
         "members": [
+          "cliKeyValue?: boolean | undefined",
           "default?: unknown",
           "description?: string | undefined",
           "enum?: string[] | undefined",
@@ -7939,7 +7942,8 @@
           "until?: string | undefined",
           "useCache?: boolean | undefined",
           "vectorLegacyGuard?: boolean | undefined",
-          "walkDepth?: number | undefined"
+          "walkDepth?: number | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "HybridSearchOpts"
       },
@@ -9213,7 +9217,8 @@
           "tag?: string | undefined",
           "type?: string | undefined",
           "updatedAfterKeyset?: { updatedAt: string; slug: string; } | undefined",
-          "updated_after?: string | undefined"
+          "updated_after?: string | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "PageFilters"
       },
@@ -9468,7 +9473,8 @@
           "until?: string | undefined",
           "useCache?: boolean | undefined",
           "vectorLegacyGuard?: boolean | undefined",
-          "walkDepth?: number | undefined"
+          "walkDepth?: number | undefined",
+          "where?: FrontmatterWhere | undefined"
         ],
         "name": "SearchOpts"
       },
