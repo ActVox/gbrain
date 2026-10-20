@@ -5,7 +5,7 @@
 import type { Operation } from './contract.ts';
 import { enforceClientSlugFence, enforceSubagentSlugFence, validatePageSlug } from './context.ts';
 import { pageMutationSource } from '../persistence/page-mutations.ts';
-import { PAGE_MUTATION_PARAMS } from '../persistence/params.ts';
+import { PAGE_MUTATION_PARAMS, WRITE_WAIT_PARAM } from '../persistence/params.ts';
 import { admitPageAppend, APPEND_TEXT_MAX_BYTES, type AppendRegion, type AppendSeparator } from '../persistence/page-append.ts';
 
 const append_page: Operation = {
@@ -23,6 +23,7 @@ const append_page: Operation = {
     region: { type: 'string', enum: ['auto', 'truth', 'timeline'], description: 'auto (default): the last non-empty region.' },
     separator: { type: 'string', enum: ['auto', 'none'], description: 'auto (default): one newline first when the tail lacks one.' },
     source_id: PAGE_MUTATION_PARAMS.source_id,
+    wait_ms: WRITE_WAIT_PARAM,
   },
   mutating: true,
   scope: 'write',
@@ -47,7 +48,7 @@ const append_page: Operation = {
     const outcome = (response.outcome ?? {}) as Record<string, unknown>;
     return { slug: outcome.slug ?? p.slug, revision: response.revision, body_bytes: outcome.body_bytes, appended_bytes: outcome.appended_bytes,
       chunks_new: outcome.chunks_new, ...(outcome.size_state !== undefined ? { size_state: outcome.size_state } : {}),
-      ...(outcome.rescanned ? { rescanned: true } : {}), receipt: response.write_request ?? response };
+      ...(outcome.rescanned ? { rescanned: true } : {}), ...(outcome.gate ? { gate: outcome.gate } : {}), receipt: response.write_request ?? response };
   },
 };
 

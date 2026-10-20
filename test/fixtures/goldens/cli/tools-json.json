@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 252608,
-    "stdoutSha256": "c4caf7e8efc25baa7e6e063797c8d16bf3f5874e465f5e6e3a6a3e537b4bf5be",
+    "stdoutBytes": 252763,
+    "stdoutSha256": "32b0c98f713f00be91ab771872ceaec27deb8d5d75ad0814ae5fde298046c0cb",
     "toolNames": [
       "remember",
       "entity",
@@ -1110,7 +1110,8 @@
           "separator": "string?",
           "slug": "string",
           "source_id": "string?",
-          "text": "string"
+          "text": "string",
+          "wait_ms": "number?"
         },
         "required_scopes": [],
         "schema": {
@@ -1155,6 +1156,10 @@
             "text": {
               "description": "Text to add, at most 4194304 bytes; a larger append uses begin_page_upload mode 'append'.",
               "type": "string"
+            },
+            "wait_ms": {
+              "description": "Commit wait ms (0-30000, default 5000).",
+              "type": "number"
             }
           },
           "required": [

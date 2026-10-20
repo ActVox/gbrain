@@ -179,7 +179,7 @@ export function applyPageEdits(page: Page, tags: string[], remote: boolean, edit
   // `within` is in stored-body bytes of the page as read: canonical positions map back through the edits applied so far.
   const head = serializePageToMarkdown({ ...page, compiled_truth: '', timeline: '' }, tags).slice(0, -1).length;
   const truth = page.compiled_truth ?? '', timeline = page.timeline ?? '';
-  const timelineAt = head + truth.length + '\n\n<!-- timeline -->\n\n'.length;
+  const timelineAt = head + truth.length + TIMELINE_SEPARATOR.length;
   const applied: Array<{ start: number; oldLen: number; newLen: number }> = [];
   const original = (pos: number, side: 'start' | 'end') => {
     for (let k = applied.length - 1; k >= 0; k--) {
@@ -402,7 +402,7 @@ interface Match { start: number; end: number; prefix: Uint8Array; suffix: Uint8A
  * before (`prefix`) and after (`suffix`) the match. Memory is one scan window plus |needle| - 1 bytes.
  */
 async function regionMatches(engine: BrainEngine, sourceId: string, rows: readonly ManifestRow[], reps: readonly BodyReplacement[], from: number, to: number,
-  needle: Buffer): Promise<Match[]> {
+  needle: Buffer, accept: (m: Match) => boolean, limit: number): Promise<Match[]> {
   const found: Match[] = [];
   let buf = Buffer.alloc(0);
   let map: Array<Piece & { v: number }> = [];
@@ -412,10 +412,13 @@ async function regionMatches(engine: BrainEngine, sourceId: string, rows: readon
     return side === 'start' ? { orig: p.origStart, rest: p.bytes.subarray(0, v - p.v) } : { orig: p.origEnd, rest: p.bytes.subarray(v - p.v) };
   };
   const search = (final: boolean) => {
-    const limit = final ? buf.length : buf.length - (needle.length - 1);
-    for (let at = buf.indexOf(needle); at !== -1 && at < limit; at = buf.indexOf(needle, at + 1)) {
+    const end = final ? buf.length : buf.length - (needle.length - 1);
+    for (let at = buf.indexOf(needle); at !== -1 && at < end && found.length < limit; at = buf.indexOf(needle, at + 1)) {
       const s = locate(at, 'start'), e = locate(at + needle.length, 'end');
-      found.push({ start: s.orig, end: e.orig, prefix: s.rest, suffix: e.rest });
+      const match = { start: s.orig, end: e.orig, prefix: s.rest, suffix: e.rest };
+      if (!accept(match)) continue;
+      spliceWork.matches++;
+      found.push(match);
     }
     if (final) return;
     const keep = Math.max(0, buf.length - (needle.length - 1));
@@ -427,6 +430,7 @@ async function regionMatches(engine: BrainEngine, sourceId: string, rows: readon
     map.push({ ...piece, v: buf.length });
     buf = Buffer.concat([buf, piece.bytes]);
     if (buf.length >= SCAN_WINDOW_BYTES) search(false);
+    if (found.length >= limit) return found;
   }
   search(true);
   return found;
@@ -545,17 +549,21 @@ export async function locateSegmentedEdits(engine: BrainEngine, input: { sourceI
   for (const [index, edit] of input.edits.entries()) {
     if (edit.old_text.includes('<!-- timeline -->') || (!within && input.head.includes(edit.old_text))) return null;
     const needle = Buffer.from(edit.old_text, 'utf8');
-    const matches: Match[] = [];
+    // A match into protected text is never kept (a remote caller's view hides it: absent); two kept matches settle ambiguity, so the scan stops there.
+    let protectedHit = false;
+    const keep = (m: Match) => {
+      if (!guarded.some(g => m.start < g.end && g.start < m.end)) return true;
+      if (!input.remote) protectedHit = true;
+      return false;
+    };
+    const allowed: Match[] = [];
     for (const region of regions) {
       const from = within ? Math.max(region.lo, within.byte_start) : region.lo;
       const to = within ? Math.min(region.hi, within.byte_end) : region.hi;
-      if (from >= to) continue;
-      matches.push(...await regionMatches(engine, input.sourceId, region.rows, reps, from, to, needle));
+      if (from >= to || allowed.length >= 2) continue;
+      for (const m of await regionMatches(engine, input.sourceId, region.rows, reps, from, to, needle, keep, 2 - allowed.length)) allowed.push(m);
     }
-    const touches = (m: Match) => guarded.some(g => m.start < g.end && g.start < m.end);
-    const visible = input.remote ? matches.filter(m => !touches(m)) : matches;
-    const allowed = visible.filter(m => !touches(m));
-    if (allowed.length === 0 && visible.length > 0) {
+    if (allowed.length === 0 && protectedHit) {
       throw editError('edit_protected_span', `Edit ${index}'s old_text touches a protected takes or facts section.`,
         'Use the takes_* operations or remember/forget for takes and facts, and quote only ordinary page text.', `edit_index=${index}`);
     }
@@ -566,9 +574,9 @@ export async function locateSegmentedEdits(engine: BrainEngine, input: { sourceI
         `edit_index=${index} match_count=0`);
     }
     if (allowed.length > 1) {
-      throw editError('edit_ambiguous_match', `Edit ${index}'s old_text matches ${allowed.length} places.`,
+      throw editError('edit_ambiguous_match', `Edit ${index}'s old_text matches more than one place.`,
         `Include surrounding text in old_text so it matches exactly once${within ? '' : ', or pass within (edit_target from a get_page window read) to search one range'}.`,
-        `edit_index=${index} match_count=${allowed.length}`);
+        `edit_index=${index} match_count_at_least=2`);
     }
     const m = allowed[0]!;
     const absorbed = reps.filter(r => r.start >= m.start && r.end <= m.end);
