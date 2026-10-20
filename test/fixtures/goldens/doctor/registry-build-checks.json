@@ -555,6 +555,10 @@
       },
       {
         "category": "brain",
+        "name": "facts_redaction_marker"
+      },
+      {
+        "category": "brain",
         "name": "loop_facts_drift"
       },
       {
@@ -688,6 +692,10 @@
       {
         "category": "ops",
         "name": "embed_backfill_stalled"
+      },
+      {
+        "category": "ops",
+        "name": "content_drift_sweep"
       },
       {
         "category": "ops",
