@@ -717,11 +717,13 @@ const scrub = (t: string) => scrubBase(t).replace(realFirstAll, m => inventedFor
 for (const p of pages) { p.title = scrub(p.title); p.body = scrub(p.body); p.fm = JSON.parse(scrub(JSON.stringify(p.fm))); }
 for (const r of rows) r.question = scrub(r.question);
 
-const denyRe = REAL_DENY.map(w => ({ w, re: new RegExp('(^|[^a-z0-9])' + w.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '([^a-z0-9]|$)', 'i') }));
+const words = (s: string) => ' ' + s.toLowerCase().replace(/[^a-z0-9&]+/g, ' ').trim() + ' ';
+const denyWords = REAL_DENY.map(w => ({ w, padded: words(w) }));
 function privacyFindings(): string[] {
   const out: string[] = [];
   const check = (where: string, text: string) => {
-    for (const { w, re } of denyRe) if (re.test(text)) out.push(where + ': "' + w + '"');
+    const padded = words(text);
+    for (const { w, padded: needle } of denyWords) if (padded.includes(needle)) out.push(where + ': "' + w + '"');
     const m = text.match(realFirstRe);
     if (m) out.push(where + ': common real name "' + m[2] + '"');
   };

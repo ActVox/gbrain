@@ -7239,7 +7239,7 @@
         "kind": "variable",
         "name": "AUTO_BLOCK_CHAR_CAP",
         "signature": [
-          "12000"
+          "8000"
         ]
       },
       {
