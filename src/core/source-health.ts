@@ -16,16 +16,23 @@
  *      wall-clock `now - last_sync_at` (which false-flagged quiet, caught-up
  *      repos as SEVERE). Local callers pass `probeContent: true` and lag
  *      becomes 0 when the source is caught up by COMMIT HASH (HEAD ==
- *      last_commit, untracked ignored, via `isSourceUnchangedSinceSync`).
+ *      last_commit, via `probeSourceGitState`).
  *      Remote callers (federation_health on the HTTP MCP path) read the stored
  *      `newest_content_at` column instead — NO git subprocess on a DB-supplied
  *      local_path (preserves the v0.41.27.0 trust boundary).
+ *
+ * GBRA-133 PR 2b.5: the local probe compares HEAD only (an uncommitted edit
+ *      to a tracked file is not a pending commit), and a source that is behind
+ *      dates its lag from when the commit landed (the reflog entry that moved
+ *      HEAD off last_commit) or from the commit notifier's persisted
+ *      first_due_at, not from the last no-op heartbeat of last_sync_at. Both
+ *      paths raise the lag to first_due_at's age (src/core/sync-pending.ts).
  */
 import { execFileSync } from './spawn.ts';
 import { execFileBounded } from './bounded-child-exec.ts';
 import type { BrainEngine } from './engine.ts';
 import { parseSourceConfig, type SourceRow } from './sources-load.ts';
-import { isSourceUnchangedSinceSync } from './git-head.ts';
+import { probeSourceGitState } from './git-head.ts';
 import { resolveHoursEnv } from './env-number.ts';
 import { isSyncDisabledConfig } from './sync-policy.ts';
 import { gitChildEnv } from './git-env.ts';
@@ -232,7 +239,7 @@ export function resolveStalenessCeilingSeconds(): number {
  *   fail and the surfaces escalate in order.
  *
  * The LOCAL path does NOT use this — it keys off the live commit hash via
- * `isSourceUnchangedSinceSync` (robust against HEAD moving to an old-dated
+ * `probeSourceGitState` (robust against HEAD moving to an old-dated
  * commit, which a timestamp comparison would miss).
  */
 export function lagFromContentMs(
@@ -284,8 +291,11 @@ export async function computeAllSourceMetrics(
   // One ceiling for the whole report (hoisted out of the per-source map):
   // every source gets the same number, and the env read runs once.
   const stalenessCeilingSeconds = resolveStalenessCeilingSeconds();
+  // GBRA-133 PR 2b.5: the commit notifier's persisted first_due_at dates a pending commit on both paths (no git).
+  const { readFirstDue, readGitPendingEvidence } = await import('./sync-pending.ts');
+  const firstDue = await readFirstDue(engine, sources.map((src) => src.id)).catch(() => new Map<string, { firstDueAt: number | null }>());
 
-  return sources.map((src) => {
+  return Promise.all(sources.map(async (src) => {
     const cfg = parseSourceConfig(src.config);
     const pages = pageCounts.get(src.id) ?? 0;
     const chunkStats = chunkCounts.get(src.id) ?? { total: 0, embedded: 0 };
@@ -296,17 +306,22 @@ export async function computeAllSourceMetrics(
       : Math.round((chunkStats.embedded / chunkStats.total) * 1000) / 10;
 
     const lastMs = src.last_sync_at ? new Date(src.last_sync_at).getTime() : null;
+    const dueMs = firstDue.get(src.id)?.firstDueAt ?? null;
     // v0.41.32.0: commit-relative lag. TWO implementations, and the split is
     // load-bearing rather than accidental duplication — see the diagram.
     //
     //   computeAllSourceMetrics
     //         │
-    //         ├─ probeContent: true  ──► isSourceUnchangedSinceSync (git subprocess)
+    //         ├─ probeContent: true  ──► probeSourceGitState, HEAD only (git subprocess)
     //         │                          LOCAL only. Accurate: keys off the live
     //         │                          commit hash, so a HEAD moved to an
     //         │                          old-dated commit is correctly NOT caught
-    //         │                          up. NULL last_commit → wall-clock.
-    //         │                          Caller: `gbrain sources status`.
+    //         │                          up, and an uncommitted edit is not a
+    //         │                          pending commit. Behind: lag runs from the
+    //         │                          reflog entry that moved HEAD off
+    //         │                          last_commit, else the notifier's
+    //         │                          first_due_at, else wall-clock since the
+    //         │                          last sync. Caller: `gbrain sources status`.
     //         │
     //         └─ probeContent: false ──► lagFromContentMs (column read)
     //                                    REMOTE-SAFE: no subprocess, because a
@@ -320,6 +335,8 @@ export async function computeAllSourceMetrics(
     //                                    doctor `sync_freshness` (via its own
     //                                    clone-unavailable branch), and
     //                                    `buildSyncStatusReport` (gbrain status).
+    //                                    A persisted first_due_at raises it to
+    //                                    the time the commit has been due.
     //
     // Do NOT "unify" these behind one flag: collapsing the trust boundary into a
     // boolean is how a remote caller eventually acquires a subprocess.
@@ -327,15 +344,18 @@ export async function computeAllSourceMetrics(
     if (lastMs === null) {
       lagSeconds = null;
     } else if (probeContent) {
-      const caughtUp = isSourceUnchangedSinceSync(src.local_path, src.last_commit, {
-        requireCleanWorkingTree: 'ignore-untracked',
-      });
-      lagSeconds = caughtUp ? 0 : Math.max(0, Math.floor((now - lastMs) / 1000));
+      const state = probeSourceGitState(src.local_path, src.last_commit);
+      const evidence = state === 'changed' && src.local_path && src.last_commit
+        ? await readGitPendingEvidence(src.local_path, src.last_commit).catch(() => null)
+        : null;
+      const sinceMs = evidence?.departedAt != null ? evidence.departedAt * 1000 : dueMs;
+      lagSeconds = state === 'unchanged' ? 0 : Math.max(0, Math.floor((now - (sinceMs ?? lastMs)) / 1000));
     } else {
       const contentMs = src.newest_content_at
         ? new Date(src.newest_content_at).getTime()
         : null;
       lagSeconds = lagFromContentMs(contentMs, lastMs, now, stalenessCeilingSeconds);
+      if (lagSeconds !== null && lagSeconds >= 0 && dueMs !== null) lagSeconds = Math.max(lagSeconds, Math.floor((now - dueMs) / 1000));
     }
 
     return {
@@ -357,7 +377,7 @@ export async function computeAllSourceMetrics(
       priority_label: resolvePriorityLabel(src.id, src.config),
       webhook_configured: typeof cfg.webhook_secret === 'string' && cfg.webhook_secret.length > 0,
     };
-  });
+  }));
 }
 
 async function pageCountsBySource(engine: BrainEngine): Promise<Map<string, number>> {
