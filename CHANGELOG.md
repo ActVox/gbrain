@@ -19,8 +19,8 @@ identifiers and attribution are available in the pre-removal Git revision
 | Situation | Before | Now |
 |---|---|---|
 | Re-ingesting an unchanged transcript right after its page was written (Postgres) | the unchanged-page screen counted the just-committed write as still pending while its post-commit cleanup ran, so the rerun admitted a no-op put_page | only unfinished writes (queued, running, recovering) hold the screen; a finished write's page and canonical file are final |
-| A sync whose lock was held across a reconnect (a write admission that lost its connection) | the lock release ran on the ended pool: \`CONNECTION_ENDED\` after the work finished, lock row left until its TTL | release and exit cleanup run on the engine's live pool |
-| \`worker-shutdown-error-matrix\`, \`persistence-memory-mutations\`, belief-ledger probe 17 | each could fail on a loaded runner | each waits for the event its contract names (handler started, provider call in flight, consumer disposed) |
+| A sync whose lock was held across a reconnect (a write admission that lost its connection) | the lock release ran on the ended pool: `CONNECTION_ENDED` after the work finished, lock row left until its TTL | release and exit cleanup run on the engine's live pool |
+| `worker-shutdown-error-matrix`, `persistence-memory-mutations`, belief-ledger probe 17 | each could fail on a loaded runner | each waits for the event its contract names (handler started, provider call in flight, consumer disposed) |
 
 No timeout, budget, retry or assertion is loosened.
 
