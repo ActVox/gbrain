@@ -8,7 +8,7 @@
  * Both reads are bounded Git plumbing over the candidate paths alone. A read that fails or times out answers `unknown`
  * for every path it covered, which the classifier treats like a missing commit (fail closed: hold, never delete).
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { gitChildEnv } from '../git-env.ts';
 
@@ -22,15 +22,32 @@ const BATCH = 500;
 const GIT_TIMEOUT_MS = 120_000;
 const GIT_MAX_BUFFER = 64 * 1024 ** 2;
 
-async function git(gitRoot: string, args: string[]): Promise<{ code: number; stdout: string }> {
+/** `literal`: the paths are pathspecs read literally (`log`); `check-ignore` takes plain pathnames and refuses the magic. */
+async function git(gitRoot: string, args: string[], literal = false): Promise<{ code: number; stdout: string }> {
   try {
-    const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', '--literal-pathspecs', '-C', gitRoot, ...args],
+    const { stdout } = await execFileAsync('git', ['-c', 'core.quotepath=false', ...(literal ? ['--literal-pathspecs'] : []), '-C', gitRoot, ...args],
       { env: gitChildEnv(), encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER });
     return { code: 0, stdout };
   } catch (error) {
     const e = error as { code?: unknown; stdout?: unknown; killed?: boolean };
     return { code: typeof e.code === 'number' && !e.killed ? e.code : -1, stdout: typeof e.stdout === 'string' ? e.stdout : '' };
   }
+}
+
+/** `git check-ignore --no-index -z --stdin` over `paths` (NUL-separated both ways, so any byte in a name survives). */
+function checkIgnore(gitRoot: string, paths: readonly string[]): Promise<{ code: number; stdout: string }> {
+  return new Promise(resolve => {
+    const child = spawn('git', ['-c', 'core.quotepath=false', '-C', gitRoot, 'check-ignore', '--no-index', '-z', '--stdin'], { env: gitChildEnv(), stdio: ['pipe', 'pipe', 'ignore'] });
+    const chunks: Buffer[] = [];
+    let size = 0, settled = false;
+    const done = (code: number) => { if (!settled) { settled = true; clearTimeout(timer); resolve({ code, stdout: Buffer.concat(chunks).toString('utf8') }); } };
+    const timer = setTimeout(() => { child.kill('SIGKILL'); done(-1); }, GIT_TIMEOUT_MS);
+    child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > GIT_MAX_BUFFER) { child.kill('SIGKILL'); done(-1); } else chunks.push(chunk); });
+    child.on('error', () => done(-1));
+    child.on('close', code => done(code ?? -1));
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(paths.map(path => `${path}\0`).join(''));
+  });
 }
 
 /**
@@ -53,9 +70,9 @@ export async function readOriginEvidence(gitRoot: string, commits: ReadonlyArray
   const paths = [...new Set(gitPaths)];
   for (let i = 0; i < paths.length; i += BATCH) {
     const batch = paths.slice(i, i + BATCH);
-    const touched = tips.length ? await git(gitRoot, ['log', ...tips, '--format=', '--name-only', '--no-renames', '-z', '--', ...batch]) : { code: 0, stdout: '' };
+    const touched = tips.length ? await git(gitRoot, ['log', ...tips, '--format=', '--name-only', '--no-renames', '-z', '--', ...batch], true) : { code: 0, stdout: '' };
     const committed = new Set(touched.stdout.split('\0').map(path => path.trim()).filter(Boolean));
-    const ignoredRead = await git(gitRoot, ['check-ignore', '--no-index', '-z', '--', ...batch]);
+    const ignoredRead = await checkIgnore(gitRoot, batch);
     const ignored = new Set(ignoredRead.stdout.split('\0').filter(Boolean));
     // check-ignore exits 1 when no path is ignored; anything else but 0 is a failed read.
     const ignoreKnown = ignoredRead.code === 0 || ignoredRead.code === 1;
