@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.323.0] - 2026-10-20
+
+**A large Postgres brain stuck at schema 220 now upgrades: migration v221 stamps chunks without a vector in committed batches instead of one ten-minute transaction.** v221 (`chunk_embedding_pending_since`) updated every chunk missing a vector in one statement inside the runner's single migration transaction, which runs under a fixed 10-minute statement budget. On a brain with about 1.7 million such chunks that statement ran out of time on every attempt and rolled back, so the brain stayed at schema 220 and couldn't upgrade past v0.60.112.0. There was no supported way around it.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| v221 on a large brain | one UPDATE over every chunk without a vector; timed out on every attempt and rolled back | the column is added, then chunks are stamped 5,000 per committed batch before v221 runs; v221 then finds nothing left to write |
+| An upgrade interrupted during that backfill | everything rolled back | committed batches stay; `gbrain apply-migrations --yes` continues from the chunks still unstamped |
+| Other published backfills that grow with a table (v011 link sources, v028 chunk keyword vectors, v033 request-log agent names except rows with no token, v116 code-edge sources) | one statement each | batched the same way before their migration |
+| v161's partial pages index, which the migration caps at 30 seconds | could time out on a large `pages` table | built concurrently first (Postgres), under the migration statement budget |
+| A migration that still runs out of its statement budget | "terminate blockers, rerun" even when nothing was blocking, so the rerun failed the same way | apply-migrations (`migrations_pending`) and doctor `schema_version` name the migration, with the fix for the case: it timed out without batching and this release batches it (rerun), idle sessions were open (check them with `gbrain doctor --locks` and end the ones still open once you agree, then rerun), or none were open (once you agree, one run with `--statement-timeout`) |
+| Raising the migration statement budget | not possible | `gbrain apply-migrations --yes --statement-timeout <minutes>` (operator only, that run only; `0` removes it) |
+
+v221 still chooses the active embedding column the same way and still records `embedding_pending_since_backfilled_at` only when it stamped a chunk, so doctor's backlog age keeps labelling those ages as a created_at backfill. The schema end state is unchanged, and the published migration files are untouched. The migrations that can't be batched, and why, are in [migration statement timeout](docs/guides/troubleshooting.md#migration-statement-timeout).
+
+Reported by @BasedGPT (#7108), whose report included the EXPLAIN and dead-tuple numbers that ruled out bloat.
+
 ## [0.60.322.0] - 2026-10-20
 
 **The full Ubicloud gate stops oversubscribing its VMs, and every gate now reports how loaded they were.** Each gate slot runs a bun process, its children and its own PostgreSQL and PgBouncer, about 2.5 runnable threads, so one slot per two vCPUs ran a 16-vCPU VM at a 1-minute load of 1.39 per vCPU at p90. Timing-sensitive files then ran up to twice their usual time, and `persistence-sync-options-parity` hit `run-e2e.sh`'s 180 s per-file cap.
