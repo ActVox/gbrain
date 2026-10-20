@@ -22,6 +22,18 @@ import { serializePageToMarkdown } from '../markdown.ts';
 import { insertNoNewlineMarkers, splitLines, unifiedDiff } from '../skillpack/diff-text.ts';
 import { redactRetrievalOutput } from '../search/output-redaction.ts';
 import { scanCanonicalFences, targetFenceRefusal } from '../fence-repair/refusal.ts';
+import type { BrainEngine } from '../engine.ts';
+import type { PageSnapshot } from '../page-state/types.ts';
+import type { ManifestRow } from '../page-body/types.ts';
+import type { StoredRegion } from '../page-body/segmenter.ts';
+import type { BodyReplacement, SplicePage } from '../page-body/splice.ts';
+import { spliceWork } from '../page-body/splice.ts';
+import { withoutBody } from '../page-body/page-shape.ts';
+import { STAGE_BATCH_BYTES } from '../page-body/limits.ts';
+import { TIMELINE_SEPARATOR } from '../page-window/document.ts';
+import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
+import type { WriteRequest } from './model.ts';
+import type { PreparedMutation } from './coordinator.ts';
 
 export const EDIT_PAGE_MAX_EDITS = 50;
 export const EDIT_PAGE_DIFF_MAX_BYTES = 8 * 1024;
@@ -34,6 +46,8 @@ const EDIT_PAGE_DIFF_CONTEXT = 3;
 export const EDIT_PAGE_DOCS = 'docs/protocol/MEMORY_VERBS_v1.md#partial-page-edits-edit_page';
 
 export interface PageEdit { old_text: string; new_text: string; }
+/** A stored-body byte range (truth bytes then timeline bytes, as get_page window reads return it in `edit_target`) that every match must lie in. */
+export interface EditWithin { byte_start: number; byte_end: number; }
 interface Segment { canonical: string; view: string; editable: boolean; }
 
 const MARKERS = [FACTS_FENCE_BEGIN, FACTS_FENCE_END, TAKES_FENCE_BEGIN, TAKES_FENCE_END];
@@ -69,6 +83,19 @@ export function parsePageEdits(value: unknown): PageEdit[] {
     }
     return { old_text: record.old_text, new_text: record.new_text };
   });
+}
+
+/** Validates `within`: integer stored-body offsets with byte_start < byte_end. */
+export function parseEditWithin(value: unknown): EditWithin | undefined {
+  if (value === undefined || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof value !== 'object' || Array.isArray(value) || Object.keys(record).some(k => k !== 'byte_start' && k !== 'byte_end')
+    || !Number.isSafeInteger(record.byte_start) || !Number.isSafeInteger(record.byte_end)
+    || (record.byte_start as number) < 0 || (record.byte_end as number) <= (record.byte_start as number)) {
+    throw editError('edit_invalid', 'within must be { byte_start, byte_end } with 0 <= byte_start < byte_end.',
+      "Pass edit_target's byte_start and byte_end from a get_page window read unchanged, or omit within.");
+  }
+  return { byte_start: record.byte_start as number, byte_end: record.byte_end as number };
 }
 
 function bodySegments(body: string, remote: boolean): Segment[] {
@@ -143,19 +170,43 @@ function occurrences(haystack: string, needle: string): number[] {
  * all or nothing. Returns the canonical content to publish and the caller's
  * view before and after (the only text a diff or receipt may show).
  */
-export function applyPageEdits(page: Page, tags: string[], remote: boolean, edits: PageEdit[]): { content: string; before: string; after: string } {
+export function applyPageEdits(page: Page, tags: string[], remote: boolean, edits: PageEdit[], within?: EditWithin): { content: string; before: string; after: string } {
   // #6188 (D19): edit_page never rewrites a fence; a stored fence that does not compile refuses typed, location only.
   const [defect] = scanCanonicalFences(page).defects;
   if (defect) throw targetFenceRefusal(defect, page.slug, page.source_id);
   let segments = pageSegments(page, tags, remote);
   const before = join(segments, 'view');
+  // `within` is in stored-body bytes of the page as read: canonical positions map back through the edits applied so far.
+  const head = serializePageToMarkdown({ ...page, compiled_truth: '', timeline: '' }, tags).slice(0, -1).length;
+  const truth = page.compiled_truth ?? '', timeline = page.timeline ?? '';
+  const timelineAt = head + truth.length + TIMELINE_SEPARATOR.length;
+  const applied: Array<{ start: number; oldLen: number; newLen: number }> = [];
+  const original = (pos: number, side: 'start' | 'end') => {
+    for (let k = applied.length - 1; k >= 0; k--) {
+      const a = applied[k]!;
+      if (pos <= a.start) continue;
+      pos = pos >= a.start + a.newLen ? pos - (a.newLen - a.oldLen) : side === 'start' ? a.start : a.start + a.oldLen;
+    }
+    return pos;
+  };
+  const storedByte = (pos: number) => pos >= head && pos <= head + truth.length ? Buffer.byteLength(truth.slice(0, pos - head), 'utf8')
+    : page.timeline && pos >= timelineAt && pos <= timelineAt + timeline.length ? Buffer.byteLength(truth, 'utf8') + Buffer.byteLength(timeline.slice(0, pos - timelineAt), 'utf8') : -1;
+  const inRange = (start: number, end: number) => {
+    if (!within) return true;
+    const s = storedByte(original(start, 'start')), e = storedByte(original(end, 'end'));
+    return s >= 0 && e >= 0 && s >= within.byte_start && e <= within.byte_end;
+  };
   edits.forEach((edit, index) => {
     const view = join(segments, 'view');
-    const ranges: Array<{ start: number; end: number; index: number }> = [];
-    let offset = 0;
-    segments.forEach((segment, i) => { ranges.push({ start: offset, end: offset + segment.view.length, index: i }); offset += segment.view.length; });
+    const ranges: Array<{ start: number; end: number; index: number; canonical: number }> = [];
+    let offset = 0, canonicalOffset = 0;
+    segments.forEach((segment, i) => {
+      ranges.push({ start: offset, end: offset + segment.view.length, index: i, canonical: canonicalOffset });
+      offset += segment.view.length; canonicalOffset += segment.canonical.length;
+    });
     const inside = (at: number) => ranges.find(r => segments[r.index].editable && at >= r.start && at + edit.old_text.length <= r.end);
-    const all = occurrences(view, edit.old_text);
+    const canonicalAt = (at: number) => { const r = inside(at)!; return r.canonical + at - r.start; };
+    const all = occurrences(view, edit.old_text).filter(at => !within || (inside(at) ? inRange(canonicalAt(at), canonicalAt(at) + edit.old_text.length) : true));
     const allowed = all.filter(at => inside(at));
     if (allowed.length === 0 && all.length > 0) {
       throw editError('edit_protected_span', `Edit ${index}'s old_text touches a protected takes or facts section.`,
@@ -175,6 +226,7 @@ export function applyPageEdits(page: Page, tags: string[], remote: boolean, edit
     const segment = segments[range.index];
     const local = at - range.start;
     const replaced = segment.canonical.slice(0, local) + edit.new_text + segment.canonical.slice(local + edit.old_text.length);
+    applied.push({ start: range.canonical + local, oldLen: edit.old_text.length, newLen: edit.new_text.length });
     segments = segments.map((s, i) => i === range.index ? text(replaced) : s);
   });
   return { content: join(segments, 'canonical'), before, after: join(segments, 'view') };
@@ -264,8 +316,11 @@ export function boundedUnifiedDiff(
  * `diff_coarse` marks a changed region too large to line-diff
  * (boundedUnifiedDiff).
  */
-export function editDiff(slug: string, before: string, after: string): { diff: string; diff_truncated?: true; diff_coarse?: true } {
-  const { diff, coarse } = boundedUnifiedDiff(before, after, `a/${slug}.md`, `b/${slug}.md`);
+export function editDiff(slug: string, before: string, after: string, lineOffset = 0): { diff: string; diff_truncated?: true; diff_coarse?: true } {
+  const bounded = boundedUnifiedDiff(before, after, `a/${slug}.md`, `b/${slug}.md`);
+  const { coarse } = bounded;
+  const diff = lineOffset === 0 ? bounded.diff : bounded.diff.replace(/^@@ -(\d+)((?:,\d+)?) \+(\d+)((?:,\d+)?) @@/gm,
+    (_, a: string, b: string, c: string, d: string) => `@@ -${Number(a) + lineOffset}${b} +${Number(c) + lineOffset}${d} @@`);
   const [{ diff: full }] = redactRetrievalOutput([{ diff }], {}).results;
   const marked = coarse ? { diff_coarse: true as const } : {};
   if (encodedBytes(full) <= EDIT_PAGE_DIFF_MAX_BYTES) return { diff: full, ...marked };
@@ -287,4 +342,296 @@ export function assertEditRevision(current: string | null, expected: unknown): v
   throw editError('revision_conflict', current === null ? 'The page does not exist.' : 'The page changed since expected_revision was read.',
     'Read get_page with include_content:true again, rebuild the edits against that content, and resend with its revision.',
     current === null ? undefined : `current_revision=${current}`);
+}
+
+
+/** Stored region kinds an edit never matches into: fence bodies and markers (a PEM block is ordinary text to edit_page). */
+const PROTECTED_KINDS = new Set(['facts', 'takes', 'tail', 'marker']);
+/** Virtual bytes a segmented scan searches per window before it carries |old_text| - 1 bytes on. */
+const SCAN_WINDOW_BYTES = 1024 * 1024;
+/** Context a segmented edit's receipt diff shows around its touched range, each side, before line rounding. */
+const DIFF_CONTEXT_BYTES = 2048;
+/** A touched range longer than this is diffed at its first replacement only (diff_truncated). */
+const DIFF_SCOPE_MAX_BYTES = 256 * 1024;
+
+const hexOf = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
+
+/** A run of the edited body: original stored bytes [origStart, origEnd), or a replacement's bytes standing for that span. */
+interface Piece { origStart: number; origEnd: number; bytes: Uint8Array; replaced: boolean }
+
+/** Live rows' texts, read in batches of at most STAGE_BATCH_BYTES. */
+async function* rowTexts(engine: BrainEngine, sourceId: string, rows: readonly ManifestRow[]): AsyncIterable<[ManifestRow, Uint8Array]> {
+  for (let i = 0; i < rows.length;) {
+    let j = i, bytes = 0;
+    while (j < rows.length && (j === i || bytes + rows[j]!.byteLen <= STAGE_BATCH_BYTES[engine.kind])) bytes += rows[j++]!.byteLen;
+    const batch = rows.slice(i, j);
+    const texts = await engine.readSegmentTexts(sourceId, batch.map(row => row.sha256));
+    for (const row of batch) {
+      const text = texts.get(hexOf(row.sha256));
+      if (!text) throw new Error(`Segment text ${hexOf(row.sha256)} of page ${row.pageId} is missing.`);
+      spliceWork.read += text.length;
+      yield [row, text];
+    }
+    i = j;
+  }
+}
+
+/** The body's bytes over original [from, to) of one region with `reps` applied, as pieces in order. */
+async function* virtualPieces(engine: BrainEngine, sourceId: string, rows: readonly ManifestRow[], reps: readonly BodyReplacement[], from: number, to: number): AsyncIterable<Piece> {
+  const covering = rows.filter(row => Number(row.byteStart) < to && Number(row.byteStart) + row.byteLen > from);
+  const emitted = new Set<BodyReplacement>();
+  for await (const [row, text] of rowTexts(engine, sourceId, covering)) {
+    const start = Number(row.byteStart);
+    let cur = Math.max(from, start);
+    const end = Math.min(to, start + row.byteLen);
+    for (const r of reps) {
+      if (r.end <= cur || r.start >= end) continue;
+      if (r.start > cur) yield { origStart: cur, origEnd: r.start, bytes: text.subarray(cur - start, r.start - start), replaced: false };
+      if (!emitted.has(r)) { emitted.add(r); yield { origStart: r.start, origEnd: r.end, bytes: r.bytes, replaced: true }; }
+      cur = Math.min(r.end, end);
+    }
+    if (cur < end) yield { origStart: cur, origEnd: end, bytes: text.subarray(cur - start, end - start), replaced: false };
+  }
+}
+
+interface Match { start: number; end: number; prefix: Uint8Array; suffix: Uint8Array }
+
+/**
+ * Every match of `needle` in one region's edited bytes over original [from, to), mapped back to original stored
+ * coordinates: a match end inside a replacement takes that replacement's whole span, and the replacement's bytes
+ * before (`prefix`) and after (`suffix`) the match. Memory is one scan window plus |needle| - 1 bytes.
+ */
+async function regionMatches(engine: BrainEngine, sourceId: string, rows: readonly ManifestRow[], reps: readonly BodyReplacement[], from: number, to: number,
+  needle: Buffer, accept: (m: Match) => boolean, limit: number): Promise<Match[]> {
+  const found: Match[] = [];
+  let buf = Buffer.alloc(0);
+  let map: Array<Piece & { v: number }> = [];
+  const locate = (v: number, side: 'start' | 'end') => {
+    const p = side === 'start' ? map.find(m => v >= m.v && v < m.v + m.bytes.length)! : map.find(m => v > m.v && v <= m.v + m.bytes.length)!;
+    if (!p.replaced) return { orig: p.origStart + (v - p.v), rest: new Uint8Array() };
+    return side === 'start' ? { orig: p.origStart, rest: p.bytes.subarray(0, v - p.v) } : { orig: p.origEnd, rest: p.bytes.subarray(v - p.v) };
+  };
+  const search = (final: boolean) => {
+    const end = final ? buf.length : buf.length - (needle.length - 1);
+    for (let at = buf.indexOf(needle); at !== -1 && at < end && found.length < limit; at = buf.indexOf(needle, at + 1)) {
+      const s = locate(at, 'start'), e = locate(at + needle.length, 'end');
+      const match = { start: s.orig, end: e.orig, prefix: s.rest, suffix: e.rest };
+      if (!accept(match)) continue;
+      spliceWork.matches++;
+      found.push(match);
+    }
+    if (final) return;
+    const keep = Math.max(0, buf.length - (needle.length - 1));
+    map = map.filter(m => m.v + m.bytes.length > keep).map(m => ({ ...m, v: m.v - keep }));
+    buf = buf.subarray(keep);
+  };
+  for await (const piece of virtualPieces(engine, sourceId, rows, reps, from, to)) {
+    if (!piece.bytes.length) continue;
+    map.push({ ...piece, v: buf.length });
+    buf = Buffer.concat([buf, piece.bytes]);
+    if (buf.length >= SCAN_WINDOW_BYTES) search(false);
+    if (found.length >= limit) return found;
+  }
+  search(true);
+  return found;
+}
+
+/** Stored spans (absolute) an edit never matches into. */
+/** Facts, takes and tail text as whole stored runs: the pieces of one region that segment cuts split are joined. */
+function hiddenRuns(rows: readonly ManifestRow[]): Array<{ start: number; end: number }> {
+  const runs: Array<{ start: number; end: number }> = [];
+  for (const span of protectedSpans(rows, false).sort((x, y) => x.start - y.start)) {
+    const last = runs[runs.length - 1];
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    else runs.push({ ...span });
+  }
+  return runs;
+}
+
+/**
+ * Newlines of the caller's view before stored byte `at` (a line start in `timeline` or truth): the head, the rows'
+ * line counts, the separator before the timeline and the containing row's prefix. A remote view renders each hidden
+ * run before `at` as sanitizeRemoteBody does, so only those runs are read, never the ordinary text before `at`.
+ */
+async function viewNewlinesBefore(engine: BrainEngine, input: { sourceId: string; remote: boolean; head: string }, rows: readonly ManifestRow[],
+  timeline: boolean, at: number): Promise<number> {
+  const count = (b: Uint8Array) => { let n = 0; for (let i = b.indexOf(0x0a); i !== -1; i = b.indexOf(0x0a, i + 1)) n++; return n; };
+  const before = rows.filter(row => Number(row.byteStart) < at && (timeline || row.region === 'truth'));
+  let lines = count(Buffer.from(input.head + (timeline ? TIMELINE_SEPARATOR : ''), 'utf8'));
+  for (const row of before) if (Number(row.byteStart) + row.byteLen <= at) lines += row.lineCount;
+  const containing = before.filter(row => Number(row.byteStart) + row.byteLen > at);
+  for await (const [row, text] of rowTexts(engine, input.sourceId, containing)) lines += count(text.subarray(0, at - Number(row.byteStart)));
+  if (!input.remote) return lines;
+  for (const run of hiddenRuns(rows).filter(r => r.end <= at)) {
+    const raw: Buffer[] = [];
+    for await (const piece of virtualPieces(engine, input.sourceId, rows, [], run.start, run.end)) raw.push(Buffer.from(piece.bytes));
+    const text = Buffer.concat(raw);
+    lines += count(Buffer.from(sanitizeRemoteBody(text.toString('utf8'), REMOTE_VIEW), 'utf8')) - count(text);
+  }
+  return lines;
+}
+
+/**
+ * #6188 (D19) on a segmented page: scanCanonicalFences over the stored fence text (facts, takes, an unclosed tail's
+ * first piece, stray markers), each piece at its own line of its section, so the refusal is the whole-body scan's,
+ * location included. Only segments holding fence text are read. With `within`, only the fences in the segments it
+ * touches and those crossing into them are checked.
+ */
+async function assertSegmentedFencesCompile(engine: BrainEngine, input: { sourceId: string; slug: string }, rows: readonly ManifestRow[], within?: EditWithin): Promise<void> {
+  let pieces = rows.flatMap(row => (row.protectedRegions as StoredRegion[]).filter(r => PROTECTED_KINDS.has(r.kind))
+    .map(r => ({ row, kind: r.kind, start: Number(row.byteStart) + r.start, end: Number(row.byteStart) + r.end }))).sort((x, y) => x.start - y.start);
+  const firstTail = pieces.findIndex(p => p.kind === 'tail');
+  if (firstTail !== -1) pieces = pieces.filter((p, i) => p.kind !== 'tail' || i === firstTail);
+  if (within) {
+    const touched = rows.filter(row => Number(row.byteStart) < within.byte_end && Number(row.byteStart) + row.byteLen > within.byte_start);
+    if (!touched.length) return;
+    const lo = Math.min(...touched.map(row => Number(row.byteStart))), hi = Math.max(...touched.map(row => Number(row.byteStart) + row.byteLen));
+    const runs: Array<typeof pieces> = [];
+    for (const piece of pieces) {
+      const run = runs[runs.length - 1];
+      if (run && piece.start <= run[run.length - 1]!.end) run.push(piece); else runs.push([piece]);
+    }
+    pieces = runs.filter(run => run[0]!.start < hi && run[run.length - 1]!.end > lo).flat();
+  }
+  if (!pieces.length) return;
+  const count = (b: Uint8Array) => { let n = 0; for (let i = b.indexOf(0x0a); i !== -1; i = b.indexOf(0x0a, i + 1)) n++; return n; };
+  const texts = new Map<number, Uint8Array>();
+  for await (const [row, text] of rowTexts(engine, input.sourceId, [...new Set(pieces.map(p => p.row))])) texts.set(Number(row.byteStart), text);
+  const sections = { truth: { text: [] as Buffer[], lines: 0, first: 0 }, timeline: { text: [] as Buffer[], lines: 0, first: 0 } };
+  for (const region of ['truth', 'timeline'] as const) sections[region].first = rows.find(row => row.region === region)?.lineStart ?? 0;
+  for (const piece of pieces) {
+    const section = sections[piece.row.region === 'timeline' ? 'timeline' : 'truth'];
+    const text = texts.get(Number(piece.row.byteStart))!, at = piece.start - Number(piece.row.byteStart);
+    const line = piece.row.lineStart - section.first + count(text.subarray(0, at));
+    if (line > section.lines) { section.text.push(Buffer.from('\n'.repeat(line - section.lines))); section.lines = line; }
+    const bytes = Buffer.from(text.subarray(at, piece.end - Number(piece.row.byteStart)));
+    section.text.push(bytes);
+    section.lines += count(bytes);
+  }
+  const [defect] = scanCanonicalFences({ compiled_truth: Buffer.concat(sections.truth.text).toString('utf8'), timeline: Buffer.concat(sections.timeline.text).toString('utf8') }).defects;
+  if (defect) throw targetFenceRefusal(defect, input.slug, input.sourceId);
+}
+
+/** Submission's fence check of a segmented page's live body, as applyPageEdits refuses an inline one before admission; preparation repeats it. */
+export async function assertSegmentedEditFences(engine: BrainEngine, page: { id?: number | null; slug: string; source_id: string }, within?: EditWithin): Promise<void> {
+  await assertSegmentedFencesCompile(engine, { sourceId: page.source_id, slug: page.slug }, await engine.readManifest(Number(page.id)), within);
+}
+
+function protectedSpans(rows: readonly ManifestRow[], markers = true): Array<{ start: number; end: number }> {
+  return rows.flatMap(row => (row.protectedRegions as StoredRegion[]).filter(r => PROTECTED_KINDS.has(r.kind) && (markers || r.kind !== 'marker'))
+    .map(r => ({ start: Number(row.byteStart) + r.start, end: Number(row.byteStart) + r.end })));
+}
+
+export interface LocatedSegmentedEdits {
+  replacements: BodyReplacement[];
+  /** The receipt diff fields (editDiff over the touched range). */
+  diff: Record<string, unknown>;
+}
+
+/**
+ * edit_page's matching on a segmented page (spec 6.3), without materializing it: each old_text is found by a
+ * streaming scan of the stored body (the edits before it applied), across segment boundaries, in `within` when given
+ * (O(range)) or the whole body. The rules are applyPageEdits': exactly one match outside protected takes and facts
+ * text, all or none; a remote caller never matches into text its view hides (such a match counts as absent). Null
+ * declines to the whole-body path: an old_text that names the timeline sentinel or also occurs in the frontmatter
+ * head, or (without `within`, within the whole-body limit) one the body does not hold, which that path settles exactly.
+ */
+export async function locateSegmentedEdits(engine: BrainEngine, input: { sourceId: string; slug: string; page: SplicePage; edits: PageEdit[]; within?: EditWithin;
+  remote: boolean; head: string }): Promise<LocatedSegmentedEdits | null> {
+  const { page, within } = input;
+  const rows = await engine.readManifest(page.id, { generation: page.generation });
+  spliceWork.rows += rows.length;
+  await assertSegmentedFencesCompile(engine, input, rows, within);
+  const guarded = protectedSpans(rows);
+  const regions = [{ lo: 0, hi: page.truthBytes, rows: rows.filter(r => r.region === 'truth') },
+    { lo: page.truthBytes, hi: page.bodyBytes, rows: rows.filter(r => r.region === 'timeline') }];
+  let reps: BodyReplacement[] = [];
+  for (const [index, edit] of input.edits.entries()) {
+    if (edit.old_text.includes('<!-- timeline -->') || (!within && input.head.includes(edit.old_text))) return null;
+    const needle = Buffer.from(edit.old_text, 'utf8');
+    // A match into protected text is never kept (a remote caller's view hides it: absent); two kept matches settle ambiguity, so the scan stops there.
+    let protectedHit = false;
+    const keep = (m: Match) => {
+      if (!guarded.some(g => m.start < g.end && g.start < m.end)) return true;
+      if (!input.remote) protectedHit = true;
+      return false;
+    };
+    const allowed: Match[] = [];
+    for (const region of regions) {
+      const from = within ? Math.max(region.lo, within.byte_start) : region.lo;
+      const to = within ? Math.min(region.hi, within.byte_end) : region.hi;
+      if (from >= to || allowed.length >= 2) continue;
+      for (const m of await regionMatches(engine, input.sourceId, region.rows, reps, from, to, needle, keep, 2 - allowed.length)) allowed.push(m);
+    }
+    if (allowed.length === 0 && protectedHit) {
+      throw editError('edit_protected_span', `Edit ${index}'s old_text touches a protected takes or facts section.`,
+        'Use the takes_* operations or remember/forget for takes and facts, and quote only ordinary page text.', `edit_index=${index}`);
+    }
+    if (allowed.length === 0) {
+      if (!within && page.bodyBytes <= PAGE_MAX_BYTES) return null;
+      throw editError('edit_no_match', `Edit ${index}'s old_text was not found in the page${within ? ' range' : ''}.`,
+        `${within ? 'Read the range again (get_page body: \'window\' returns edit_target), or omit within to search the whole page. ' : ''}Copy old_text exactly, including whitespace; earlier edits in the same call have already been applied to the text it matches.`,
+        `edit_index=${index} match_count=0`);
+    }
+    if (allowed.length > 1) {
+      throw editError('edit_ambiguous_match', `Edit ${index}'s old_text matches more than one place.`,
+        `Include surrounding text in old_text so it matches exactly once${within ? '' : ', or pass within (edit_target from a get_page window read) to search one range'}.`,
+        `edit_index=${index} match_count_at_least=2`);
+    }
+    const m = allowed[0]!;
+    const absorbed = reps.filter(r => r.start >= m.start && r.end <= m.end);
+    reps = [...reps.filter(r => !absorbed.includes(r)), { start: m.start, end: m.end, bytes: Buffer.concat([m.prefix, Buffer.from(edit.new_text, 'utf8'), m.suffix]) }]
+      .sort((a, b) => a.start - b.start);
+  }
+  return { replacements: reps, diff: await segmentedEditDiff(engine, input, rows, regions, reps) };
+}
+
+/** editDiff over the touched range (line-rounded, with context), in the caller's view: remote text is sanitized as get_page shows it. */
+async function segmentedEditDiff(engine: BrainEngine, input: { sourceId: string; slug: string; remote: boolean; head: string }, rows: readonly ManifestRow[],
+  regions: ReadonlyArray<{ lo: number; hi: number; rows: ManifestRow[] }>, reps: readonly BodyReplacement[]): Promise<Record<string, unknown>> {
+  let scoped = reps;
+  if (reps[reps.length - 1]!.end - reps[0]!.start > DIFF_SCOPE_MAX_BYTES || regions.some(r => reps[0]!.start < r.hi && reps[reps.length - 1]!.end > r.hi)) scoped = reps.slice(0, 1);
+  const region = regions.find(r => scoped[0]!.start >= r.lo && scoped[0]!.start < r.hi) ?? regions[0]!;
+  let from = Math.max(region.lo, scoped[0]!.start - DIFF_CONTEXT_BYTES), to = Math.min(region.hi, scoped[scoped.length - 1]!.end + DIFF_CONTEXT_BYTES);
+  // Context never starts or ends inside hidden text: a slice of a fence is not sanitized as the fence is.
+  for (const run of hiddenRuns(rows)) {
+    if (run.start < from && from < run.end) from = run.end;
+    if (run.start < to && to < run.end) to = run.start;
+  }
+  const original: Buffer[] = [];
+  for await (const piece of virtualPieces(engine, input.sourceId, region.rows, [], from, to)) original.push(Buffer.from(piece.bytes));
+  let raw = Buffer.concat(original);
+  let lo = scoped[0]!.start - from, hi = scoped[scoped.length - 1]!.end - from;
+  const head = from === region.lo ? 0 : raw.indexOf(0x0a) + 1;
+  const tailNl = to === region.hi ? raw.length : raw.lastIndexOf(0x0a) + 1;
+  const start = head > 0 && head <= lo ? head : (from === region.lo ? 0 : lo), end = tailNl >= hi && tailNl > 0 ? tailNl : hi;
+  const slice = (buf: Buffer, a: number, b: number) => { while (a > 0 && (buf[a]! & 0xc0) === 0x80) a--; while (b < buf.length && (buf[b]! & 0xc0) === 0x80) b++; return [a, b] as const; };
+  const [a, b] = slice(raw, start, end);
+  raw = raw.subarray(a, b);
+  lo -= a; hi -= a;
+  const after: Buffer[] = [];
+  let cur = 0;
+  for (const r of scoped) { after.push(raw.subarray(cur, r.start - from - a), Buffer.from(r.bytes)); cur = r.end - from - a; }
+  after.push(raw.subarray(cur));
+  const view = (bytes: Buffer) => { const text = bytes.toString('utf8'); return input.remote ? sanitizeRemoteBody(text, REMOTE_VIEW) : text; };
+  const lineOffset = await viewNewlinesBefore(engine, input, rows, region !== regions[0], from + a);
+  return { ...editDiff(input.slug, view(raw), view(Buffer.concat(after)), lineOffset), ...(scoped.length < reps.length ? { diff_truncated: true as const } : {}),
+    ...(input.remote ? {} : { diff_scope: { byte_start: from + a, byte_end: from + b } }) };
+}
+
+/**
+ * The segmented branch of edit_page's preparation (spec 6.3): locate the edits by streaming the segments, then splice
+ * the touched range through the generation flip (persistence/page-append.ts prepareSegmentedSpliceMutation). Null
+ * declines to the whole-body path (locateSegmentedEdits, or a splice that does not apply).
+ */
+export async function prepareSegmentedEditMutation(engine: BrainEngine, row: WriteRequest, stored: PageSnapshot): Promise<PreparedMutation | null> {
+  assertEditRevision(stored.revision, row.intent?.expected_revision);
+  const edits = parsePageEdits(row.intent?.edits);
+  const within = parseEditWithin(row.intent?.within);
+  const { prepareSegmentedSpliceMutation } = await import('./page-append.ts');
+  const head = serializePageToMarkdown({ ...withoutBody(stored.page), compiled_truth: '', timeline: '' } as Page, stored.tags).slice(0, -1);
+  return prepareSegmentedSpliceMutation(engine, row, stored, { replacements: async page => {
+    const located = await locateSegmentedEdits(engine, { sourceId: row.source_id, slug: row.slug, page, edits, within, remote: row.authority.remote, head });
+    return located && { replacements: located.replacements, outcome: located.diff };
+  } });
 }

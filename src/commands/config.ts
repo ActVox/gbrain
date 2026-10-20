@@ -379,6 +379,7 @@ const setLineGrammarConfig = async (engine: BrainEngine, key: string, value: str
 
 async function setConfigWithDecideHooks(engine: BrainEngine, key: string, value: string, force = false): Promise<void> {
   if (await setLineGrammarConfig(engine, key, value)) return;
+  if (key === 'sync.admission') return (await import('./config/sync-admission-value.ts')).setSyncAdmissionValue(engine, value);
   if (key.startsWith('decide.')) {
     const { validateDecideConfigValue } = await import('../core/ai/decide/config.ts');
     const err = validateDecideConfigValue(key, value);
@@ -1215,8 +1216,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     if (key.startsWith('provider_chat_options.')) await import('../core/config-db-merge.ts').then(m => m.assertProviderChatOptionsSetValue(key, value)).catch((error: Error) => { console.error(`[config] ${error.message}`); process.exit(1); });
     // #5470: every admission parses the journal caps; a malformed value
     // would refuse all managed writes, so reject it here.
-    const { JOURNAL_CONFIG_KEYS, parseJournalConfigValue } = await import('../core/persistence/limits.ts');
-    if (JOURNAL_CONFIG_KEYS.includes(key)) {
+    const { JOURNAL_CONFIG_KEYS, UPLOAD_CONFIG_KEYS, parseJournalConfigValue } = await import('../core/persistence/limits.ts');
+    if (JOURNAL_CONFIG_KEYS.includes(key) || UPLOAD_CONFIG_KEYS.includes(key)) {
       try { parseJournalConfigValue(key, value); }
       catch (error) { console.error(`[config] ${(error as Error).message}`); process.exit(1); }
     }

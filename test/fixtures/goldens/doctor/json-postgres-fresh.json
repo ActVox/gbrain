@@ -639,6 +639,20 @@
         {
           "category": "ops",
           "details": {
+            "age_seconds": null,
+            "docs": "docs/guides/error-codes.md#sync_admission_restricted",
+            "set_at": null,
+            "stored": null,
+            "value": "normal"
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "sync.admission is normal: managed sync admits everything it classifies.",
+          "name": "sync_admission_restricted",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
             "docs": "docs/guides/repair.md#receipt-compaction",
             "last_compaction": {
               "at": "<ts>",

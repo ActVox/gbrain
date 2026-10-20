@@ -129,6 +129,7 @@ import { managedSyncLatencyEntry } from './checks/managed-sync-latency.ts';
 import { commitNotifierEntry } from './checks/commit-notifier.ts';
 import { managedSyncConvergenceEntry } from './checks/managed-sync-convergence.ts';
 import { managedSyncBlockedEntry } from './checks/managed-sync-blocked.ts';
+import { syncAdmissionEntry } from './checks/sync-admission.ts';
 import { atomHeldFailedEntry } from './checks/atom-holds.ts';
 import { extractionInputTruncatedEntry } from './checks/extraction-input.ts';
 import {
@@ -177,6 +178,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   terminalFailuresEntry,
   managedSyncMovementEntry,
   managedSyncBlockedEntry,
+  syncAdmissionEntry,
   persistenceCompactionEntry,
   soakCountersEntry,
   serveBuildDriftEntry,

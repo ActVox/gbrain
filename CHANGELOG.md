@@ -10,6 +10,43 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.320.0] - 2026-10-19
+
+**A managed `gbrain sync` of an ordinary (non-company) source now compares the files at HEAD with what the brain holds, instead of replaying commits, so a reset, a revert, a rewritten history or a lost run can no longer leave pages behind, and one bad file holds only itself.** Each pass reads the committed tree, the index and the database, admits only the files whose page differs, proves nothing moved underneath it, and records the checkpoint inside the last import's own transaction. An idle sync with nothing new returns in well under a second.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| History rewritten, reset or reverted, or a sync interrupted | replayed `last_commit..HEAD`; pages could be missed or resurrected | every file at HEAD is compared with its page and import record; what differs is admitted |
+| An idle sync with nothing new | about 3 s on a large Postgres brain (57 ms round trips) | about 0.75 s: no level read at all |
+| One odd file (unreadable, a NUL byte, a broken alias list, a page whose identity changed, a write that fails) | stopped the whole source | that file alone is held with its own code and fix; the rest syncs |
+| The checkpoint after an import | its own write request and transactions | carried by the round's last import publication (fewer statements and transactions per run) |
+| First sync after activating a classic brain with 100k pages on Postgres | did not finish | converges in one pass (about 45 s) |
+| A sync that would delete more than half of a source's pages | ran | refused until confirmed, as `repair ghost-pages` already does |
+
+### New for operators
+
+- `gbrain repair file-drift --held --side <side> [--state <state>]` resolves held file-drift pages one decision at a time.
+- `gbrain repair legacy-twins --source <id>` merges page pairs an older gbrain forked from one file (preview first, then `--apply --expect <hash>`).
+- `sync.admission` (`normal`, `imports_only`, `classify_only`) narrows what a managed sync admits; doctor warns while it is restricted.
+- `gbrain sync status --json` reports `convergence` for a managed source.
+
+No schema migration. Company-brain sources keep their existing sync path.
+
+## [0.60.319.0] - 2026-10-19
+
+**The native data-safety step's per-suite stall bound now fits each target, so Windows stops killing a backup suite that was passing.** v0.60.317.0 bounded every suite at 300 s, which was calibrated on darwin-x64; on Windows `backup-portability-native` legitimately runs 3.5 to 8 minutes, and one run was killed at 301 s with every test passing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A native data-safety suite on win32-x64 or win32-arm64 | killed at 300 s even when healthy (p99 462 s and 303 s) | bounded at 540 s and 390 s |
+| The bound on every other target | one 300 s number | the slowest suite's measured p99 plus max(60 s, 15%), rounded to 30 s: 120-180 s on Linux and macOS |
+| A matrix target with no bound | n/a | the step fails before running any suite |
+| The stall message | said files take "under 60 s" | names the target's bound; the process table and macOS stack sample are unchanged |
+
 ## [0.60.318.0] - 2026-10-20
 
 **On large Postgres brains, autovacuum can finish again, and a page delete's Git commit now reaches the remote.** gbrain refreshed `content_chunks` statistics after every embed drain and import. That ANALYZE waited for the table's lock, and Postgres cancels an autovacuum whenever another session waits on it for a second, so on a brain of about 10M chunks no autovacuum of the table ever finished: millions of dead rows stayed in every index, the vector index included. Separately, on a managed brain with Git durability on, a page delete whose first push failed left its removal commit local-only, while writer status and doctor reported nothing pending. Reported by @DaCal90 (#7083) and @MMichot (#7089).

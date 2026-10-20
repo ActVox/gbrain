@@ -89,6 +89,14 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
 
+### admission_paused
+
+<a id="admission_paused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `sync.admission` is not `normal`, so a managed sync's destructive write (a delete or a keep_db DB-wins reconcile) was not admitted, or was cancelled before it published; nothing was written. | `sync.admission` (`imports_only` or `classify_only`) is the brain-wide switch that pauses what managed sync writes. It is read when the pass pins, inside every admission transaction and again when a destructive write publishes, so a change takes effect at the next group and no destructive write lands after it. | Restore admission with `gbrain config set sync.admission normal` when the pause is no longer wanted; the next plain sync admits the paused paths again. Run: gbrain sync status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
+
 ### ambient_capture_off
 
 <a id="ambient_capture_off"></a>
@@ -793,6 +801,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/troubleshooting.md#consumers-without-heartbeat](../../docs/guides/troubleshooting.md#consumers-without-heartbeat)
 
+### content_null_bytes
+
+<a id="content_null_bytes"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A synced Markdown file holds NUL bytes (U+0000), so managed sync holds that file alone. | Page text is stored as UTF-8 without NUL bytes, so the file cannot be imported as it stands; NUL bytes usually mean a UTF-16 save (a Windows "Unicode" file), a binary file named .md or a crash-padded file. The rest of the source keeps syncing. | Save a UTF-16 file as UTF-8, remove the NUL bytes, or remove a binary file (or leave it out with sync.exclude), then commit and sync again. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#content_null_bytes](../../docs/guides/write-refusals.md#content_null_bytes)
+
 ### content_receipt_stale
 
 <a id="content_receipt_stale"></a>
@@ -1427,6 +1445,26 @@ More: [docs/guides/write-refusals.md#file_database_drift](../../docs/guides/writ
 
 More: [docs/guides/write-refusals.md#file_drift](../../docs/guides/write-refusals.md#file_drift)
 
+### file_drift_mixed_selection
+
+<a id="file_drift_mixed_selection"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair file-drift --held selected held pages of more than one Decision (side, or deleted state), so nothing was previewed: one --prefer must not resolve differently shaped drift in bulk. | Each side and deleted state is its own Decision with its own meaning of --prefer file and --prefer database; resolving them together would apply one choice to questions the user answered differently, or not at all. | Preview one Decision at a time with the narrower commands the message names (--held --side <side>, plus --state <state> for --side deleted), or narrow with --only / --skip. Run: gbrain sources status '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#file-drift](../../docs/guides/repair.md#file-drift)
+
+### file_drift_state_required
+
+<a id="file_drift_state_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair file-drift --held for deleted-side drift needs --state (tombstone_edited, purged_differs or file_gone); nothing was previewed. | In each deleted state --prefer file and --prefer database do opposite things (tombstone_edited: restore and import, or keep the deletion and remove the file; purged_differs: import as a new page, or remove the file; file_gone: soft-delete the page, or recreate the file), so the state is always named explicitly. | Rerun the preview with --side deleted --state <state>, choosing the state gbrain sources status <source> --json lists for the held files. Run: gbrain sources status '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#file-drift](../../docs/guides/repair.md#file-drift)
+
 ### file_removed_during_scan
 
 <a id="file_removed_during_scan"></a>
@@ -1590,6 +1628,16 @@ More: [docs/guides/concurrent-writes.md#git-durability-at-activation](../../docs
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | Git index stale. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### git_object_missing
+
+<a id="git_object_missing"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A committed file's Git object is missing from the checkout and its working-tree copy differs or is gone, so managed sync holds that file alone. | An interrupted gc, a partial clone without its promisor remote or disk corruption can drop an object a commit still names. Sync imports the working-tree bytes when they hash to the committed blob id; otherwise it imports nothing from a guess, and the rest of the source keeps syncing. | Run git fsck in the checkout to see what is missing, restore it with git fetch (a partial or shallow clone) or from a backup, then sync again; every sync re-tests the hold. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#git_object_missing](../../docs/guides/write-refusals.md#git_object_missing)
 
 ### git_operation_in_progress
 
@@ -1802,6 +1850,16 @@ More: [docs/guides/move-to-postgres.md#platforms](../../docs/guides/move-to-post
 Reasons: `count`, `digest`, `sequence`, `fk`, `trigger`, `relation_set`, `replay`, `doctor`.
 
 More: [docs/guides/move-to-postgres.md#verify](../../docs/guides/move-to-postgres.md#verify)
+
+### grant_scope
+
+<a id="grant_scope"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync pass ran under a grant that covers only part of the source, so it admitted what the grant can see and cannot finish (stamp) the source. | A slug-fenced grant never stamps a pass (design v3.2 §5): converging the whole source needs a writer that can see every page, which is the owner host's own sync. | On the host that owns the source, run gbrain sync --source <id> --no-pull; check the result with gbrain sync status --source <id> --json. | user | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#drain-grant-scope](../../docs/guides/write-refusals.md#drain-grant-scope)
 
 ### graph_incomplete
 
@@ -2191,6 +2249,28 @@ Reasons: `live_holder`, `network_filesystem`, `filesystem_unverified`.
 
 More: [docs/ENGINES.md#legacy-pglite-lock](../../docs/ENGINES.md#legacy-pglite-lock)
 
+### legacy_twin_mass_merge_refused
+
+<a id="legacy_twin_mass_merge_refused"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| gbrain repair legacy-twins refused to merge legacy twin pairs that are more than half of a source's file-backed pages; nothing was changed. | The sync mass-delete valve (#2828) applied to legacy twins: each merge soft-deletes a file-backed twin, and that many twins at once almost always means a re-import under another slug fold or the wrong checkout, not a backlog of forked pairs. | Check the source and its checkout on the owner host first. If merging these pairs is genuinely intended, ask the user, then rerun the same apply command with GBRAIN_ALLOW_MASS_RECONCILE=1. Run: gbrain sources writer status --source '{source_id}' --json | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/repair.md#legacy-twins](../../docs/guides/repair.md#legacy-twins)
+
+### legacy_twins_storage_unknown
+
+<a id="legacy_twins_storage_unknown"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Legacy twin pairs of a source cannot be checked because its canonical root is missing or is not a readable directory; nothing was listed or changed. | Whether a twin's file is still there and agrees with it is only known from the checkout, so the repair fails closed rather than merge on a guess. | Inspect the source checkout on its owner host (writer status shows its root), fix it, then preview gbrain repair legacy-twins --source <id> again. Run: gbrain sources writer status --source '{source_id}' --json | agent | `gbrain doctor --json` | 1 | no |
+
+Reasons: `storage_unavailable`.
+
+More: [docs/guides/repair.md#legacy-twins](../../docs/guides/repair.md#legacy-twins)
+
 ### link_cursor_invalid
 
 <a id="link_cursor_invalid"></a>
@@ -2521,6 +2601,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-connect.md#troubleshooting)
 
+### not_converged
+
+<a id="not_converged"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync pass used its rounds without the level settling (another writer kept changing it), so it ended resumable; everything it admitted stands. | A pass re-reads the level each round and stamps only when nothing is left to admit. Concurrent writes can keep producing new work; the next pass starts from what this one settled. Three in a row (the pass row's not_converged_streak) mean rerunning is not converging. | Rerun the same gbrain sync; after three consecutive not_converged passes, stop and report it with gbrain sync status --source <id> --json and gbrain doctor --json. | agent | `repeat the read that failed` | 1 | yes |
+
+More: [docs/guides/write-refusals.md#drain-not-converged](../../docs/guides/write-refusals.md#drain-not-converged)
+
 ### not_found
 
 <a id="not_found"></a>
@@ -2671,7 +2761,23 @@ More: [docs/guides/windowed-reads.md#page_too_large_for_inline](../../docs/guide
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A file whose exact bytes imported before is now refused by gbrain's frontmatter reader. | The same bytes imported under an earlier gbrain version, so only gbrain changed; with `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, such a file is held and the rest of the sync continues. | Report it as a gbrain bug with the gbrain version, the file and the code; upgrade, or keep `GBRAIN_SYNC_PARSER_REGRESSION=hold` set for the process that syncs, and never pin a release older than 0.60.305.0; then sync again. | host_admin | `gbrain doctor --json` | 1 | no |
+| A file whose exact bytes imported before is now refused by gbrain's frontmatter reader. | The same bytes imported under an earlier gbrain version, so only gbrain changed; such a file is held and the rest of the sync continues (`GBRAIN_SYNC_PARSER_REGRESSION=stop` for the process that syncs stops the run instead). | Report it as a gbrain bug with the gbrain version, the file and the code; upgrade or pin the last good version, then sync again. | host_admin | `gbrain doctor --json` | 1 | no |
+
+### part_splits_code_point
+
+<a id="part_splits_code_point"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An upload part starts or ends inside a code point (half of a surrogate pair), so it was not stored. | Each part is stored as raw UTF-8 bytes; half of a surrogate pair has no UTF-8 encoding, so a part cut there would corrupt the character. | Move the cut before the high surrogate so the pair travels in one part, then send the part again. | agent | `repeat the read that failed` | 1 | no |
+
+### part_too_large
+
+<a id="part_too_large"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| An upload part's encoded frame is over the connection's part limit (part_max_frame_bytes), so it was not stored. | part_max_frame_bytes is the connection's inbound request cap (at most 4 MiB) minus a 4 KiB envelope; JSON escaping makes quotes, backslashes and control characters count more than once. | Cut the part so the whole call stays within part_max_frame_bytes, then send it again with the same part number. | agent | `repeat the read that failed` | 1 | no |
 
 ### pasted_wrong_url
 
@@ -2690,6 +2796,16 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The --pat-file token file is missing, empty, holds more than one token, or is readable by other users, so it was not read. | The token is read from a private file so it never appears on a command line or in a process list; a file other users can read would leak it, so the verb refuses before any credential is written. | Write exactly one token on one line to a file, chmod 600 it, and pass its path with --pat-file. | agent | `repeat the read that failed` | 1 | no |
+
+### path_not_utf8
+
+<a id="path_not_utf8"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A committed file's name is not valid UTF-8, so managed sync holds that file alone. | Git hands the name back with U+FFFD for the bytes that are not UTF-8 (a Latin-1 name from an older system, an archive or a network share), and no Git read or file matches that decoded name, so nothing is imported from it. The rest of the source keeps syncing. | Rename the file to a UTF-8 name (git ls-files with core.quotePath shows its exact bytes; convmv -f latin1 -t utf8 converts a Latin-1 name), commit, then sync again; the rename clears the hold. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/write-refusals.md#path_not_utf8](../../docs/guides/write-refusals.md#path_not_utf8)
 
 ### pattern_claims_pending
 
@@ -3070,6 +3186,16 @@ More: [docs/guides/company-brain-ingestion.md#resume-and-verify](../../docs/guid
 | The receipt ID is already bound to different approved ingestion metadata. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/company-brain-ingestion.md#agent-and-ci-use](../../docs/guides/company-brain-ingestion.md#agent-and-ci-use)
+
+### reconcile_host_required
+
+<a id="reconcile_host_required"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A remote caller's managed sync admitted what it could, and the rest of the source needs the owner host (holds, markers, keep_db writes or the stamp). | Remote callers admit only one-sided work and never write holds, markers, keep_db writes or stamps (design v3.2 §5), so only the owner host's sync converges the source. | On the host that owns the source, run gbrain sync --source <id> --no-pull; verify with gbrain sync status --source <id> --json. | user | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#drain-reconcile-host-required](../../docs/guides/write-refusals.md#drain-reconcile-host-required)
 
 ### reconcile_read_incomplete
 
@@ -3521,6 +3647,16 @@ Reasons: `lock_held`, `no_brain`, `config_unreadable`, `missing_brain`, `brain_u
 
 More: [docs/ENGINES.md#serve-unhealthy-exit](../../docs/ENGINES.md#serve-unhealthy-exit)
 
+### settle_mismatch
+
+<a id="settle_mismatch"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A managed sync settled a file at the same level in three consecutive passes, but the next round never classified it settled, so the file is held instead of being re-imported every pass; the rest of the source synced. | A pass records the level it settled each path at and the next round expects the same path to classify settled at that level. A path that keeps coming back unsettled at one level points to a broken writer, a stuck effect or a damaged record, not to the file; re-importing it every pass would spend work without converging, so after three passes sync holds it and stamps the rest. | Run gbrain doctor --json and gbrain sources writer status --source <id> --json (both read-only), fix or report what they name with the gbrain version, then gbrain sources retry-held <id> and gbrain sync --source <id> --no-pull. Run: gbrain doctor --json | agent | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/write-refusals.md#settle_mismatch](../../docs/guides/write-refusals.md#settle_mismatch)
+
 ### setup_harness_unsupported
 
 <a id="setup_harness_unsupported"></a>
@@ -3753,6 +3889,14 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 |---|---|---|---|---|---|---|
 | Reading or writing durable storage failed. | Usually a dropped connection or a failed statement; the same error after a rerun is not transient. `detail: persistence_mode_unknown` (#6482): the persistence_brain singleton is missing, duplicated or carries a non-boolean `enabled`, so gbrain cannot tell whether the brain is managed and refuses every write, sync, connector run and activation step that depends on it rather than route a managed brain through the unmanaged writer; only a well-formed `enabled: false` row selects the unmanaged path. | For persistence_mode_unknown: run gbrain sources writer status --probe --json on the brain host (it reports the malformed state instead of refusing), fix the persistence_brain row it names, then gbrain doctor --json. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### sync_admission_restricted
+
+<a id="sync_admission_restricted"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| `sync.admission` is not `normal`, so managed sync admits less than it classifies: `imports_only` admits no deletes and no keep_db writes (they wait as `paused_deletes` and `paused_keep_db`), and `classify_only` writes and stamps nothing. | The owner sets the switch on the brain host (`gbrain config set`; it is never settable remotely) as the first response to a suspected sync bug. A pass reads it at pin and in every group's admission, and a destructive request re-reads it at publication, so the change applies at the next group; `sync status --json` reports `admission: {value, set_at, effective}`, where `effective` turns true once no pass pinned before `set_at` holds the lease and no delete or keep_db reconcile admitted before it is unpublished. Doctor warns, with the value's age, for as long as it stays restricted. | Tell the user how long ago the switch was set and ask whether its reason still holds. Only they restore it: gbrain config set sync.admission normal on the brain host; the next sync admits what waited. Run: gbrain config set sync.admission normal | user | `gbrain doctor --only sync_admission_restricted --json` | 1 | no |
+
 ### sync_cursor_replaced
 
 <a id="sync_cursor_replaced"></a>
@@ -3821,7 +3965,15 @@ Reasons: `content_directory`.
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Sync stopped because gbrain would hold a file whose exact bytes imported before; this is a gbrain bug. | The upgrade invariant says a newer reader never refuses bytes an older one imported, so the run stops without advancing rather than hide a regression. | Report it with the gbrain version, the file and the code; upgrade, or set `GBRAIN_SYNC_PARSER_REGRESSION=hold` for the process that syncs, and never pin a release older than 0.60.305.0; then run gbrain sync --source <id> --no-pull. | host_admin | `gbrain doctor --json` | 1 | no |
+| Sync stopped because gbrain would hold a file whose exact bytes imported before; this is a gbrain bug. | The upgrade invariant says a newer reader never refuses bytes an older one imported; with `GBRAIN_SYNC_PARSER_REGRESSION=stop` set for the process that syncs (the default holds the file), the run stops without advancing rather than hide a regression. | Report it with the gbrain version, the file and the code; upgrade or pin the last good version, then run gbrain sync --source <id> --no-pull. | host_admin | `gbrain doctor --json` | 1 | no |
+
+### tail_changed
+
+<a id="tail_changed"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The end of the page no longer has the sha256 the append expected, so nothing was appended. | append_page's expected_tail_sha256 binds an append to the tail its caller read; another write changed it, and appending anyway could interleave text with a tail the caller never saw. | Read the page again (get_page body: 'none' returns tail_sha256), check whether the text is still missing, and append against the current tail with a new request_id. Run: gbrain get --source '{source_id}' -- '{slug}' | agent | `repeat the read that failed` | 1 | no |
 
 ### tail_exposure_approval
 
@@ -4075,6 +4227,32 @@ Reasons: `not_utf8`, `control_character`.
 
 More: [docs/guides/write-refusals.md#unsupported_path](../../docs/guides/write-refusals.md#unsupported_path)
 
+### upload_expired
+
+<a id="upload_expired"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The upload session passed its idle or hard deadline before it was committed, so its parts were discarded and nothing was written. | Open sessions hold staged bytes against per-connection and per-brain quotas; persistence.limits.upload_idle_seconds (1 h) and upload_max_seconds (24 h) bound how long they may. | Begin the upload again with a new request_id and send every part from part 0. | agent | `repeat the read that failed` | 1 | no |
+
+### upload_not_found
+
+<a id="upload_not_found"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| No open upload session matches this upload_id for this connection. | A session answers only its creating connection, in its source, while the page it began against is unchanged; every other case gets this same answer so an upload_id reveals nothing. | Begin a new upload with begin_page_upload and a new request_id. | agent | `repeat the read that failed` | 1 | no |
+
+### upload_protected_content
+
+<a id="upload_protected_content"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A remote replace upload over 24 MiB was refused because the page holds content it cannot carry over: a takes fence remote reads hide, or timeline rows. | put_page keeps a hidden takes fence and checks omitted timeline rows by comparing whole bodies; an upload over the single-string ceiling is never held whole, so it refuses instead of dropping them. | Replace the page with content of at most 24 MiB through put_page, write it locally on the brain host, or (timeline only) commit with drop_timeline: true when deleting every entry is intended. | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `takes`, `timeline`.
+
 ### upstream
 
 <a id="upstream"></a>
@@ -4247,9 +4425,9 @@ More: [docs/guides/write-refusals.md#write_outcome_unknown](../../docs/guides/wr
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| A cumulative write cap (permanent request ids or reserved receipt bytes, for the principal or the brain) is full, so the write was not admitted and nothing changed. | Request ids are permanent replay protection and a receipt keeps its bytes until it compacts, so waiting does not free the cap; the brain host raises it with gbrain config set (reversible). | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. Run: gbrain doctor --only persistence_capacity --json | agent | `gbrain doctor --only persistence_capacity --json` | 12 | no |
+| A write cap (permanent request ids, reserved receipt bytes, staged upload bytes or open upload sessions, for the principal or the brain) is full, so the write was not admitted and nothing changed. | Request ids are permanent replay protection and a receipt keeps its bytes until it compacts, so waiting does not free the cap; the brain host raises it with gbrain config set (reversible). | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. Run: gbrain doctor --only persistence_capacity --json | agent | `gbrain doctor --only persistence_capacity --json` | 12 | no |
 
-Reasons: `lifetime_ids`, `terminal_bytes`.
+Reasons: `lifetime_ids`, `terminal_bytes`, `staged_bytes`, `open_uploads`.
 
 More: [docs/guides/write-refusals.md#write_quota_exhausted](../../docs/guides/write-refusals.md#write_quota_exhausted)
 

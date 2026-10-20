@@ -80,6 +80,11 @@ interface PreparedMutationBase {
    */
   postimage?: PageSnapshot | null;
   validate?(tx: BrainEngine): Promise<void>;
+  /**
+   * #6712 PR 4b: runs in the publication transaction right after its effects are queued, so it sees the request's own
+   * Git effect (a writeback import's folded pass stamp, sync-pass-fold.ts); it may add to the outcome. Absent for every other write.
+   */
+  afterEffects?(tx: BrainEngine, outcome: Record<string, unknown>): Promise<void>;
   /** #5575: the tier and origin of the rows apply writes; absent: the request's channel tier (trust/channel.ts). */
   trust?: WriteTrust;
   /**
@@ -200,6 +205,8 @@ function requestError(error: unknown): PublicationFailure {
   return ownerExceptionFailure(error);
 }
 function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','revision_backfill_pending','source_changed','page_identity_changed',SYNC_CURSOR_REPLACED].includes(code); }
+/** The terminal state of an unpublished failure: `admission_paused` (#6712 PR 4b, a destructive write `sync.admission` paused at publication) is `cancelled`. */
+function failureState(code: string): 'conflict' | 'failed' | 'cancelled' { return code === 'admission_paused' ? 'cancelled' : conflictCode(code) ? 'conflict' : 'failed'; }
 export function transientDatabaseFailure(error: unknown): boolean {
   return ['40001','40P01','55P03','57014','53300','57P01','57P02','57P03','08000','08003','08006','08001','08004',
     'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code));
@@ -340,7 +347,7 @@ export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRe
     await releaseUnpublishedClaim(engine, row, transientDatabaseFailure(error) ? 'database_contention' : 'revision_changed_repreparing');
     return (await getWriteRequestById(engine, row.id))!;
   }
-  return engine.transaction(tx => completeWrite(tx, row, conflictCode(failure.code) ? 'conflict' : 'failed', {}, failure));
+  return engine.transaction(tx => completeWrite(tx, row, failureState(failure.code), {}, failure));
 }
 
 /**
@@ -360,7 +367,7 @@ export function decoratePublicationOutcome(row: WriteRequest, prepared: Prepared
   outcome.persistence = { mode: fileCount ? 'filesystem' : 'database', ...(fileCount ? { file_written: !prepared.noop } : {}), ...(skill ? { git_state: 'not_requested' } : {}) };
   outcome.write_through = fileCount ? { written: !prepared.noop } : { written: false, skipped: prepared.databaseOnlyReason ?? row.authority.databaseOnlyReason ?? 'no_repo_configured' };
   if (prepared.databaseOnlyReason === 'mirror_read_only') outcome.storage = 'database_only';
-  if ((row.operation === 'put_page' || row.operation === 'edit_page') && row.authority.remote && row.authority.databaseOnlyReason === 'no_repo_configured') outcome.write_through = withNoRepoWriteThroughWarning(outcome.write_through as { written: boolean; skipped?: string }, row.source_id, row.operation);
+  if ((row.operation === 'put_page' || row.operation === 'edit_page' || row.operation === 'append_page') && row.authority.remote && row.authority.databaseOnlyReason === 'no_repo_configured') outcome.write_through = withNoRepoWriteThroughWarning(outcome.write_through as { written: boolean; skipped?: string }, row.source_id, row.operation);
   if ((outcome.write_through as { skipped?: string }).skipped === 'unbound_source') {
     outcome.write_through = { ...outcome.write_through as object, warning: unboundWriteWarning(row.operation, row.source_id, row.authority.databaseOnlyReason === 'unbound_source') };
   }
@@ -586,6 +593,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       decoratePublicationOutcome(row, prepared, outcome, final, files.length, skill);
       await recordPublicationFenceTrend(tx, row, outcome);
       await timePublicationStep('effects', row.slug, () => queuePublicationEffects(tx, row, final, outcome, prepared));
+      if (prepared.afterEffects) await withCoordinatedWrite(tx, [row.source_id], () => prepared.afterEffects!(tx, outcome), publicationAttribution(row, prepared.trust));
       await hooks.boundary?.('before_commit', row);
       const committed = await completeWrite(tx, current, 'committed', outcome, undefined, current);
       transactionBodyCompleted = true;
@@ -726,7 +734,7 @@ export async function recoverPublication(engine: BrainEngine, id: string, hostId
       // Withdrawal is authoritative DB state and is never rolled back here.
       const failure: PublicationFailure | undefined = terminalError ?? (current.error_code ? {code:current.error_code,message:current.error_message ?? 'Publication failed before database completion.',
         ...(current.error_detail ? { detail: current.error_detail as unknown as PublicationFailureDetail } : {})} : undefined);
-      if (failure) return completeWrite(tx, current, conflictCode(failure.code) ? 'conflict' : 'failed', {}, failure);
+      if (failure) return completeWrite(tx, current, failureState(failure.code), {}, failure);
       for (const key of ['brain', `worktree:${current.worktree_id}`]) await tx.executeRaw('UPDATE persistence_counters SET recovery_bytes=recovery_bytes-$2 WHERE key=$1', [key, Number(current.recovery_bytes)]);
       const [queued] = await tx.executeRaw<WriteRequest>(`UPDATE persistence_requests SET state='queued',execution_token=NULL,
         claim_expires_at=NULL,recovery=NULL,recovery_bytes=0,publication_started=false,blocked_reason=NULL,updated_at=now()
