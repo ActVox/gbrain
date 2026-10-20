@@ -679,13 +679,16 @@ async function main(): Promise<void> {
 }
 
 /** p50 / p95 / max in seconds; p95 only from n >= 40 (otherwise "-", read the max). */
-const sec = (x: Stats | undefined) => x && x.n ? [x.p50, x.n >= 40 ? x.p95 : null, x.max].map(v => v === null || v === undefined ? '-' : (v / 1000).toFixed(2)).join(' / ') : '-';
+function sec(x: Stats | undefined): string {
+  return x && x.n ? [x.p50, x.n >= 40 ? x.p95 : null, x.max].map(v => v === null || v === undefined ? '-' : (v / 1000).toFixed(2)).join(' / ') : '-';
+}
 
 function report(dirs: string): void {
   const rows = dirs.split(',').flatMap(dir => readdirSync(dir).filter(f => f.endsWith('.json')).map(f => JSON.parse(readFileSync(join(dir, f), 'utf8')))).filter(r => r.schema === 'gbrain-sync-freshness/1')
     .sort((a, b) => a.cell.localeCompare(b.cell));
-  const det = (r: any) => r.params.detection ? r.params.detection + (r.detection_observed ? ' (' + [...new Set(Object.values(r.detection_observed as Record<string, string | null>).map(v => v ?? 'unrecorded'))].join(', ') + ')' : '') : '-';
-  const ph = (r: any) => Object.entries(r.phases as Record<string, Stats>).filter(([k, v]) => v.n && v.p50 !== null && !['written', 'spawn_after_commit_ms', 'submit_cli_ms', 'stub_inputs_with_token'].includes(k)).map(([k, v]) => k + ' ' + (v.p50! / 1000).toFixed(2)).join(', ');
+  const det = (r: any) => !r.params.detection ? '-' : r.detection_observed
+    ? [...new Set(Object.values(r.detection_observed as Record<string, string | null>).map(v => v ?? 'unrecorded'))].join(', ') : r.params.detection + ' (requested; not recorded)';
+  const ph = (r: any) => Object.entries(r.phases as Record<string, Stats>).filter(([k, v]) => v.n && v.p50 !== null && !['written', 'spawn_after_commit_ms', 'submit_cli_ms'].includes(k) && !k.startsWith('stub_') || k === 'stub_drained_ms').map(([k, v]) => k + ' ' + (v.p50! / 1000).toFixed(2)).join(', ');
   const lat = rows.filter(r => !r.kind || r.kind === 'latency' || r.kind === 'embed-drain');
   console.log('| cell | engine | mode | pages | commit | trigger | detection | rtt | n | get_page p50/p95/max s | search p50/p95/max s | search cv | embedded p50/p95/max s | exit p50/p95/max s | phases (p50 s) | failures | gbrain |');
   console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
