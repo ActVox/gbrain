@@ -30,7 +30,7 @@ import { mayReprepare } from './semantic.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
 import { queuePublicationEffects } from './effect-journal.ts';
 import { timePublicationStep } from './publication-timing.ts';
-import type { GitCommitNote } from './effect-model.ts';
+import type { AppendedRange, GitCommitNote } from './effect-model.ts';
 import { authorizePageVisibility } from './page-visibility.ts';
 import { withNoRepoWriteThroughWarning } from '../write-through.ts';
 import { assertUnboundPublication, classifyUnboundPage, unboundWriteWarning } from './unbound-source.ts';
@@ -92,6 +92,8 @@ interface PreparedMutationBase {
    * deferred projection and segment GC). Best effort: the projection queue and GC converge after a failure.
    */
   afterCommit?(engine: BrainEngine): Promise<void>;
+  /** #7122: the truth bytes an append_page added; a remote append's `links` effect reads only these. Absent for every other write. */
+  mentionRange?: AppendedRange;
 }
 /**
  * A page file target; `publishMode` (Google pages) is the exact mode it publishes with, and its created directories get 0700.
