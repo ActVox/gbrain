@@ -3,6 +3,8 @@
  * un-syncable-modified sweep that runs before the checkpoint opens, and the
  * batched removed-file drain. Both SOFT-delete (#4587).
  */
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { softDeleteSyncPages } from '../../core/company-brain/profile.ts';
 import { serr, slog } from '../../core/console-prefix.ts';
 import { DELETE_BATCH_SIZE } from '../../core/engine-constants.ts';
@@ -98,11 +100,17 @@ export async function sweepUnsyncableModified(
 /** The removed-file drain. Returns a partial result when the run aborts mid-drain. */
 export async function runDeletesPhase(
   run: SyncRun,
-  plan: Pick<SyncPlan, 'opts' | 'filtered' | 'lastCommit' | 'pin'>,
+  plan: Pick<SyncPlan, 'opts' | 'filtered' | 'lastCommit' | 'pin' | 'syncImportRoot'>,
   progress: SyncProgress,
 ): Promise<SyncResult | undefined> {
   const { engine, completed, pagesAffected, deletedSlugs, failedFiles } = run;
   const { opts, filtered } = plan;
+  // #7130: Git reports a deletion for `git rm --cached`, but the file is still on disk and only untracked now. Keep its page.
+  const stillOnDisk = filtered.deleted.filter(p => existsSync(join(plan.syncImportRoot, p)));
+  const keptOnDisk = new Set(stillOnDisk);
+  if (stillOnDisk.length > 0) {
+    serr(`\n  Kept ${stillOnDisk.length} page(s) whose file Git stopped tracking but is still on disk (e.g. ${stillOnDisk[0]}); not deleting. Commit the file again to keep it in Git, or delete the file to delete the page.`);
+  }
   // v0.41.19.0 (T2/D6/D7/D16/D18 via /plan-eng-review + codex outside-voice):
   // batched delete loop. Replaces the per-file N+1 that PR #1538 originally
   // batched on Postgres only. See plan file:
@@ -153,7 +161,7 @@ export async function runDeletesPhase(
   // v0.42.x (#1794): resume-filter the delete set so a resumed run skips paths
   // already drained in a prior run (deletes are idempotent, but skipping avoids
   // re-resolving + re-deleting tens of thousands of already-gone pages).
-  const deletesToDo = resumeFilter(filtered.deleted, [...completed]);
+  const deletesToDo = resumeFilter(filtered.deleted.filter(p => !keptOnDisk.has(p)), [...completed]);
   if (deletesToDo.length > 0) {
     progress.start('sync.deletes', deletesToDo.length);
     if (opts.sourceId) {

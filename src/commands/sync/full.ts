@@ -2,7 +2,9 @@
 import { assertSourceFilesystemActive } from '../../core/minions/source-filesystem.ts';
 import { currentJobSignal } from '../../core/minions/submission-authority.ts';
 import { currentCompanyBrainSync, softDeleteSyncPages } from '../../core/company-brain/profile.ts';
-import { relative } from 'path';
+import { existsSync } from 'fs';
+import { join, relative } from 'path';
+import { gitIgnoresUntracked } from '../../core/persistence/sync-origin-evidence.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../../core/engine-constants.ts';
 import { collectSyncableFiles } from '../import.ts';
@@ -40,6 +42,9 @@ import {
   planReconcileDeletes,
   listEverCommittedPaths,
   massReconcileAllowed,
+  readSyncDeleteCaps,
+  syncDeleteTrip,
+  syncDeleteTripText,
 } from '../../core/sync-reconcile.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
 import { heldRenameOrigins, holdRefusedImport, moveHeldRenames, noteScreenedImport, settleFullSyncHolds, wouldHoldFields, type LegacyHolds } from './holds.ts';
@@ -475,6 +480,30 @@ async function reconcileFullSyncDeletes(
           if (sp && !everCommitted.has(sp.replace(/\\/g, '/'))) dbOnlySlugs.push(slug);
           else deletableSlugs.push(slug);
         }
+        // #7130: `git rm --cached` plus a .gitignore entry leaves the file on disk; its history says committed, but nothing was removed.
+        const ignoredOnDisk = new Set<string>();
+        for (const slug of deletableSlugs) {
+          const sp = pathBySlug.get(slug);
+          const abs = sp ? join(slugRoot ?? syncScopeRoot, sp) : null;
+          if (abs && existsSync(abs) && await gitIgnoresUntracked(gitContextRoot, relative(gitContextRoot, abs))) ignoredOnDisk.add(slug);
+        }
+        if (ignoredOnDisk.size > 0) {
+          serr(`\n  Kept ${ignoredOnDisk.size} page(s) whose file .gitignore now excludes but is still on disk; not deleting. Import them with gbrain sync --source ${sid} --full --include-gitignored, or delete the file to delete the page.`);
+          deletableSlugs = deletableSlugs.filter(slug => !ignoredOnDisk.has(slug));
+        }
+      } else if (!company) {
+        // #7130: Git could not list the history (a dangling ref fails `git log --all`), so no stale page is proven
+        // committed; deleting them would treat a never-committed page's absence as a deletion. Keep them all.
+        serr(`\n  WARNING: kept ${plan.staleSlugs.length} stale page(s) of source '${sid}': Git could not list the history that proves their files were committed and removed (run git -C ${gitContextRoot} log --all to see why). No pages were deleted.`);
+        deletableSlugs = [];
+      }
+      // #7130: the absolute caps (sync.max_deletes, sync.max_delete_ratio) brake a full reconcile below the 50% valve too.
+      const caps = await readSyncDeleteCaps(engine, sid);
+      const trip = syncDeleteTrip(deletableSlugs.length, plan.reconcilableCount, caps);
+      if (trip && !massReconcileAllowed()) {
+        serr(`\n  WARNING: refusing to reconcile-delete ${deletableSlugs.length} of ${plan.reconcilableCount} file-backed page(s) for source '${sid}' (${syncDeleteTripText(trip, caps)}). ` +
+          `No pages were deleted. Check the checkout first; if the removal is intended, raise the cap (gbrain config set ${trip === 'max_deletes' ? 'sync.max_deletes' : 'sync.max_delete_ratio'}.source.${sid} <value>) or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1.`);
+        deletableSlugs = [];
       }
       if (dbOnlySlugs.length > 0) {
         let reExported = 0;

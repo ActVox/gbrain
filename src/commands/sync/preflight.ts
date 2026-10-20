@@ -34,7 +34,7 @@ import {
   unique,
 } from '../../core/sync-git.ts';
 import { buildPartialResult } from '../../core/sync-lock.ts';
-import { composeAbortSignals, massReconcileAllowed, MASS_RECONCILE_RATIO } from '../../core/sync-reconcile.ts';
+import { composeAbortSignals, massReconcileAllowed, MASS_RECONCILE_RATIO, readSyncDeleteCaps, syncDeleteTrip, syncDeleteTripText } from '../../core/sync-reconcile.ts';
 import {
   DEFAULT_SOURCE_ID,
   resolveSlugForPath,
@@ -1112,7 +1112,7 @@ async function computeFilteredDelta(
   // ratio + same env escape hatch. Deletes are skipped loudly; adds and
   // modifies still import, and committing the deletions (or
   // GBRAIN_ALLOW_MASS_RECONCILE=1) re-enables them.
-  if (importWorkingTree && !detachedHead && filtered.deleted.length >= 10 && !massReconcileAllowed()) {
+  if (importWorkingTree && filtered.deleted.length > 0 && !massReconcileAllowed()) {
     try {
       const rows = await engine.executeRaw<{ count: number }>(
         opts.sourceId
@@ -1121,7 +1121,15 @@ async function computeFilteredDelta(
         opts.sourceId ? [opts.sourceId] : [],
       );
       const pageCount = Number(rows[0]?.count ?? 0);
-      if (pageCount > 0 && filtered.deleted.length > pageCount * MASS_RECONCILE_RATIO) {
+      // #7130: the absolute caps (sync.max_deletes, sync.max_delete_ratio) apply on a detached HEAD too.
+      const sid = opts.sourceId ?? DEFAULT_SOURCE_ID;
+      const caps = await readSyncDeleteCaps(engine, sid);
+      const trip = syncDeleteTrip(filtered.deleted.length, pageCount, caps);
+      if (trip) {
+        serr(`\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree sync (${syncDeleteTripText(trip, caps)}). ` +
+          `Commit the deletions and sync again, raise the cap (gbrain config set ${trip === 'max_deletes' ? 'sync.max_deletes' : 'sync.max_delete_ratio'}.source.${sid} <value>), or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`);
+        filtered.deleted = [];
+      } else if (!detachedHead && filtered.deleted.length >= 10 && pageCount > 0 && filtered.deleted.length > pageCount * MASS_RECONCILE_RATIO) {
         serr(
           `\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree ` +
           `sync (> ${Math.round(MASS_RECONCILE_RATIO * 100)}% of ${pageCount} page(s)). An uncommitted ` +

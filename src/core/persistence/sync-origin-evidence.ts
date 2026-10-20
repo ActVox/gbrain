@@ -8,7 +8,7 @@
  * Both reads are bounded Git plumbing over the candidate paths alone. A read that fails or times out answers `unknown`
  * for every path it covered, which the classifier treats like a missing commit (fail closed: hold, never delete).
  */
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn } from '../spawn.ts';
 import { promisify } from 'node:util';
 import { gitChildEnv } from '../git-env.ts';
 
