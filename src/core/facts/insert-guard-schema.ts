@@ -37,7 +37,7 @@
  * the per-row BEFORE UPDATE OF triggers under their old names and functions;
  * only the insert half moves here. A statement trigger sees only the rows the
  * statement wrote: a row ON CONFLICT DO NOTHING skipped is not checked (it is
- * not saved either). Installed by migration v263.
+ * not saved either). Installed by migration v264.
  */
 import { FACT_WITHDRAWAL_STAMP_SETTING } from '../persistence/attribution-schema.ts';
 

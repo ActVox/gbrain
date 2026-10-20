@@ -13,8 +13,8 @@ import { STAMP_ROW_FUNCTION } from '../persistence/attribution-schema.ts';
 // re-created so the guard's withdrawal stamp (an UPDATE under
 // gbrain.fact_withdrawal_stamp) keeps the row's last_write_* values.
 // Function and trigger DDL only: no row changes.
-export const v263: Migration = {
-  version: 263,
+export const v264: Migration = {
+  version: 264,
   name: 'set_based_fact_insert_guards',
   idempotent: true,
   sql: `${STAMP_ROW_FUNCTION};\n${FACT_INSERT_GUARD_SQL}`,

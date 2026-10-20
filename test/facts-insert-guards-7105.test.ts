@@ -1,7 +1,7 @@
 /**
  * #7105: the facts purge refusal and withdrawal stamp run once per INSERT
  * statement, not once per inserted row (facts/insert-guard-schema.ts,
- * migration v263).
+ * migration v264).
  *
  * Protects:
  * 1. Work count. A 6,000-row bulk insert calls the guard functions once per
