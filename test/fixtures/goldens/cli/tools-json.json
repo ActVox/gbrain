@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 252763,
-    "stdoutSha256": "32b0c98f713f00be91ab771872ceaec27deb8d5d75ad0814ae5fde298046c0cb",
+    "stdoutBytes": 252798,
+    "stdoutSha256": "71b348f0e16ec33eeb7b856a2fa24821a5f971503416d541e00226572381ab56",
     "toolNames": [
       "remember",
       "entity",
@@ -1428,7 +1428,7 @@
         "scope": "write"
       },
       {
-        "description": "Discard an uncommitted upload and free its staged bytes.",
+        "description": "Discard an uncommitted upload session: its staged parts are deleted and its quota is freed.",
         "idempotent": true,
         "local_only": false,
         "mutating": true,

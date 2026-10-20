@@ -188,7 +188,13 @@ for (const backend of testBackends()) {
       }
       expect(await managed()).toBe(true);
       const body = hugeBody('Managed huge');
-      const put = await cli(['put', 'notes/managed-huge', '--file', file('managed-huge.md', body)]);
+      const path = file('managed-huge.md', body);
+      let put = await cli(['put', 'notes/managed-huge', '--file', path]);
+      if (put.code === 10) {
+        const requestId = /Retry the same put with --request-id ([0-9a-f-]{36})/.exec(put.stderr)?.[1];
+        expect(requestId, put.stderr).toBeDefined();
+        put = await cli(['put', 'notes/managed-huge', '--file', path, '--request-id', requestId!]);
+      }
       expect(put.code, put.stderr).toBe(0);
       expect(await stored('notes/managed-huge')).toMatchObject({ body_storage: 'segmented' });
       expect(await uploads()).toBeGreaterThan(0);

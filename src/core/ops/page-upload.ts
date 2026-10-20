@@ -290,7 +290,7 @@ const abort_page_upload: Operation = {
   name: 'abort_page_upload',
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'Discard an uncommitted upload and free its staged bytes.',
+  description: 'Discard an uncommitted upload session: its staged parts are deleted and its quota is freed.',
   params: { upload_id: { type: 'string', required: true, description: 'From begin_page_upload.' } },
   mutating: true,
   scope: 'write',

@@ -168,7 +168,7 @@ Every non-localOnly operation on the MCP surface: 157 tools across 25 areas. **S
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
-| `abort_page_upload` | Discard an uncommitted upload and free its staged bytes. | write |  |  |
+| `abort_page_upload` | Discard an uncommitted upload session: its staged parts are deleted and its quota is freed. | write |  |  |
 | `append_page` | Add text to the end of a page, in time proportional to the text: use it for logs and conversations instead of re-putting a large page. | write |  |  |
 | `begin_page_upload` | Start writing a page too large for one request: then upload_page_part from part 0 and commit_page_upload. | write |  |  |
 | `cancel_write_request` | Cancel your accepted write before it publishes; returns the receipt. | write | yes |  |

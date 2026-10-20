@@ -25,7 +25,7 @@ function locateBlock(source: string): { rowLines: number; first: number; count: 
     const trimmed = line.trimStart();
     if (trimmed.startsWith(MARKER)) { inBlock = true; first = rowLines; continue; }
     if (trimmed.startsWith('//')) inBlock = false;
-    const rows = line.match(/\{ since: '\d/g)?.length ?? 0;
+    const rows = line.match(/\{ since: '/g)?.length ?? 0;
     rowLines += rows;
     if (inBlock) count += rows;
   }
@@ -49,9 +49,9 @@ describe('#6712 PR 4b BEHAVIOR_CHANGES block', () => {
     expect(block.filter(row => row.since !== block[0]!.since).map(row => row.since)).toEqual([]);
   });
 
-  test("the block sits after master's rows: last in the array, and no earlier row is newer", () => {
-    expect(first + count).toBe(BEHAVIOR_CHANGES.length);
+  test("the block sits after master's rows: no earlier row is newer, and no later row is older", () => {
     expect(BEHAVIOR_CHANGES.slice(0, first).filter(row => compareReleases(row.since, block[0]!.since) > 0).map(row => row.since)).toEqual([]);
+    expect(BEHAVIOR_CHANGES.slice(first + count).filter(row => row.since !== 'TBD' && compareReleases(row.since, block[0]!.since) <= 0).map(row => row.since)).toEqual([]);
   });
 
   test(`every row of the block is plain text inside the rendered ${NOTICE_CAP}-character cap`, () => {

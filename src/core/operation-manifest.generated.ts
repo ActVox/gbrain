@@ -1111,7 +1111,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "abort_page_upload",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Discard an uncommitted upload and free its staged bytes.",
+    "description": "Discard an uncommitted upload session: its staged parts are deleted and its quota is freed.",
     "params": {
       "upload_id": {
         "type": "string",
