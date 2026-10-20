@@ -207,11 +207,29 @@ const PER_REQUEST_SEAMS: ReadonlySet<FaultPoint> = new Set<FaultPoint>(['consume
  * are claimed one after another, and `finish` waits for a claim pass after its probe, the last request (#6957), so
  * every slot the count role saw comes again in the run.
  */
-/** How far this pass advances the seam's count: 1, 0 for a repeat of the same request at a per-request seam, the epochs passed at the claim seam. */
+/**
+ * #7124: a sync pass makes as many rounds as the schedule's races dictate: a direct write still in flight when round 1
+ * reads its level defers that page to a round of its own, so the same schedule makes 2 or 3 rounds per pass (a count role
+ * saw 7 `sync:level_chunk`, a cold run made 6 and its fault at #7 went unreached). These seams count in round slots: in
+ * each pass, the first time a seam (a chunk: of each Git read) is reached in round 1, and the first time in a later
+ * round. Every pass that made a round 1 with work makes a later round, its confirm round at least, so every slot comes
+ * again; `sync:batch_entries` counts in round 1 alone, since a later round has entries only when the race deferred one.
+ */
+const ROUND_SEAMS: ReadonlySet<FaultPoint> = new Set<FaultPoint>(['sync:round_start', 'sync:level_chunk', 'sync:level_result', 'sync:level_take',
+  'sync:level_read', 'sync:confirm_parallel', 'sync:level_narrow', 'sync:batch_entries']);
+/** How far this pass advances the seam's count: 1, 0 for a repeat of the same request at a per-request seam or of a round slot, the epochs passed at the claim seam. */
 export function seamCounter(): (point: FaultPoint, detail: FaultDetail) => number {
   const seen = new Set<string>(), prepared = new Set<string>();
-  let claimSlots = 0;
+  let claimSlots = 0, pass = 0, round = 0;
   return (point, detail) => {
+    if (point === 'sync:round_start') { round = Number(detail.round); if (round === 1) pass++; }
+    if (ROUND_SEAMS.has(point)) {
+      if (point === 'sync:batch_entries' && round > 1) return 0;
+      const key = `${point}\u0000${pass}\u0000${round > 1 ? 'later' : 'first'}\u0000${detail.read ?? ''}`;
+      if (seen.has(key)) return 0;
+      seen.add(key);
+      return 1;
+    }
     const request = detail.writeId ?? detail.requestId;
     if (point === 'consumer:preparing' && request) prepared.add(request);
     if (point === 'consumer:claiming') {
