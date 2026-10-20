@@ -208,7 +208,7 @@ and the commit it would make, and changes nothing.
    date), branch-added TODOS lines naming the old version, and every
    `since: 'TBD'` row in `src/core/behavior-change-notice.ts` (development
    branches write their BEHAVIOR_CHANGES rows as TBD; the stamp gives them the
-   new version).
+   new version, and a restamp moves the branch's own rows from the old version).
 5. Renumbers the branch's own schema migrations (files `origin/master` does
    not have) consecutively from master's latest + 1, in their original order.
    It changes only the filename, the `export const v<NNN>` name and the

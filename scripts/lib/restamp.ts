@@ -179,6 +179,12 @@ export function restampTodoLines(text: string, addedLines: Set<number>, oldVersi
   return text.split('\n').map((l, i) => (addedLines.has(i + 1) ? l.split(`v${oldVersion}`).join(`v${newVersion}`) : l)).join('\n');
 }
 
+/** Rewrite `since: 'OLD'` to `since: 'NEW'` on branch-added lines (1-based): a stamped branch's own BEHAVIOR_CHANGES rows follow a restamp. */
+export function restampSinceLines(text: string, addedLines: Set<number>, oldVersion: string, newVersion: string): string {
+  if (oldVersion === newVersion) return text;
+  return text.split('\n').map((l, i) => (addedLines.has(i + 1) ? l.split(`since: '${oldVersion}'`).join(`since: '${newVersion}'`) : l)).join('\n');
+}
+
 // ---------------------------------------------------------------- migrations
 
 export const MIGRATIONS_DIR = 'src/core/schema-migrations';

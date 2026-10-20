@@ -37,7 +37,7 @@ import { join, resolve } from 'node:path';
 import {
   BEHAVIOR_NOTICE_FILE, COLLISION_DOCS, MIGRATION_FILE_RE, MIGRATIONS_DIR, RESTAMP_DOCS, RestampError, STAMPS,
   branchEntrySections, fail, findLeftoverRefs, isGenerated, migrationPayloadKey, nextPatchVersion, parseAddedLines,
-  isVersionToken, planRenumber, rebuildChangelog, renumberMigrationText, resolveVersionOnlyHunks, restampTodoLines, stampTbdSince, versionOfHeader,
+  isVersionToken, planRenumber, rebuildChangelog, renumberMigrationText, resolveVersionOnlyHunks, restampSinceLines, restampTodoLines, stampTbdSince, versionOfHeader,
   type BranchMigration, type ChangelogSection, type LeftoverRef, type Renumber,
 } from './lib/restamp.ts';
 import { offlineEnv } from './regen-all.ts';
@@ -346,12 +346,14 @@ function restampTree(ctx: Ctx, state: State, opts: { acceptRefs: boolean; date: 
     const text = ctx.read(stamp.file);
     if (stamp.read(text) !== version) ctx.write(stamp.file, stamp.write(text, version));
   }
+  const olds = new Set([state.branchVersion, state.entry ? versionOfHeader(state.entry.header) ?? '' : ''].filter((v) => v && v !== version && isVersionToken(v)));
   if (existsSync(join(ctx.root, BEHAVIOR_NOTICE_FILE))) {
     const notice = ctx.read(BEHAVIOR_NOTICE_FILE);
-    const stamped = stampTbdSince(notice, version);
+    const lines = new Set(addedLines(ctx, state.masterRef, ['--', BEHAVIOR_NOTICE_FILE]).map((l) => l.line));
+    let stamped = stampTbdSince(notice, version);
+    for (const old of olds) stamped = restampSinceLines(stamped, lines, old, version);
     if (stamped !== notice) ctx.write(BEHAVIOR_NOTICE_FILE, stamped);
   }
-  const olds = new Set([state.branchVersion, state.entry ? versionOfHeader(state.entry.header) ?? '' : ''].filter((v) => v && v !== version && isVersionToken(v)));
   if (state.entry) {
     const old = versionOfHeader(state.entry.header) ?? state.branchVersion;
     ctx.write('CHANGELOG.md', rebuildChangelog(ctx.read('CHANGELOG.md'), state.entry, old, version, opts.date));

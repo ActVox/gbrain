@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { main, NOTICE_FILE, tbdLines } from '../../scripts/check-behavior-since.ts';
 import { DEFAULT_CHECKS } from '../../scripts/release-restamp.ts';
-import { BEHAVIOR_NOTICE_FILE, stampTbdSince } from '../../scripts/lib/restamp.ts';
+import { BEHAVIOR_NOTICE_FILE, restampSinceLines, stampTbdSince } from '../../scripts/lib/restamp.ts';
 
 const roots: string[] = [];
 afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
@@ -148,6 +148,12 @@ describe('release:restamp and the TBD rows', () => {
     expect(stamped).toBe(notice('0.60.322.0', '0.60.323.0', '0.60.323.0'));
     expect(stampTbdSince(stamped, '0.60.324.0')).toBe(stamped);
     expect(BEHAVIOR_NOTICE_FILE).toBe(NOTICE_FILE);
+  });
+
+  test('restampSinceLines moves only branch-added rows from the old version to the new one', () => {
+    const text = notice('0.60.323.0', '0.60.323.0', '0.60.323.0');
+    expect(restampSinceLines(text, new Set([3, 4]), '0.60.323.0', '0.60.324.0')).toBe(notice('0.60.323.0', '0.60.324.0', '0.60.324.0'));
+    expect(restampSinceLines(text, new Set([3]), '0.60.324.0', '0.60.324.0')).toBe(text);
   });
 
   test("restamp's drift checks run the guard with --stamped", () => {
