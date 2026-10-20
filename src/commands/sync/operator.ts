@@ -153,6 +153,7 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
   const rendered = { ...status, holds: status.holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })),
     git_push_holds: status.git_push_holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })), next: status.next ? renderAction(status.next, ctx) : null,
     checkpoint_blockers_read: read(status.checkpoint_blockers_read), cursors_read: read(status.cursors_read), terminal_failures_read: read(status.terminal_failures_read),
+    landing_read: read(status.landing_read), landing: status.landing?.status === 'ok' ? { ...status.landing, pages: status.landing.pages.map(page => ({ ...page, fix: page.fix ? renderAction(page.fix, ctx) : null })) } : status.landing,
     capacity: { status: snapshot.status, pause_pct: snapshot.pause_pct, low: snapshot.low, paused: snapshot.paused }, freshness, notifier, ...(notices.length ? { notices } : {}) };
   if (args.includes('--json')) return writeJsonDocument(JSON.stringify(rendered, null, 2));
   const c = status.cursor;
@@ -178,6 +179,12 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
     for (const b of t.active_blockers) console.log(`    BLOCKING ${b.kind}: request ${b.request_id}${b.slug ? ` (${b.slug})` : ''} [${b.category}]`);
     if (t.active_blockers.length || t.unresolved.rows) console.log(`    drill down: ${t.drill_down.join(' ')}`);
   }
+  const landing = status.landing;
+  if (landing?.status === 'ok') {
+    console.log(`  synced but not searchable after ${landing.after_seconds} s (last ${landing.window_hours} h, ${landing.checked} page(s)${landing.complete ? '' : ', newest receipts only'}): ${landing.gaps}`
+      + `${landing.gaps ? ` (${Object.entries(landing.by_state).map(([state, n]) => `${state} ${n}`).join(', ')})` : ''}`);
+    for (const page of landing.pages) console.log(`    ${page.slug}: ${page.state}, synced ${page.age_seconds} s ago${page.fix?.argv ? `; fix: ${page.fix.argv.join(' ')}` : ''}`);
+  } else if (landing) console.log(`  synced but not searchable: ${landing.status} (${landing.reason})`);
   for (const hold of status.git_push_holds) console.log(`  git backups not pushed: ${hold.retrying} retrying, ${hold.parked} parked (${hold.codes.join(', ')}) since ${hold.oldest_at}${hold.conflict ? `; CONFLICT in ${hold.conflict.paths.join(', ')} needs a person` : ''}`);
   const connector = status.connector_last_error;
   if (connector) console.log(`  connector: ${connector.stopped ? 'STOPPED, ' : ''}the last ${connector.consecutive} run(s) ended on ${connector.code}${connector.slug ? ` at ${connector.slug}` : ''}: ${connector.message}`);
@@ -192,6 +199,7 @@ export function syncStatusHeadline(status: Pick<SyncStatus, 'source_id' | 'state
   switch (status.reason) {
     case 'nothing_pending': return `Source ${status.source_id} is synced${c?.done ? ` (last run ${status.run_id?.slice(0, 8) ?? '?'} finished at ${c.index}/${c.total})` : ''}.`;
     case 'held_by_design': return `Source ${status.source_id} is synced; ${status.holds.length} file(s) stay held by design.`;
+    case 'held_needs_human': return `Source ${status.source_id} is synced except ${status.holds.length} held file(s), some waiting on a person (see NEEDS HUMAN below); the rest keeps syncing.`;
     case 'live_job': return `Source ${status.source_id} is resumable: sync job #${status.live_job_id} is draining it.`;
     case 'cursor_unfinished': return `Source ${status.source_id} is resumable: run ${status.run_id?.slice(0, 8) ?? '?'} stands at ${c?.index ?? '?'}/${c?.total ?? '?'}; the next sync resumes it.`;
     case 'last_error': return `Source ${status.source_id} is resumable: the last run recorded a failure that a rerun holds or retries.`;
