@@ -5,30 +5,34 @@
  * frees go to other pages, and on both keyword-only return paths. Three kinds
  * of page fold into the best-ranked member of their group, which lists the
  * others in `collapsed`:
- *   - twin: the same slug in another source. Page identity stays
- *     (source_id, slug) everywhere else in search (dedup.ts); only result
- *     slots fold, and the twin stays named on the row.
+ *   - twin: the same slug in another source, when the two pages are copies
+ *     (identical bodies, or most of the shorter body's words in the other).
+ *     Page identity stays (source_id, slug) everywhere else in search
+ *     (dedup.ts); only result slots fold, and the twin stays named on the row.
  *   - redirect: a page that hands its identity to another page of its source:
  *     frontmatter `redirect_to` / `redirect` / `merged_into` (or an
  *     alias/redirect `status` with `superseded_by`), a `*-redirect` page
- *     type, or a short body that says it was merged or moved into a linked
- *     page. The target takes the stub's slot. A target missing from the pool
+ *     type, or a whole page body of at most REDIRECT_BODY_MAX_CHARS that says
+ *     it was merged or moved into a linked page. The target takes the stub's slot. A target missing from the pool
  *     is read in under the alias hop's read policy (its own source, the
  *     private and exclude predicates re-applied); a bare-word target resolves
  *     only when exactly one page of the source ends in that word. A stub
- *     whose target can't be returned stays, stamped `redirect_to`, and the
- *     rank priors demote it.
+ *     whose target can't be returned stays, stamped `redirect_to` with the
+ *     target as the stub itself writes it (never a slug resolved from the
+ *     database, so a private page's slug is never named), and the rank
+ *     priors demote it.
  *   - family: copies of one document: pages whose bodies are identical, or,
- *     in one source and outside entity types, slugs whose last segment
- *     differs only by a derivative suffix (-summary, -transcript, ...) or
- *     extends the other's last segment while both carry the same document
+ *     in one source and outside entity types, with bodies that share most of
+ *     the shorter one's words: slugs in one directory whose last segment
+ *     differs only by a derivative suffix (-summary, -transcript, ...), or a
+ *     last segment extending the other's while both carry the same document
  *     date (a meeting and its transcript).
  * Only rows already in the pool are folded, so no page outside the caller's
  * results is named. `search.collapse false` turns it off.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { SearchResult } from '../types.ts';
-import { pageLeadSource, projectedLead } from '../page-window/bounded-lead.ts';
+import { boundedBodyPrefixSql, pageLeadSource, projectedLead } from '../page-window/bounded-lead.ts';
 import { type IdentityTierOpts, isExcludedIdentity } from './alias-hop.ts';
 import { isPrivatePage } from './private-visibility.ts';
 
@@ -50,6 +54,12 @@ const FAMILY_HEAD = 40;
 /** Identical bodies shorter than this (empty templates, one-line stubs) say nothing about a shared document. */
 const IDENTICAL_BODY_MIN_CHARS = 200;
 const INJECTED_LEAD_CHARS = 1500;
+/** Body prefix compared for word overlap. */
+const OVERLAP_PREFIX_CHARS = 4000;
+/** Share of the shorter body's words the other must contain: twins are copies, a summary keeps fewer. */
+const TWIN_OVERLAP = 0.5;
+const FAMILY_OVERLAP = 0.4;
+const STOPWORDS = new Set(['the', 'and', 'for', 'that', 'with', 'this', 'from', 'are', 'was', 'were', 'has', 'have', 'had', 'but', 'not', 'you', 'our', 'their', 'its', 'into', 'about', 'will', 'can', 'all', 'any', 'one', 'they', 'them', 'his', 'her', 'she', 'him', 'who', 'what', 'when', 'which', 'also', 'than', 'then', 'there', 'these', 'those', 'been', 'more', 'most', 'some', 'such', 'only', 'other', 'over', 'each']);
 
 const pageKey = (r: Pick<SearchResult, 'source_id' | 'slug'>) => `${r.source_id ?? 'default'}:${r.slug}`;
 const leaf = (slug: string) => (slug.split('/').pop() ?? slug).replace(/\.(md|mdx|txt)$/i, '').toLowerCase();
@@ -65,14 +75,29 @@ export function redirectTargetSlug(value: string): string | null {
   return v && !/^[a-z]+:\/\//i.test(v) ? v : null;
 }
 
-/** Same source, same stem once derivative suffixes are stripped, or one leaf extending the other on the same document date. */
+function wordSet(text: string | null): Set<string> | null {
+  if (!text) return null;
+  const words = new Set((text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter(w => !STOPWORDS.has(w)));
+  return words.size >= 5 ? words : null;
+}
+
+/** Share of the smaller word set found in the larger; 0 when either body is too short to say. */
+function overlap(a: Set<string> | null | undefined, b: Set<string> | null | undefined): number {
+  if (!a || !b) return 0;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let shared = 0;
+  for (const w of small) if (large.has(w)) shared++;
+  return shared / small.size;
+}
+
+/** Same source and directory, same stem once derivative suffixes are stripped, or one leaf extending the other on the same document date. */
 function slugFamily(a: SearchResult, b: SearchResult): boolean {
   if ((a.source_id ?? 'default') !== (b.source_id ?? 'default')) return false;
   if (ENTITY_TYPES.has(a.type) || ENTITY_TYPES.has(b.type)) return false;
   const strip = (s: string) => { for (let prev = ''; prev !== s;) { prev = s; s = s.replace(DERIVATIVE_SUFFIX, ''); } return s; };
   const [la, lb] = [leaf(a.slug), leaf(b.slug)];
   const [sa, sb] = [strip(la), strip(lb)];
-  if (sa.length >= 6 && !/^\d{4}(-\d{2}){0,2}$/.test(sa) && sa === sb && (sa !== la || sb !== lb)) return true;
+  if (sa.length >= 6 && !/^\d{4}(-\d{2}){0,2}$/.test(sa) && sa === sb && (sa !== la || sb !== lb)) return dir(a.slug) === dir(b.slug);
   const [short, long] = la.length <= lb.length ? [la, lb] : [lb, la];
   const sameDate = !!a.effective_date && a.effective_date === b.effective_date
     && DATED_SOURCES.has(a.effective_date_source ?? '') && DATED_SOURCES.has(b.effective_date_source ?? '');
@@ -101,24 +126,30 @@ class Groups {
 
 const STATUS_REDIRECT = `lower(COALESCE(frontmatter->>'status', '')) ~ '(^|[^a-z])(alias|redirect|redirected)([^a-z]|$)'`;
 
-export interface PageFacts { target: string | null; body: string | null }
+export interface PageFacts { target: string | null; body: string | null; bodyChars: number | null; words: Set<string> | null }
 
-/** Per page id: the frontmatter redirect target and an identity hash of a substantial body. Ids already in `cache` are not read again. */
+/**
+ * Per page id: the frontmatter redirect target, the body's length (bounded prefix: a body under the bound is whole),
+ * and, for the head, an identity hash of a substantial body and its leading words. Ids already in `cache` are not read again.
+ */
 async function readPageFacts(engine: Pick<BrainEngine, 'executeRaw'>, allIds: number[], bodyIds: number[], cache: Map<number, PageFacts>): Promise<Map<number, PageFacts>> {
   const ids = allIds.filter(id => !cache.has(id));
   if (ids.length === 0) return cache;
+  const body = `btrim(COALESCE(${boundedBodyPrefixSql('p')}, ''))`;
   try {
-    const rows = await engine.executeRaw<{ id: number; target: string | null; body: string | null }>(
-      `SELECT id,
-              COALESCE(NULLIF(btrim(frontmatter->>'redirect_to'), ''), NULLIF(btrim(frontmatter->>'redirect'), ''),
-                       NULLIF(btrim(frontmatter->>'merged_into'), ''),
-                       CASE WHEN ${STATUS_REDIRECT} THEN NULLIF(btrim(frontmatter->>'superseded_by'), '') END) AS target,
-              CASE WHEN id = ANY($2::int[]) AND length(btrim(COALESCE(compiled_truth, ''))) >= ${IDENTICAL_BODY_MIN_CHARS} THEN md5(btrim(compiled_truth)) END AS body
-         FROM pages WHERE id = ANY($1::int[])`,
+    const rows = await engine.executeRaw<{ id: number; target: string | null; body: string | null; body_chars: number | null; lead: string | null }>(
+      `SELECT p.id,
+              COALESCE(NULLIF(btrim(p.frontmatter->>'redirect_to'), ''), NULLIF(btrim(p.frontmatter->>'redirect'), ''),
+                       NULLIF(btrim(p.frontmatter->>'merged_into'), ''),
+                       CASE WHEN ${STATUS_REDIRECT} THEN NULLIF(btrim(p.frontmatter->>'superseded_by'), '') END) AS target,
+              length(${body}) AS body_chars,
+              CASE WHEN p.id = ANY($2::int[]) AND length(${body}) >= ${IDENTICAL_BODY_MIN_CHARS} THEN md5(${body}) END AS body,
+              CASE WHEN p.id = ANY($2::int[]) THEN left(${body}, ${OVERLAP_PREFIX_CHARS}) END AS lead
+         FROM pages p WHERE p.id = ANY($1::int[])`,
       [ids, bodyIds],
     );
-    for (const id of ids) cache.set(id, { target: null, body: null });
-    for (const r of rows) cache.set(Number(r.id), { target: r.target, body: r.body });
+    for (const id of ids) cache.set(id, { target: null, body: null, bodyChars: null, words: null });
+    for (const r of rows) cache.set(Number(r.id), { target: r.target, body: r.body, bodyChars: r.body_chars === null ? null : Number(r.body_chars), words: wordSet(r.lead) });
   } catch {
     // fail-open: no frontmatter redirects or body identity this call
   }
@@ -171,7 +202,7 @@ export async function collapseResults(
   results: SearchResult[],
   opts: IdentityTierOpts & { onDecision?: (d: CollapseDecision) => void; facts?: Map<number, PageFacts> } = {},
 ): Promise<SearchResult[]> {
-  if (results.length < 2) return results;
+  if (results.length === 0) return results;
   const pages = new Map<string, SearchResult[]>();
   const order = new Map<string, number>();
   for (const r of results) {
@@ -182,23 +213,30 @@ export async function collapseResults(
   const head = [...pages.keys()].slice(0, FAMILY_HEAD);
   const idOf = (k: string) => pages.get(k)![0].page_id;
   const valid = (id: number) => Number.isSafeInteger(id) && id > 0;
-  const facts = await readPageFacts(engine, [...pages.keys()].map(idOf).filter(valid), head.map(idOf).filter(valid), opts.facts ?? new Map());
+  const slugCount = new Map<string, number>();
+  for (const rows of pages.values()) slugCount.set(rows[0].slug, (slugCount.get(rows[0].slug) ?? 0) + 1);
+  const compared = [...pages.keys()].filter((k, i) => i < FAMILY_HEAD || slugCount.get(pages.get(k)![0].slug)! > 1);
+  const facts = await readPageFacts(engine, [...pages.keys()].map(idOf).filter(valid), compared.map(idOf).filter(valid), opts.facts ?? new Map());
   const decision: CollapseDecision = { twins: 0, redirects: 0, families: 0, redirect_reads: 0 };
 
   // Redirect stubs and their targets (same source).
   const targets = new Map<string, string>();
+  const written_ = new Map<string, string>();
   for (const [k, rows] of pages) {
     const r = rows[0];
     const fm = facts.get(r.page_id)?.target;
-    const body = rows.map(x => (x.chunk_text ?? '').trim()).find(t => t.length <= REDIRECT_BODY_MAX_CHARS && REDIRECT_BODY.test(t));
+    const bodyChars = facts.get(r.page_id)?.bodyChars;
+    const stubBody = bodyChars !== null && bodyChars !== undefined && bodyChars <= REDIRECT_BODY_MAX_CHARS;
+    const body = stubBody ? rows.map(x => (x.chunk_text ?? '').trim()).find(t => REDIRECT_BODY.test(t)) : undefined;
     const raw = fm ?? body?.match(REDIRECT_BODY)?.[1] ?? (REDIRECT_TYPE.test(r.type) ? rows.map(x => x.chunk_text ?? '').join(' ').match(/\[\[[^\]]+\]\]|\[[^\]]*\]\([^)]+\)/)?.[0] : undefined);
-    let target = raw ? redirectTargetSlug(raw) : null;
-    if (target && !target.includes('/')) target = await resolveBareTarget(engine, r.source_id ?? 'default', target, pages) ?? `\u0000${target}`;
+    const written = raw ? redirectTargetSlug(raw) : null;
+    if (!written || written === r.slug) continue;
+    written_.set(k, written);
+    const target = written.includes('/') ? written : await resolveBareTarget(engine, r.source_id ?? 'default', written, pages);
     if (target && target !== r.slug) targets.set(k, target);
   }
   const injected = new Map<string, SearchResult>();
   for (const [stubKey, target] of targets) {
-    if (target.startsWith('\u0000')) continue;
     const stub = pages.get(stubKey)![0];
     const targetKey = pageKey({ source_id: stub.source_id, slug: target });
     if (pages.has(targetKey) || injected.has(targetKey)) continue;
@@ -207,6 +245,8 @@ export async function collapseResults(
   }
   for (const [targetKey, row] of injected) { pages.set(targetKey, [row]); order.set(targetKey, Number.MAX_SAFE_INTEGER - order.size); }
 
+  const sameBody = (a: SearchResult, b: SearchResult) => { const h = facts.get(a.page_id)?.body; return !!h && h === facts.get(b.page_id)?.body; };
+  const copies = (a: SearchResult, b: SearchResult, min: number) => sameBody(a, b) || overlap(facts.get(a.page_id)?.words, facts.get(b.page_id)?.words) >= min;
   const groups = new Groups(order);
   const redirectStubs = new Set<string>();
   for (const [stubKey, target] of targets) {
@@ -223,15 +263,14 @@ export async function collapseResults(
   for (const [k, rows] of pages) {
     if (redirectStubs.has(k)) continue;
     const twin = bySlug.get(rows[0].slug);
-    if (twin) groups.join(twin, k, 'twin'); else bySlug.set(rows[0].slug, k);
+    if (twin && copies(pages.get(twin)![0], rows[0], TWIN_OVERLAP)) groups.join(twin, k, 'twin'); else if (!twin) bySlug.set(rows[0].slug, k);
   }
   const family = head.filter(k => !redirectStubs.has(k));
   for (let i = 0; i < family.length; i++) {
     for (let j = i + 1; j < family.length; j++) {
       const [a, b] = [pages.get(family[i])![0], pages.get(family[j])![0]];
       if (groups.find(family[i]) === groups.find(family[j])) continue;
-      const bodyA = facts.get(a.page_id)?.body;
-      if ((bodyA && bodyA === facts.get(b.page_id)?.body) || slugFamily(a, b)) groups.join(family[i], family[j], 'family');
+      if (sameBody(a, b) || (slugFamily(a, b) && copies(a, b, FAMILY_OVERLAP))) groups.join(family[i], family[j], 'family');
     }
   }
 
@@ -246,7 +285,7 @@ export async function collapseResults(
     decision[reason === 'twin' ? 'twins' : reason === 'redirect' ? 'redirects' : 'families']++;
     members.set(root, [...members.get(root) ?? [], { slug: r.slug, ...(r.source_id ? { source_id: r.source_id } : {}), reason }]);
   }
-  const unresolved = new Map([...targets].filter(([k]) => !redirectStubs.has(k)).map(([k, t]) => [k, t.replace(/^\u0000/, '')]));
+  const unresolved = new Map([...written_].filter(([k]) => !redirectStubs.has(k)));
   const folded = [...pages.keys()].some(k => groups.find(k) !== k);
   if (!folded && unresolved.size === 0) return results;
 
