@@ -9,6 +9,10 @@
  * gate value is the p50 of commit -> keyword-visible over reps 1..10. A cell fails when that p50 exceeds the committed
  * baseline p50 by more than 25%, or when any counted rep never became visible. A baseline is valid only on the machine
  * class it names (machine_class); --write-baseline records this run as the baseline instead of comparing.
+ *
+ * Only cells measured stable are gated: 25 runs on 5 fresh Ubicloud standard-4 VMs (the CI runner class) put every
+ * serve-watch cell's p50 within a max/min ratio of 1.18, with no false failure in any of 600 baseline/candidate run
+ * pairs at +25%. A manual managed sync was left out: its p50 moves with the VM (852 to 1254 ms, 52 of 600 pairs failed).
  */
 import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -24,7 +28,6 @@ const CELLS: Record<string, string[]> = {
   'postgres-managed-serve-watch': ['--engine', 'postgres', '--mode', 'managed', '--commit', 'single', '--trigger', 'serve', '--detection', 'watch'],
   'pglite-managed-serve-watch': ['--engine', 'pglite', '--mode', 'managed', '--commit', 'single', '--trigger', 'serve', '--detection', 'watch'],
   'postgres-classic-serve-watch': ['--engine', 'postgres', '--mode', 'classic', '--commit', 'single', '--trigger', 'serve', '--detection', 'watch'],
-  'postgres-managed-manual': ['--engine', 'postgres', '--mode', 'managed', '--commit', 'single', '--trigger', 'manual'],
 };
 const names = flag('cells', Object.keys(CELLS).join(',')).split(',').filter(Boolean);
 for (const n of names) if (!CELLS[n]) { console.error('unknown cell ' + n + '; known: ' + Object.keys(CELLS).join(', ')); process.exit(2); }
