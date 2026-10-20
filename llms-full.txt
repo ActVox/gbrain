@@ -11059,6 +11059,36 @@ the phase, its blocker key and back-off, or the last failed job.
 3. Confirm with `gbrain doctor --only global_maintenance_stalled`: it is `ok`
    after a pass completes with the phase passing.
 
+## Content-drift sweep
+
+**Doctor reports `content_drift_sweep` as a warning, or an embed run prints
+`content-drift sweep ... FAILED`?** Every `embed --stale` run, embed job and
+embed-backfill job runs the content-drift sweep: it re-queues chunks whose text
+changed after their vector was computed (`embedded_text_hash` no longer
+matches `md5(chunk_text)`). The sweep examines 5,000 chunk rows per statement
+in id order and commits its cursor with each batch, in the config row
+`embed.content_drift_sweep.<column>.<scope>`, so a pass spans as many runs as
+it needs; one run sweeps for at most 60 seconds. After a pass completes, the
+next starts once `embed.content_drift.pass_interval_hours` have passed (24 by
+default; 0 repeats it every run). A pass that fits in one batch repeats on
+every run. The run's result carries `content_drift` (`contentDrift` on
+embed-backfill): rows checked and invalidated, the cursor, and `state`
+(`complete`, `partial`, `waiting`, `stopped`, `failed`, or `unsupported`
+on a schema before migration v133).
+
+A failed batch commits nothing and leaves the cursor before it; the embed run
+goes on with the rest of its work and the next run retries the batch. Search
+already ignores a vector whose text changed, so a stalled sweep delays
+re-embedding, not answers.
+
+1. Read the error: `gbrain doctor --only content_drift_sweep --json` names the
+   scope, the chunk id and the message.
+2. Fix what it names (a lock held by another session, a statement timeout far
+   below one batch, a database error), then run `gbrain embed --stale`. It
+   spends embedding tokens, so ask the user first.
+3. Confirm with `gbrain doctor --only content_drift_sweep`: it is `ok` once a
+   batch commits.
+
 ## auto_chronicle has no effect
 
 **Say to your agent:** *"Why aren't my meetings showing up as timeline events?"*

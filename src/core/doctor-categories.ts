@@ -347,6 +347,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   // GBRA-130 C-6: no completed brain-wide pass while jobs fail or a phase keeps blocking it.
   'global_maintenance_stalled',
   'embed_backfill_stalled',
+  // #7117: the content-drift sweep's latest batch failed.
+  'content_drift_sweep',
   'connector_account_mismatch',
   // #5157: queued jobs from before the v0.50 authority cutover block every worker.
   'legacy_job_authority',

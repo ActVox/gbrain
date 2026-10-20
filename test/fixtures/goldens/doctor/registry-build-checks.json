@@ -695,6 +695,10 @@
       },
       {
         "category": "ops",
+        "name": "content_drift_sweep"
+      },
+      {
+        "category": "ops",
         "name": "connector_account_mismatch"
       },
       {
