@@ -2074,6 +2074,12 @@ the two `--prefer` values do opposite things in each state.
 | `purged_differs` | Removes the file. | Imports the file as a new page. |
 | `file_gone` | Recreates the file from the page. | Soft-deletes the page (the mass-delete valve applies). |
 
+A `file_gone` hold whose `meta.reason` is `never_committed` or `ignored`
+(#7130) is a page whose file is missing although Git never committed it: the
+sync could not tell a deletion from a file that never reached the repository,
+so the page may hold the only copy. `--prefer file` deletes it after review;
+committing the file again clears the hold.
+
 `both` and `unknown` resolve as `--slug` does above. `--only` / `--skip` narrow
 the held set by file path, and the preview lists each page's action.
 
