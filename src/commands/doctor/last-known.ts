@@ -2,11 +2,11 @@
  * #7142: last known doctor results.
  *
  * On a large brain a standard run cannot finish every check inside the
- * non-interactive default budget, and the fast tier does not run the slow
+ * non-interactive default budget, and the quick tier does not run the slow
  * checks at all. Every completed standard or deep entry records the checks it
  * emitted in `op_checkpoints` (op `doctor-last-known`, one row per entry, so
  * the jobs worker and the CLI share it whatever GBRAIN_HOME each has). A later
- * run that did not finish an entry, or a fast-tier run that did not run it,
+ * run that did not finish an entry, or a quick-tier run that did not run it,
  * reports that entry's last known checks with their age instead of nothing or
  * an unknown. A result older than LAST_KNOWN_MAX_AGE_MS is not served: those
  * checks are named as unknown in one `doctor_last_known` check (status warn,
@@ -86,7 +86,7 @@ function ageText(ms: number): string {
 /** One check from a last known result, with its age; its status is the one it had then. */
 export function lastKnownCheck(check: Check, measuredAt: string, reason: 'not_in_tier' | 'budget', now = Date.now()): Check {
   const age = Math.max(0, now - Date.parse(measuredAt));
-  const why = reason === 'budget' ? 'not finished within this run\'s budget' : 'not run by the fast tier';
+  const why = reason === 'budget' ? 'not finished within this run\'s budget' : 'not run by the quick tier';
   return { ...check, message: `Last known, ${ageText(age)} ago (${why}): ${check.message}`,
     details: { ...check.details, last_known: { measured_at: measuredAt, age_ms: age, reason } } };
 }
@@ -127,7 +127,7 @@ export function unmeasuredCheck(stale: readonly EntryOutcome[], cache: ReadonlyM
     name: 'doctor_last_known', status: 'warn',
     message: `${names.length} check(s) have no result from the last ${LAST_KNOWN_MAX_AGE_MS / 3_600_000} h (${old === stale.length ? 'their last results are too old' : old ? `${old} of ${stale.length} entries have only an older result, the rest were never measured` : 'never measured'}); their health is unknown, not clear.${queued} Measure them now with: ${argv.join(' ')}`,
     details: { health: 'unknown', reason: 'not_measured', exact: false, unknown_checks: names, ...(refreshJob ? { refresh_job: refreshJob.id } : {}) },
-    fix: { argv, consent: [], actor: 'user', requires_exclusive: false, why: 'Runs every standard check with no overall budget and records each result, so later fast runs report them; read-only, and it can take minutes on a large brain.' },
+    fix: { argv, consent: [], actor: 'user', requires_exclusive: false, why: 'Runs every standard check with no overall budget and records each result, so later quick runs report them; read-only, and it can take minutes on a large brain.' },
   };
 }
 

@@ -481,7 +481,7 @@ export async function buildChecks(
     ...(remoteScope.entryBudgetOverrideMs ? { entryBudgetOverrideMs: remoteScope.entryBudgetOverrideMs } : {}),
   };
 
-  return remoteScope.refreshOnly ? runDoctorRegistry(ctx, doctorRefreshRegistry()) : runDoctorRegistry(ctx);
+  return runDoctorRegistry(ctx, remoteScope.refreshOnly ? doctorRefreshRegistry() : undefined);
 }
 
 /**

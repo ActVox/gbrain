@@ -23,7 +23,7 @@ import { BACKUP_SIZE_WARN_RATIO, PHYSICAL_COPY_RUNBOOK, estimatedTarBytes, forma
 import type { Check } from '../../doctor.ts';
 import { classifyPgAccessError } from '../../../core/pg-access-classify.ts';
 import { dbRepairRecurrenceCheck } from './engine-fit.ts';
-import { STOP_DOCTOR, connectedEngine, quickTier, type DoctorContext, type DoctorEntry } from '../context.ts';
+import { STOP_DOCTOR, connectedEngine, cheapTier, type DoctorContext, type DoctorEntry } from '../context.ts';
 import { DoctorBudgetError, budgetUnknownCheck } from '../budget.ts';
 
 async function runPgliteDataDir(ctx: DoctorContext): Promise<Check[]> {
@@ -313,7 +313,7 @@ async function runConnection(ctx: DoctorContext): Promise<Check[]> {
   progress.heartbeat('connection');
   try {
     // #6696 B1: the ops tier proves the round trip only; the page count is a full count the deadline does not afford.
-    if (quickTier(ctx.tier)) {
+    if (cheapTier(ctx.tier)) {
       await engine.executeRaw('SELECT 1 AS ok');
       checks.push({ name: 'connection', status: 'ok', message: `Connected (${ctx.tier} tier: page count not read).` });
     } else {
@@ -324,7 +324,7 @@ async function runConnection(ctx: DoctorContext): Promise<Check[]> {
     // A round trip the ops deadline ended (a saturated pool, a blocked server) is unknown, not a classified outage.
     const deadlineAt = ctx.deadline?.deadlineAt;
     if (e instanceof DoctorBudgetError) throw e;
-    if (quickTier(ctx.tier) && deadlineAt != null && Date.now() >= deadlineAt) throw new DoctorBudgetError(Date.now() - ctx.deadline!.startedAt);
+    if (cheapTier(ctx.tier) && deadlineAt != null && Date.now() >= deadlineAt) throw new DoctorBudgetError(Date.now() - ctx.deadline!.startedAt);
     // db-availability loop (2c): classified + redacted, with the fix hint.
     checks.push(classifiedConnectionCheck(e));
     progress.finish();

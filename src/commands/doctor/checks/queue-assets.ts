@@ -88,7 +88,7 @@ async function runQueueHealth(ctx: DoctorContext): Promise<Check[]> {
 export const queueHealthEntry: DoctorEntry = {
   name: 'queue_health',
   emits: ['queue_health', 'subagent_capability', 'facts_health'],
-  tier: 'fast',
+  tier: 'quick',
   run: runQueueHealth,
 };
 

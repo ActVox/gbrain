@@ -21,17 +21,17 @@ import type { BrainHealth } from '../../core/types.ts';
 export const STOP_DOCTOR: unique symbol = Symbol('STOP_DOCTOR');
 
 /**
- * #6696 B1: `--tier ops|fast|standard|deep`. `ops` runs only the entries tagged
- * `ops` (observational, under one absolute deadline); `fast` (#7142) adds the
- * entries tagged `fast` under its own deadline and reports every other check
+ * #6696 B1: `--tier ops|quick|standard|deep`. `ops` runs only the entries tagged
+ * `ops` (observational, under one absolute deadline); `quick` (#7142) adds the
+ * entries tagged `quick` under its own deadline and reports every other check
  * from its last known result; `standard` (default) runs ops entries first, then
  * the rest; `deep` adds the entries tagged `deep`.
  */
-export type DoctorTier = 'ops' | 'fast' | 'standard' | 'deep';
+export type DoctorTier = 'ops' | 'quick' | 'standard' | 'deep';
 
 /** #7142: the tiers that answer from cheap reads only (a round-trip connection check, counter-mode sections). */
-export function quickTier(tier: DoctorTier | undefined): boolean {
-  return tier === 'ops' || tier === 'fast';
+export function cheapTier(tier: DoctorTier | undefined): boolean {
+  return tier === 'ops' || tier === 'quick';
 }
 
 export interface DoctorEntry {

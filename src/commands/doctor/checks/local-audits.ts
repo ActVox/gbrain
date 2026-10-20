@@ -125,7 +125,7 @@ export const stubGuardEntry: DoctorEntry = {
   name: 'stub_guard_24h',
   emits: ['stub_guard_24h', 'sync_failures', 'managed_sync_backlog', 'slug_fallback_audit'],
   engineChecks: ['sync_failures', 'managed_sync_backlog'],
-  tier: 'fast',
+  tier: 'quick',
   run: runStubGuard,
 };
 

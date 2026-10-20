@@ -140,7 +140,7 @@ import {
   soakCountersEntry,
   schemaPackConsistencyEntry,
 } from './checks/ops-sections.ts';
-import { STOP_DOCTOR, quickTier, type DoctorContext, type DoctorEntry, type DoctorTier } from './context.ts';
+import { STOP_DOCTOR, cheapTier, type DoctorContext, type DoctorEntry, type DoctorTier } from './context.ts';
 import {
   BUDGET_EXPIRED, DoctorBudgetError, budgetExpired, type BudgetExpired, ENTRY_BUDGET_KEY, ENTRY_BUDGET_MS_DEFAULT, budgetUnknownCheck, entryRunsAt,
   isBudgetUnknown, opsNotApplicableCheck, raceBudget, startDeferredDeadline,
@@ -379,7 +379,7 @@ export function runDoctorRegistry(ctx: DoctorContext, entries: readonly DoctorEn
       if (entryBudgetMs === null && ctx.engine && !ctx.fastMode && !ctx.connectionFailed && gateAt >= 0 && entries.indexOf(entry) > gateAt) {
         entryBudgetMs = await readEntryBudget(ctx);
       }
-      const overallOnly = quickTier(tier) || (!!ctx.only && ctx.deadline?.explicit === true);
+      const overallOnly = cheapTier(tier) || (!!ctx.only && ctx.deadline?.explicit === true);
       const budgetMs = entryBudget(ctx, overallOnly, CONNECTION_LANE.has(entry) ? null : entryBudgetMs, started);
       const limit = budgetMs !== null && ctx.deadline?.deadlineAt != null && (overallOnly || entryBudgetMs === null || started + budgetMs >= ctx.deadline.deadlineAt) ? 'overall' : 'entry';
       if (budgetMs !== null && budgetMs <= 0) {
