@@ -20,6 +20,9 @@ import { openAppendBrain, type AppendBrain } from '../helpers/append-brain.ts';
 import { testBackends } from '../helpers/test-backends.ts';
 import { waitFor } from '../helpers/wait-for.ts';
 import { SEGMENT_MAX_BYTES } from '../../src/core/page-body/limits.ts';
+import { runLinksEffect } from '../../src/core/persistence/effect-links.ts';
+import type { PersistenceEffect } from '../../src/core/persistence/effect-model.ts';
+import { declarePersistenceProtocol, PERSISTENCE_PROTOCOL_PREDICATE } from '../../src/core/persistence/protocol.ts';
 
 const SMALL = 'notes/mention-log-small';
 const BIG = 'notes/mention-log-big';
@@ -27,6 +30,11 @@ const INLINE = 'notes/mention-log-inline';
 const TAKES_SEGMENTED = 'notes/mention-log-takes';
 const TAKES_INLINE = 'notes/mention-log-takes-inline';
 const FENCED_LATER = 'notes/mention-log-fenced-later';
+const BUSY = 'notes/mention-log-busy';
+const BUSY_INLINE = 'notes/mention-log-busy-inline';
+const NORMALIZED = 'notes/mention-log-normalized';
+/** A takes fence in the two-dash marker form Tier 1 rewrites to the canonical one (one byte more per marker). */
+const TWO_DASH_TAKES = '\n\n## Takes\n\n<!-- gbrain:takes:begin -->\n\n| # | claim | kind | who | weight | since | source |\n|---|-------|------|-----|--------|-------|--------|\n| 1 | Widgets will sell | take | brain | 0.5 | 2026-07 | notes |\n<!-- gbrain:takes:end -->\n\nTail paragraph.';
 /** About 10 KB of conversation turns, then the mentions. */
 const filler = conversationBody(10_000, { seed: 7 });
 const mentions = (...slugs: string[]) => `${filler}\n\nFollow-up with ${slugs.map(slug => `[[${slug}]]`).join(', ')}.`;
@@ -35,6 +43,8 @@ const TAKES_BEGIN = '<!--- gbrain:takes:begin -->';
 const OPEN_TAKES = `\n\n${TAKES_BEGIN}\nPrivate musing.\n\n${TAKES_BEGIN}\n| # | claim | kind | who | weight | since | source |\n|---|-------|------|-----|--------|-------|--------|\n| 1 | Widgets will sell | take | brain | 0.5 | 2026-07 | notes |\n<!--- gbrain:takes:end -->\n\nMore private musing.\n`;
 /** A line as long as the takes begin marker, which a later trusted edit turns into one without moving any byte after it. */
 const PLACEHOLDER = 'x'.repeat(TAKES_BEGIN.length);
+/** Appends the busy-page seam lands at most, across the effects it delays. */
+const BUSY_LANDINGS = 5;
 
 for (const kind of testBackends()) {
   describe(`remote append_page mention links (${kind})`, () => {
@@ -54,10 +64,11 @@ for (const kind of testBackends()) {
     };
     /** Release the page's links effects (and only those) and wait until each settles; returns the segment text loaded meanwhile. */
     const runLinks = async (slug: string) => {
-      const original = brain.engine.readSegmentTexts.bind(brain.engine);
+      const original = brain.engine.readSegmentTexts;
       const loaded = { segments: 0, bytes: 0 };
-      brain.engine.readSegmentTexts = (async (sourceId: string, hashes: Uint8Array[]) => {
-        const texts = await original(sourceId, hashes);
+      // Unbound, so a transaction engine (which inherits this property) still reads through its own transaction.
+      brain.engine.readSegmentTexts = (async function (this: AppendBrain['engine'], sourceId: string, hashes: Uint8Array[]) {
+        const texts = await original.call(this, sourceId, hashes);
         loaded.segments += texts.size;
         for (const text of texts.values()) loaded.bytes += text.length;
         return texts;
@@ -85,8 +96,13 @@ for (const kind of testBackends()) {
       await brain.seed(TAKES_SEGMENTED, `${conversationPage(1_500_000, { seed: 4 }).trimEnd()}${OPEN_TAKES}`);
       await brain.seed(TAKES_INLINE, `${conversationPage(20_000, { seed: 5 }).trimEnd()}${OPEN_TAKES}`);
       await brain.seed(FENCED_LATER, `${conversationPage(20_000, { seed: 6 }).trimEnd()}\n\n${PLACEHOLDER}\n`);
-      for (const slug of [SMALL, BIG, TAKES_SEGMENTED]) expect((await brain.body(slug)).storage).toBe('segmented');
-      for (const slug of [INLINE, TAKES_INLINE, FENCED_LATER]) expect((await brain.body(slug)).storage).toBe('inline');
+      await brain.seed(BUSY, conversationPage(1_500_000, { seed: 9 }));
+      await brain.seed(BUSY_INLINE, conversationPage(20_000, { seed: 10 }));
+      // Stored as written (no import screen), so the append's publication is the write that normalizes the fence.
+      await brain.engine.putPage(NORMALIZED, { type: 'note', title: 'Normalized', compiled_truth: `${conversationBody(20_000, { seed: 11 })}${TWO_DASH_TAKES}`, timeline: '', frontmatter: {} } as never,
+        { sourceId: 'default' });
+      for (const slug of [SMALL, BIG, TAKES_SEGMENTED, BUSY]) expect((await brain.body(slug)).storage).toBe('segmented');
+      for (const slug of [INLINE, TAKES_INLINE, FENCED_LATER, BUSY_INLINE, NORMALIZED]) expect((await brain.body(slug)).storage).toBe('inline');
     }, 600_000);
     afterAll(() => brain.close(), 120_000);
 
@@ -163,6 +179,59 @@ for (const kind of testBackends()) {
       await runLinks(FENCED_LATER);
       expect(await remoteEdges(FENCED_LATER)).toEqual([]);
       expect((await linksEffects(FENCED_LATER)).at(-1)!.outcome).toEqual({ links: 'committed', added: 0, removed: 0, skipped_targets: [] });
+    }, 300_000);
+
+    test('appends landing between the effect\'s read and its page lock do not make it retry, and its edge lands', async () => {
+      for (const slug of [BUSY_INLINE, BUSY]) {
+        await deferred(() => append(slug, mentions('notes/alice-example')));
+        const [{ id }] = await brain.engine.executeRaw<{ id: string }>("SELECT id::text AS id FROM persistence_effects WHERE kind='links' AND data->>'slug'=$1 ORDER BY id DESC LIMIT 1", [slug]);
+        // Seam: just before the effect takes its page lock (its transaction), another remote append to the page lands. The
+        // effect runs here, outside the consumer, so the consumer publishes that append; its own links effect waits (deferred),
+        // since the effect worker would otherwise queue it behind the running one this append's caller is waiting on.
+        const original = brain.engine.transaction;
+        const claim = original.bind(brain.engine) as typeof original;
+        let landed = 0;
+        let running = false;
+        // A transaction engine inherits this property, so its nested transactions (savepoints) come through here too.
+        brain.engine.transaction = (async function (this: AppendBrain['engine'], fn: (tx: never) => Promise<unknown>, ...rest: unknown[]) {
+          if (running && landed < BUSY_LANDINGS && String(fn).includes('lockedPage(')) {
+            landed++;
+            await deferred(() => append(slug, `${filler}\n\nAnother agent's turn ${landed}.`));
+          }
+          return (original as (...args: unknown[]) => Promise<unknown>).call(this, fn, ...rest);
+        }) as typeof brain.engine.transaction;
+        // Counted seam: each pass claims the effect and runs it once, as the effect worker does; a revision_conflict is the
+        // contention the worker would retry 250 ms later.
+        let attempts = 0;
+        try {
+          for (;;) {
+            attempts++;
+            const effect = await claim(async tx => {
+              await declarePersistenceProtocol(tx);
+              return (await tx.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,claim_expires_at=now()+interval '10 minutes',
+                attempts=attempts+1 WHERE id=$1 AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING *`, [id, randomUUID()]))[0]!;
+            });
+            running = true;
+            try { await runLinksEffect(brain.engine, effect, randomUUID()); break; }
+            catch (error) { if ((error as { code?: string }).code !== 'revision_conflict' || attempts >= BUSY_LANDINGS) throw error; }
+            finally { running = false; }
+          }
+        } finally { brain.engine.transaction = original; }
+        expect({ attempts, landed }).toEqual({ attempts: 1, landed: 1 });
+        expect((await linksEffects(slug)).find(e => e.request_id && e.state === 'committed' && e.outcome?.added === 1)).toBeDefined();
+        expect(await remoteEdges(slug)).toEqual([mention('notes/alice-example')]);
+      }
+    }, 300_000);
+
+    test('an inline append whose publication normalizes a fence before it mines its own text', async () => {
+      await deferred(() => append(NORMALIZED, mentions('notes/alice-example')));
+      const stored = (await brain.body(NORMALIZED)).truth;
+      expect(stored).toContain('<!--- gbrain:takes:begin -->');
+      const [effect] = (await linksEffects(NORMALIZED)).slice(-1);
+      expect(Buffer.byteLength(stored)).toBe(effect!.data.range.end);
+      await runLinks(NORMALIZED);
+      expect(await remoteEdges(NORMALIZED)).toEqual([mention('notes/alice-example')]);
+      expect((await linksEffects(NORMALIZED)).at(-1)!.outcome).toEqual({ links: 'committed', added: 1, removed: 0, skipped_targets: [] });
     }, 300_000);
   });
 }

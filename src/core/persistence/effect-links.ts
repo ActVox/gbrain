@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine, LinkBatchInput } from '../engine.ts';
 import { unmanagedBeliefPoint } from '../belief/projection-point.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
-import { OperationError, opError } from '../ops/contract.ts';
+import { OperationError } from '../ops/contract.ts';
 import { matchesSlugAllowList, slugUnderBoundPrefixes } from '../ops/context.ts';
 import { extractPageLinks, isAutoLinkEnabled, isGlobalBasenameEnabled, makeResolver, type PageLinksResult } from '../link-extraction.ts';
 import { protectedRegions } from '../fence-scan.ts';
@@ -145,7 +145,8 @@ export async function runLinksEffect(engine: BrainEngine, effect: PersistenceEff
  * inside its grant, exactly as runLinksEffect does. It never removes an edge or replaces wanted rows: the rest of the
  * page was not read. A later write moves the revision but leaves the appended bytes in place unless it rewrote them, so
  * at a later revision the effect still runs when those bytes hash as appended, and is skipped as superseded otherwise
- * (a remote rewrite's own effect reconciles the whole page).
+ * (a remote rewrite's own effect reconciles the whole page). A write that lands between the read and the page lock is
+ * decided the same way under the lock, once: the effect never retries because the page moved.
  */
 async function runAppendLinksEffect(engine: BrainEngine, effect: PersistenceEffect, row: WriteRequest, range: AppendedRange, hostId: string): Promise<void> {
   const skip = (tx: SqlEngine, reason: string) => completeEffect(tx, effect, { links: 'skipped', reason });
@@ -153,7 +154,8 @@ async function runAppendLinksEffect(engine: BrainEngine, effect: PersistenceEffe
   const snapshot = await engine.readPageSnapshot(effect.data.slug!, { sourceId });
   if (!snapshot || snapshot.page.id !== effect.data.page_id) return skip(engine, 'superseded');
   if (!await isAutoLinkEnabled(engine) || !await isRemoteAutoLinksEnabled(engine)) return skip(engine, 'disabled');
-  const text = await appendedText(engine, snapshot, range, snapshot.revision !== effect.revision, row.authority.remote ? 'remote' : 'trusted');
+  const audience: BodyAudience = row.authority.remote ? 'remote' : 'trusted';
+  const text = await appendedText(engine, snapshot, range, snapshot.revision !== effect.revision, audience);
   if (text === null) return skip(engine, 'superseded');
   const { page } = snapshot;
   const { candidates } = await extractPageLinks(page.slug, text, {}, page.type, makeResolver(engine, { mode: 'live', sourceId }), await mentionOptions(engine));
@@ -162,9 +164,9 @@ async function runAppendLinksEffect(engine: BrainEngine, effect: PersistenceEffe
   await engine.transaction(async tx => {
     const live = await lockedPage(tx, effect, row, snapshot, targets, hostId);
     if (!live) return;
-    if (live.revision !== snapshot.revision) {
-      throw opError('revision_conflict', `Page ${page.slug} changed while its appended mentions were read.`, 'The links effect retries against the current revision.');
-    }
+    // Another write (on a busy log, another append) landed between the read and the page lock, which now holds writers off:
+    // the range is read again at the live revision and applies only when it still reads as before, so the effect never retries.
+    if (live.revision !== snapshot.revision && await appendedText(tx, live, range, true, audience) !== text) { await skip(tx, 'superseded'); return; }
     const { wanted, owned } = await writableTargets(tx, row, live, targets, skipped);
     const additions = mentionEdges(live.page.slug, sourceId, wanted, new Set(owned.map(link => link.slug)));
     const added = await beliefs.run(tx, async () => additions.length ? await tx.addLinksBatch(additions, { auditSite: 'addLinksBatch' }) : 0);
@@ -174,8 +176,9 @@ async function runAppendLinksEffect(engine: BrainEngine, effect: PersistenceEffe
 }
 
 /**
- * The appended truth bytes [start, end) as `audience` reads them; null when `verify` (the page moved since the append)
- * finds the stored bytes there no longer hash as appended. A segmented page is read through readBodyRange, which loads
+ * The appended truth bytes [start, end) as `audience` reads them; null when the stored bytes there no longer hash as
+ * appended. A segmented range is hash-checked only with `verify` (the page moved since the append: the splice's offsets
+ * are exact); an inline one always, since it is in memory and publication may have rewritten bytes before it. A segmented page is read through readBodyRange, which loads
  * only the segments the range overlaps (the remote audience gets the read projection: protected, private and withdrawn
  * text never reaches it). An inline truth (bounded by the inline threshold) is read raw, as the append stored it; its
  * protected regions are found over the whole truth and cut out of the range before the remote sanitizer.
@@ -195,7 +198,7 @@ async function appendedText(engine: BrainEngine, snapshot: PageSnapshot, range: 
     return text;
   }
   const truth = Buffer.from((await inlineRegions(engine, Number(page.id))).truth, 'utf8');
-  if (verify && sha256Hex(truth.subarray(range.start, range.end)) !== range.sha256) return null;
+  if (sha256Hex(truth.subarray(range.start, range.end)) !== range.sha256) return null;
   if (audience === 'trusted') return truth.subarray(range.start, range.end).toString('utf8');
   const text = truth.toString('utf8');
   const from = truth.subarray(0, range.start).toString('utf8').length;

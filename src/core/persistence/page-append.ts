@@ -417,16 +417,19 @@ export async function prepareAppendMutation(engine: BrainEngine, row: WriteReque
   const beforeBytes = Buffer.byteLength(page.compiled_truth ?? '', 'utf8') + Buffer.byteLength(page.timeline ?? '', 'utf8');
   const prepared = await preparePageMutation(engine, row, config, { content, expectedRevision: stored.revision }, signal, { clock });
   const apply = prepared.apply.bind(prepared);
-  // The stored truth is the parsed one (trimmed); the append's bytes are what it adds after the old truth.
+  // The bytes the append adds to the stored truth: the parsed truth (trimmed) after the old one. Publication may still
+  // rewrite bytes before them (Tier 1 fence normalization), so their range is taken from the end of the stored truth.
   const truth = region === 'truth' ? Buffer.from(parseMarkdown(content, row.slug).compiled_truth, 'utf8') : null;
   const start = Buffer.byteLength(before, 'utf8');
-  const mentionRange = truth && truth.length > start && truth.subarray(0, start).equals(Buffer.from(before, 'utf8'))
-    ? { start, end: truth.length, sha256: sha256Hex(truth.subarray(start)) } : undefined;
-  return { ...prepared, ...(mentionRange ? { mentionRange } : {}), apply: async (tx, preimage) => {
+  const appended = truth && truth.length > start && truth.subarray(0, start).equals(Buffer.from(before, 'utf8')) ? truth.subarray(start) : null;
+  const result = { ...prepared, apply: async (tx, preimage) => {
     const outcome = await apply(tx, preimage);
-    const [row2] = await tx.executeRaw<{ bytes: string | null }>(`SELECT COALESCE(body_bytes, octet_length(COALESCE(compiled_truth,'')) + octet_length(COALESCE(timeline,'')))::text AS bytes
-      FROM pages WHERE id=$1`, [stored.page.id]);
+    const [row2] = await tx.executeRaw<{ bytes: string | null; truth: string | null }>(`SELECT COALESCE(body_bytes, octet_length(COALESCE(compiled_truth,'')) + octet_length(COALESCE(timeline,'')))::text AS bytes,
+      (CASE WHEN body_storage='segmented' THEN truth_bytes ELSE octet_length(COALESCE(compiled_truth,'')) END)::text AS truth FROM pages WHERE id=$1`, [stored.page.id]);
     const bodyBytes = Number(row2?.bytes ?? 0);
+    const truthEnd = Number(row2?.truth ?? 0);
+    if (appended && truthEnd >= appended.length) result.mentionRange = { start: truthEnd - appended.length, end: truthEnd, sha256: sha256Hex(appended) };
     return { ...outcome, body_bytes: bodyBytes, appended_bytes: Math.max(0, bodyBytes - beforeBytes), chunks_new: Number(outcome.chunks ?? 0), region };
   } } as PreparedMutation;
+  return result;
 }
