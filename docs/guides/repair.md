@@ -9,7 +9,7 @@ fixes those and the other kinds listed in
 [What each kind fixes](#what-each-kind-fixes). Every run is a preview unless
 you pass `--apply`.
 The explicit-only kinds, among them `google-file-modes`, `stale-atoms`, `atoms-restore`, `extractor-facts`,
-`captured-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `content-receipt-root`, `stuck-recovery`, `aliases`, `rename-identity` and `segmented-mirror`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
+`captured-facts`, `redacted-facts`, `loop-facts`, `ontology-facts`, `orphan-children`, `failed-writes`, `frontmatter`, `managed-sync-orphans`, `content-receipt-root`, `stuck-recovery`, `aliases`, `rename-identity` and `segmented-mirror`, run only when you name them (see [Explicit-only repair kinds](#explicit-only-repair-kinds)).
 `gbrain doctor --remediation-plan` lists the same kinds as repair steps, and
 `gbrain doctor --remediate --yes --include-repairs --expect <plan_hash>` runs them under a budget
 (see [Run repairs through doctor](#run-repairs-through-doctor)).
@@ -108,7 +108,7 @@ gives each a fresh row number); it never deletes or rewrites a page.
 | `--limit <n>` | Repair at most `n` items per kind in this run (a positive integer; with `--all`, up to `n` for each kind). Rerun the same command to continue. |
 | `--no-embed` | `safe-chunks` and `contextual-mode`: skip the embedding provider. Run `gbrain embed --stale` later. `timeline` and `visibility` pages are re-embedded by their publication either way. |
 | `--all` | Run every automatic kind in order. Explicit-only kinds are listed with their preview command, never run. |
-| `--expect <hash>` | Explicit-only kinds: apply exactly the set the preview printed under this hash. Required with `--apply` for `stale-atoms`, `atoms-restore`, `extractor-facts`, `captured-facts`, `loop-facts`, `failed-writes`, `frontmatter`, `managed-sync-orphans` and `content-receipt-root`. |
+| `--expect <hash>` | Explicit-only kinds: apply exactly the set the preview printed under this hash. Required with `--apply` for `stale-atoms`, `atoms-restore`, `extractor-facts`, `captured-facts`, `redacted-facts`, `loop-facts`, `failed-writes`, `frontmatter`, `managed-sync-orphans` and `content-receipt-root`. |
 | `--include-ambiguous` | `extractor-facts` and `captured-facts`: widen the hashed set to `ambiguous` facts. `frontmatter`: add interpretive file changes. Pass it to both the preview and the apply. See [Extractor facts](#extractor-facts), [Captured facts](#captured-facts) and [Frontmatter](#frontmatter). |
 | `--only <path>`, `--skip <path>` | `frontmatter` only: select source-relative files (repeatable). The hash covers the selection, so pass the same flags to the apply. |
 | `--diff` | `frontmatter` only: print every per-file diff instead of one sample per class (`--json` always carries all of them). |
@@ -1595,6 +1595,55 @@ cannot reactivate it; a fact with no fence row expires database-only (one
 maintenance request per page on a managed brain). Nothing is withdrawn, so
 `gbrain remember` can save the same claim again.
 
+<a id="redacted-facts"></a>
+### Redacted facts
+
+Before the fix for #7125, fact extraction ran the prompt-injection patterns
+over the text it stored, and one pattern matched the English word "system"
+before a parenthesis. "Acme Business System (ABS)" was stored as "Danaher
+Business [redacted](ABS)", in the fact, its page's `## Facts` fence, the
+page's search chunks and its history, and `trust scan` flags the marker as
+instruction-like. Extraction no longer rewrites stored text, and the pattern
+now matches only a code call such as `os.system("…")`. `gbrain repair
+redacted-facts` restores the facts already damaged. It is explicit-only and
+preview-bound, it runs on the brain host, and it never runs on upgrade.
+
+**Say to your agent:** *"Doctor says some facts lost words to a redaction
+marker. Show me what you can restore before changing anything."* The agent
+runs `gbrain repair redacted-facts`, shows you each fact with its restored
+text and, after you agree, runs the printed apply command.
+
+```bash
+gbrain doctor                                   # facts_redaction_marker
+gbrain repair redacted-facts                    # preview: every damaged fact with its class and restored text
+gbrain repair redacted-facts --apply --expect <hash>
+gbrain doctor
+```
+
+Each active fact whose text holds a redaction marker is checked against the
+pages it came from: the page its context names (the page or transcript the
+turn came from) and the page that holds it, as each reads now and in up to 50
+retained versions. A text proves a restoration when the words around every
+marker in the fact occur there around exactly one span the marker's pattern
+matches.
+
+| Class | Meaning | Restored |
+| --- | --- | --- |
+| `evidenced` | Every text that proves a restoration proves the same one. | By `--apply --expect <hash>` |
+| `ambiguous` | A text holds two different spans around the same words, or two texts prove different restorations. | Never; listed |
+| `unproven` | No page it came from exists any more (`no_source_page`), or none still holds the words around the marker (`not_in_source`). | Never; listed |
+
+The apply restores exactly the previewed set. A fact that changed since the
+preview reports `changed_since_preview` and keeps its text. A fact with a row
+in its page's `## Facts` fence has that row's claim rewritten in the page
+(one revision-bound `put_page` per page, which re-chunks and re-embeds the
+page); a fact with no fence row is rewritten database-only (one maintenance
+request per page on a managed brain) and gets `restored: redacted-facts
+repair` appended to its context; its vector no longer matches its text, so
+the next `gbrain embed` re-embeds it. Page history keeps the damaged
+revisions. Edit an `ambiguous` or `unproven` fact by hand if you know the
+missing word.
+
 <a id="loop-facts"></a>
 ### Loop facts
 
@@ -2892,6 +2941,7 @@ walk me through it before changing anything."*
 | Working-tree sync prints `legacy file(s) skipped … not valid UTF-8` | `find <checkout> -name '*.md' ! -exec iconv -f UTF-8 -t UTF-8 -o /dev/null {} \; -print` | re-save each listed file as UTF-8 | the next `gbrain sync --working-tree` no longer prints the line | user (re-saves the files) | none |
 | Doctor `google_file_modes` warns, or the upgrade printed `[google] Google source <id> keeps its files in <dir>, outside ~/.gbrain` | `gbrain repair google-file-modes --source <id>` | `gbrain repair google-file-modes --source <id> --apply` | `gbrain doctor --only google_file_modes --json` (`google_file_modes` ok) | brain host, after the user agrees | none |
 | Recall or hot memory returns facts from gbrain's own claude-cli sessions or from pasted text; doctor `captured_facts_active` warns; the upgrade banner prints `captured_facts_active: N (explicit_kind_required; …)` | `gbrain repair captured-facts` (add `--include-ambiguous` to include paste candidates) | `gbrain repair captured-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only captured_facts_active --json` (`captured_facts_active` ok) | brain host, after the user agrees | `destructive` (quarantines facts) |
+| A stored fact reads `[redacted](…)` where a word such as "System" belongs; doctor `facts_redaction_marker` warns; `trust scan` flags the marker | `gbrain repair redacted-facts` | `gbrain repair redacted-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only facts_redaction_marker --json` (ok, or only facts the preview listed as `ambiguous` or `unproven`) | brain host, after the user agrees | none |
 | A finished promise still shows on entity cards and in recall after its loop was closed; doctor `loop_facts_drift` warns; the upgrade banner prints `loop_facts_drift: N (explicit_kind_required; …)` | `gbrain repair loop-facts` | `gbrain repair loop-facts --apply --expect <hash>` | `gbrain doctor --only loop_facts_drift --json` (`loop_facts_drift` ok) | brain host, after the user agrees | `destructive` (retires facts) |
 | `gbrain upgrade` refuses with `requires Bun >=<floor>` (exit 78), or doctor `self_upgrade_health` says `Auto-upgrade to <target> held` | `bun --version` | `bun upgrade`, then `gbrain upgrade` ([Bun floor](upgrades-auto-update.md#bun-floor)) | `gbrain --version` shows the target; `gbrain doctor --only self_upgrade_health --json` (`self_upgrade_health` ok) | user | `persistent_install` |
 

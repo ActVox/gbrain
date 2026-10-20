@@ -54,9 +54,68 @@ export const INJECTION_PATTERNS: Array<{ name: string; rx: RegExp; replacement: 
   // Output exfiltration
   { name: 'print-system',     rx: /(?:print|output|reveal|show)\s+(?:your\s+)?(?:system\s+prompt|instructions?|hidden)/gi, replacement: '[redacted]' },
   { name: 'verbatim',         rx: /(?:repeat|echo)\s+(?:back|verbatim)/gi, replacement: '[redacted]' },
-  // Code-execution-style hooks
-  { name: 'eval-shell',       rx: /\b(?:eval|exec|system|shell)\s*\(/gi, replacement: '[redacted](' },
+  // Code-execution-style hooks. #7125: only the code-call shape (the name
+  // directly followed by `(` and then a quote, `)` or an identifier of two or
+  // more characters), never the English word: "Business System (ABS)" and
+  // "system(s)" are prose.
+  { name: 'eval-shell',       rx: /\b(?:eval|exec|system|shell)\((?=\s*(?:['"`)]|[A-Za-z_$][\w$]))/gi, replacement: '[redacted](' },
 ];
+
+const REDACTION_MARKER = /\[redacted(?:-attr)?\]/;
+
+/**
+ * #7125: the `eval-shell` rule before the fix. Text it rewrote before the fix
+ * is restored against this shape (`gbrain repair redacted-facts`).
+ */
+export const LEGACY_EVAL_SHELL = { name: 'eval-shell-legacy', rx: /\b(?:eval|exec|system|shell)\s*\(/gi, replacement: '[redacted](' };
+
+/**
+ * #7125: neutralizing is for text rendered into a prompt, never for text that
+ * gets stored. A model that copies a neutralized span into its output (a fact,
+ * a quote, a page body) would otherwise persist the marker in place of the
+ * user's words. `restoreNeutralized` puts back each marker the model copied
+ * when the raw text the prompt was built from proves what it replaced: the
+ * words around the marker in `output` occur in `raw` around exactly one
+ * distinct span that a pattern with that replacement matches (the nearest
+ * four words on each side first, then two, then one, then four words on one
+ * side only when they hold at least 16 characters). A marker with no such
+ * proof stays as written and is counted in `unresolved`, and in `ambiguous` too
+ * when the raw text holds more than one distinct span around those words.
+ */
+export function restoreNeutralized(output: string, raw: string,
+  patterns: ReadonlyArray<{ rx: RegExp; replacement: string }> = INJECTION_PATTERNS): { text: string; restored: number; unresolved: number; ambiguous: number } {
+  if (!REDACTION_MARKER.test(output)) return { text: output, restored: 0, unresolved: 0, ambiguous: 0 };
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const markers = [...new Set(patterns.map(p => p.replacement.trim()).filter(r => REDACTION_MARKER.test(r)))].sort((a, b) => b.length - a.length);
+  // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- escaped literal replacements
+  const hits = [...output.matchAll(new RegExp(markers.map(escape).join('|'), 'g'))].map(m => ({ start: m.index!, end: m.index! + m[0].length, marker: m[0] }));
+  let text = '';
+  let at = 0;
+  let restored = 0;
+  let ambiguous = 0;
+  hits.forEach((hit, i) => {
+    const before = output.slice(i ? hits[i - 1]!.end : 0, hit.start).split(/\s+/).filter(Boolean);
+    const after = output.slice(hit.end, i + 1 < hits.length ? hits[i + 1]!.start : output.length).split(/\s+/).filter(Boolean);
+    const shapes = patterns.filter(p => p.replacement.trim() === hit.marker).map(p => `(?:${p.rx.source})`).join('|');
+    let replacement: string | null = null;
+    for (const [l, r, min] of [[4, 4, 8], [2, 2, 8], [1, 1, 8], [4, 0, 16], [0, 4, 16]] as const) {
+      const left = l ? before.slice(-l) : [];
+      const right = after.slice(0, r);
+      if ([...left, ...right].join('').length < min) continue;
+      // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- escaped literals around this module's own pattern sources
+      const rx = new RegExp(`${left.map(escape).join('\\s+')}\\s*(${shapes})\\s*${right.map(escape).join('\\s+')}`, 'gi');
+      const found = new Set([...raw.matchAll(rx)].map(m => m[1]!));
+      if (!found.size) continue;
+      if (found.size === 1) replacement = [...found][0]!;
+      else ambiguous++;
+      break;
+    }
+    text += output.slice(at, hit.start) + (replacement ?? hit.marker);
+    if (replacement !== null) restored++;
+    at = hit.end;
+  });
+  return { text: text + output.slice(at), restored, unresolved: hits.length - restored, ambiguous };
+}
 
 /**
  * #5575 write gate: non-global clones of the detection-grade subset

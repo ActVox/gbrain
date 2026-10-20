@@ -1892,6 +1892,18 @@
           {
             "category": "brain",
             "details": {
+              "affected": 0,
+              "docs": "docs/guides/repair.md#redacted-facts",
+              "repair": "redacted-facts"
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No active fact holds a redaction marker.",
+            "name": "facts_redaction_marker",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
               "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
               "drifted": 0,
               "repair": "loop-facts"
@@ -6239,6 +6251,18 @@
             "elapsed_ms": "<volatile>",
             "message": "No active fact from a gbrain self-capture or paste candidate remains. This counts facts in the database; the self_capture check counts corpus files.",
             "name": "captured_facts_active",
+            "status": "ok"
+          },
+          {
+            "category": "brain",
+            "details": {
+              "affected": 0,
+              "docs": "docs/guides/repair.md#redacted-facts",
+              "repair": "redacted-facts"
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "No active fact holds a redaction marker.",
+            "name": "facts_redaction_marker",
             "status": "ok"
           },
           {

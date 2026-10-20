@@ -555,6 +555,10 @@
       },
       {
         "category": "brain",
+        "name": "facts_redaction_marker"
+      },
+      {
+        "category": "brain",
         "name": "loop_facts_drift"
       },
       {

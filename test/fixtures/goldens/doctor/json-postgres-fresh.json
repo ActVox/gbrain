@@ -1668,6 +1668,18 @@
         {
           "category": "brain",
           "details": {
+            "affected": 0,
+            "docs": "docs/guides/repair.md#redacted-facts",
+            "repair": "redacted-facts"
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No active fact holds a redaction marker.",
+          "name": "facts_redaction_marker",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
             "drifted": 0,
             "repair": "loop-facts"

@@ -60,6 +60,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #7013: atoms an empty managed re-extraction retired that atoms-restore can bring back (doctor/checks/atom-retirements.ts).
   'atom_retirements_restorable',
   'captured_facts_active',
+  // #7125: facts whose stored text holds a pre-fix sanitizer redaction marker (doctor/checks/facts-redaction-marker.ts).
+  'facts_redaction_marker',
   'conversation_label_facts',
   'conversation_outcomes_stale',
   'connector_checkpoints',

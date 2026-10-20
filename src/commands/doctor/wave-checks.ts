@@ -344,6 +344,13 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/captured-facts.ts')).capturedFactsCheck(engine, scope.sourceIds),
   },
   {
+    id: 'facts_redaction_marker', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Restoring redacted fact text reads the facts\' source pages and versions on the brain host; the repair is explicit-only.',
+    count: d => Number(d.affected ?? 0),
+    impact: 'Some active facts lost words to the pre-fix prompt sanitizer and hold a [redacted] marker in their stored text',
+    run: async (engine, scope) => (await import('./checks/facts-redaction-marker.ts')).factsRedactionMarkerCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'loop_facts_drift', resolution: 'repair', registration: 'wave',
     hostOnly: 'Retiring closed-loop commitment facts is a host-side, explicit-only repair.',
     count: d => Number(d.drifted ?? 0),
