@@ -111,11 +111,12 @@ export interface PublicationHooks {
   fileBoundary?(name: 'before_file' | 'staging_flushed' | 'file_replaced' | 'directory_flushed' | 'after_file'
     | 'before_restore' | 'restoration_staging_flushed' | 'restoration_file_replaced' | 'restoration_directory_flushed' | 'after_restore', request: WriteRequest, index: number): void;
   /**
-   * #7106: a committed write whose outcome says its projection is built after commit (`searchable: 'pending'`): the
-   * caller settles its waiter with `done` now and tracks `afterCommit` (that build) itself, so the reply and the
-   * source's next write do not wait for it. Without this hook the publication awaits afterCommit before it returns.
+   * #7106: a committed write that created its page and whose outcome says the projection is built after commit
+   * (`projection: 'pending'`): the caller settles its waiter with `done` now and runs `afterCommit` (that build, which
+   * never rejects) itself, so the reply and the source's next write do not wait for it. Every other write, and every
+   * write without this hook, awaits afterCommit before the publication returns.
    */
-  projectionPending?(done: WriteRequest, afterCommit: Promise<void>): void;
+  projectionPending?(done: WriteRequest, afterCommit: () => Promise<void>): void;
 }
 /** SHA-256 of the file at `path` read in pieces (large-file.ts), null when absent. */
 const fileHash = hashFile;
@@ -448,6 +449,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   let published = false;
   let transactionBodyCompleted = false;
   let afterCommitDue: WriteRequest | null = null;
+  let createdPage = false;
   const skill = prepared.target === 'skill_bundle';
   const files = skill ? prepared.files ?? [] : prepared.file ? [prepared.file] : [];
   const beliefReport = { appended: 0 };
@@ -556,6 +558,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await assertKnowledgePublicationAllowed(tx, row, prepared.file);
         await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug },...(prepared.additionalPageKeys??[])]);
         snapshot = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+        // A rename moves an existing page (its old slug is an additional key): not a new page.
+        createdPage = snapshot === null && !prepared.additionalPageKeys?.length;
         await authorizePageVisibility(tx, row.authority, row.slug);
         if ((snapshot?.page.id ?? null) !== row.page_id) throw pageIdentityError(snapshot != null || row.page_id === null, 'The accepted page was deleted or recreated.');
         await assertUnboundPublication(tx, row, snapshot?.page.source_path);
@@ -647,9 +651,9 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     releaseCapacity?.();
     await lock?.release();
     if (afterCommitDue) {
-      const work = (prepared.afterCommit?.(engine) ?? Promise.resolve()).catch(() => undefined);
-      if (callerHooks.projectionPending && afterCommitDue.outcome?.searchable === 'pending') callerHooks.projectionPending(afterCommitDue, work);
-      else await work;
+      const work = () => (prepared.afterCommit?.(engine) ?? Promise.resolve()).catch(() => undefined);
+      if (callerHooks.projectionPending && createdPage && afterCommitDue.outcome?.projection === 'pending') callerHooks.projectionPending(afterCommitDue, work);
+      else await work();
     }
   }
 }
