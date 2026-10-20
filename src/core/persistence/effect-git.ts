@@ -169,8 +169,8 @@ async function stageTarget(session: GitSession, relativePath: string): Promise<{
     parent = dirname(parent);
   }
   const scope = relative(root, parent).split(sep).join('/') || '.';
-  const deleted = await git(session, ['diff', '--name-only', '--diff-filter=D', '--no-renames', '-z', '--', scope]);
-  const staged = await git(session, ['diff', '--cached', '--name-only', '--diff-filter=D', '--no-renames', '-z', '--', scope]);
+  const deleted = await git(session, ['diff', '--name-only', '--relative', '--diff-filter=D', '--no-renames', '-z', '--', scope]);
+  const staged = await git(session, ['diff', '--cached', '--name-only', '--relative', '--diff-filter=D', '--no-renames', '-z', '--', scope]);
   if (deleted.code !== 0 || staged.code !== 0) throw gitFailure('Cannot inspect canonical Git deletions.', `git diff could not list the deletions under ${scope}.`);
   for (const entry of new Set(`${deleted.stdout}${staged.stdout}`.split('\0').filter(Boolean))) {
     if (existsSync(join(root, entry))) continue;
@@ -234,8 +234,12 @@ export async function commitGitTargets(root: string, relativePaths: string[], si
       if (out.code !== 0) throw gitFailure('Cannot inspect the canonical Git target.', `git ${args[0]} failed for this group of ${paths.length} file(s).`);
       return out.stdout;
     };
+    // #7091: ls-files and `diff --relative` print paths relative to the root, but status prints them relative to the
+    // repository toplevel; a root below the toplevel (local_path <repo>/brain) strips its prefix so every listing compares.
+    const prefix = paths.length ? (await git(session, ['rev-parse', '--show-prefix'])).stdout.replace(/\n$/, '') : '';
     const tracked = new Set((await list(['ls-files', '-z'])).split('\0').filter(Boolean));
-    const dirty = new Set((await list(['status', '--porcelain', '-z', '--no-renames', '--untracked-files=all'])).split('\0').filter(Boolean).map(entry => entry.slice(3)));
+    const dirty = new Set((await list(['status', '--porcelain', '-z', '--no-renames', '--untracked-files=all'])).split('\0').filter(Boolean)
+      .map(entry => entry.slice(3)).map(path => path.startsWith(prefix) ? path.slice(prefix.length) : path));
     const changed: { requested: string; path: string }[] = [];
     const staged: string[] = [];
     // #6665: a tracked path absent on disk is staged as a removal without trusting status, which can
@@ -256,7 +260,7 @@ export async function commitGitTargets(root: string, relativePaths: string[], si
     if (staged.length) {
       const add = await git(session, ['add', '-A', '--', ...new Set(staged)]);
       if (add.code !== 0) throw gitFailure('Cannot stage the canonical Git target.', `git add failed for this group of ${new Set(staged).size} file(s).`);
-      const diff = await git(session, ['diff', '--cached', '--name-only', '-z', '--no-renames', '--', ...new Set(staged)]);
+      const diff = await git(session, ['diff', '--cached', '--name-only', '--relative', '-z', '--no-renames', '--', ...new Set(staged)]);
       if (diff.code !== 0) throw gitFailure('Cannot compare the canonical Git target.', `git diff --cached failed for this group of ${new Set(staged).size} file(s).`);
       const indexed = new Set(diff.stdout.split('\0').filter(Boolean));
       for (const [requested, path] of normalized) {
@@ -270,7 +274,7 @@ export async function commitGitTargets(root: string, relativePaths: string[], si
       const rm = await git(session, [...NO_FSCACHE, 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', ...removals]);
       if (rm.code !== 0) throw gitFailure('Cannot stage the canonical Git target removal.', `git rm --cached failed for this group of ${removals.length} removed file(s).`);
       const kept = await git(session, [...NO_FSCACHE, 'ls-files', '-z', '--', ...removals]);
-      const diff = await git(session, ['diff', '--cached', '--name-only', '-z', '--no-renames', '--', ...removals]);
+      const diff = await git(session, ['diff', '--cached', '--name-only', '--relative', '-z', '--no-renames', '--', ...removals]);
       if (kept.code !== 0 || diff.code !== 0) throw gitFailure('Cannot compare the canonical Git target removal.', `git ls-files or git diff --cached failed for this group of ${removals.length} removed file(s).`);
       const still = new Set(kept.stdout.split('\0').filter(Boolean));
       const indexed = new Set(diff.stdout.split('\0').filter(Boolean));
