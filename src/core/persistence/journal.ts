@@ -31,6 +31,7 @@ import { schemaAdmissionRefusal } from './schema-admission.ts';
 import { CAPACITY_VERIFY } from './capacity-verify.ts';
 import { readManagedMode } from './managed-mode.ts';
 import { localHostId } from './identity.ts';
+import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
 import { BACKOFF_ELAPSED } from './transient-retry.ts';
 import { segmentWriteScope } from '../page-body/ingest.ts';
 import {
@@ -50,6 +51,8 @@ export interface WriteAdmission {
   pageId?: number | null;
   worktreeId?: string | null;
   topologyGeneration?: string | number | null;
+  /** #6712 PR 4b: the worktree owner epoch the caller resolved; admission refuses `source_changed` when it moved. */
+  ownerEpoch?: string | number | null;
   requestId?: string;
   /** F6: the client's non-UUID request_id, stored beside the canonical id and never digested. */
   clientRequestId?: string;
@@ -541,19 +544,19 @@ export async function chargePreparationAttempt(engine: SqlEngine, row: WriteRequ
 async function assertWorktreeAdmission(tx: BrainEngine, input: WriteAdmission): Promise<void> {
   // Sent together: the server takes the share lock before it reads the fence and the binding.
   const [[worktree], [state]] = await pipelined(tx, [
-    () => tx.executeRaw<{ state: string }>('SELECT state FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [input.worktreeId]),
+    () => tx.executeRaw<{ state: string; owner_epoch: string }>('SELECT state,owner_epoch::text AS owner_epoch FROM persistence_worktrees WHERE id=$1::uuid FOR SHARE', [input.worktreeId]),
     () => tx.executeRaw<{ refresh: { id: string; state: string; source_ids: string[] } | string | null; bound: boolean }>(`SELECT
       (SELECT row_to_json(f) FROM (SELECT id,state,source_ids FROM persistence_worktree_refreshes
         WHERE worktree_id=$3::uuid AND state IN ${ACTIVE_REFRESH_STATES_SQL} LIMIT 1) f) AS refresh,
       EXISTS (SELECT 1 FROM persistence_source_bindings WHERE source_id=$1
         AND source_incarnation=$2::uuid AND worktree_id=$3::uuid AND topology_generation=$4) AS bound`,
     [input.sourceId, input.sourceIncarnation, input.worktreeId, input.topologyGeneration]),
-  ]) as [Array<{ state: string }>, Array<{ refresh: { id: string; state: string; source_ids: string[] } | string | null; bound: boolean }>];
+  ]) as [Array<{ state: string; owner_epoch: string }>, Array<{ refresh: { id: string; state: string; source_ids: string[] } | string | null; bound: boolean }>];
   const refresh = typeof state?.refresh === 'string' ? JSON.parse(state.refresh) as { id: string; state: string; source_ids: string[] } : state?.refresh ?? null;
   if (refresh) await assertWorktreeNotRefreshing(tx, input, refresh);
   // #6741 C: a background producer never takes a permanent request id against a worktree in recovery (a draining owner still replays).
   if (worktree?.state === 'recovering' && resolveAdmissionOrigin(input.origin) === 'background') throw backgroundWorktreeInactive(input.sourceId, worktree.state, ownerStatusFix(input.sourceId));
-  if (!state?.bound) throw opError('source_changed', 'The source binding changed during admission.',
+  if (!state?.bound || input.ownerEpoch != null && worktree && worktree.owner_epoch !== String(input.ownerEpoch)) throw opError('source_changed', 'The source binding changed during admission.',
     `Source ${input.sourceId}'s worktree binding changed (a claim, transfer or lifecycle change) while this write was being admitted, so nothing was accepted. Check the owner with the command in fix, then submit the write again; reusing the same request_id is safe because nothing was recorded.`,
     { fix: ownerStatusFix(input.sourceId) });
 }
@@ -1064,12 +1067,26 @@ export async function sweepSegmentStorage(engine: BrainEngine): Promise<void> {
  * is how a resumed run finds what it committed. A receipt of a run whose
  * managed-sync cursor is still open (not done) is never compacted, nor the newest
  * committed sync receipt of its worktree.
+ * #6712 PR 4b (design v3.2 §3.7): a pass's receipts carry `intent.passId`
+ * instead; one whose pass row is open (`telemetry.outcome = 'open'`, its
+ * `pass_id` equal) is kept the same way, and the newest committed sync receipt
+ * is kept whether it names a run or a pass.
  */
+const OPEN_SYNC_PASS_SQL = (r: string) => `${r}.intent ? 'passId' AND EXISTS (SELECT 1 FROM op_checkpoints p
+      WHERE p.op='${MANAGED_SYNC_PASS_OP}' AND p.completed_keys->0->'telemetry'->>'pass_id'=${r}.intent->>'passId' AND p.completed_keys->0->'telemetry'->>'outcome'='open')`;
 export const OPEN_SYNC_CURSOR_EXCLUSION = (r: string) => `AND NOT (${r}.intent ? 'runId' AND EXISTS (SELECT 1 FROM op_checkpoints c
-      WHERE c.op='managed-sync' AND c.completed_keys->0->>'runId'=${r}.intent->>'runId' AND COALESCE(c.completed_keys->0->>'done','false')<>'true'))`;
+      WHERE c.op='managed-sync' AND c.completed_keys->0->>'runId'=${r}.intent->>'runId' AND COALESCE(c.completed_keys->0->>'done','false')<>'true'))
+    AND NOT (${OPEN_SYNC_PASS_SQL(r)})`;
+/**
+ * GBRA-130 A-14: `newestSyncReceipt` as a selection filter, so a compaction pass's window is never filled by receipts
+ * `compactReceipt` keeps (one per worktree, retired ones included); the per-row check still re-reads it under the lock.
+ */
+export const NEWEST_SYNC_RECEIPT_EXCLUSION = (r: string) => `AND NOT (${r}.state='committed' AND ${r}.worktree_id IS NOT NULL AND (${r}.intent ? 'runId' OR ${r}.intent ? 'passId')
+      AND COALESCE(${r}.intent->>'kind','') LIKE 'managed_sync_%' AND ${r}.id=(SELECT n.id FROM persistence_requests n WHERE n.worktree_id=${r}.worktree_id
+        AND n.state='committed' AND COALESCE(n.intent->>'kind','') LIKE 'managed_sync_%' ORDER BY n.completed_at DESC, n.sequence DESC LIMIT 1))`;
 export async function newestSyncReceipt(tx: SqlEngine, row: Pick<WriteRequest, 'id' | 'state' | 'intent' | 'worktree_id'>): Promise<boolean> {
-  const intent = row.intent as { runId?: unknown; kind?: unknown } | null;
-  if (row.state !== 'committed' || !row.worktree_id || typeof intent?.runId !== 'string' || !String(intent.kind ?? '').startsWith('managed_sync_')) return false;
+  const intent = row.intent as { runId?: unknown; passId?: unknown; kind?: unknown } | null;
+  if (row.state !== 'committed' || !row.worktree_id || (typeof intent?.runId !== 'string' && typeof intent?.passId !== 'string') || !String(intent?.kind ?? '').startsWith('managed_sync_')) return false;
   const [newest] = await tx.executeRaw<{ id: string }>(`SELECT id FROM persistence_requests WHERE worktree_id=$1::uuid AND state='committed'
     AND COALESCE(intent->>'kind','') LIKE 'managed_sync_%' ORDER BY completed_at DESC, sequence DESC LIMIT 1`, [row.worktree_id]);
   return newest?.id === row.id;
@@ -1089,6 +1106,7 @@ export async function compactWriteReceiptsDetailed(engine: BrainEngine, retentio
     AND completed_at < now()-($1::double precision*interval '1 day')
     AND NOT EXISTS (SELECT 1 FROM persistence_effects e WHERE e.request_id=r.id AND e.state<>'committed')
     ${OPEN_SYNC_CURSOR_EXCLUSION('r')}
+    ${NEWEST_SYNC_RECEIPT_EXCLUSION('r')}
     ORDER BY sequence LIMIT 100`, [retentionDays]);
   const result: ReceiptCompactionResult = { compacted: 0, freed_bytes: 0, skipped_by_reason: {} };
   for (const row of rows) {
@@ -1107,7 +1125,8 @@ export const COMPACTABLE_STATES = ['committed', 'conflict', 'failed', 'cancelled
  * Compacts one terminal receipt in its own short transaction (#6696 A9, A11): counters locked first in key order, then
  * the request row, with transaction-local lock and statement timeouts so a concurrent admission waits at most that
  * long. Every eligibility rule is rechecked under the lock: terminal, no recovery, not compacted, `states`,
- * `completedBefore`, no unfinished effect, no open sync cursor for its run, not the worktree's newest sync receipt.
+ * `completedBefore`, no unfinished effect, no open sync cursor for its run, no open pass for its pass id (#6712 PR 4b), not
+ * the worktree's newest sync receipt.
  */
 export async function compactReceipt(engine: BrainEngine, row: Pick<WriteRequest, 'id' | 'principal_kind' | 'principal_id'>,
   opts: { states?: readonly string[]; completedBefore?: string } = {}): Promise<{ freed_bytes: number } | { skipped: string }> {
@@ -1117,16 +1136,18 @@ export async function compactReceipt(engine: BrainEngine, row: Pick<WriteRequest
     await tx.executeRaw("SET LOCAL statement_timeout = '15s'");
     const keys = ['brain', principalKey(requestPrincipal(row as WriteRequest))];
     await lockCounters(tx, keys);
-    const [current] = await tx.executeRaw<WriteRequest & { eligible_age: boolean; open_cursor: boolean }>(`SELECT r.*,
+    const [current] = await tx.executeRaw<WriteRequest & { eligible_age: boolean; open_cursor: boolean; open_pass: boolean }>(`SELECT r.*,
         ($2::timestamptz IS NULL OR r.completed_at < $2::timestamptz) AS eligible_age,
         EXISTS (SELECT 1 FROM op_checkpoints c WHERE r.intent ? 'runId' AND c.op='managed-sync' AND c.completed_keys->0->>'runId'=r.intent->>'runId'
-          AND COALESCE(c.completed_keys->0->>'done','false')<>'true') AS open_cursor
+          AND COALESCE(c.completed_keys->0->>'done','false')<>'true') AS open_cursor,
+        COALESCE(${OPEN_SYNC_PASS_SQL('r')}, false) AS open_pass
       FROM persistence_requests r WHERE r.id=$1::uuid FOR UPDATE OF r`, [row.id, opts.completedBefore ?? null]);
     if (!current || current.compacted || current.recovery || !isTerminal(current)) return { skipped: 'changed' };
     if (!(opts.states ?? COMPACTABLE_STATES).includes(current.state) || !current.eligible_age) return { skipped: 'changed' };
     const unfinished = await tx.executeRaw("SELECT 1 FROM persistence_effects WHERE request_id=$1::uuid AND state<>'committed' LIMIT 1", [row.id]);
     if (unfinished.length) return { skipped: 'unfinished_effect' };
     if (current.open_cursor) return { skipped: 'open_sync_cursor' };
+    if (current.open_pass) return { skipped: 'open_sync_pass' };
     if (await newestSyncReceipt(tx, current)) return { skipped: 'newest_sync_receipt' };
     const [effects] = await tx.executeRaw<{ bytes: string }>(`SELECT COALESCE(SUM(${EFFECT_BYTES_SQL}),0)::text AS bytes
       FROM persistence_effects WHERE request_id=$1::uuid`, [row.id]);

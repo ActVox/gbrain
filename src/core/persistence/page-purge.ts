@@ -42,6 +42,7 @@ import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { PERSISTENCE_REQUEST_SLUG_INTENT_INDEX } from './schema.ts';
 import { readRequestIndexStates, REQUEST_INDEXES_REPAIR_COMMAND, type RequestIndexState } from './checkpoint-validation.ts';
 import { faultPoint } from './fault-points.ts';
+import { writeOriginDeletedMarker } from './sync-markers.ts';
 import { clearRebuildableCache } from './rebuildable-cache.ts';
 import { carryingNeedles, findRequestsForSlugs, JOURNAL_SWEEP_MATCH_CAP, recheckRequestsCarrying, redactRequestIntents, sweepRequestsCarrying, sweepRequestsForGroups,
   type JournalSweep } from './intent-redaction.ts';
@@ -342,6 +343,7 @@ export async function purgePageInTransaction(tx: BrainEngine, row: WriteRequest,
     derived_hidden: await appendDerivedHidden(tx, { sourceId, request: row.id, publicationId: row.id, op: 'delete_page', targets: heldTargets, truncated: walk === 'truncated' }),
     derived_walk: walk })) : null;
   if (ledger) removed.belief_events = ledger.purged_events + ledger.redacted_fields.length;
+  await writeOriginDeletedMarker(tx, { sourceId, page: { id: page.id, slug, source_path: page.source_path } });
   const { shas, ...segmentRows } = await deletePageWithSegments(tx, sourceId, slug, page.id, segmentClaims);
   Object.assign(removed, segmentRows);
   if (!retention) appendPurgeIntent({ request: row.id, request_id: row.request_id, source_id: sourceId, source_incarnation: row.source_incarnation,
@@ -388,9 +390,10 @@ export async function finishPagePurge(ctx: Pick<OperationContext, 'engine' | 'co
   return { ...result, ...extra };
 }
 
+export const PAGE_PURGE_TOMBSTONES_SQL = 'SELECT content_hash,slug FROM page_purges WHERE source_id=$1 ORDER BY purged_at DESC LIMIT $2';
 /** Prefetch for import screens: every page tombstone of a source, content hash -> slug (bounded). */
 export async function readPagePurgeTombstones(engine: BrainEngine, sourceId: string, limit = 10_000): Promise<Map<string, string>> {
-  const rows = await engine.executeRaw<{ content_hash: string; slug: string }>('SELECT content_hash,slug FROM page_purges WHERE source_id=$1 ORDER BY purged_at DESC LIMIT $2', [sourceId, limit]);
+  const rows = await engine.executeRaw<{ content_hash: string; slug: string }>(PAGE_PURGE_TOMBSTONES_SQL, [sourceId, limit]);
   return new Map(rows.map(r => [r.content_hash, r.slug]));
 }
 

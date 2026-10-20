@@ -1724,6 +1724,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'orphans.exclude_prefixes',
   'orphans.exclude_slugs',
   'sync.cost_gate_min_usd',
+  'sync.admission', // #6712 PR 4b: normal | imports_only | classify_only, what a managed pass admits (persistence/sync-admission.ts)
   'sync.federated_v2',
   'sync.include_working_tree',
   // #5984: managed Postgres sync publishes pages in bulk groups (on by default; each page keeps its own request).
