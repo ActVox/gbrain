@@ -221,18 +221,46 @@ export function parseAppendArgs(args: string[]): AppendArgs {
   return out;
 }
 
-async function readAppendText(parsed: AppendArgs): Promise<string> {
+/** @internal The whole-file read `gbrain append --file` does for a file within one call's part cap; a test seam proves larger files are never read whole. */
+export const appendFileIo = { readFileSync: (path: string): Buffer => readFileSync(path) };
+
+const UPLOAD_ONLY_FLAGS = { expected_tail_sha256: '--expect-tail', region: '--region', separator: '--separator' } as const;
+
+/** Refuses the flags an upload session cannot carry (it appends at the end with region and separator auto, unchecked). */
+function refuseUploadFlags(parsed: AppendArgs, cap: number, size: string): void {
+  const flags = (Object.keys(UPLOAD_ONLY_FLAGS) as Array<keyof typeof UPLOAD_ONLY_FLAGS>).filter(key => parsed[key] !== undefined).map(key => UPLOAD_ONLY_FLAGS[key]);
+  if (!flags.length) return;
+  throw usageError(`${flags.join(', ')} apply only to an append whose call fits this connection's ${cap}-byte part cap; this one is ${size}.`,
+    'A larger append goes through an upload session, which appends at the end with region and separator auto and cannot check the tail. Drop those flags, or split the text into smaller appends.');
+}
+
+/**
+ * The text to append: a string when it can fit one call (stdin, or a file of
+ * at most LOCAL_FRAME_MAX_BYTES), otherwise the file as a streamed upload
+ * body. A file is sized before it is read: one over the page ceiling (the most
+ * an append upload carries) is refused unread, and one over the part cap is
+ * never read whole.
+ */
+async function readAppendInput(parsed: AppendArgs, cap: number): Promise<{ text: string } | { body: UploadBody }> {
   if (parsed.file) {
-    let raw: Buffer;
-    try { raw = readFileSync(parsed.file); } catch (error) {
+    let size: number;
+    try { size = statSync(parsed.file).size; } catch (error) {
       throw usageError(`Cannot read ${parsed.file}: ${error instanceof Error ? error.message : String(error)}`, 'Pass --file a readable text file.');
     }
-    return decodeTextInput(raw, parsed.file);
+    if (size > PAGE_MAX_BYTES) {
+      throw opError('request_too_large', `${parsed.file} is ${size} bytes, over the ${PAGE_MAX_BYTES}-byte limit of one append; nothing was read or appended.`,
+        'Split the text into several appends, each at most that size.');
+    }
+    if (size > LOCAL_FRAME_MAX_BYTES) {
+      refuseUploadFlags(parsed, cap, `at least ${size} bytes`);
+      return { body: await fileUploadBody(parsed.file) };
+    }
+    return { text: decodeTextInput(appendFileIo.readFileSync(parsed.file), parsed.file) };
   }
   if (process.stdin.isTTY) throw usageError('gbrain append needs text: pass --file PATH or pipe it on stdin.', 'Run gbrain append --help for examples.');
   const read = await readStdinPayload('echo "the next message" | gbrain append <slug>');
   if (!read.ok) throw usageError(read.message, 'Pipe the text on stdin, or pass --file PATH.');
-  return decodeTextInput(read.raw, 'stdin');
+  return { text: decodeTextInput(read.raw, 'stdin') };
 }
 
 function printAppendReceipt(result: Record<string, unknown>, json: boolean): Promise<void> {
@@ -259,41 +287,43 @@ export async function run(args: string[], ctx: CliDispatchContext): Promise<void
   let caller: PageWriteCaller | undefined;
   try {
     if (!parsed.slug) throw usageError("Missing required parameter 'slug' for 'gbrain append'.", 'Usage: gbrain append <slug> [--file PATH] (see `gbrain append --help`).');
-    const text = await readAppendText(parsed);
-    if (text.length === 0) throw usageError('Nothing to append: the text is empty.', 'Pass non-empty text with --file or on stdin.');
     caller = pageWriteCaller(() => ctx.connectEngine(), parsed.source ?? null);
-    const params: Record<string, unknown> = {
-      slug: parsed.slug, text, request_id: requestId,
-      ...(parsed.expected_revision ? { expected_revision: parsed.expected_revision } : {}),
-      ...(parsed.expected_tail_sha256 ? { expected_tail_sha256: parsed.expected_tail_sha256 } : {}),
-      ...(parsed.region ? { region: parsed.region } : {}),
-      ...(parsed.separator ? { separator: parsed.separator } : {}),
-    };
-    const frame = toolCallFrameBytes('append_page', params);
-    const begin = { slug: parsed.slug, mode: 'append', request_id: requestId, ...(parsed.expected_revision ? { expected_revision: parsed.expected_revision } : {}) };
-    const body = stringUploadBody(text);
     let cap = caller.thin ? DIRECT_FRAME_MAX_BYTES : LOCAL_FRAME_MAX_BYTES;
-    let begun: Record<string, unknown> | undefined;
-    if (frame > cap && caller.thin && frame <= LOCAL_FRAME_MAX_BYTES) {
-      begun = await caller.call('begin_page_upload', { ...begin, total_bytes: body.bytes, sha256: body.sha256 });
-      cap = Number(begun.part_max_frame_bytes);
-      if (frame <= cap) {
-        await caller.call('abort_page_upload', { upload_id: begun.upload_id });
-        begun = undefined;
-      }
-    }
+    const input = await readAppendInput(parsed, cap);
+    if ('text' in input ? input.text.length === 0 : input.body.bytes === 0) throw usageError('Nothing to append: the text is empty.', 'Pass non-empty text with --file or on stdin.');
+    const begin = { slug: parsed.slug, mode: 'append', request_id: requestId, ...(parsed.expected_revision ? { expected_revision: parsed.expected_revision } : {}) };
+    const upload = (body: UploadBody, begun?: Record<string, unknown>) => uploadPageBody(caller!.call, begin, body,
+      { transient: caller!.transient, wait_ms: Math.min(currentCliWriteWait().waitMs, 30_000), ...(begun ? { begun } : {}) });
     let result: Record<string, unknown>;
-    if (frame <= cap) {
-      result = await caller.call('append_page', params);
+    if ('body' in input) {
+      result = await upload(input.body);
     } else {
-      const unsupported = (['expected_tail_sha256', 'region', 'separator'] as const).filter(key => parsed[key] !== undefined);
-      if (unsupported.length) {
-        if (begun) await caller.call('abort_page_upload', { upload_id: begun.upload_id }).catch(() => undefined);
-        throw usageError(`${unsupported.map(key => ({ expected_tail_sha256: '--expect-tail', region: '--region', separator: '--separator' })[key]).join(', ')} apply only to an append whose call fits this connection's ${cap}-byte part cap; this one is ${frame} bytes.`,
-          'A larger append goes through an upload session, which appends at the end with region and separator auto and cannot check the tail. Drop those flags, or split the text into smaller appends.');
+      const params: Record<string, unknown> = {
+        slug: parsed.slug, text: input.text, request_id: requestId,
+        ...(parsed.expected_revision ? { expected_revision: parsed.expected_revision } : {}),
+        ...(parsed.expected_tail_sha256 ? { expected_tail_sha256: parsed.expected_tail_sha256 } : {}),
+        ...(parsed.region ? { region: parsed.region } : {}),
+        ...(parsed.separator ? { separator: parsed.separator } : {}),
+      };
+      const frame = toolCallFrameBytes('append_page', params);
+      const body = stringUploadBody(input.text);
+      let begun: Record<string, unknown> | undefined;
+      if (frame > cap && caller.thin && frame <= LOCAL_FRAME_MAX_BYTES) {
+        begun = await caller.call('begin_page_upload', { ...begin, total_bytes: body.bytes, sha256: body.sha256 });
+        cap = Number(begun.part_max_frame_bytes);
+        if (frame <= cap) {
+          await caller.call('abort_page_upload', { upload_id: begun.upload_id });
+          begun = undefined;
+        }
       }
-      result = await uploadPageBody(caller.call, begin, body,
-        { transient: caller.transient, wait_ms: Math.min(currentCliWriteWait().waitMs, 30_000), ...(begun ? { begun } : {}) });
+      if (frame <= cap) result = await caller.call('append_page', params);
+      else {
+        try { refuseUploadFlags(parsed, cap, `${frame} bytes`); } catch (error) {
+          if (begun) await caller.call('abort_page_upload', { upload_id: begun.upload_id }).catch(() => undefined);
+          throw error;
+        }
+        result = await upload(body, begun);
+      }
     }
     await printAppendReceipt(result, parsed.json);
   } catch (error) {
