@@ -31,6 +31,7 @@ import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances } from './sync-holds.ts';
 import { readBlobContents, readTreeBlobs, SYNC_READ_BOUND } from './sync-blobs.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { readOriginEvidence } from './sync-origin-evidence.ts';
 import { movedDriftHolds, prescreenSyncEntries, type SyncDriftSide } from './sync-prescreen.ts';
 import { sliceEntries, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
 
@@ -73,6 +74,8 @@ export interface SyncDiscovery { binding: WorktreeBinding; root: string; gitRoot
   stagedHead?: string;
   /** #5459 (P4.5): live pages the tree walk left alone because their file is in the working tree and their import provenance is the working tree or unknown. */
   workingTreeKept?: string[];
+  /** #7130: live pages whose file is absent but Git never committed it (or `.gitignore` excludes it): kept, never deleted. */
+  uncommittedKept?: string[];
   /** #6349 (P4.4): this discovery is one path slice of its target; the checkpoint records it instead of advancing `last_commit` until `done`. */
   slice?: SyncSliceState;
   /** #6729: inexact Git renames split into a delete plus an add (origin form); recorded after the run commits. */
@@ -348,6 +351,8 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const renamedFrom = new Map<string, { from: string; identityHead?: string }>();
   let workingTreeKept: string[] | undefined;
   let treeAbsent: Array<{ id: number; gitPath: string }> = [];
+  // #7130: deletions no Git change names (a tree walk's absent pages, a re-screened held deletion) need a commit that held the file.
+  const unproven = new Set<string>();
   const discoveredAt = new Date().toISOString();
   // #5988: active holds are re-screened when their file changed, left, or a newer reader may import it.
   const holds = company ? [] : (await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds.filter(hold => hold.incarnation === incarnation) ?? [];
@@ -418,7 +423,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   if (treeAbsent.length) {
     // A path the selected working tree already decided (an import or a deletion above) is not re-judged.
     const kept = await keptWorkingTreePages(engine, { sourceId, incarnation, root, nativeRoot, nativeGitRoot }, treeAbsent.filter(page => !entries.has(page.gitPath)));
-    for (const page of treeAbsent) if (!entries.has(page.gitPath) && !kept.has(page.gitPath)) put(page.gitPath, 'delete');
+    for (const page of treeAbsent) if (!entries.has(page.gitPath) && !kept.has(page.gitPath)) { put(page.gitPath, 'delete'); unproven.add(page.gitPath); }
     if (kept.size) workingTreeKept = [...kept];
   }
   // #6278 (B7): every scheduled path is consumed by this discovery: it is screened as an entry (the file changed in Git),
@@ -451,7 +456,15 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       }
       if (!changed) continue;
       put(gitPath, present ? 'import' : 'delete', workingHold);
+      if (!present) unproven.add(gitPath);
     }
+  }
+  let uncommittedKept: string[] | undefined;
+  const unprovenDeletes = [...unproven].filter(path => entries.get(path)?.action === 'delete');
+  if (unprovenDeletes.length && !company) {
+    const evidence = await readOriginEvidence(gitRoot, [target, source.last_commit], unprovenDeletes);
+    uncommittedKept = unprovenDeletes.filter(path => evidence.get(path) !== 'committed');
+    for (const path of uncommittedKept) entries.delete(path);
   }
   if (company) {
     entries.clear();
@@ -495,7 +508,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   }
   const discovered: SyncDiscovery = { discoveredAt, ...(released.length ? { releasedHolds: released } : {}), ...(retryTaken.length ? { retryTaken } : {}),
     ...(refused.size ? { fileRefusals: [...refused.values()] } : {}), binding: { ...binding, owner_epoch: String(binding.owner_epoch), topology_generation: String(binding.topology_generation) }, root, gitRoot, sourceId, incarnation, from: source.last_commit, target, entries: selected, slugMode, ...(company ? { companyPlan: company.plan } : {}), ...(stage ? { stagedHead: stage.head } : {}),
-    ...(workingTreeKept ? { workingTreeKept } : {}), ...(company ? {} : identityDowngradesOf([delta?.status === 'ok' ? delta.manifest : null, working ? dirty : null], eligible, sourcePath)) };
+    ...(workingTreeKept ? { workingTreeKept } : {}), ...(uncommittedKept?.length ? { uncommittedKept } : {}), ...(company ? {} : identityDowngradesOf([delta?.status === 'ok' ? delta.manifest : null, working ? dirty : null], eligible, sourcePath)) };
   // Freeze all logical identities in one database statement, before yielding
   // between pages. A later interactive edit must conflict with this scan.
   const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string; deleted_at: Date | string | null; fm_id: string | null }>(

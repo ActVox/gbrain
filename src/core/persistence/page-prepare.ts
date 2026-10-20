@@ -72,6 +72,7 @@ import { preparePageAdvisories, remoteLinkHint, pageNoopAdvisories, timelineRows
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { colonSlugWindowsRefusal, isWindowsColonTarget, nativeFileTarget } from './native-file-target.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
+import { gitIgnoresUntracked } from './sync-origin-evidence.ts';
 import { isMirrorOnlyPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { DERIVE_PHASE_DB_ONLY_DEFAULTS } from '../storage-config.ts';
 import { SOURCE_CONFIG_OBJECT_SQL } from '../source-config-sql.ts';
@@ -293,6 +294,10 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
   if (!isWriteTargetContained(path, root)) throw opError('source_changed', 'The canonical file target is outside its registered source.',
     `The file of ${row.slug} resolves outside source ${row.source_id}'s registered root (a symlinked directory or a moved checkout), so nothing was written. Inspect the owner before resubmitting; how to repair the checkout is the user's decision.`,
     { fix: ownerStatusFix(row.source_id) });
+  // #7130: a canonical file under a path the checkout's .gitignore excludes would never be committed, so the page would be
+  // file-backed by a file no history holds (and a later sync could read its absence as a deletion). The write publishes
+  // to the database only and binds no file; a declared db_only page keeps its cache file as before.
+  if (!isSourceDbOnlySlug(root, row.slug, 'not_db_only') && await gitIgnoresUntracked(root, relative(root, path).split(sep).join('/'))) return undefined;
   if (options.excludeTombstone && snapshot?.page.deleted_at) {
     const rel = relative(root, path).split(sep).join('/');
     if (matchesAnyGlob(rel, options.excludeTombstone.patterns)) { options.excludeTombstone.onExcluded(rel); return undefined; }

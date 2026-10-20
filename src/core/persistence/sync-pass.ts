@@ -36,6 +36,7 @@ import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHo
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { sameSyncOrigin, selectOriginClaimant, syncOriginPath } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexDelta, readIndexLevel, readTreeLevel, workingChanged, type GitIndexEntry, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
+import { readOriginEvidence } from './sync-origin-evidence.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
@@ -832,6 +833,18 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
       paths[i] = { ...paths[i]!, state, result: sharedResult(classifySyncPath(state)) };
     }
     timings.classify += t();
+  }
+
+  // #7130: an absent file is deletion evidence only when Git once committed it (sync-origin-evidence.ts), read for those paths alone.
+  const absent = await filterYielding(paths, entry => (entry.result.cls === 'delete' || entry.result.cls === 'delete_drift') && entry.state.originEvidence === undefined, step);
+  if (absent.length) {
+    t = timer();
+    const evidence = await readOriginEvidence(gitRoot, [head, baselineCommit], absent.map(entry => entry.path));
+    for (const entry of absent) {
+      const state = { ...entry.state, originEvidence: evidence.get(entry.path) ?? 'unknown' as const };
+      Object.assign(entry, { state, result: classifySyncPath(state) });
+    }
+    timings.origin = t();
   }
 
   // Adoption by hash needs the level's bytes: committed mode reads the blobs of the candidates that could adopt.
