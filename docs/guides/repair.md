@@ -1143,8 +1143,10 @@ retention window. Sync now holds such a page instead
 `ignored`). For a brain already hit, doctor `uncommitted_sync_deletions`
 counts, on each source's owner host, the tombstones a sync deleted whose file
 `.gitignore` excludes or no commit of HEAD's history holds (and that is not on
-the disk). It reads at most 20,000 tombstones per source and the Git evidence
-of 2,000 files per run, sync deletions first, and says when it was bounded.
+the disk). It reads at most 2,000 tombstones per run across sources, newest
+page id first, with their Git evidence; when it was bounded it says so and
+names the preview that continues below the last page it read
+(`--after <page-id>`).
 Off the owner host, or on a brain without managed sync, it is `ok` and not
 applicable. To restore them, preview, then apply after the user agrees:
 
@@ -1157,8 +1159,10 @@ gbrain repair uncommitted-deletions --source default --apply --expect <hash> --y
 (`pg_dump`, or a `gbrain backup create` taken before the purge) can bring them
 back.** Restore what is still there before the purge runs.
 
-The preview writes nothing. Its default set is the pages a sync deleted (a
-committed `managed_sync_delete` request is the newest deletion of the slug);
+The preview writes nothing. Its default set is the pages a sync deleted (the
+open `sync-delete-tombstone` record of the page's current tombstone, or the
+committed `managed_sync_delete` receipt that made it; a record left from an
+earlier deletion of the same page does not count);
 pages another writer deleted are listed apart and join the hashed set only with
 `--include-ambiguous`. The apply needs the user's consent: without `--yes` a
 terminal asks, and a non-interactive run exits 3 with the consent payload and
@@ -1172,8 +1176,15 @@ checkout again is skipped `file_restored` (commit it and sync instead); one
 purged in between is skipped `purged`. A wrong or stale hash refuses
 [`preview_changed`](#preview-changed), and off the owner host the preview and
 the apply refuse [`not_owner_host`](error-codes.md#not_owner_host). Undo one
-page with `gbrain delete <slug>`. A preview lists at most 1,000 pages; apply
-them, then preview again. The repair runs only when named, never on upgrade or
+page with `gbrain delete <slug>`. One preview reads a bounded window of at
+most 5,000 tombstones, newest page id first, and lists at most 1,000 pages.
+When it is bounded its `details.truncated` is true and `details.next_after`
+names the page id to continue below: after applying this set (or deciding not
+to), preview the next window with
+`gbrain repair uncommitted-deletions --source default --after <next_after>`.
+The hash covers `--after`, and the printed apply command carries it. An apply
+stopped part way (`--limit`, a time budget) resumes over the rest of the same
+approved set when rerun. The repair runs only when named, never on upgrade or
 from a maintenance cycle.
 
 <a id="legacy-twins"></a>

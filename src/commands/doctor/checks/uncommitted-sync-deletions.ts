@@ -5,8 +5,9 @@
  * the only copy of the page and the purge removes it for good after its retention window. The finding names the
  * read-only `gbrain repair uncommitted-deletions --source <id>` preview; restoring is the user's decision.
  *
- * Read-only and bounded: at most `TOMBSTONE_SCAN_LIMIT` tombstones per source and `DOCTOR_PATH_LIMIT` Git evidence reads
- * per run (sync deletions first), with `truncated` / `exact` details. Pages deleted by another writer are counted apart
+ * Read-only and bounded: at most `DOCTOR_PATH_LIMIT` tombstones read and checked per run across sources (descending page
+ * id), with `truncated` / `exact` details; a bounded source names the `next_after` page id, and the message names the
+ * repair preview that continues from it (`--after`). Pages deleted by another writer are counted apart
  * and never warn. Off the owner host, on a brain without managed sync or with no bound source it is `ok` + info
  * (`not_applicable`); a checkout or Git history that cannot be read is the unknown convention (`warn`, `health: unknown`).
  */
@@ -27,7 +28,7 @@ async function runUncommittedSyncDeletions(ctx: DoctorContext): Promise<Check[]>
     let budget = DOCTOR_PATH_LIMIT;
     for (const sourceId of sourceIds) {
       const scan = await scanUncommittedDeletions(engine, sourceId, { pathLimit: budget });
-      budget -= scan.checked;
+      budget -= scan.tombstones;
       scans.push(scan);
     }
     const bySync = scans.flatMap(scan => scan.pages.filter(page => page.deleted_by === 'sync'));
@@ -36,15 +37,18 @@ async function runUncommittedSyncDeletions(ctx: DoctorContext): Promise<Check[]>
     const truncated = scans.some(scan => scan.truncated);
     const details = { count: bySync.length, other_writer_count: byOther.length, truncated, exact: !truncated && !unknown.length, purged: PURGED_NOTE, docs: DOCS,
       by_source: scans.map(scan => ({ source_id: scan.source_id, status: scan.status, ...(scan.reason ? { reason: scan.reason } : {}), sync_deleted: scan.pages.filter(page => page.deleted_by === 'sync').length,
-        other_writer: scan.pages.filter(page => page.deleted_by !== 'sync').length, tombstones: scan.tombstones, checked: scan.checked, unknown: scan.unknown, truncated: scan.truncated })),
+        other_writer: scan.pages.filter(page => page.deleted_by !== 'sync').length, tombstones: scan.tombstones, checked: scan.checked, unknown: scan.unknown, truncated: scan.truncated,
+        ...(scan.next_after !== undefined ? { next_after: scan.next_after } : {}) })),
       samples: bySync.slice(0, SAMPLE_LIMIT).map(({ source_id, slug, source_path, deleted_at, evidence }) => ({ source_id, slug, source_path, deleted_at, evidence })) };
     const otherNote = byOther.length ? ` ${byOther.length} more soft-deleted page(s) with an uncommitted file were deleted by another writer, not by a sync (the preview lists them; --include-ambiguous restores them).` : '';
+    const continueNote = truncated ? ` This check is bounded (${DOCTOR_PATH_LIMIT} tombstones per run); preview past it with `
+      + `${scans.filter(scan => scan.truncated).map(scan => `gbrain repair uncommitted-deletions --source ${scan.source_id}${scan.next_after !== undefined ? ` --after ${scan.next_after}` : ''}`).join('; ')}.` : '';
     if (bySync.length) {
       const sources = [...new Set(bySync.map(page => page.source_id))];
       checks.push({ name: 'uncommitted_sync_deletions', status: 'warn', details: { ...details, ...(unknown.length ? { health: 'unknown' } : {}) },
         message: `${bySync.length}${details.exact ? '' : '+'} soft-deleted page(s) were removed by a sync although Git never held their file (.gitignore excludes it, or it was never committed), so each tombstone may be the only copy and the purge removes it for good `
           + `(${sources.map(source => `${source}: ${bySync.filter(page => page.source_id === source).length}`).join('; ')}; e.g. ${details.samples.map(page => `${page.source_id}:${page.slug} (${page.source_path}, ${page.evidence})`).join(', ')}). `
-          + `Preview the restore with gbrain repair uncommitted-deletions --source ${sources[0]}. ${PURGED_NOTE}${otherNote}`,
+          + `Preview the restore with gbrain repair uncommitted-deletions --source ${sources[0]}. ${PURGED_NOTE}${otherNote}${continueNote}`,
         fix: agentFix(['gbrain', 'repair', 'uncommitted-deletions', '--source', sources[0]!, '--json'],
           'Read-only preview: lists each page with its recorded path, deletion time and evidence, and prints the apply command with its hash. Apply only after the user agrees (each page comes back live and database-only).',
           'uncommitted_sync_deletions', { docs: DOCS }) });
@@ -67,7 +71,7 @@ async function runUncommittedSyncDeletions(ctx: DoctorContext): Promise<Check[]>
       return checks;
     }
     checks.push({ name: 'uncommitted_sync_deletions', status: 'ok', details,
-      message: `No soft-deleted page was removed by a sync while Git never held its file (${scans.reduce((sum, scan) => sum + scan.checked, 0)} tombstone(s) checked${truncated ? '; bounded, more not checked' : ''}).${otherNote}` });
+      message: `No soft-deleted page was removed by a sync while Git never held its file (${scans.reduce((sum, scan) => sum + scan.checked, 0)} tombstone(s) checked${truncated ? '; bounded, more not checked' : ''}).${otherNote}${continueNote}` });
   } catch (error) {
     checks.push(checkError('uncommitted_sync_deletions', 'check soft-deleted pages for files Git never held', error, { details: { count: 'unknown', health: 'unknown', docs: DOCS } }));
   }

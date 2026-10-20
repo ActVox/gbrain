@@ -4,7 +4,8 @@
  * - `sync --full` keeps every stale page when Git cannot list the history that proves a file was committed (a dangling
  *   ref fails `git log --all`); it used to skip the #2426 never-committed gate and delete them all;
  * - the absolute caps (`sync.max_deletes`, per source too) withhold a classic full reconcile and a working-tree sync
- *   below the 50% valve, and `GBRAIN_ALLOW_MASS_RECONCILE=1` still lets the deletion through.
+ *   below the 50% valve, and `GBRAIN_ALLOW_MASS_RECONCILE=1` still lets the deletion through;
+ * - the working-tree valve's ratio is of the source's file-backed pages, so database-only pages cannot dilute it.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -67,6 +68,15 @@ describe('#7130 classic sync: a missing file is deletion evidence only when Git 
     expect((await live()).length).toBe(40);
     await withEnv({ GBRAIN_ALLOW_MASS_RECONCILE: '1' }, () => sync({ full: true }));
     expect((await live()).length).toBe(30);
+  }, 120_000);
+
+  test('the working-tree valve counts the source\'s file-backed pages, not its database-only pages', async () => {
+    seed(Array.from({ length: 20 }, (_, i) => `n${String(i).padStart(2, '0')}`));
+    expect(['first_sync', 'synced']).toContain((await sync()).status);
+    for (let i = 0; i < 30; i++) await engine.putPage(`memories/m${i}`, { type: 'concept', title: `m${i}`, compiled_truth: `Database-only note ${i}.`, timeline: '', frontmatter: { type: 'concept' } });
+    for (let i = 0; i < 12; i++) rmSync(join(repoPath, `notes/n${String(i).padStart(2, '0')}.md`));
+    await withEnv({ GBRAIN_ALLOW_MASS_RECONCILE: undefined }, () => sync({ workingTree: true }));
+    expect((await live()).filter(slug => slug.startsWith('notes/')).length).toBe(20);
   }, 120_000);
 
   test('sync.max_deletes withholds a working-tree sync\'s uncommitted deletions', async () => {

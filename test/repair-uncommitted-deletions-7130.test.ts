@@ -9,7 +9,10 @@
  * - `gbrain repair uncommitted-deletions --source <id>` previews them with a hash and the purge caveat, refuses a wrong
  *   hash (preview_changed), exits 3 without --yes, and with the right hash restores each live and detached
  *   (database-only, no file written); the next sync, incremental and full, keeps them live and the control deleted;
- * - off the owner host the doctor check is not_applicable and the repair refuses not_owner_host.
+ * - off the owner host the doctor check is not_applicable and the repair refuses not_owner_host;
+ * - an apply stopped by --limit resumes over the rest of the approved set; a sync-delete record of an earlier tombstone
+ *   does not make a later hand delete a sync deletion; a bounded scan continues below next_after, and --after previews
+ *   and applies that window under its own hash.
  */
 import { beforeEach, afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -26,6 +29,7 @@ import { EXPLICIT_REPAIR_REGISTRY, repairRunner } from '../src/core/repair/regis
 import { runRepairCommand } from '../src/commands/repair.ts';
 import { uncommittedSyncDeletionsEntry } from '../src/commands/doctor/checks/uncommitted-sync-deletions.ts';
 import { categorizeCheck } from '../src/core/doctor-categories.ts';
+import { scanUncommittedDeletions } from '../src/core/uncommitted-deletions.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -61,8 +65,10 @@ async function refusal(fn: () => Promise<unknown>): Promise<OperationError> {
 const pageRow = async (engine: BrainEngine, slug: string) => (await engine.executeRaw<{ live: boolean; source_path: string | null; database_only_reason: string | null }>(
   "SELECT deleted_at IS NULL AS live, source_path, database_only_reason FROM pages WHERE source_id='default' AND slug=$1", [slug]))[0];
 const doctor = async (engine: BrainEngine) => (await uncommittedSyncDeletionsEntry.run({ engine } as never) as Array<Record<string, any>>)[0]!;
-const repair = async (engine: BrainEngine, opts: { apply?: boolean; expect?: string; includeAmbiguous?: boolean } = {}) => (await repairRunner(engine, { apply: opts.apply === true, logger }))
-  .run(KIND, await resolveRepairScope(engine, 'default'), { explicit: true, sourceFlag: 'default', expect: opts.expect, includeAmbiguous: opts.includeAmbiguous });
+const repair = async (engine: BrainEngine, opts: { apply?: boolean; expect?: string; includeAmbiguous?: boolean; limit?: number; afterPage?: number } = {}) => (await repairRunner(engine, { apply: opts.apply === true, logger }))
+  .run(KIND, await resolveRepairScope(engine, 'default'), { explicit: true, sourceFlag: 'default', expect: opts.expect, includeAmbiguous: opts.includeAmbiguous, limit: opts.limit,
+    ...(opts.afterPage !== undefined ? { afterPage: opts.afterPage } : {}) });
+const pageId = async (engine: BrainEngine, slug: string) => Number((await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug=$1", [slug]))[0]!.id);
 
 /** Imports untracked files from the working tree (working mode), then returns to committed mode. */
 async function importUntracked(engine: BrainEngine, root: string, files: Record<string, string>) {
@@ -156,7 +162,8 @@ for (const backend of testBackends()) describe(`[${backend}] #7130: restoring pa
   test('a sync tombstone marker counts as a sync deletion; off the owner host the doctor check is not applicable and the repair refuses not_owner_host', () => managedBrain(async ({ engine, ctx, root }) => {
     await hitBrain(engine, ctx, root);
     const [hand] = await engine.executeRaw<{ id: number }>("SELECT id FROM pages WHERE source_id='default' AND slug='notes/hand'");
-    await engine.executeRaw("INSERT INTO op_checkpoints(op, fingerprint, completed_keys) VALUES ('sync-delete-tombstone', $1, '[]'::jsonb)", [String(hand!.id)]);
+    await engine.executeRaw(`INSERT INTO op_checkpoints(op, fingerprint, completed_keys) SELECT 'sync-delete-tombstone', id::text,
+      jsonb_build_array(jsonb_build_object('page_id', id, 'slug', slug, 'deleted_at', deleted_at)) FROM pages WHERE id=$1`, [hand!.id]);
     expect(await doctor(engine)).toMatchObject({ status: 'warn', details: { count: 3, other_writer_count: 0 } });
     const hash = (await repair(engine)).preview_hash!;
     await withEnv({ GBRAIN_HOME: join(dirname(root), 'other-host') }, async () => {
@@ -165,5 +172,53 @@ for (const backend of testBackends()) describe(`[${backend}] #7130: restoring pa
       expect((await refusal(() => repair(engine, { apply: true, expect: hash }))).code).toBe('not_owner_host');
     });
     expect((await pageRow(engine, 'notes/draft'))!.live).toBe(false);
+  }, { databaseUrl, setup }), 240_000);
+
+  test('an apply stopped by --limit resumes and restores the rest of the approved set', () => managedBrain(async ({ engine, ctx, root }) => {
+    await hitBrain(engine, ctx, root);
+    const preview = await repair(engine);
+    expect(preview.affected).toBe(2);
+    const first = await repair(engine, { apply: true, expect: preview.preview_hash!, limit: 1 });
+    expect(first).toMatchObject({ applied: 1, complete: false });
+    const rest = await repair(engine, { apply: true, expect: preview.preview_hash! });
+    expect(rest).toMatchObject({ applied: 1, failed: [], complete: true });
+    for (const slug of ['notes/draft', 'scratch/agent']) expect(await pageRow(engine, slug)).toEqual({ live: true, source_path: null, database_only_reason: 'detached' });
+  }, { databaseUrl, setup }), 240_000);
+
+  test('a sync-delete record left from an earlier tombstone does not make a later hand delete a sync deletion', () => managedBrain(async ({ engine, ctx, root }) => {
+    await hitBrain(engine, ctx, root);
+    await engine.executeRaw(`INSERT INTO op_checkpoints(op, fingerprint, completed_keys) SELECT 'sync-delete-tombstone', id::text,
+      jsonb_build_array(jsonb_build_object('page_id', id, 'slug', slug, 'deleted_at', deleted_at - interval '1 hour')) FROM pages WHERE id=$1`, [await pageId(engine, 'notes/hand')]);
+    expect(await doctor(engine)).toMatchObject({ status: 'warn', details: { count: 2, other_writer_count: 1 } });
+    const preview = await repair(engine);
+    expect(preview.listing!.find(entry => entry.item === 'default:notes/hand')?.class).toBe('excluded:deleted_by_other');
+  }, { databaseUrl, setup }), 240_000);
+
+  test('a bounded scan continues below next_after; --after previews and applies the next window under its own hash', () => managedBrain(async ({ engine, ctx, root }) => {
+    await hitBrain(engine, ctx, root);
+    const seen: string[] = [];
+    let after: number | undefined;
+    for (let window = 0; window < 10; window++) {
+      const scan = await scanUncommittedDeletions(engine, 'default', { pathLimit: 1, ...(after !== undefined ? { after } : {}) });
+      seen.push(...scan.pages.map(page => page.slug));
+      if (!scan.truncated) break;
+      expect(scan.next_after).toBeDefined();
+      after = scan.next_after;
+    }
+    expect(seen.sort()).toEqual(['notes/draft', 'notes/hand', 'scratch/agent']);
+
+    const [lower, upper] = (await Promise.all(['notes/draft', 'scratch/agent'].map(async slug => ({ slug, id: await pageId(engine, slug) })))).sort((a, b) => a.id - b.id);
+    const whole = await repair(engine);
+    const preview = JSON.parse(await capture(() => runRepairCommand(engine, ['uncommitted-deletions', '--source', 'default', '--after', String(upper!.id), '--json']))).results[0];
+    expect(preview.affected).toBe(1);
+    expect(preview.sample).toEqual([`default:${lower!.slug}`]);
+    expect(preview.preview_hash).not.toBe(whole.preview_hash);
+    expect(preview.apply_command).toBe(`gbrain repair uncommitted-deletions --source default --after ${upper!.id} --apply --expect ${preview.preview_hash} --yes`);
+    expect((await refusal(() => repair(engine, { apply: true, expect: preview.preview_hash }))).code).toBe('preview_changed');
+    const applied = JSON.parse(await withEnv({ GBRAIN_INTERACTIVE: '0', CI: '1' }, () => capture(() => runRepairCommand(engine,
+      ['uncommitted-deletions', '--source', 'default', '--after', String(upper!.id), '--apply', '--expect', preview.preview_hash, '--yes', '--json'])))).results[0];
+    expect(applied).toMatchObject({ applied: 1, complete: true });
+    expect((await pageRow(engine, lower!.slug))!.live).toBe(true);
+    expect((await pageRow(engine, upper!.slug))!.live).toBe(false);
   }, { databaseUrl, setup }), 240_000);
 });

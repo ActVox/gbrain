@@ -137,6 +137,24 @@ for (const backend of testBackends()) describe(`[${backend}] #7130: an absent fi
     await performManagedSync(engine, { ...OPTS, full: true });
     expect(await liveSlugs(engine)).toContain('ingested/report');
   }, { databaseUrl, setup: setupNotes(['a'], 'ingested/\n') }), 240_000);
+
+  test('a page that already records a file keeps it when a rule later ignores it: an unimported disk edit still refuses the write (source_changed)', () => managedBrain(async ({ engine, ctx, root }) => {
+    expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+    await importUntracked(engine, root, { 'drafts/x.md': 'A draft imported from the working tree.' });
+    writeFileSync(join(root, '.gitignore'), 'drafts/\n');
+    writeFileSync(join(root, 'drafts/x.md'), note('drafts/x', 'A newer edit on disk that no sync imported.'));
+    const requestId = randomUUID();
+    const revision = (await engine.readPageSnapshot('drafts/x', { sourceId: 'default' }))!.revision;
+    const refusal = await submitPageMutation(ctx as OperationContext, { operation: 'put_page', params: { slug: 'drafts/x', request_id: requestId, expected_revision: revision, content: note('drafts/x', 'An agent rewrite.') } })
+      .then(() => null, (error: { code?: string }) => error.code ?? 'unknown');
+    await waitFor(async () => refusal !== null || ['committed', 'failed', 'cancelled', 'conflict'].includes((await engine.executeRaw<{ state: string }>('SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [requestId]))[0]?.state ?? ''),
+      { timeoutMs: 20_000, label: 'put_page settles' });
+    const [request] = await engine.executeRaw<{ error_code: string | null }>('SELECT error_code FROM persistence_requests WHERE request_id=$1::uuid', [requestId]);
+    expect(request?.error_code ?? refusal).toBe('source_changed');
+    const page = await engine.getPage('drafts/x', { sourceId: 'default' });
+    expect(page?.compiled_truth).not.toContain('An agent rewrite.');
+    expect((await engine.executeRaw<{ source_path: string | null }>("SELECT source_path FROM pages WHERE source_id='default' AND slug='drafts/x'"))[0]).toEqual({ source_path: 'drafts/x.md' });
+  }, { databaseUrl, setup: setupNotes(['a']) }), 240_000);
 });
 
 describe('#7130: origin evidence', () => {
@@ -154,6 +172,12 @@ describe('#7130: origin evidence', () => {
       expect(Object.fromEntries(await readOriginEvidence(join(root, 'missing'), [head], ['notes/never.md']))).toEqual({ 'notes/never.md': 'unknown' });
       expect(await gitIgnoresUntracked(root, 'scratch/agent.md')).toBe(true);
       expect(await gitIgnoresUntracked(root, 'notes/never.md')).toBe(false);
+      // A name is read byte for byte: only ' lead.md' and '\nlead.md' were committed, so 'lead.md' has no commit. A removed
+      // file that a later rule ignores is still committed (its removal is a real deletion).
+      writeFileSync(join(root, ' lead.md'), 'x'); writeFileSync(join(root, '\nlead.md'), 'y'); mkdirSync(join(root, 'old')); writeFileSync(join(root, 'old/x.md'), 'x');
+      commit(root, 'three'); git(root, 'rm', '-q', ' lead.md', '\nlead.md', 'old/x.md'); writeFileSync(join(root, '.gitignore'), 'scratch/\nold/\n'); commit(root, 'four');
+      const later = await readOriginEvidence(root, [git(root, 'rev-parse', 'HEAD')], [' lead.md', '\nlead.md', 'lead.md', 'old/x.md']);
+      expect(Object.fromEntries(later)).toEqual({ ' lead.md': 'committed', '\nlead.md': 'committed', 'lead.md': 'never_committed', 'old/x.md': 'committed' });
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

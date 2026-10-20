@@ -14,7 +14,7 @@ import { gitChildEnv } from '../git-env.ts';
 
 const execFileAsync = promisify(execFile);
 
-/** `committed`: some commit of the history holds the path. `never_committed`: none does. `ignored`: `.gitignore` excludes it. `unknown`: a read failed. */
+/** `committed`: some commit of the history holds the path. `never_committed`: none does. `ignored`: none does and `.gitignore` excludes it (a commit's evidence wins over a later ignore rule). `unknown`: a read failed. */
 export type OriginEvidence = 'committed' | 'never_committed' | 'ignored' | 'unknown';
 
 /** Paths per Git invocation (argument-list bound). */
@@ -71,15 +71,16 @@ export async function readOriginEvidence(gitRoot: string, commits: ReadonlyArray
   for (let i = 0; i < paths.length; i += BATCH) {
     const batch = paths.slice(i, i + BATCH);
     const touched = tips.length ? await git(gitRoot, ['log', ...tips, '--format=', '--name-only', '--no-renames', '-z', '--', ...batch], true) : { code: 0, stdout: '' };
-    const committed = new Set(touched.stdout.split('\0').map(path => path.trim()).filter(Boolean));
+    // With an empty format and -z, every name is one NUL-terminated record (no separator between commits): read each byte for byte.
+    const committed = new Set(touched.stdout.split('\0').filter(Boolean));
     const ignoredRead = await checkIgnore(gitRoot, batch);
     const ignored = new Set(ignoredRead.stdout.split('\0').filter(Boolean));
     // check-ignore exits 1 when no path is ignored; anything else but 0 is a failed read.
     const ignoreKnown = ignoredRead.code === 0 || ignoredRead.code === 1;
     for (const path of batch) {
       if (touched.code !== 0 || !ignoreKnown) evidence.set(path, 'unknown');
-      else if (ignored.has(path)) evidence.set(path, 'ignored');
-      else evidence.set(path, committed.has(path) ? 'committed' : 'never_committed');
+      else if (committed.has(path)) evidence.set(path, 'committed');
+      else evidence.set(path, ignored.has(path) ? 'ignored' : 'never_committed');
     }
   }
   return evidence;

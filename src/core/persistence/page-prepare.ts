@@ -296,8 +296,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     { fix: ownerStatusFix(row.source_id) });
   // #7130: a canonical file under a path the checkout's .gitignore excludes would never be committed, so the page would be
   // file-backed by a file no history holds (and a later sync could read its absence as a deletion). The write publishes
-  // to the database only and binds no file; a declared db_only page keeps its cache file as before.
-  if (!isSourceDbOnlySlug(root, row.slug, 'not_db_only') && await gitIgnoresUntracked(root, relative(root, path).split(sep).join('/'))) return undefined;
+  // to the database only and binds no file; a declared db_only page keeps its cache file as before. A page that already
+  // records a file keeps it (and its drift checks): only a person's detach turns it database-only.
+  if (!snapshot?.page.source_path && !recordedPathFromFileUri(snapshot?.page.source_uri, root) && !isSourceDbOnlySlug(root, row.slug, 'not_db_only') && await gitIgnoresUntracked(root, relative(root, path).split(sep).join('/'))) return undefined;
   if (options.excludeTombstone && snapshot?.page.deleted_at) {
     const rel = relative(root, path).split(sep).join('/');
     if (matchesAnyGlob(rel, options.excludeTombstone.patterns)) { options.excludeTombstone.onExcluded(rel); return undefined; }

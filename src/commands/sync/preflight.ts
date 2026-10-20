@@ -1113,32 +1113,33 @@ async function computeFilteredDelta(
   // modifies still import, and committing the deletions (or
   // GBRAIN_ALLOW_MASS_RECONCILE=1) re-enables them.
   if (importWorkingTree && filtered.deleted.length > 0 && !massReconcileAllowed()) {
-    try {
-      const rows = await engine.executeRaw<{ count: number }>(
-        opts.sourceId
-          ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
-          : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
-        opts.sourceId ? [opts.sourceId] : [],
+    // #7130: the ratio is of the source's file-backed pages (the pages a missing file can delete). A failed read of the
+    // count or the caps withholds every deletion: the brake cannot be checked, so nothing is deleted.
+    const sid = opts.sourceId ?? DEFAULT_SOURCE_ID;
+    const read = await Promise.all([
+      engine.executeRaw<{ count: number }>(`SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1 AND source_path IS NOT NULL`, [sid]),
+      readSyncDeleteCaps(engine, sid),
+    ]).then(([rows, caps]) => ({ pageCount: Number(rows[0]?.count ?? 0), caps }), (error: unknown) => ({ error }));
+    if ('error' in read) {
+      serr(`\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree sync: the delete limits could not be read (${read.error instanceof Error ? read.error.message : String(read.error)}). Adds/modifies still import; sync again once the database answers.\n`);
+      filtered.deleted = [];
+    }
+    const { pageCount, caps } = 'error' in read ? { pageCount: 0, caps: null } : read;
+    // The absolute caps apply on a detached HEAD too.
+    const trip = caps ? syncDeleteTrip(filtered.deleted.length, pageCount, caps) : null;
+    if (trip && caps) {
+      serr(`\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree sync (${syncDeleteTripText(trip, caps)}). ` +
+        `Commit the deletions and sync again, raise the cap (gbrain config set ${trip === 'max_deletes' ? 'sync.max_deletes' : 'sync.max_delete_ratio'}.source.${sid} <value>), or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`);
+      filtered.deleted = [];
+    } else if (!detachedHead && filtered.deleted.length >= 10 && pageCount > 0 && filtered.deleted.length > pageCount * MASS_RECONCILE_RATIO) {
+      serr(
+        `\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree ` +
+        `sync (> ${Math.round(MASS_RECONCILE_RATIO * 100)}% of ${pageCount} file-backed page(s)). An uncommitted ` +
+        `tree deleting this much is almost always transient (mid-rebase, accidental rm) — commit the ` +
+        `deletions to apply them, or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`,
       );
-      const pageCount = Number(rows[0]?.count ?? 0);
-      // #7130: the absolute caps (sync.max_deletes, sync.max_delete_ratio) apply on a detached HEAD too.
-      const sid = opts.sourceId ?? DEFAULT_SOURCE_ID;
-      const caps = await readSyncDeleteCaps(engine, sid);
-      const trip = syncDeleteTrip(filtered.deleted.length, pageCount, caps);
-      if (trip) {
-        serr(`\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree sync (${syncDeleteTripText(trip, caps)}). ` +
-          `Commit the deletions and sync again, raise the cap (gbrain config set ${trip === 'max_deletes' ? 'sync.max_deletes' : 'sync.max_delete_ratio'}.source.${sid} <value>), or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`);
-        filtered.deleted = [];
-      } else if (!detachedHead && filtered.deleted.length >= 10 && pageCount > 0 && filtered.deleted.length > pageCount * MASS_RECONCILE_RATIO) {
-        serr(
-          `\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree ` +
-          `sync (> ${Math.round(MASS_RECONCILE_RATIO * 100)}% of ${pageCount} page(s)). An uncommitted ` +
-          `tree deleting this much is almost always transient (mid-rebase, accidental rm) — commit the ` +
-          `deletions to apply them, or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`,
-        );
-        filtered.deleted = [];
-      }
-    } catch { /* valve is best-effort — a count failure must not block the sync */ }
+      filtered.deleted = [];
+    }
   }
 
   // NAV-4: warn when --exclude filtered out every candidate change — almost

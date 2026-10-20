@@ -350,9 +350,9 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   const entries = new Map<string, SyncEntry>();
   const renamedFrom = new Map<string, { from: string; identityHead?: string }>();
   let workingTreeKept: string[] | undefined;
-  let treeAbsent: Array<{ id: number; gitPath: string }> = [];
+  let treeAbsent: Array<{ id: number; gitPath: string; evidencePath?: string }> = [];
   // #7130: deletions no Git change names (a tree walk's absent pages, a re-screened held deletion) need a commit that held the file.
-  const unproven = new Set<string>();
+  const unproven = new Map<string, string>();
   const discoveredAt = new Date().toISOString();
   // #5988: active holds are re-screened when their file changed, left, or a newer reader may import it.
   const holds = company ? [] : (await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds.filter(hold => hold.incarnation === incarnation) ?? [];
@@ -413,7 +413,12 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       // #5988: the old page of a held rename keeps its origin until the renamed file imports.
       return !holdRenameOrigins.has(origin);
     });
-    treeAbsent = absent.map(page => ({ id: page.id, gitPath: gitPathOf(syncOriginPath(page.source_path)) }));
+    treeAbsent = absent.map(page => {
+      const origin = syncOriginPath(page.source_path);
+      // #7130: a legacy origin recorded Git-root-relative under a source-root scope is already the file's Git path.
+      const legacy = slugMode === 'source-root' && scope && origin.startsWith(`${scope}/`) && sameSyncOrigin(origin, origin.slice(scope.length + 1), originScope, page.slug);
+      return { id: page.id, gitPath: gitPathOf(origin), ...(legacy ? { evidencePath: origin } : {}) };
+    });
   }
   if (working) {
     for (const path of [...dirty.added, ...dirty.modified]) put(path, 'import', true);
@@ -423,7 +428,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   if (treeAbsent.length) {
     // A path the selected working tree already decided (an import or a deletion above) is not re-judged.
     const kept = await keptWorkingTreePages(engine, { sourceId, incarnation, root, nativeRoot, nativeGitRoot }, treeAbsent.filter(page => !entries.has(page.gitPath)));
-    for (const page of treeAbsent) if (!entries.has(page.gitPath) && !kept.has(page.gitPath)) { put(page.gitPath, 'delete'); unproven.add(page.gitPath); }
+    for (const page of treeAbsent) if (!entries.has(page.gitPath) && !kept.has(page.gitPath)) { put(page.gitPath, 'delete'); unproven.set(page.gitPath, page.evidencePath ?? page.gitPath); }
     if (kept.size) workingTreeKept = [...kept];
   }
   // #6278 (B7): every scheduled path is consumed by this discovery: it is screened as an entry (the file changed in Git),
@@ -456,14 +461,14 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       }
       if (!changed) continue;
       put(gitPath, present ? 'import' : 'delete', workingHold);
-      if (!present) unproven.add(gitPath);
+      if (!present) unproven.set(gitPath, gitPath);
     }
   }
   let uncommittedKept: string[] | undefined;
-  const unprovenDeletes = [...unproven].filter(path => entries.get(path)?.action === 'delete');
+  const unprovenDeletes = [...unproven.keys()].filter(path => entries.get(path)?.action === 'delete');
   if (unprovenDeletes.length && !company) {
-    const evidence = await readOriginEvidence(gitRoot, [target, source.last_commit], unprovenDeletes);
-    uncommittedKept = unprovenDeletes.filter(path => evidence.get(path) !== 'committed');
+    const evidence = await readOriginEvidence(gitRoot, [target, source.last_commit], unprovenDeletes.map(path => unproven.get(path)!));
+    uncommittedKept = unprovenDeletes.filter(path => evidence.get(unproven.get(path)!) !== 'committed');
     for (const path of uncommittedKept) entries.delete(path);
   }
   if (company) {

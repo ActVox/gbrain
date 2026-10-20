@@ -13,7 +13,9 @@
  * written, so the next sync has no file to read as missing and never deletes it again. A page that changed since the
  * preview is skipped `changed_since_preview`; one whose file is back in the checkout is skipped `file_restored` (sync
  * reads it); one purged in between is skipped `purged`. Pages already purged cannot be restored by this command; only
- * a backup can bring them back. Never runs on upgrade or from a maintenance cycle.
+ * a backup can bring them back. One preview reads one bounded window of tombstones (descending page id); a truncated
+ * preview prints `next_after`, and `--after <page id>` previews the next window (the hash covers it). Never runs on upgrade
+ * or from a maintenance cycle.
  */
 import type { BrainEngine } from '../engine.ts';
 import { opError, OperationError, type OperationContext } from '../ops/contract.ts';
@@ -44,7 +46,7 @@ export const UNCOMMITTED_DELETIONS_CONSENT_TEXT = {
   user_message: 'Restore the previewed pages that a sync deleted without Git evidence? They come back live as database-only pages; no file is written',
 };
 
-interface Selection { source_ids: string[]; include_ambiguous: boolean }
+interface Selection { source_ids: string[]; include_ambiguous: boolean; after: number | null }
 interface ApprovedDeletion extends UncommittedDeletion { owner: GhostOwner; selection: Selection }
 interface DeletionItem extends RepairItem { page: UncommittedDeletion; hash: string; last: boolean }
 
@@ -63,8 +65,8 @@ const hashParts = (scope: RepairScope, owner: GhostOwner | undefined, selection:
 const describeDeletion = (page: UncommittedDeletion) => `file ${page.source_path} ${page.evidence === 'ignored' ? 'is excluded by .gitignore' : 'was never committed'}; `
   + `deleted ${page.deleted_at} by ${page.deleted_by === 'sync' ? 'a managed sync' : 'another writer'}; revision ${page.revision}`;
 
-function item(page: UncommittedDeletion, hash: string, last: boolean): DeletionItem {
-  return { cursor: { phase: 1, id: page.page_id }, source_id: page.source_id, slug: page.slug, chars: 0, action: `restore_detached:${page.evidence}`, page, hash, last };
+function item(page: UncommittedDeletion, hash: string, index: number, last: boolean): DeletionItem {
+  return { cursor: { phase: 1, id: index }, source_id: page.source_id, slug: page.slug, chars: 0, action: `restore_detached:${page.evidence}`, page, hash, last };
 }
 
 export const uncommittedDeletionsRepair: RepairHandler = {
@@ -78,7 +80,7 @@ export const uncommittedDeletionsRepair: RepairHandler = {
     }
     const sourceId = scope.source_ids[0]!;
     const command = uncommittedDeletionsPreviewCommand(sourceId);
-    const selection: Selection = { source_ids: scope.source_ids, include_ambiguous: opts?.includeAmbiguous === true };
+    const selection: Selection = { source_ids: scope.source_ids, include_ambiguous: opts?.includeAmbiguous === true, after: opts?.afterPage ?? null };
     if (opts?.apply) {
       if (!opts.expect) {
         throw opError('invalid_params', 'gbrain repair uncommitted-deletions --apply restores only the set a preview printed.',
@@ -90,15 +92,18 @@ export const uncommittedDeletionsRepair: RepairHandler = {
       const owner = context.ok ? context.owner : undefined;
       const approved = await loadApprovedSet<ApprovedDeletion>(engine, { command: 'uncommitted-deletions', hash: opts.expect, previewCommand: command,
         emptyHash: async () => previewHash(hashParts(scope, owner, selection, [])) });
-      if (approved.items.some(page => JSON.stringify(page.selection) !== JSON.stringify(selection) || !sameOwner(owner, page.owner))) throw previewChangedError(opts.expect, command);
-      const items = approved.items.map(({ selection: _selection, owner: _owner, ...page }, index) => item(page, opts.expect!, index === approved.items.length - 1));
+      if (approved.items.some(page => JSON.stringify(page.selection.source_ids) !== JSON.stringify(selection.source_ids) || page.selection.include_ambiguous !== selection.include_ambiguous
+        || (page.selection.after ?? null) !== selection.after || !sameOwner(owner, page.owner))) throw previewChangedError(opts.expect, command);
+      const items = approved.items.map(({ selection: _selection, owner: _owner, ...page }, index) => item(page, opts.expect!, index, index === approved.items.length - 1));
       return { items: items.filter(entry => afterCursor(entry.cursor, after)), preview_hash: opts.expect, residuals: {} };
     }
-    const scan = await scanUncommittedDeletions(engine, sourceId, { pathLimit: PATH_LIMIT });
+    const scan = await scanUncommittedDeletions(engine, sourceId, { pathLimit: PATH_LIMIT, ...(selection.after !== null ? { after: selection.after } : {}) });
     if (scan.reason === 'not_owner_host') throw notOwnerHost(sourceId);
     const eligible = scan.pages.filter(page => selection.include_ambiguous || page.deleted_by === 'sync');
     const selected = eligible.slice(0, UNCOMMITTED_DELETIONS_LIMIT);
-    const excluded = scan.pages.filter(page => !selection.include_ambiguous && page.deleted_by !== 'sync');
+    const cut = eligible.length > selected.length ? selected[selected.length - 1]!.page_id : undefined;
+    const next = cut ?? scan.next_after;
+    const excluded = scan.pages.filter(page => !selection.include_ambiguous && page.deleted_by !== 'sync' && (cut === undefined || page.page_id > cut));
     const hash = previewHash(hashParts(scope, scan.owner, selection, selected));
     if (selected.length) await saveApprovedSet<ApprovedDeletion>(engine, { command: 'uncommitted-deletions', hash }, selected.map(page => ({ ...page, owner: scan.owner!, selection })));
     const warnings = [
@@ -107,14 +112,15 @@ export const uncommittedDeletionsRepair: RepairHandler = {
         : scan.reason === 'mirror_read_only' ? 'a read-only mirror publishes no file' : 'its checkout or Git history could not be read on this host'}; nothing is listed.`] : []),
       ...(scan.unknown ? [`${scan.unknown} soft-deleted page(s) are not listed because Git could not answer for their file; fix the checkout and preview again.`] : []),
       ...(excluded.length ? [`${excluded.length} more soft-deleted page(s) with an uncommitted file were deleted by another writer, not by a sync; they are listed apart and restored only with --include-ambiguous.`] : []),
-      ...(scan.truncated || eligible.length > selected.length ? [`More soft-deleted pages may qualify past this bounded preview; apply this set, then preview again.`] : []),
+      ...(scan.truncated || cut !== undefined ? [`This preview read one bounded window of tombstones; more may qualify below page id ${next}. `
+        + `After applying this set (or deciding not to), preview the next window: ${command} --after ${next}${selection.include_ambiguous ? ' --include-ambiguous' : ''}`] : []),
     ];
-    return { warnings, items: selected.map((page, index) => item(page, hash, index === selected.length - 1)), preview_hash: hash,
+    return { warnings, items: selected.map((page, index) => item(page, hash, index, index === selected.length - 1)), preview_hash: hash,
       residuals: { tombstones: scan.tombstones, checked: scan.checked, committed: scan.committed, file_present: scan.file_present, unknown: scan.unknown, ...(excluded.length ? { deleted_by_other: excluded.length } : {}) },
       listing: [...selected.map(page => ({ item: `${page.source_id}:${page.slug}`, class: `restore:${page.evidence}`, detail: describeDeletion(page) })),
         ...excluded.map(page => ({ item: `${page.source_id}:${page.slug}`, class: 'excluded:deleted_by_other', detail: `${describeDeletion(page)}; restored only with --include-ambiguous` }))],
       details: { pages: selected.map(({ source_id, slug, source_path, deleted_at, evidence, deleted_by }) => ({ source_id, slug, source_path, deleted_at, evidence, deleted_by })),
-        purged: PURGED_NOTE, undo: 'gbrain delete <slug>', truncated: scan.truncated, docs: DOCS } };
+        purged: PURGED_NOTE, undo: 'gbrain delete <slug>', truncated: scan.truncated || cut !== undefined, ...(next !== undefined ? { next_after: next } : {}), docs: DOCS } };
   },
   async apply(ctx, entry): Promise<RepairItemOutcome> {
     const { page, hash, last } = entry as DeletionItem;
