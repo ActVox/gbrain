@@ -140,6 +140,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "string",
         "description": "Source to try first (thin clients send .gbrain-source here); never narrows.",
         "fullSurfaceOnly": true
+      },
+      "variants": {
+        "type": "boolean",
+        "description": "Default true: when no exact name matches, resolve one unambiguous name variant (nickname, initial, title, order, surname typo, unique surname; card.match says which). false: exact names only."
       }
     },
     "scope": "read",
@@ -3769,6 +3773,52 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "cliHints": {
       "name": "orphans",
       "hidden": true
+    },
+    "area": "links"
+  },
+  {
+    "name": "rank_entities",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "retrieval",
+    "scope": "read",
+    "description": "Rank pages by graph connections: the most-linked people, companies or other entities. Use instead of counting link rows yourself. An edge is a distinct (from page, to page, link_type) between live pages in scope: self-links, links to deleted pages, non-ranking types (amends) and, unless include_mentions, mention rows do not count; several provenance rows for one edge count once. inbound/outbound count edges, neighbors counts distinct linked pages. A redirect stub (canonical: false, superseded_by, merged_into) is folded into its live target in the same source (listed under folded) and its edges count once; title-prefixed person duplicates are listed under possible_duplicates, never merged. Ties order by slug, then source_id. coverage.state is behind when link extraction lags, so counts cover only extracted pages.",
+    "params": {
+      "direction": {
+        "type": "string",
+        "enum": [
+          "in",
+          "out",
+          "both"
+        ],
+        "description": "Rank by 'in' (inbound edges, default), 'out' (outbound edges) or 'both' (inbound + outbound)."
+      },
+      "types": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Page types to rank, e.g. ['person']. Default: the schema pack's entity types."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "Only this source (it must be inside your source grant); '__all__' spans every source you can read. Both ends of a counted edge stay in scope."
+      },
+      "link_type": {
+        "type": "string",
+        "description": "Count only edges of this link type, e.g. works_at."
+      },
+      "include_mentions": {
+        "type": "boolean",
+        "description": "Also count mention links (link_source mentions); default false."
+      },
+      "limit": {
+        "type": "number",
+        "description": "Rows to return (default 20, max 100)."
+      }
+    },
+    "cliHints": {
+      "name": "rank-entities"
     },
     "area": "links"
   },

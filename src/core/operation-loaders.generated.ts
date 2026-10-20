@@ -21,6 +21,7 @@ const load_extraction = () => import('./ops/extraction.ts') as Promise<Record<st
 const load_facts = () => import('./ops/facts.ts') as Promise<Record<string, unknown>>;
 const load_feedback = () => import('./ops/feedback.ts') as Promise<Record<string, unknown>>;
 const load_files = () => import('./ops/files.ts') as Promise<Record<string, unknown>>;
+const load_graph_rank = () => import('./ops/graph-rank.ts') as Promise<Record<string, unknown>>;
 const load_image = () => import('./ops/image.ts') as Promise<Record<string, unknown>>;
 const load_ingest_log = () => import('./ops/ingest-log.ts') as Promise<Record<string, unknown>>;
 const load_insights = () => import('./ops/insights.ts') as Promise<Record<string, unknown>>;
@@ -152,6 +153,7 @@ export const OPERATION_LOADERS: Record<string, readonly [() => Promise<Record<st
   "get_agent_job": [load_jobs, "jobsOperations"],
   "get_job_stats": [load_jobs, "jobsOperations"],
   "find_orphans": [load_orphans, "orphansOperations"],
+  "rank_entities": [load_graph_rank, "graphRankOperations"],
   "get_calibration_profile": [load_calibration, "calibrationOperations"],
   "takes_list": [load_takes, "takesOperations"],
   "takes_search": [load_takes, "takesOperations"],
