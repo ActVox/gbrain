@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.321.0] - 2026-10-20
+
+**With Git durability on, a page edit or delete on a source whose root sits below its Git repository's top (a brain in `<repo>/brain`) is now committed and pushed.** Before, the Git effect read file lists from Git with two different bases: `git ls-files` printed paths relative to the source root, while `git status` and `git diff --cached` printed them relative to the repository top. An edit to an already-tracked page, and every page delete, therefore completed as `unchanged`, and nothing was committed or pushed. Writer status and doctor showed nothing pending. A source whose root is the repository top was not affected.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page edit or delete on a durable source whose root is below the repository top | completed `unchanged`; nothing was committed or pushed | committed and pushed like any other change |
+| A URL-cloned source (`trackedChanges`, url-clone fence repair) whose root is below its clone's top | modified tracked files could be missed | every listing uses the source root's base (`--relative`) |
+| A durable checkout below the repository top that is ahead of its upstream | doctor `git_convergence` never matched it to its binding | warns `stranded`, as #7089 added for a root at the top |
+| Tracked files modified under a durable source root with no Git effect queued, running or parked | not reported | doctor `git_convergence` warns (`stranded`, listing them in `uncommitted_pages`); its fix asks you to commit them, then push |
+
+Edits that earlier releases left uncommitted on such a root stay in the working tree. The new doctor warning lists them so you can commit and push them. No schema migration.
+
+Reported by @mje-xyz (#7091), who also traced the mismatched path bases.
+
 ## [0.60.320.0] - 2026-10-19
 
 **A managed `gbrain sync` of an ordinary (non-company) source now compares the files at HEAD with what the brain holds, instead of replaying commits, so a reset, a revert, a rewritten history or a lost run can no longer leave pages behind, and one bad file holds only itself.** Each pass reads the committed tree, the index and the database, admits only the files whose page differs, proves nothing moved underneath it, and records the checkpoint inside the last import's own transaction. An idle sync with nothing new returns in well under a second.
