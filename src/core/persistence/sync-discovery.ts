@@ -331,6 +331,20 @@ function cutDiscoveryToSlice(discovered: SyncDiscovery, slicing: Pick<SyncSliceC
   discovered.slice = { phase: cut.phase, after: cut.after, head, target: discovered.target, done: cut.done };
   if (cut.done && discovered.target === head) delete discovered.stagedHead; else discovered.stagedHead = head;
 }
+/**
+ * #7130: the deletions no Git change names (`unproven`: Git path to the path its evidence is read at) that Git never
+ * committed are dropped from `entries` and returned: their absence is no evidence the page was deleted.
+ */
+async function dropUncommittedDeletes(gitRoot: string, tips: Array<string | null | undefined>, unproven: ReadonlyMap<string, string>,
+  entries: Map<string, { action: string }>): Promise<string[] | undefined> {
+  const deletes = [...unproven.keys()].filter(path => entries.get(path)?.action === 'delete');
+  if (!deletes.length) return undefined;
+  const evidence = await readOriginEvidence(gitRoot, tips, deletes.map(path => unproven.get(path)!));
+  const kept = deletes.filter(path => evidence.get(unproven.get(path)!) !== 'committed');
+  for (const path of kept) entries.delete(path);
+  return kept;
+}
+
 export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, context?: ManagedSyncContext,
   stage?: { target: string; head: string; slice?: Pick<SyncSliceCursor, 'phase' | 'after'> }, walk = false): Promise<SyncDiscovery> {
   const { binding, root, gitRoot, sourceId, incarnation, source } = context ?? await resolveManagedSyncContext(engine, opts);
@@ -464,13 +478,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       if (!present) unproven.set(gitPath, gitPath);
     }
   }
-  let uncommittedKept: string[] | undefined;
-  const unprovenDeletes = [...unproven.keys()].filter(path => entries.get(path)?.action === 'delete');
-  if (unprovenDeletes.length && !company) {
-    const evidence = await readOriginEvidence(gitRoot, [target, source.last_commit], unprovenDeletes.map(path => unproven.get(path)!));
-    uncommittedKept = unprovenDeletes.filter(path => evidence.get(unproven.get(path)!) !== 'committed');
-    for (const path of uncommittedKept) entries.delete(path);
-  }
+  const uncommittedKept = company ? undefined : await dropUncommittedDeletes(gitRoot, [target, source.last_commit], unproven, entries);
   if (company) {
     entries.clear();
     renamedFrom.clear();
