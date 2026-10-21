@@ -6,7 +6,7 @@ import { LANE_BUSY, PersistenceConsumer, type PersistenceConsumerLike, type Prep
 import { WaiterOnlyConsumer, type ElectedOwner } from './consumer-election.ts';
 import { RESIDENT_CONSUMER_KINDS, startConsumerHeartbeat, type ConsumerHeartbeat } from './consumer-heartbeat.ts';
 import { enginePoolStats } from '../postgres-engine/pool-stats.ts';
-import { claimOwnerKind } from './claim-phase.ts';
+import { claimOwnerKind, isOneShotCommand } from './claim-phase.ts';
 import { preparePageMutation } from './page-prepare.ts';
 import { prepareSemanticPageMutation } from './semantic-pages.ts';
 import { getWriteRequestById, getWriteRequestProgress, receiptFor, type WriteRequestProgress } from './journal.ts';
@@ -123,9 +123,10 @@ export function startPersistenceConsumer(engine: BrainEngine, config: GBrainConf
     }
     return prior.consumer;
   }
-  const full = () => new PersistenceConsumer(engine, config, preparePersistedMutation,
-    { drainNotice: claimOwnerKind() === 'serve', onSettled: row => { recordSettlement(engine); rememberSettled(engine, row.id); for (const listener of settledWaiters.get(engine)?.get(row.id) ?? []) listener(row); } });
   const kind = claimOwnerKind();
+  const oneShot = isOneShotCommand() && kind !== 'serve' && !RESIDENT_CONSUMER_KINDS.includes(kind) ? { waiting: () => (settledWaiters.get(engine)?.size ?? 0) > 0 } : undefined;
+  const full = () => new PersistenceConsumer(engine, config, preparePersistedMutation,
+    { drainNotice: kind === 'serve', oneShot, onSettled: row => { recordSettlement(engine); rememberSettled(engine, row.id); for (const listener of settledWaiters.get(engine)?.get(row.id) ?? []) listener(row); } });
   const service: Service = kind !== 'serve' && RESIDENT_CONSUMER_KINDS.includes(kind) && engine.kind === 'postgres'
     ? { consumer: new WaiterOnlyConsumer(engine, config, full, { kind, hostId: localHostId(), pool: () => enginePoolStats(engine) }), stopping: false }
     : (() => { const consumer = full(); return { consumer, stopping: false, heartbeat: startConsumerHeartbeat(engine, consumer.hostId,

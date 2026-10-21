@@ -1317,7 +1317,7 @@ export class PGLiteEngine implements BrainEngine {
     mode: string,
     corpusGeneration: string | null,
   ): Promise<void> {
-    return pagesImpl.updatePageContextualRetrievalState(this.engineSql, slug, sourceId, mode, corpusGeneration);
+    return pagesImpl.updatePageContextualRetrievalState(this.engineSql, slug, sourceId, mode, corpusGeneration, (key, read) => transactionMemo(this, key, read));
   }
 
   async migrateFactsToCanonical(

@@ -20,6 +20,7 @@ import { laneClaim, laneOf, laneRoots, laneTask } from './sync-lanes.ts';
 import { runPersistenceEffects } from './effects.ts';
 import { settleNoopEmbeddingEffects, type NoopSettleCursor } from './embedding-noop-settle.ts';
 import { runCompactionPass } from './compaction-pass.ts';
+import { claimHousekeepingTurn, housekeepingIntervalMs } from './housekeeping-turn.ts';
 import { currentEmbeddingSignature } from '../embedding.ts';
 import { PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { isWriteErrorCode } from './types.ts';
@@ -236,6 +237,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   private detachedBuilds = 0;
   private detachedQueue: Array<() => void> = [];
   private abandonedReleased = false;
+  /** GBRA-156: when this one-shot consumer last asked for the host's housekeeping turn, and whether it holds the turn now. */
+  private housekeepingAskedAt = -Infinity;
+  private housekeepingTurn = false;
   /** #6317: the engine the tick's own statements run through (the direct route when the engine has one; consumer-lane.ts). */
   private readonly statements: BrainEngine;
   private routeLogged = false;
@@ -254,7 +258,14 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       /** #6278: abandoned preparations past the ceiling before this process stops claiming (default DEFAULT_ZOMBIE_CAP). */
       zombieCap?: number;
       /** Write the long-drain progress line on stderr (serve; never a CLI command that may print --json). */
-      drainNotice?: boolean } = {}) {
+      drainNotice?: boolean;
+      /**
+       * GBRA-156: the consumer of a one-shot command (`put`, `cli`, `import`, ...). While `waiting` says a caller in this
+       * process awaits a write, it runs only what that write's claim can depend on; housekeeping (recovery and topology scans,
+       * compaction, queue upkeep, the projection pass) waits until no write is awaited and then runs at most once per
+       * interval across this host's processes (housekeeping-turn.ts).
+       */
+      oneShot?: { waiting: () => boolean } } = {}) {
     this.hostId = opts.hostId ?? localHostId();
     this.statements = consumerStatementEngine(engine);
   }
@@ -298,6 +309,29 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       void this.tick(afterProgress).finally(() => { const next = this.nextDelayMs ?? this.pollMs; this.nextDelayMs = undefined; this.schedule(next); });
     }, ms);
     this.timer.unref?.();
+  }
+  /**
+   * GBRA-156: recovery, expired-claim, dead-owner and topology scans. A one-shot consumer runs them while a caller in this
+   * process awaits a write that may be blocked behind them (except on the direct claim of its own admission), and otherwise
+   * only in the host's housekeeping turn (housekeeping-turn.ts).
+   */
+  private async sweepAllowed(direct: boolean): Promise<boolean> {
+    if (!this.opts.oneShot) return true;
+    return this.opts.oneShot.waiting() ? !direct : this.housekeepingTurnNow();
+  }
+  /** GBRA-156: compaction, queue upkeep and the projection pass; a one-shot consumer runs them only in the host's housekeeping turn. */
+  private async upkeepAllowed(): Promise<boolean> {
+    return !this.opts.oneShot || !this.opts.oneShot.waiting() && this.housekeepingTurnNow();
+  }
+  /** Whether this tick holds the host's housekeeping turn; asked at most once per interval per process, granted when the claim cannot be read. */
+  private async housekeepingTurnNow(): Promise<boolean> {
+    if (this.housekeepingTurn) return true;
+    const interval = housekeepingIntervalMs();
+    if (interval === 0) return true;
+    if (Date.now() - this.housekeepingAskedAt < interval) return false;
+    this.housekeepingAskedAt = Date.now();
+    this.housekeepingTurn = await this.phase('housekeeping_turn', signal => claimHousekeepingTurn(this.statements, this.hostId, interval, signal)).catch(() => true);
+    return this.housekeepingTurn;
   }
   private backoff(): number {
     this.idleDelayMs = Math.min(Math.max(this.idleDelayMs, this.pollMs) * 2, this.idleMaxMs);
@@ -500,6 +534,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   }
   private async doTick(afterProgress: boolean): Promise<void> {
     if (this.stopping) return;
+    this.housekeepingTurn = false;
     const requested = this.fullTickRequested;
     this.fullTickRequested = false;
     if (!requested) {
@@ -515,11 +550,11 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       }
       if (this.stopping) return;
       // #6650: the idle probe sees only lapsed claims; a live-leased claim of a dead owner is looked for here, on its own cadence.
-      if (!work) this.deadOwnersSeen = await this.phase('dead_owner_claims', signal => this.deadOwnerClaims(signal, true));
+      if (!work && await this.sweepAllowed(false)) this.deadOwnersSeen = await this.phase('dead_owner_claims', signal => this.deadOwnerClaims(signal, true));
       if (!work && !this.deadOwnersSeen?.length) {
         if (this.active.size > 0) { this.nextDelayMs = this.pollMs; return; }
         this.nextDelayMs = this.backoff();
-        if (!this.maintenanceWorker && Date.now() >= this.nextMaintenance) {
+        if (!this.maintenanceWorker && Date.now() >= this.nextMaintenance && await this.upkeepAllowed()) {
           this.nextMaintenance = Date.now() + 300_000;
           await this.phase('refresh_roots', signal => refreshManagedFilesystemRoots(this.engine,
             this.engine.kind === 'pglite' ? this.config.database_path : undefined, signal));
@@ -542,7 +577,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     this.nextDelayMs = this.pollMs;
     const direct = afterProgress && this.ownAdmission && fast;
     this.ownAdmission = false;
-    const scan = !direct && (!afterProgress || Date.now() - this.lastScan >= this.pollMs);
+    const scan = !direct && (!afterProgress || Date.now() - this.lastScan >= this.pollMs) && await this.sweepAllowed(direct);
+    const upkeep = await this.upkeepAllowed();
     if (scan) {
       this.lastScan = Date.now();
       await this.phase('refresh_roots', signal => refreshManagedFilesystemRoots(this.engine,
@@ -557,7 +593,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       .finally(() => { this.effectsWorker = undefined; });
     // Queue upkeep also follows publication volume, like autovacuum's scale
     // factor, so a busy owner never plans against a much smaller queue.
-    if (!this.maintenanceWorker && (Date.now() >= this.nextMaintenance || this.publishedSinceMaintenance >= this.maintenanceVolume)) {
+    if (upkeep && !this.maintenanceWorker && (Date.now() >= this.nextMaintenance || this.publishedSinceMaintenance >= this.maintenanceVolume)) {
       this.nextMaintenance = Date.now() + 60_000;
       this.publishedSinceMaintenance = 0;
       this.maintenanceWorker = runCompactionPass(this.engine, { hostId: this.hostId, notice: this.opts.drainNotice })
@@ -566,7 +602,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
         .then(rows => { this.maintenanceVolume = 50 + Math.ceil(rows * 0.2); }).catch(error => this.report(error))
         .finally(() => { this.maintenanceWorker = undefined; });
     }
-    if (!this.projectionWorker) this.projectionWorker = runResidentProjectionInvocation(this.engine, this.hostId,
+    if (upkeep && !this.projectionWorker) this.projectionWorker = runResidentProjectionInvocation(this.engine, this.hostId,
       [...this.activeRoots, ...this.rootRetryAfter.keys()], Date.now, this.engine.kind === 'postgres'
         ? AbortSignal.any([this.abort.signal, AbortSignal.timeout(this.opts.phaseMs ?? 5000)]) : undefined)
       .catch(error => this.report(error)).finally(() => { this.projectionWorker = undefined; });
@@ -989,6 +1025,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
         return this.settled(done);
       } finally { this.preparing.delete(row.id); this.executing.delete(row.id); }
     }
+    // GBRA-156: the publication ceiling (a TTL-cached config read that never rejects) is read while the write prepares.
+    const ceiling = readPublicationCeilingMs(this.engine);
     const prep = startPreparation(async signal => {
       signal.addEventListener('abort', () => cancel.abort(signal.reason), { once: true });
       await faultPoint('consumer:preparing', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation, signal });
@@ -1037,7 +1075,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       preparationActive = false;
       enterClaimPhase(clock, 'publishing');
       await faultPoint('consumer:prepared', { requestId: row.request_id, writeId: row.id, sourceId: row.source_id, operation: row.operation });
-      const ceilingMs = await readPublicationCeilingMs(this.engine);
+      const ceilingMs = await ceiling;
       await holdClaimForPublication(lease, () => renewWriteClaim({ executeRaw: this.engine.executeRawDirect.bind(this.engine) }, row.id, row.execution_token!,
         publicationLeaseMs(ceilingMs), undefined, claimPhaseStamp(clock, row.execution_token)));
       const { done, settled } = await boundPublication(() => this.publishSingle(row, prepared), this.publicationBound(row, ceilingMs, clock));

@@ -522,6 +522,7 @@ async function main() {
  * Split out of main() (refactor wave 1, W4 cli); order and exits unchanged.
  */
 async function runSharedOperation(command: string, subArgs: string[], cliOpts: CliOptions): Promise<void> {
+  (await import('../core/persistence/claim-phase.ts')).markOneShotCommand();
   // Shared operations (fall through to aliases, e.g. link-add -> add_link)
   const meta = cliOps.get(command) ?? cliAliases.get(command);
   if (!meta) exitCliError(usageError(`Unknown command: ${command}`, 'Run `gbrain --help` for available commands.', { code: 'unknown_command' }), command);
@@ -1454,10 +1455,14 @@ export async function makeContext(engine: BrainEngine, params: Record<string, un
   const explicit = op && opOwnsSource(op) ? null : (params.source as string | undefined) ?? null;
   const { resolveSourceWithTier, localFederatedSourceIds, SourceTargetError } = await import('../core/source-resolver.ts');
   try {
-    const resolved = await resolveSourceWithTier(engine, explicit);
-    sourceId = resolved.source_id;
-    sourceImplicit = resolved.tier !== 'flag' && resolved.tier !== 'env' && resolved.tier !== 'dotfile';
-    localFederated = await localFederatedSourceIds(engine, resolved.source_id, resolved.tier);
+    // GBRA-156: the source resolution reads config through the table the connect-time merge already read.
+    const { commandStartupConfig, withRequestConfigSnapshot } = await import('../core/config-snapshot.ts');
+    await withRequestConfigSnapshot(engine, async () => {
+      const resolved = await resolveSourceWithTier(engine, explicit);
+      sourceId = resolved.source_id;
+      sourceImplicit = resolved.tier !== 'flag' && resolved.tier !== 'env' && resolved.tier !== 'dotfile';
+      localFederated = await localFederatedSourceIds(engine, resolved.source_id, resolved.tier);
+    }, commandStartupConfig(engine));
   } catch (err) {
     // #1712: an EXPLICIT --source that fails to resolve (invalid id, or a
     // source that doesn't exist) must error loudly — the blanket swallow
