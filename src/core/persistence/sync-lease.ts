@@ -199,8 +199,9 @@ export interface DrainLeaseOptions {
 /**
  * The holder record: one `gbrain-drain-lease` minion row per lease, keyed by the lease token, carrying the holder's
  * kind, id and version. It doubles as the beacon an older binary's `liveSyncJob` sees, so an older autopilot backs off
- * while any holder drains. Application authority keeps it out of the unreviewed-job gate; `max_stalled` 0 and
- * `remove_on_fail` drop a dead holder's row instead of queueing it. It is renewed with the lease and deleted on release.
+ * while any holder drains. Application authority keeps it out of the unreviewed-job gate. It is renewed with the lease
+ * and deleted on release; the worker's stall sweep deletes the row of a holder that stopped renewing it, and the
+ * wall-clock sweep skips it (MinionQueue.handleStalled, #7187).
  */
 async function writeHolderRecord(engine: BrainEngine, sourceId: string, lease: DrainLease, holder: DrainHolderRef): Promise<void> {
   // One statement: the insert reads the delete's count, so a former holder's row goes first.

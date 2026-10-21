@@ -89,6 +89,7 @@ import { evaluateQuietHours, type QuietHoursConfig } from './quiet-hours.ts';
 import { endedByShutdown, releaseUndrainedClaims, settleShutdownInterruptedJob } from './worker-shutdown.ts';
 import { isWatchdogSuspect, settleWatchdogAbort } from './watchdog-attribution.ts';
 import { IdleWaiter } from './idle-wait.ts';
+import { jobResultOutcome } from './job-outcome.ts';
 import { readFileSync } from 'fs';
 
 /**
@@ -1559,12 +1560,12 @@ export class MinionWorker extends EventEmitter {
 
       clearInterval(lockTimer);
 
-      // Complete the job (token-fenced)
-      const completed = await this.queue.completeJob(
-        job.id,
-        lockToken,
-        result != null ? (typeof result === 'object' ? result as Record<string, unknown> : { value: result }) : undefined,
-      );
+      const stored = result != null ? (typeof result === 'object' ? result as Record<string, unknown> : { value: result }) : undefined;
+      const verdict = jobResultOutcome(stored);
+      // Complete the job (token-fenced); a result that reports a failure (#7188) ends it failed instead.
+      const completed = verdict.outcome === 'failed'
+        ? await this.queue.failJob(job.id, lockToken, verdict.reason!, 'failed', 0, stored)
+        : await this.queue.completeJob(job.id, lockToken, verdict.outcome === 'partial' ? { ...stored, job_outcome: 'partial' } : stored);
       const execution = this.executions.get(lockToken);
       if (execution) execution.stopped = true;
 
@@ -1572,6 +1573,7 @@ export class MinionWorker extends EventEmitter {
         console.warn(`Job ${job.id} completion dropped (lock token mismatch, job was reclaimed)`);
         return;
       }
+      if (verdict.outcome === 'failed') console.log(`Job ${job.id} (${job.name}) finished failed: ${verdict.reason}`);
       // resolveParent is folded into queue.completeJob() (same transaction as
       // status flip + token rollup + child_done), so a process crash here can't
       // strand the parent in waiting-children.

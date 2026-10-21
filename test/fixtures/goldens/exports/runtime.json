@@ -381,6 +381,7 @@
         "rlsScopeBindingEnabled",
         "runMigration",
         "runUnsafe",
+        "runUnsafeOnce",
         "runVectorAttempt",
         "searchKeyword",
         "searchKeywordChunks",
