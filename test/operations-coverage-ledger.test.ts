@@ -190,6 +190,7 @@ const LEDGER: Record<string, string> = {
   rate_answer: 'test/feedback-store.test.ts',
   // Covered by the C1 lifecycle behavioral suite (moved out of UNCOVERED).
   get_job_progress: 'test/jobs-lifecycle-ops.test.ts',
+  wait_job: 'test/minions/job-insight.test.ts',
   pause_job: 'test/jobs-lifecycle-ops.test.ts',
   resume_job: 'test/jobs-lifecycle-ops.test.ts',
   replay_job: 'test/jobs-lifecycle-ops.test.ts',

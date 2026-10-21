@@ -16,7 +16,8 @@ import { serializePageToMarkdown } from '../markdown.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { materializePageSnapshot } from '../page-state/materialize.ts';
-import { installPageEmbeddings, readProjectionSnapshot } from '../page-state/projections.ts';
+import { embeddingInputContext, embeddingWriteTarget, installPageEmbeddings, readProjectionSnapshot } from '../page-state/projections.ts';
+import { acceptedEmbeddingInputHashes } from '../embedding-input-hash.ts';
 import { embedSegmentedPage, readSegmentedEmbedPage, type SegmentedEmbedPage } from '../page-body/segmented-embedding.ts';
 import { resolveProvenanceStamp, stampIfPageProvenanceComplete } from '../embed-stale.ts';
 import { currentEmbeddingSignature, embedBatch } from '../embedding.ts';
@@ -412,14 +413,25 @@ export async function readEmbeddingEffectProjection(engine: BrainEngine, effect:
         { fix: effectStatusFix(effect) });
     }
     const column = prepared.embeddingColumn;
-    const completion = await tx.executeRaw<{ id: number; complete: boolean }>(`SELECT cc.id,
-      p.embedding_signature=$2 AND cc.${quoteIdentifier(column.name)} IS NOT NULL AND cc.embedded_at IS NOT NULL
-        AND cc.embedded_text_hash=md5(cc.chunk_text) AND cc.model IS NOT DISTINCT FROM $3 AS complete
+    const completion = await tx.executeRaw<{ id: number; chunk_text: string; chunk_source: string | null; embedding_input_hash: string | null; embedded: boolean; stamped: boolean }>(`SELECT cc.id,
+      cc.chunk_text, cc.chunk_source, cc.embedding_input_hash,
+      cc.${quoteIdentifier(column.name)} IS NOT NULL AND cc.embedded_at IS NOT NULL AND cc.embedded_text_hash=md5(cc.chunk_text)
+        AND cc.model IS NOT DISTINCT FROM $3 AS embedded,
+      p.embedding_signature=$2 AS stamped
       FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.id=$1 AND ${chunkGenerationFilter('p', 'cc', await chunkManifestReads(engine, tx))}`,
     [snapshot.page.id, signature, embeddingCompletionModel(column, signature, model)]);
-    const complete = new Set(completion.filter(chunk => chunk.complete === true).map(chunk => chunk.id));
+    // #7172: a vector whose recorded input (#5553: column, model, dimensions, wrapper tier and exact input) is one the
+    // current page accepts is current, whatever the page-level signature says; only the stamp is missing, so it is
+    // restamped (embedPage) rather than paid for again.
+    const target = await embeddingWriteTarget(tx);
+    const accepted = (chunk: { chunk_text: string; chunk_source: string | null; embedding_input_hash: string | null }) => chunk.embedding_input_hash !== null
+      && target.column.name === column.name && model === undefined
+      && acceptedEmbeddingInputHashes(embeddingInputContext(target, prepared.snapshot.page.title, prepared.snapshot.page.corpus_generation ?? null, prepared.chunks),
+        prepared.snapshot.page.contextual_retrieval_mode, chunk).includes(chunk.embedding_input_hash);
+    const complete = new Set(completion.filter(chunk => chunk.embedded === true && (chunk.stamped === true || accepted(chunk))).map(chunk => chunk.id));
     const pending = prepared.chunks.filter(chunk => !complete.has(chunk.id));
-    return { prepared, pending: pending.length && prepared.snapshot.page.contextual_retrieval_mode === 'per_chunk_synopsis' ? prepared.chunks : pending };
+    return { prepared, pending: pending.length && prepared.snapshot.page.contextual_retrieval_mode === 'per_chunk_synopsis' ? prepared.chunks : pending,
+      restamp: completion.some(chunk => chunk.stamped !== true) };
   });
 }
 
@@ -438,7 +450,16 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
   if (isEmbedSkipped(snapshot.page.frontmatter)) { await completeEffect(engine, effect, { embedding: 'skipped', reason: 'embed_skip' }); return; }
   const segmented = await readSegmentedEmbedPage(engine, { id: snapshot.page.id });
   if (segmented) { await embedSegmentedEffect(engine, config, effect, snapshot, segmented, signature, opts); return; }
-  const projection = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model);
+  await faultPoint('effect:embedding:page_read', { effectId: effect.id, requestId: effect.request_id, sourceId: effect.source_id });
+  // A write that committed after the page read above leaves no projection at this revision to wait for: the effect is
+  // superseded, as when the page read already saw the newer revision; only the effect's own revision still unsealed retries.
+  const projection = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model).catch(async error => {
+    if ((error as { code?: string }).code !== 'projection_pending' || targetedWithdrawalEffect(effect) || effect.data.source_scan) throw error;
+    const current = await selectedEffectPage(engine, effect);
+    if (!current || current.page.deleted_at || (current.revision === effect.revision && current.page.id === effect.data.page_id)) throw error;
+    return null;
+  });
+  if (!projection) { await completeEffect(engine, effect, { embedding: 'superseded', reason: 'revision_changed' }); return; }
   const { prepared } = projection;
   let pending = projection.pending;
   // A large page is metered as a whole under embed.max_usd_per_page (page-embedding-budget.ts).
@@ -535,6 +556,9 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
       await completeEffect(engine, effect, { embedding: 'superseded', reason: 'revision_changed' }); return;
     }
     return;
+  }
+  if (projection.restamp && !(await installPageEmbeddings(engine, prepared, [], signature)).complete) {
+    await completeEffect(engine, effect, { embedding: 'superseded', reason: 'revision_changed' }); return;
   }
   await finishPage(engine, effect, snapshot);
 }

@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 257454,
-    "stdoutSha256": "a92e6bc337e2a788986c2980d4b0acfe30d0a1259b56f462de2f21c04c7f68b4",
+    "stdoutBytes": 258655,
+    "stdoutSha256": "ad14c32a587d230a1eb8b6d47bab0cf1da4193be6cc1c7e645bc459dbbc6db6d",
     "toolNames": [
       "remember",
       "entity",
@@ -90,6 +90,7 @@
       "file_url",
       "submit_job",
       "get_job",
+      "wait_job",
       "list_jobs",
       "cancel_job",
       "retry_job",
@@ -4205,6 +4206,35 @@
         "scope": "admin"
       },
       {
+        "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Agent-scoped tokens (no admin) wait only on jobs they own.",
+        "idempotent": true,
+        "local_only": false,
+        "mutating": false,
+        "name": "wait_job",
+        "parameters": {
+          "id": "number",
+          "timeout_s": "number?"
+        },
+        "required_scopes": [],
+        "schema": {
+          "properties": {
+            "id": {
+              "description": "Job ID",
+              "type": "number"
+            },
+            "timeout_s": {
+              "description": "Seconds to wait (default 30, at most 55).",
+              "type": "number"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "scope": "admin"
+      },
+      {
         "description": "List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. Use when checking queued or failed work. Needs admin scope (agent-scoped tokens see only jobs they own).",
         "idempotent": true,
         "local_only": false,
@@ -4212,6 +4242,7 @@
         "name": "list_jobs",
         "parameters": {
           "fields": "array?",
+          "finished_since": "string?",
           "limit": "number?",
           "name": "string?",
           "queue": "string?",
@@ -4226,6 +4257,10 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "finished_since": {
+              "description": "Terminal-event cursor: an ISO time or the next_cursor of the previous call. Returns {jobs, next_cursor}: jobs that finished after it, oldest first.",
+              "type": "string"
             },
             "limit": {
               "description": "Max results (default: 50)",
@@ -4513,7 +4548,7 @@
         "scope": "agent"
       },
       {
-        "description": "Job queue statistics. PER-BLOCK scoping: by_status and queue_health are GLOBAL (unfiltered); by_type is windowed by since_hours; only the wedge block is scoped to the queue param. wedged: true is the silent-halt signal (a worker is alive but claiming nothing while work waits) — suggest restarting the jobs supervisor on the brain host. no_worker: true means work is waiting and NO worker is running for the queue (always on PGLite unless a gbrain jobs work drain is live); wedged is then false and the no_worker notice names the fix. private_queue: true means the queue is a parent-owned dream-inline queue: wedged is NEVER true for it and a worker restart cannot help — recovery runs automatically at worker spawn / dream-cycle start; suggest gbrain doctor for the per-queue verdict. Host-process diagnostics (renice, backpressure hints) stay on the gbrain jobs stats CLI.",
+        "description": "Job queue statistics. PER-BLOCK scoping: by_status and queue_health are GLOBAL (unfiltered); by_type is windowed by since_hours; only the wedge block is scoped to the queue param. wedged: true is the silent-halt signal (a worker is alive but claiming nothing while work waits) — suggest restarting the jobs supervisor on the brain host. no_worker: true means work is waiting and NO worker is running for the queue (always on PGLite unless a gbrain jobs work drain is live); wedged is then false and the no_worker notice names the fix. private_queue: true means the queue is a parent-owned dream-inline queue: wedged is NEVER true for it and a worker restart cannot help — recovery runs automatically at worker spawn / dream-cycle start; suggest gbrain doctor for the per-queue verdict. by_queue has one row per queue (every dream-inline-* queue folded into one dream-inline row). Host-process diagnostics (renice, backpressure hints) stay on the gbrain jobs stats CLI.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
