@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.353.0] - 2026-10-21
+
+**The warm CLI socket now matches a serve that exports `GBRAIN_HOME` with a CLI that doesn't.** After v0.60.350.0, a serve started with `GBRAIN_HOME=$HOME` still refused every CLI that relied on `HOME` alone, with `refused (identity_mismatch): env GBRAIN_HOME`. Both sides resolved to the same home, but the identity compared whether the variable was set. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID` now count by the config home and brain they resolve to, which the identity already compares.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Serve exports `GBRAIN_HOME`, CLI reaches the same home through `HOME` | refused (`env GBRAIN_HOME`) | answered warm |
+| Serve sets `GBRAIN_BRAIN_ID=host`, CLI leaves it unset | refused | answered warm |
+| A different resolved config home or brain | refused | still refused (`config home`, `brain`) |
+
+### What to watch for after you upgrade
+
+- Restart the serve after upgrading, as before: a serve and a CLI on different gbrain versions never match.
+
+### Itemized changes
+
+- `READ_BEHAVIOR_ENV` drops `GBRAIN_HOME`, `GBRAIN_BRAIN_ID`, `GBRAIN_MOUNTS_PATH` (mount brains, which the socket never serves) and `GBRAIN_CWD_ENV_QUARANTINED` (a re-run marker whose effect already shows in the environment it left). The classification test lists them with the reason.
+
 ## [0.60.352.0] - 2026-10-21
 
 **Reading the timeline of a very large page uses less memory.** When gbrain rebuilds a page's timeline links, it keeps track of the timeline lines it has already seen, so it never writes one twice. On a page with tens of thousands of dated lines, that tracking took about 80 bytes per line, roughly a third of an 8 MiB page's own size. It now takes about 25 bytes per line, and the results are exactly the same.

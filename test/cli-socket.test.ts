@@ -67,7 +67,10 @@ function homeWithConfig(name: string, body = '{"engine":"postgres"}'): { dir: st
  * its text goes: writes, sync, jobs, workers, locks, doctor, setup and hooks,
  * other transports (HTTP, MCP surface, thin client), the database URL variables
  * (compared as a database target), connection sizing and driver tuning,
- * diagnostics, settings only the CLI's own renderer reads (GBRAIN_FAIL_ON_EMPTY:
+ * location variables compared by what they resolve to (GBRAIN_HOME as the config
+ * home, GBRAIN_BRAIN_ID as the brain id, GBRAIN_MOUNTS_PATH for mount brains the
+ * socket never serves, GBRAIN_CWD_ENV_QUARANTINED whose effect is already in the
+ * env it left), diagnostics, settings only the CLI's own renderer reads (GBRAIN_FAIL_ON_EMPTY:
  * the warm path renders and sets the exit code in the CLI, with the CLI's
  * environment), and constants that only share the prefix. Families are listed
  * by prefix only where no member reads; anything else is named.
@@ -80,6 +83,7 @@ const NOT_READ_BEHAVIOR_PREFIXES = [
   'GBRAIN_PROGRESSIVE_BATCH_', 'GBRAIN_QUEUE_', 'GBRAIN_SETUP_', 'GBRAIN_STOP_PUSH', 'GBRAIN_SUPERVIS', 'GBRAIN_SWEEP', 'GBRAIN_SYNC', 'GBRAIN_WORKER_',
 ];
 const NOT_READ_BEHAVIOR = new Set([
+  'GBRAIN_HOME', 'GBRAIN_BRAIN_ID', 'GBRAIN_MOUNTS_PATH', 'GBRAIN_CWD_ENV_QUARANTINED',
   'GBRAIN_FAIL_ON_EMPTY', 'GBRAIN_CLI_SOCKET', 'GBRAIN_DEBUG', 'GBRAIN_SQL_TRACE', 'GBRAIN_SQL_TRACE_LABEL', 'GBRAIN_LME_DEBUG', 'GBRAIN_SOURCE',
   'GBRAIN_DATABASE_URL', 'GBRAIN_DIRECT_DATABASE_URL', 'GBRAIN_DIRECT_POOL_SIZE', 'GBRAIN_DISABLE_DIRECT_POOL', 'GBRAIN_PREPARE',
   'GBRAIN_IDLE_TX_TIMEOUT', 'GBRAIN_MAX_CONNECTIONS', 'GBRAIN_NO_RETRY_CONNECT', 'GBRAIN_DB_ACCESS',
@@ -160,7 +164,7 @@ describe('identity', () => {
     expect(cliSocketIdentityMismatch(base, identity())).toBe('config contents');
   });
 
-  test('a sizing or driver variable may differ; a read-behavior variable may not, and is named without its value', () => {
+  test('a sizing or driver variable may differ, and so may a location variable that resolves to the same home and brain (one side exporting GBRAIN_HOME, the other relying on HOME); a read-behavior variable may not, and is named without its value', () => {
     homeWithConfig('a');
     const base = identity({ env: { HOME: '/home/alice-example', GBRAIN_HOME: '/home/alice-example' } });
     for (const env of [{ GBRAIN_POOL_SIZE: '10' }, { GBRAIN_DIRECT_POOL_SIZE: '4' }, { GBRAIN_PREPARE: 'true' }, { GBRAIN_POOL_MAX_LIFETIME_S: '60' },
@@ -169,7 +173,9 @@ describe('identity', () => {
     }
     const contributor = identity({ env: { GBRAIN_HOME: '/home/alice-example', GBRAIN_CONTRIBUTOR_MODE: '1' } });
     expect(cliSocketIdentityMismatch(base, contributor)).toBe('env GBRAIN_CONTRIBUTOR_MODE');
-    expect(cliSocketIdentityMismatch(base, identity({ env: { GBRAIN_HOME: '/home/bob-example' } }))).toBe('env GBRAIN_HOME');
+    expect(cliSocketIdentityMismatch(base, identity({ env: { HOME: '/home/alice-example' } }))).toBeNull();
+    expect(cliSocketIdentityMismatch(base, identity({ env: { GBRAIN_HOME: '/home/alice-example', GBRAIN_BRAIN_ID: 'host', GBRAIN_MOUNTS_PATH: '/home/alice-example/.gbrain/mounts.json' } }))).toBeNull();
+    expect(cliSocketIdentityMismatch(base, identity({ env: { GBRAIN_HOME: '/home/alice-example', GBRAIN_MODEL: 'model-a' } }))).toBe('env GBRAIN_MODEL');
     expect(JSON.stringify(identity({ env: { GBRAIN_MODEL: 'model-secretish' } }))).not.toContain('model-secretish');
   });
 
