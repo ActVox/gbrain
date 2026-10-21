@@ -102,7 +102,7 @@ const remember: Operation = {
     visibility: {
       type: 'string',
       enum: ['world', 'private'],
-      description: 'world (default) or private (local CLI). Omitted on a private target page or brain default: private.',
+      description: 'world (default) or private (local CLI).',
     },
     replaces: { type: 'string', description: 'fact_id this fact replaces (same entity, or none).', fullSurfaceOnly: true },
   },
