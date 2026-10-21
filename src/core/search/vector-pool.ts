@@ -25,35 +25,26 @@ export interface VectorPoolAttempt {
  * Runs the statement's index walk, then its scope scan (each when present),
  * before the pool. Walk rows answer the search when its window is full and
  * they fill the limit; scope-scan rows when they fill the limit or the scope
- * ran out of eligible chunks (a short window). A full walk window that holds
- * fewer pages than the limit (pages with many chunks) widens the walk the way
- * the pool escalates (`nextInnerLimit`), so it returns the set the pool's
- * widened attempt would, through the index, instead of handing a large brain
- * to the joined statement, whose plan there is a full scan (GBRA-156).
- * Otherwise, or past an attempt's 2 s budget, this returns null and the
- * caller runs the pool. The walk may visit its whole over-fetched window, so
- * its tuple budget covers it.
+ * ran out of eligible chunks (a short window). Otherwise, or past an
+ * attempt's 2 s budget, this returns null and the caller runs the pool. The
+ * walk may visit its whole over-fetched window, so its tuple budget covers it.
  */
 export async function searchIndexWalk(
   stmt: Pick<VectorSearchStatement, 'indexWalkSql' | 'scopeScanSql' | 'innerLimit' | 'indexWalkOverfetch'>,
   limit: number,
   run: (attempt: VectorPoolAttempt) => Promise<VectorPoolBatch>,
 ): Promise<Record<string, unknown>[] | null> {
-  const attempt = async (kind: { indexWalk: true } | { scopeScan: true }, innerLimit = stmt.innerLimit) => {
+  const attempt = async (kind: { indexWalk: true } | { scopeScan: true }) => {
     try {
-      return await run({ innerLimit, maxScanTuples: Math.max(2_000, innerLimit * stmt.indexWalkOverfetch), remainingMs: 2_000, exact: false, ...kind });
+      return await run({ innerLimit: stmt.innerLimit, maxScanTuples: Math.max(2_000, stmt.innerLimit * stmt.indexWalkOverfetch), remainingMs: 2_000, exact: false, ...kind });
     } catch (error) {
       if ((error as { code?: string }).code === '57014') return null;
       throw error;
     }
   };
   if (stmt.indexWalkSql) {
-    for (let innerLimit = stmt.innerLimit, escalations = 0; ; innerLimit = nextInnerLimit(innerLimit, stmt.innerLimit), escalations++) {
-      const batch = await attempt({ indexWalk: true }, innerLimit);
-      if (!batch || batch.candidatePool < innerLimit) break;
-      if (batch.rows.length >= limit) return batch.rows;
-      if (escalations >= MAX_POOL_ESCALATIONS) break;
-    }
+    const batch = await attempt({ indexWalk: true });
+    if (batch && batch.candidatePool >= stmt.innerLimit && batch.rows.length >= limit) return batch.rows;
   }
   if (stmt.scopeScanSql) {
     const batch = await attempt({ scopeScan: true });
@@ -76,14 +67,6 @@ export async function searchIndexWalk(
  * filtered searches pay for the deeper visit.
  */
 export const POOL_MAX_SCAN_TUPLES = 20_000;
-
-/** How many times a short pool (and a walk whose full window holds too few pages) widens its window. */
-const MAX_POOL_ESCALATIONS = 3;
-
-/** The next, wider candidate window: four times the last, capped at 20,000 chunks (or the first window when that is larger). */
-function nextInnerLimit(innerLimit: number, initialLimit: number): number {
-  return Math.min(innerLimit * 4, Math.max(initialLimit, 20_000));
-}
 
 export function remainingVectorBudget(deadline: number): number {
   const remaining = Math.floor(deadline - performance.now());
@@ -119,8 +102,8 @@ export async function searchVectorPool(
         if (remaining() === 0) { reason = 'deadline'; break; }
         if (!(await hasMore(batch.eligiblePool ?? batch.candidatePool, remaining()))) return batch.rows;
       }
-      if (escalations >= MAX_POOL_ESCALATIONS || (indexed && !iterative)) break;
-      innerLimit = nextInnerLimit(innerLimit, initialLimit);
+      if (escalations >= 3 || (indexed && !iterative)) break;
+      innerLimit = Math.min(innerLimit * 4, Math.max(initialLimit, 20_000));
       escalations++;
     }
     if (engine === 'postgres' && indexed && remaining() > 0) {

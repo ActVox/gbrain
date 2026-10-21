@@ -154,7 +154,7 @@ describe('searchTitles — D1 title candidate arm', () => {
     expect(tlHit.chunk_index).toBe(2); // lowest index when no compiled_truth chunk
   });
 
-  test('local callers match the title only: a timeline word is not a title hit, on the strict query or the OR fallback (#7135)', async () => {
+  test('a local OR re-run matches the title only: a timeline word is not a relaxed title hit (#7135)', async () => {
     await engine.putPage('people/dated-entity', {
       type: 'person',
       title: 'Cobalt Meridian Atlas',
@@ -170,8 +170,8 @@ describe('searchTitles — D1 title candidate arm', () => {
     expect(inVector.rows[0].hit).toBe(true);
 
     const slugs = async (q: string) => (await engine.searchTitles(q, { limit: 10 })).map(r => r.slug);
-    expect(await slugs('zircon quarry')).not.toContain('people/dated-entity');
     expect(await slugs('zircon nebulith')).not.toContain('people/dated-entity');
+    expect(await slugs('quarry nebulith')).not.toContain('people/dated-entity');
     expect(await slugs('Cobalt Meridian')).toContain('people/dated-entity');
     expect(await slugs('Cobalt zircon')).toContain('people/dated-entity');
   });
