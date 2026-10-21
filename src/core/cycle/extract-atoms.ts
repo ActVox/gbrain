@@ -1304,7 +1304,7 @@ export async function runPhaseExtractAtoms(
         context.links = provenanceLinks;
         context.embed = isAvailable('embedding');
         const outcome = await publishGeneration(engine, atomGenerationAdapter, { key, items: unmanagedAtoms.map(atom => markdownItem(atom.slug, atom.content)),
-          input: { pin: atomInputPin(item), size: Buffer.byteLength(item.kind === 'transcript' ? item.content : sourcePage?.compiled_truth ?? '') },
+          input: { pin: atomInputPin(item), size: Buffer.byteLength(item.content) },
           partial: truncated, context, runId });
         for (const complete of context.postCommit ?? []) await complete().catch(error => console.error(`[extract_atoms] ${originLabel}: post-commit embedding failed (the embedding backfill retries it): ${error instanceof Error ? error.message : String(error)}`));
         if (outcome.state === 'held') {
