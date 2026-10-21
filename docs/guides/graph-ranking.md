@@ -86,10 +86,12 @@ CLI keeps the trusted view (deleted pages and the scope still apply).
 
 `coverage.state` is `current`, `behind` (link extraction has pages to catch up,
 so counts cover only pages whose links are extracted; `note` says so) or
-`unread` (the backlog could not be read). It reads the same backlog as doctor's
-`links_extraction_lag` for each source in scope. The local CLI also gets the
-page counts; a remote caller gets the state alone, because the counts include
-pages it cannot read. The brain host catches up with `gbrain extract --stale`.
+`unread` (the backlog could not be read). The local CLI reads the same backlog
+as doctor's `links_extraction_lag` for each source in scope and also gets the
+page counts. A remote caller gets the state alone, computed over the pages it
+can read (the same rule as the ranking): a private, quarantined or
+foreign-source page never makes its coverage `behind`. The brain host catches
+up with `gbrain extract --stale`.
 
 ## rank_entities_timeout
 

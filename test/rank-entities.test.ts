@@ -8,6 +8,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 import { OperationError } from '../src/core/ops/contract.ts';
 import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
+import { ALIAS_DERIVATION_VERSION, MENTION_EXTRACTOR_VERSION } from '../src/core/mentions/pass.ts';
 
 let engine: PGLiteEngine;
 
@@ -220,6 +221,39 @@ describe('rank_entities remote visibility', () => {
     const res = await rank(remote()) as any;
     expect(res.coverage).toEqual({ state: 'behind' });
     expect(Object.keys((await rank(local()) as any).coverage)).toContain('actionable');
+  });
+
+  test('pages the caller cannot read change local coverage and leave remote coverage current', async () => {
+    await seedBase();
+    const settle = async () => {
+      await engine.executeRaw("UPDATE pages SET links_extracted_at = now() + interval '1 day'");
+      await engine.executeRaw(`INSERT INTO page_mention_state (page_id, source_id, mention_revision, mention_version, alias_revision, alias_version)
+        SELECT id, source_id, knowledge_revision, $1, knowledge_revision, $2 FROM pages ON CONFLICT (page_id) DO NOTHING`, [MENTION_EXTRACTOR_VERSION, ALIAS_DERIVATION_VERSION]);
+    };
+    await settle();
+    const all = { source_id: '__all__' };
+    const coverageOf = async (ctx: OperationContext, params: Record<string, unknown>) => (await rank(ctx, params) as any).coverage;
+    for (const include_mentions of [false, true]) {
+      expect((await coverageOf(ctxOf({ sourceId: '__all__' }), { ...all, include_mentions })).state).toBe('current');
+      expect(await coverageOf(remote(), { include_mentions })).toEqual({ state: 'current' });
+    }
+    const cases: Array<[string, boolean, () => Promise<void>]> = [
+      ['private page', true, () => page('notes/secret', 'note', 'source-a', { visibility: 'private' })],
+      ['quarantined page', false, () => page('notes/quarantined', 'note', 'source-a', { quarantine: 'synthetic' })],
+      ['foreign-source page', true, () => page('notes/foreign', 'note', 'source-b')],
+    ];
+    for (const [label, linkStale, seed] of cases) {
+      await settle();
+      await seed();
+      const localState = async (include_mentions: boolean) => (await coverageOf(ctxOf({ sourceId: '__all__' }), { ...all, include_mentions })).state;
+      expect({ label, links: await localState(false), mentions: await localState(true) })
+        .toEqual({ label, links: linkStale ? 'behind' : 'current', mentions: 'behind' });
+      for (const include_mentions of [false, true]) {
+        expect({ label, include_mentions, coverage: await coverageOf(remote(), { include_mentions }) }).toEqual({ label, include_mentions, coverage: { state: 'current' } });
+      }
+    }
+    await page('notes/readable', 'note');
+    expect(await coverageOf(remote(), {})).toEqual({ state: 'behind' });
   });
 
   test('a source outside the grant answers not_found', async () => {

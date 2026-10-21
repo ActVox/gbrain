@@ -103,9 +103,10 @@ function parseFolded(value: unknown): Array<{ slug: string; reason: string }> {
   return Array.isArray(list) ? list.map(f => ({ slug: String(f.slug), reason: String(f.reason) })) : [];
 }
 
-async function readCoverage(ctx: OperationContext, sourceIds: string[] | undefined, includeMentions: boolean): Promise<Coverage> {
+async function readCoverage(ctx: OperationContext, sourceIds: string[] | undefined, includeMentions: boolean, excludePrivate: boolean): Promise<Coverage> {
   const targets: Array<string | undefined> = sourceIds ?? [undefined];
   if (targets.length > COVERAGE_SOURCE_CAP) return { state: 'unread', reason: 'too_many_sources' };
+  if (ctx.remote !== false) return readRemoteCoverage(ctx, sourceIds, includeMentions, excludePrivate);
   const { readExtractionLag } = await import('../extraction-lag.ts');
   const sum = { total: 0, actionable: 0, attendance_blocked: 0, held: 0, mention_due: null as number | null };
   try {
@@ -120,9 +121,29 @@ async function readCoverage(ctx: OperationContext, sourceIds: string[] | undefin
   } catch {
     return { state: 'unread', reason: 'read_failed' };
   }
-  const state = sum.actionable > 0 || (includeMentions && (sum.mention_due ?? 0) > 0) ? 'behind' : 'current';
-  // The counts include pages a remote caller cannot read, so remote callers get the state alone.
-  return ctx.remote === false ? { state, ...sum } : { state };
+  return { state: sum.actionable > 0 || (includeMentions && (sum.mention_due ?? 0) > 0) ? 'behind' : 'current', ...sum };
+}
+
+/** A remote caller's state alone, computed over the pages it may read: a page it cannot see never makes coverage behind. */
+async function readRemoteCoverage(ctx: OperationContext, sourceIds: string[] | undefined, includeMentions: boolean, excludePrivate: boolean): Promise<Coverage> {
+  const { effectiveLinkExtractorWatermark } = await import('../link-extraction-watermark.ts');
+  const { linkableTypesFor, loadSourcePack, readMentionPolicy } = await import('../mentions/policy.ts');
+  const { rankCoverageStatement } = await import('../engine-sql/graph-rank.ts');
+  try {
+    const versionTs = await effectiveLinkExtractorWatermark(ctx.engine);
+    const policy = includeMentions ? await readMentionPolicy(ctx.engine) : null;
+    const ids = sourceIds ?? (await ctx.engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE NOT archived ORDER BY id')).map(r => r.id);
+    if (ids.length > COVERAGE_SOURCE_CAP) return { state: 'unread', reason: 'too_many_sources' };
+    for (const sourceId of ids) {
+      const mentionTypes = policy?.enabled ? linkableTypesFor(await loadSourcePack(ctx.engine, sourceId), policy) : undefined;
+      const { text, params } = rankCoverageStatement({ sourceId, excludePrivate, versionTs, ...(mentionTypes ? { mentionTypes } : {}) });
+      const [row] = await ctx.engine.executeRaw<{ link_behind: boolean; mention_due: boolean }>(text, params, { timeoutMs: 10_000 });
+      if (row?.link_behind || row?.mention_due) return { state: 'behind' };
+    }
+  } catch {
+    return { state: 'unread', reason: 'read_failed' };
+  }
+  return { state: 'current' };
 }
 
 async function attachDuplicates(ctx: OperationContext, rows: RankedEntity[], filter: EntityTypeFilter, excludePrivate: boolean): Promise<number> {
@@ -198,7 +219,7 @@ const rank_entities: Operation = {
         inbound: Number(r.inbound), outbound: Number(r.outbound), neighbors: Number(r.neighbors), ...folded };
     });
     const duplicatesChecked = await attachDuplicates(ctx, entities, resolution.filter, excludePrivate);
-    const coverage = await readCoverage(ctx, sourceIds, params.includeMentions);
+    const coverage = await readCoverage(ctx, sourceIds, params.includeMentions, excludePrivate);
     const notes: string[] = [];
     if (resolution.status === 'pack_unavailable') notes.push('The schema pack did not load, so no entity types are known: pass types explicitly, e.g. ["person"].');
     if (coverage.state === 'behind') notes.push('Link extraction is behind: counts cover only pages whose links are extracted (the brain host runs gbrain extract --stale to catch up).');

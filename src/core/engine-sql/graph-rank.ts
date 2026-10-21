@@ -42,6 +42,8 @@ import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 import { quarantineFilterFragment } from '../quarantine.ts';
 import { rankingLinkSql } from '../link-ranking-policy.ts';
 import { MAX_RETIREMENT_HOPS, retiredPageSql } from '../entities/resolve.ts';
+import { staleForExtractionSql } from './pages.ts';
+import { ALIAS_DERIVATION_VERSION, MENTION_EXTRACTOR_VERSION } from '../mentions/pass.ts';
 
 export type RankDirection = 'in' | 'out' | 'both';
 
@@ -82,12 +84,32 @@ const REDIRECT_TARGET_SQL = "regexp_replace(regexp_replace(btrim(split_part(rege
 const FOLD_REASON_SQL = "CASE WHEN btrim(COALESCE(rp.frontmatter->>'superseded_by', '')) <> '' THEN 'superseded_by' ELSE 'merged_into' END";
 
 /** The pages (alias vp) a counted edge, chain hop, fold target or link origin may touch, evaluated once per page. */
-function readablePageSql(opts: RankEntitiesStatementOpts): SqlFragment {
+function readablePageSql(opts: Pick<RankEntitiesStatementOpts, 'sourceIds' | 'remote'>): SqlFragment {
   const scope = opts.sourceIds ? sqlFragment` AND vp.source_id = ANY(${opts.sourceIds}::text[])` : sqlFragment``;
   if (!opts.remote) return sqlFragment`vp.deleted_at IS NULL${scope}`;
   const privacy = opts.remote.excludePrivate ? trustedSql(` AND ${privatePagesFilterFragment('vp')}`) : sqlFragment``;
   return sqlFragment`vp.deleted_at IS NULL${scope} AND ${trustedSql(quarantineFilterFragment('vp'))}${privacy}
       AND EXISTS (SELECT 1 FROM sources rank_source WHERE rank_source.id = vp.source_id AND NOT rank_source.archived)`;
+}
+
+/**
+ * A remote caller's coverage for one source, over the pages it may read (the
+ * same readable predicate as the ranking): does any readable page still owe
+ * link extraction, and (with mentionTypes) a mention pass? Pages the caller
+ * cannot read never move the state.
+ */
+export function rankCoverageStatement(opts: { sourceId: string; excludePrivate: boolean; versionTs: string; mentionTypes?: string[] }): { text: string; params: unknown[] } {
+  const readable = readablePageSql({ sourceIds: [opts.sourceId], remote: { excludePrivate: opts.excludePrivate } });
+  const mentionDue = opts.mentionTypes
+    ? sqlFragment`EXISTS (SELECT 1 FROM pages p LEFT JOIN page_mention_state s ON s.page_id = p.id
+        WHERE p.id IN (SELECT id FROM readable) AND (s.page_id IS NULL OR s.mention_revision IS DISTINCT FROM p.knowledge_revision
+          OR s.mention_version IS DISTINCT FROM ${MENTION_EXTRACTOR_VERSION}
+          OR (p.type = ANY(${opts.mentionTypes}::text[]) AND (s.alias_revision IS DISTINCT FROM p.knowledge_revision OR s.alias_version IS DISTINCT FROM ${ALIAS_DERIVATION_VERSION}))))`
+    : sqlFragment`false`;
+  return renderFragment(sqlFragment`
+    WITH readable AS MATERIALIZED (SELECT vp.id FROM pages vp WHERE ${readable})
+    SELECT EXISTS (SELECT 1 FROM pages WHERE id IN (SELECT id FROM readable) AND ${staleForExtractionSql(opts.versionTs)}) AS link_behind,
+           ${mentionDue} AS mention_due`);
 }
 
 export function rankEntitiesStatement(opts: RankEntitiesStatementOpts): { text: string; params: unknown[] } {
