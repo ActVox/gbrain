@@ -117,10 +117,11 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     summary: 'Write database-only timeline rows back into their pages as marked bullets (#5567). Rows that cannot round-trip are kept and counted. Each repaired page is re-embedded by its publication.',
   },
   visibility: {
-    handler: visibilityRepair, embeds: 'effect', checks: ['derived_visibility'],
+    handler: visibilityRepair, embeds: 'effect', checks: ['derived_visibility'], preview_bound: true,
     summary: 'Stamp explicit visibility on extracted atoms and synthesized concepts, tighten-only (#5525). Transcript and missing origins become private; nothing is ever loosened. '
       + 'Also makes private the chronicle events of a private origin, the pages that carry a privacy alias (access: private, ...) but no visibility, and the world facts held in or extracted from a private page. '
-      + 'Each repaired page is re-embedded by its publication.',
+      + 'The preview plans by class (--class facts|events|aliases|lineage; facts first, only lineage reads links), lists one window (--limit, default 1000) '
+      + 'and prints --apply --expect <hash>, which applies exactly that window (resumable); preview again for the next window. Each repaired page is re-embedded by its publication.',
   },
   'safe-chunks': {
     handler: safeChunksRepair, embeds: 'inline', checks: ['safe_index_pending'],

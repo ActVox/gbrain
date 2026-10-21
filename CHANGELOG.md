@@ -12,27 +12,33 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.351.0] - 2026-10-21
 
-**Reading the timeline of a very large page uses less memory.** When gbrain rebuilds a page's timeline links, it keeps track of the timeline lines it has already seen, so it never writes one twice. On a page with tens of thousands of dated lines, that tracking took about 80 bytes per line, roughly a third of an 8 MiB page's own size. It now takes about 25 bytes per line, and the results are exactly the same.
+**Remote page reads now hide a page marked private only by a privacy alias, and `gbrain repair visibility` and doctor `derived_visibility` finish on a large brain: the preview plans one class at a time, world facts from a private page first, lists one bounded window and applies exactly that window with `--apply --expect <hash>`.**
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| Memory held while reading the timeline of an 8 MiB page with about 43,000 dated lines (PGLite) | 4.9–6.6 MiB | 1.7–3.4 MiB |
-| The same page on Postgres | about 5.3 MiB | 2.8–5.1 MiB |
-| A dense page with about 113,000 dated lines (PGLite / Postgres) | 5.6–6.5 / 6.3–7.3 MiB | 2.7–2.9 / 4.5–5.1 MiB |
-| Which timeline entries are kept or dropped | — | unchanged |
+| A page with `access: private` (or `confidentiality: secret`, ...) and no `visibility`, read remotely | shown unless `visibility.honor_aliases` was set | hidden by default, like `visibility: private`; local CLI reads are unchanged; opt out with `gbrain config set visibility.honor_aliases false` |
+| `gbrain repair visibility` on a brain with tens of thousands of atoms and concepts | the plan ran a join that paired every concept with every atom (and every world fact with every page) and could time out before printing anything | set-based plans; one class at a time in the order remote callers are exposed (facts, remotely readable first; chronicle events; alias-only pages; atoms and concepts); only `--class lineage` reads concept-provenance links |
+| Preview size and apply | every row, then `--apply` applied them all | one window (1,000 items, `--limit` up to 10,000) with progress on stderr; `--apply --expect <hash>` applies exactly that window and resumes after its last item; preview again for the next window |
+| A plan class over its statement bound | the whole preview failed | that class is reported and skipped (120 s per statement); the others are listed |
+| Doctor `derived_visibility` | one long pass; the fact count came last | the fact count (what remote callers can read) runs first; derived-page counts that overrun the bound read as unknown |
+| A doctor rerun hint capped to fit an agent tool call | named only the capped `--budget-ms` | also names the uncapped budget to use in a terminal |
 
-Nothing changes on upgrade, and nothing is rewritten.
+On a synthetic brain of about 600k pages (40k atoms, 1k concepts, 20k facts), the default preview takes 0.5 s on Postgres and 0.7 s on PGLite, a lineage preview 0.5 s and 0.75 s, and doctor `derived_visibility` 1.3 s and 1.0 s.
+
+**Spend effect:** none. No model calls; repaired pages are re-embedded by their publication as before. Nothing is rewritten on upgrade: the repair is preview-first and only tightens.
+
+### What to watch for after you upgrade
+
+- Remote callers stop seeing alias-only private pages. Doctor `derived_visibility` counts them; `gbrain repair visibility --class aliases` stamps `visibility: private` on them after you agree.
+- Use the apply command a preview prints. A bare `gbrain repair visibility --apply` (and `--all`, the remediation plan) still applies every class at once.
 
 ### Itemized changes
 
-- `src/core/timeline-extract.ts`: `TimelineKeySet` stores its digests with open addressing over two flat number arrays (`firsts` and `values`, growing at 3/4 load) instead of a `Map<number, number>`. Collision handling (`AMBIGUOUS`), `mark` and `marked` behave as before.
-
-### For contributors
-
-- `test/large-pages/managed-links-timeline-heap.test.ts` now has margin under its unchanged bound (`held < page bytes`). The bound and the test are untouched.
-- Unit and serial shard weights are refreshed from a recent full run (`scripts/test-weights.json`, `scripts/serial-weights.json` and their metadata files).
+- `visibility.honor_aliases` defaults to on; remote `get_page` and `list_pages` honor the aliases.
+- `gbrain repair visibility`: `--class facts|events|aliases|lineage`, a windowed preview bound to `--expect`, stderr progress, a per-statement bound, set-based fact and concept-lineage queries.
+- Doctor `derived_visibility`: facts first, bounded derived-page counts; the preview hint names the windowed apply.
 
 ## [0.60.350.0] - 2026-10-21
 
