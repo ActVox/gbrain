@@ -4581,7 +4581,7 @@
         "kind": "function",
         "name": "walkMarkdownFiles",
         "signature": [
-          "(dir: string) => { path: string; relPath: string; }[]"
+          "(dir: string, metafilePages?: MetafilePagesMode) => { path: string; relPath: string; }[]"
         ]
       },
       {
