@@ -425,7 +425,7 @@ async function buildRetrievalResponseMeta(
   queryText: string,
   results: unknown[],
   meta: HybridSearchMeta | null,
-  opts: { conceptHint?: boolean; types?: string[]; typeFilterNotice?: string; declarations?: DeclarationMemo; feedbackOp?: 'query' | 'search'; entity?: ResolvedEntity; hint?: { op: 'search' | 'query'; p: Record<string, unknown> } } = {},
+  opts: { conceptHint?: boolean; types?: string[]; typeFilterNotice?: string; declarations?: DeclarationMemo; feedbackOp?: 'query' | 'search'; entity?: ResolvedEntity; filterHintFor?: { op: 'search' | 'query'; p: Record<string, unknown> } } = {},
 ): Promise<Record<string, unknown>> {
   const m = meta as (HybridSearchMeta & { degraded?: unknown[]; retrieved_count?: number }) | null;
   const hint = opts.conceptHint && looksConceptShaped(queryText)
@@ -446,7 +446,7 @@ async function buildRetrievalResponseMeta(
     stampHeldHits(ctx.engine, results as SearchResult[], scope, ctx).catch(() => []),
     // GBRA-133 PR 2a.5: per-source freshness from the notifier's cached coverage record (no git call).
     readSourceFreshness(ctx.engine, scope),
-    opts.hint ? searchFilterHint(ctx, scope, excludePrivate, queryText, results as SearchResult[], opts.types, opts.hint) : null,
+    opts.filterHintFor ? searchFilterHint(ctx, scope, excludePrivate, queryText, results as SearchResult[], opts.types, opts.filterHintFor) : null,
   ]);
   if (filterNotice) ctx.emitNotice?.(filterNotice);
   const heldBySource = new Map(heldFiles.map(h => [h.source_id, h.missing + h.stale]));
@@ -747,7 +747,7 @@ const search: Operation = {
       await stampKeywordRows(ctx, results, { ...scope, excludePrivate }, queryText, startedAt, timings);
       // #3800: cap AFTER capture/meta so eval + cache see the real payload.
       return evidenceOutput(ctx, p, results, plan, { ...scope, excludePrivate }, null, snippetCap, timings,
-        async rows => withCountMeta(await buildRetrievalResponseMeta(ctx, scope, queryText, rows, null, { conceptHint: true, types, typeFilterNotice: typeFilter.notice, hint: { op: 'search', p } }),
+        async rows => withCountMeta(await buildRetrievalResponseMeta(ctx, scope, queryText, rows, null, { conceptHint: true, types, typeFilterNotice: typeFilter.notice, filterHintFor: { op: 'search', p } }),
           page ?? keywordCountMeta(await keywordCount!, offset + limit)), page !== null);
     }
 
@@ -792,7 +792,7 @@ const search: Operation = {
     maybeCaptureSearch(ctx, queryText, results, latency_ms, true, capturedMeta);
     // #3800: cap AFTER capture/meta so eval + cache see the real payload.
     return evidenceOutput(ctx, p, results, plan, { ...scope, excludePrivate }, capturedMeta, snippetCap, timings,
-      async rows => withCountMeta(withExplainTarget({ ...(await buildRetrievalResponseMeta(ctx, scope, queryText, rows, capturedMeta, { conceptHint: true, types, typeFilterNotice: typeFilter.notice, declarations, feedbackOp: 'search', entity: fanned.entity, hint: { op: 'search', p } })), ...(fanned.fanout ? { fanout: fanned.fanout } : {}) }, finishExplainTarget(ctx, p, explainPrep, results, 'search')),
+      async rows => withCountMeta(withExplainTarget({ ...(await buildRetrievalResponseMeta(ctx, scope, queryText, rows, capturedMeta, { conceptHint: true, types, typeFilterNotice: typeFilter.notice, declarations, feedbackOp: 'search', entity: fanned.entity, filterHintFor: { op: 'search', p } })), ...(fanned.fanout ? { fanout: fanned.fanout } : {}) }, finishExplainTarget(ctx, p, explainPrep, results, 'search')),
         keywordCountMeta(await keywordCount, offset + limit)));
   },
   scope: 'read', mutating: false,
@@ -1202,7 +1202,7 @@ const query: Operation = {
     // #3800: cap AFTER capture/meta/CRAG so every internal consumer graded
     // and recorded the real payload; only the returned envelope is snipped.
     return evidenceOutput(ctx, p, results, plan, { ...querySourceScope, excludePrivate, detail }, capturedMeta, snippetCap, timings,
-      async rows => withExplainTarget({ ...(await buildRetrievalResponseMeta(ctx, querySourceScope, queryText, rows, capturedMeta, { types, typeFilterNotice: typeFilter.notice, declarations, feedbackOp: 'query', entity: fanned.entity, hint: { op: 'query', p } })), crag, ...(fanned.fanout ? { fanout: fanned.fanout } : {}) }, finishExplainTarget(ctx, p, explainPrep, results, 'query')));
+      async rows => withExplainTarget({ ...(await buildRetrievalResponseMeta(ctx, querySourceScope, queryText, rows, capturedMeta, { types, typeFilterNotice: typeFilter.notice, declarations, feedbackOp: 'query', entity: fanned.entity, filterHintFor: { op: 'query', p } })), crag, ...(fanned.fanout ? { fanout: fanned.fanout } : {}) }, finishExplainTarget(ctx, p, explainPrep, results, 'query')));
   },
   scope: 'read', mutating: false,
   cliHints: { name: 'query', positional: ['query'] },
