@@ -105,8 +105,11 @@ export async function detachRestoredPage(tx: SqlEngine, row: Pick<WriteRequest, 
 
 /** Live pages of a source read per scan; past it the result says `truncated`. */
 export const MISSING_FILES_SCAN_LIMIT = 50_000;
+let scanLimit = MISSING_FILES_SCAN_LIMIT;
+/** Tests only: a smaller per-source scan limit (null restores the default). */
+export function __setMissingFilesScanLimitForTests(limit: number | null): void { scanLimit = limit ?? MISSING_FILES_SCAN_LIMIT; }
 
-export interface MissingRecordedFiles { source_id: string; pages: Array<{ slug: string; source_path: string }>; inspected: number; truncated: boolean }
+export interface MissingRecordedFiles { source_id: string; pages: Array<{ slug: string; source_path: string }>; inspected: number; truncated: boolean; limit: number }
 
 /**
  * GBRA-150: whether a recorded nested metafile is a page the way `sync --full` judges it: its file under `root`, else its
@@ -137,15 +140,15 @@ export async function scanMissingRecordedFiles(engine: BrainEngine, sourceId: st
   const strategy = source.strategy ?? 'markdown';
   const rows = await engine.executeRaw<{ slug: string; source_path: string }>(
     `SELECT slug, source_path FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND NULLIF(btrim(source_path), '') IS NOT NULL
-      ORDER BY id LIMIT ${MISSING_FILES_SCAN_LIMIT + 1}`, [sourceId]);
-  const truncated = rows.length > MISSING_FILES_SCAN_LIMIT;
+      ORDER BY id LIMIT ${scanLimit + 1}`, [sourceId]);
+  const truncated = rows.length > scanLimit;
   const mode = await scannerSlugRootMode(engine, sourceId, root);
   const fileOf = (row: { slug: string; source_path: string }) => resolveSourceLocalFilePath(root, row.source_path, row.slug, mode) ?? join(root, row.source_path);
   const files = new Map(rows.map(row => [row.source_path, relative(root, fileOf(row)).split('\\').join('/')]));
   const metafilePages = await readMetafilePagesMode(engine);
   const metafilePage = recordedMetafilePage(metafilePages, root, source.last_commit, path => files.get(path) ?? path);
-  const inspected = rows.slice(0, MISSING_FILES_SCAN_LIMIT).filter(row => isSyncable(row.source_path, { strategy, metafilePage }));
-  const result: MissingRecordedFiles = { source_id: sourceId, pages: [], inspected: inspected.length, truncated };
+  const inspected = rows.slice(0, scanLimit).filter(row => isSyncable(row.source_path, { strategy, metafilePage }));
+  const result: MissingRecordedFiles = { source_id: sourceId, pages: [], inspected: inspected.length, truncated, limit: scanLimit };
   if (!inspected.length) return result;
   const { collectSyncableFiles } = await import('../../commands/import.ts');
   const present = new Set(collectSyncableFiles(root, { strategy, metafilePages }).map(file => resolve(file)));
