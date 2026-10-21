@@ -4459,14 +4459,14 @@
         "kind": "function",
         "name": "extractLinksForSlugs",
         "signature": [
-          "(engine: BrainEngine, repoPath: string, slugs: string[], opts?: { sourceId?: string; includeFrontmatter?: boolean; }) => Promise<ExtractForSlugsResult>"
+          "(engine: BrainEngine, repoPath: string, slugs: string[], opts?: { sourceId?: string; includeFrontmatter?: boolean; tree?: MarkdownTree; }) => Promise<ExtractForSlugsResult>"
         ]
       },
       {
         "kind": "function",
         "name": "extractLinksFromFile",
         "signature": [
-          "(content: string, relPath: string, allSlugs: Set<string>, opts?: { includeFrontmatter?: boolean; globalBasename?: boolean; pack?: LinkExtractionPack | null; pageTypes?: ReadonlyMap<string, string>; aliases?: ReadonlyMap<string, string>; lineGrammar?: { enabled?: boolean; allowUndeclaredTypes?: boolean; }; }) => Promise<ExtractedLink[]>"
+          "(content: string, relPath: string, allSlugs: Set<string>, opts?: { includeFrontmatter?: boolean; globalBasename?: boolean; pack?: LinkExtractionPack | null; pageTypes?: PageTypeLookup; aliases?: ReadonlyMap<string, string>; lineGrammar?: { enabled?: boolean; allowUndeclaredTypes?: boolean; }; }) => Promise<ExtractedLink[]>"
         ]
       },
       {
@@ -4487,7 +4487,7 @@
         "kind": "function",
         "name": "extractTimelineForSlugs",
         "signature": [
-          "(engine: BrainEngine, repoPath: string, slugs: string[], opts?: { sourceId?: string; }) => Promise<ExtractForSlugsResult>"
+          "(engine: BrainEngine, repoPath: string, slugs: string[], opts?: { sourceId?: string; tree?: MarkdownTree; }) => Promise<ExtractForSlugsResult>"
         ]
       },
       {

@@ -39,6 +39,33 @@ The bound of 5 is derived in `src/core/page-state/chunk-moves.ts` (`CHUNK_VECTOR
 - Writes that wrap a page publication in their own (takes, the facts fence, maintenance pages) still replace passages in one transaction.
 - `readEmbeddingEffectProjection` accepts a vector whose recorded input hash is one the current page accepts, whatever the page-level signature says, and restamps the page.
 
+## [0.60.344.0] - 2026-10-21
+
+**A managed brain on remote Postgres syncs a no-op commit in about half the time, sync work no longer stalls searches running beside it, sync status grades a commit that is still waiting, and an aborted sync returns at once.** A no-op `gbrain sync` used to pay 70 to 90 dependent round trips, more on a bigger brain. It now pays about 32 at any brain size: at 57 ms RTT, p50 drops from 5.9 s to 3.3 s on a direct connection and from 6.1 s to 2.9 s behind PgBouncer. A single-file commit behind PgBouncer goes from 400 round trips to 282. On Postgres, no part of a sync holds a concurrent search past 100 ms anymore.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A transaction behind a transaction-mode pooler (PgBouncer, Supabase 6543, `prepare=false`) | one round trip per statement | the statements of one transaction are pipelined on the connection the pooler pins for it; autocommit statements never are, and nothing is sent after COMMIT. `GBRAIN_PG_TXN_PIPELINE=0` turns it off |
+| Postgres array-type lookup | a `pg_type` fetch on every connection of every pool | one per process (`GBRAIN_PG_TYPE_CACHE=0` turns it off) |
+| An idle sync tick | ran all six post-sync checks | skips each check whose pin found no work for it (`GBRAIN_SYNC_IDLE_FAST_PATH=0` turns the skips off) |
+| The ghost-page report | read every page batch on each sync | is answered from `op_checkpoints` and rescanned in the background at most every 5 minutes (`GBRAIN_SYNC_GHOST_INTERVAL_MS`) |
+| Link and timeline extraction at the end of a sync | two tree walks, and on PGLite every page in one event-loop turn | one walk, yielding after each page |
+| A first sync, a confirm round or a dirtiness probe on 10k pages | stretches of 0.9 to 1.4 s that held every concurrent search | the loops yield |
+| PGLite after a small sync | a full ANALYZE every time | ANALYZE only when the tables really grew |
+| Doctor `managed_sync_latency` with a commit still waiting | `ok` until the commit synced | grades the waiting commit, dated from the reflog, and reports keyword and embedding freshness separately |
+| `gbrain sources mirror-readonly` / `mirror-writable --dry-run` (#7086) | wrote the flag | prints the change under a dry-run banner and writes nothing |
+| A SIGTERM to stdio `gbrain serve` on Postgres | the commit-notifier lease stayed live for about 20 s | the next resident owns it in 0.5 s |
+| An aborted sync waiting on its accepted write | waited out the 5 s write wait | returns within 1.5 s; work accepted and committed is kept, and a write blocked by another owner stays queued |
+| A Postgres socket that died after an error while a statement was queued | the statement could wait on the replacement socket until the drain gave up (331 s seen) | every queued statement is rejected with `CONNECTION_CLOSED`, so the retry runs at once |
+
+### For contributors
+
+- `test/helpers/cpu-time.ts` measures loop lag in the thread's own CPU time, so a loaded CI VM no longer counts its run-queue waits as a held loop. The 100 ms bounds are unchanged.
+- `src/core/sync-idle-skips.ts` defines each idle-tick skip once, and a coverage test seeds a state that makes each skipped check run.
+- `test/postgres-driver-startup-death.test.ts` reproduces the stranded statement against a scripted server.
+
 ## [0.60.343.0] - 2026-10-21
 
 **An opt-in warm CLI socket lets `gbrain search`, `query`, `get` and `recall` skip most of a cold start's database round trips.** A cold CLI process connects, loads config and resolves its source before it can answer. Behind a transaction-mode pooler at 40 ms RTT, that cost a 305k-page brain about 3.4 s per search. With `gbrain serve --cli-socket` running, the same CLI call goes through a local Unix socket to the running serve and returns byte-identical output: 2.3 s for that search and 0.66 s for a get, against 1.19 s cold. It is off by default.
