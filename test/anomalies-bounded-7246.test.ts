@@ -1,13 +1,12 @@
 /**
  * #7246: find_anomalies (and `gbrain anomalies --json`) returned every slug
  * of an anomalous cohort, so a bulk-import day put tens of thousands of slugs
- * in one response. Each row now carries at most `slug_limit` slugs (default
- * 20, max 1000) and `page_slugs_complete: false` when it left some out; the
- * count still covers the whole cohort. `--all` keeps every slug on the local CLI.
+ * in one response. Each row now carries at most 20 slugs and
+ * `page_slugs_complete: false` when it left some out; the count still covers
+ * the whole cohort. `--all` keeps every slug on the local CLI.
  *
  * Authoring gate: protects the output-size contract of a remote-reachable op;
- * fails if the cap is dropped or a remote caller can lift it; no existing test
- * covers the slug list size.
+ * fails if the cap is dropped; no existing test covers the slug list size.
  */
 import { describe, expect, test } from 'bun:test';
 import { operations } from '../src/core/operations.ts';
@@ -40,11 +39,11 @@ describe('find_anomalies bounded slug lists (#7246)', () => {
     expect(out!.count).toBe(500);
   });
 
-  test('slug_limit raises the cap up to 1000, never unbounded for a remote caller', async () => {
-    const [out] = await op.handler(ctx(true), { slug_limit: 1000 }) as Array<Record<string, unknown>>;
-    expect(out!.page_slugs).toHaveLength(500);
+  test('a cohort that fits the cap is returned whole with no completeness flag', async () => {
+    const small = { kind: 'pglite', findAnomalies: async () => [{ ...row, count: 3, page_slugs: slugs.slice(0, 3) }] } as unknown as BrainEngine;
+    const [out] = await op.handler({ ...(ctx(true) as object), engine: small } as never, {}) as Array<Record<string, unknown>>;
+    expect(out!.page_slugs).toEqual(slugs.slice(0, 3));
     expect(out!.page_slugs_complete).toBeUndefined();
-    await expect(op.handler(ctx(true), { slug_limit: 1001 })).rejects.toThrow('slug_limit');
   });
 
   test('gbrain anomalies --json is capped by default and --all keeps every slug', async () => {

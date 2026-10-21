@@ -19,7 +19,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
-import { capRowList, LISTING_MAX_LIMIT } from '../core/bounded-listing.ts';
+import { capRowList } from '../core/bounded-listing.ts';
 import { ANOMALY_SLUG_DEFAULT_LIMIT } from '../core/ops/salience.ts';
 
 interface RunOpts {
@@ -66,7 +66,7 @@ Options:
   --sigma N            Threshold multiplier (default 3.0)
   --json               JSON output for agents (up to ${ANOMALY_SLUG_DEFAULT_LIMIT} slugs per cohort;
                        page_slugs_complete is false when slugs were left out)
-  --all                Every slug of each cohort (a remote brain caps at ${LISTING_MAX_LIMIT})
+  --all                Every slug of each cohort (local brain; a remote brain always caps)
   --help, -h           Show this help
 `;
 
@@ -84,7 +84,6 @@ export async function runAnomalies(engine: BrainEngine, args: string[]): Promise
       since: parsed.since,
       lookback_days: parsed.lookbackDays,
       sigma: parsed.sigma,
-      slug_limit: parsed.all ? LISTING_MAX_LIMIT : ANOMALY_SLUG_DEFAULT_LIMIT,
     }, { timeoutMs: 30_000 });
     rows = unpackToolResult<Awaited<ReturnType<BrainEngine['findAnomalies']>>>(raw);
   } else {

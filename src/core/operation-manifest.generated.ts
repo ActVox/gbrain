@@ -4644,10 +4644,6 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "sigma": {
         "type": "number",
         "description": "Threshold (default 3)."
-      },
-      "slug_limit": {
-        "type": "number",
-        "description": "Slugs listed per cohort (default 20, max 1000); count covers the whole cohort and page_slugs_complete is false when slugs were left out."
       }
     },
     "cliHints": {

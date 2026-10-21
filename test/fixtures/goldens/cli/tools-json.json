@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 255279,
-    "stdoutSha256": "587625e601300f3576e9857ad6e27f3d26a951095fcb4303ee144ad4154a0fdc",
+    "stdoutBytes": 255021,
+    "stdoutSha256": "6523b1ba32215784707e0ae074471ee85990d277ef0691913900b4d6ad35f75d",
     "toolNames": [
       "remember",
       "entity",
@@ -5570,8 +5570,7 @@
         "parameters": {
           "lookback_days": "number?",
           "sigma": "number?",
-          "since": "string?",
-          "slug_limit": "number?"
+          "since": "string?"
         },
         "required_scopes": [],
         "schema": {
@@ -5587,10 +5586,6 @@
             "since": {
               "description": "YYYY-MM-DD (default today).",
               "type": "string"
-            },
-            "slug_limit": {
-              "description": "Slugs listed per cohort (default 20, max 1000); count covers the whole cohort and page_slugs_complete is false when slugs were left out.",
-              "type": "number"
             }
           },
           "required": [],
