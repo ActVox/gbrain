@@ -41,7 +41,7 @@ export interface DefaultSourcePathInput {
   repoPath: string | null;
   /** True when repoPath exists on disk and is a directory. */
   repoPathIsDir: boolean;
-  /** A non-default source whose own local_path is repoPath under any spelling (#2018 leak guard, #7203), if any. */
+  /** A non-default source whose own local_path is or contains repoPath under any spelling (#2018 leak guard, #7203), if any. */
   collidingSourceId: string | null;
   /** Live default-source pages whose source_path also names a live page of collidingSourceId. */
   sharedPages?: number;
@@ -83,7 +83,7 @@ export function assessDefaultSourcePath(
     return {
       status: 'warn',
       message:
-        `default source has local_path: null and sync.repo_path (${repoPath}) is source ` +
+        `default source has local_path: null and sync.repo_path (${repoPath}) is, or lies inside, source ` +
         `"${collidingSourceId}"'s own working tree — the #2018 leak guard silently SKIPS every ` +
         `unscoped write-through for the ${livePages} default-source page(s), so \`gbrain put\`/` +
         '`gbrain capture` writes never reach disk. Fix with `gbrain sources set-path default <path>` ' +

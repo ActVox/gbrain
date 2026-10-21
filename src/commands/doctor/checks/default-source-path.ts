@@ -16,7 +16,7 @@ import { existsSync, statSync } from 'fs';
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
 import { assessDefaultSourcePath } from '../../../core/default-source-path-check.ts';
-import { otherSourceAtPath } from '../../../core/write-through.ts';
+import { otherSourceOwning } from '../../../core/write-through.ts';
 
 export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<Check | null> {
   const [defaultSource] = await engine.executeRaw<{ local_path: string | null }>(
@@ -49,7 +49,7 @@ export async function defaultSourceLocalPathCheck(engine: BrainEngine): Promise<
       }
       // Mirror resolvePageWriteTarget's #2018 leak guard: sync.repo_path
       // being another source's own working tree silently skips the write.
-      collidingSourceId = await otherSourceAtPath(engine, 'default', repoPath);
+      collidingSourceId = await otherSourceOwning(engine, 'default', repoPath);
       if (collidingSourceId) {
         const [shared] = await engine.executeRaw<{ n: number }>(
           `SELECT COUNT(*)::int AS n FROM pages a

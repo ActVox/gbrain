@@ -53,6 +53,32 @@ for (const backend of testBackends()) {
       }, 60_000);
     }
 
+    for (const spelling of ['real', 'symlink'] as const) {
+      test(`sync.repo_path inside another source's checkout (${spelling} spelling) is refused`, async () => {
+        await brain(backend, async (engine, home, tree) => {
+          mkdirSync(join(tree, 'sub'));
+          const base = spelling === 'real' ? tree : join(home, 'alias');
+          if (spelling === 'symlink') symlinkSync(tree, base);
+          await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', ['source-b', tree]);
+          await engine.setConfig('sync.repo_path', join(base, 'sub'));
+          expect(await resolvePageWriteTarget(engine, 'notes/x', 'default')).toEqual({ ok: false, skipped: 'source_repo_belongs_to_other_source' });
+          expect(await resolvePageWriteTarget(engine, 'notes/x', 'source-c')).toEqual({ ok: false, skipped: 'source_repo_belongs_to_other_source' });
+        });
+      }, 60_000);
+
+      test(`another source's checkout inside sync.repo_path (${spelling} spelling) refuses only writes that land in it`, async () => {
+        await brain(backend, async (engine, home) => {
+          const repo = join(home, 'repo'); mkdirSync(join(repo, 'notes'), { recursive: true });
+          const nested = spelling === 'real' ? join(repo, 'notes') : join(home, 'notes-alias');
+          if (spelling === 'symlink') symlinkSync(join(repo, 'notes'), nested);
+          await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', ['source-b', nested]);
+          await engine.setConfig('sync.repo_path', repo);
+          expect(await resolvePageWriteTarget(engine, 'notes/x', 'default')).toEqual({ ok: false, skipped: 'source_repo_belongs_to_other_source' });
+          expect(await resolvePageWriteTarget(engine, 'other/x', 'default')).toMatchObject({ ok: true, filePath: join(repo, 'other', 'x.md') });
+        });
+      }, 60_000);
+    }
+
     test('a distinct checkout is not a collision', async () => {
       await brain(backend, async (engine, home, tree) => {
         const repo = join(home, 'repo'); mkdirSync(repo);
@@ -70,6 +96,18 @@ for (const backend of testBackends()) {
         await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', ['source-b', loop]);
         await engine.setConfig('sync.repo_path', repo);
         expect(await resolvePageWriteTarget(engine, 'notes/x', 'default')).toEqual({ ok: false, skipped: 'source_repo_belongs_to_other_source' });
+      });
+    }, 60_000);
+
+    test('doctor names a sync.repo_path nested inside another source\'s checkout', async () => {
+      await brain(backend, async (engine, home, tree) => {
+        mkdirSync(join(tree, 'sub'));
+        await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', ['source-b', tree]);
+        await engine.setConfig('sync.repo_path', join(tree, 'sub'));
+        await engine.putPage('notes/x', { type: 'note', title: 'x', compiled_truth: 'body', timeline: '', frontmatter: {} }, { sourceId: 'default' });
+        const check = await defaultSourceLocalPathCheck(engine);
+        expect(check?.status).toBe('warn');
+        expect(check?.message).toContain('is, or lies inside, source "source-b"\'s own working tree');
       });
     }, 60_000);
 

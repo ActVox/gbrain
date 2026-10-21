@@ -23,7 +23,7 @@ import { hasSourceFilesystemLock, withSourceFilesystemLock, assertSourceFilesyst
  */
 
 import { existsSync, statSync, mkdirSync, unlinkSync, readdirSync, readFileSync } from 'fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { atomicWriteFileSync } from './atomic-write.ts';
 import type { BrainEngine } from './engine.ts';
 import { isRelativeFileUri, serializePageToMarkdown, resolvePageFilePath, resolveSourceLocalFilePath } from './markdown.ts';
@@ -281,12 +281,12 @@ export async function scannerSlugRootMode(engine: BrainEngine, sourceId: string,
 }
 
 /**
- * #2018/#7203: the other source whose own working tree is `path`, compared by
- * filesystem identity, so a symlink, a trailing slash, or a macOS case or
- * /private alias still matches. A spelling that cannot be resolved counts as a
- * match: the leak guard fails closed.
+ * #2018/#7203: the other source whose own working tree is `path` or contains
+ * it, compared by filesystem identity, so a symlink, a trailing slash, or a
+ * macOS case or /private alias still matches. A spelling that cannot be
+ * resolved counts as a match: the leak guard fails closed.
  */
-export async function otherSourceAtPath(engine: BrainEngine, sourceId: string, path: string): Promise<string | null> {
+export async function otherSourceOwning(engine: BrainEngine, sourceId: string, path: string): Promise<string | null> {
   const rows = await engine.executeRaw<{ id: string; local_path: string }>(
     `SELECT id, local_path FROM sources WHERE id <> $1 AND local_path IS NOT NULL AND local_path <> '' ORDER BY id`,
     [sourceId],
@@ -295,7 +295,9 @@ export async function otherSourceAtPath(engine: BrainEngine, sourceId: string, p
   const target = identity(path);
   return rows.find(row => {
     const other = identity(row.local_path);
-    return target === null || other === null || other === target;
+    if (target === null || other === null) return true;
+    const rel = relative(other, target);
+    return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
   })?.id ?? null;
 }
 
@@ -387,14 +389,15 @@ export async function resolvePageWriteTarget(
     if (!existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
       return { ok: false, skipped: 'repo_not_found' };
     }
-    // Leak guard: refuse to write into a path that is some OTHER source's
-    // own working tree (#2018), under any spelling of it (#7203).
-    if (await otherSourceAtPath(engine, sourceId, repoPath)) {
-      return { ok: false, skipped: 'source_repo_belongs_to_other_source' };
-    }
     const pageRoot = sourceId === 'default' ? repoPath : join(repoPath, '.sources', sourceId);
     const knownPath = recordedPath ?? recordedPathFromFileUri(recordedUri, pageRoot);
     filePath = knownPath ? join(pageRoot, knownPath) : resolvePageFilePath(repoPath, slug, sourceId);
+    // Leak guard: refuse a file inside some OTHER source's own working tree
+    // (#2018) under any spelling, whether sync.repo_path is that tree, lies
+    // inside it, or contains it (#7203).
+    if (await otherSourceOwning(engine, sourceId, filePath)) {
+      return { ok: false, skipped: 'source_repo_belongs_to_other_source' };
+    }
     writeRoot = repoPath;
     // pageRoot, not repoPath: a later `sources add --path <pageRoot>` scan
     // walks pageRoot, so the bind must speak that scan's convention.
