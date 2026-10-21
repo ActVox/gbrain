@@ -195,6 +195,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'takes_weight_grid',
   // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
   'unlinked_facts',
+  // #7160: title-prefixed person pages that likely duplicate an unprefixed page (preview only).
+  'person_title_duplicates',
   'edge_validity',
   'text_projection_readiness',
   'timeline_coverage',

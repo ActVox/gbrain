@@ -167,6 +167,7 @@ const MATRIX: Row[] = [
   { name: 'get_chunks', mode: 'isolated', args: { slug: 'notes/beta-note' } },
   { name: 'get_ingest_log', mode: 'isolated', args: { limit: 50 } },
   { name: 'find_orphans', mode: 'isolated', args: {} },
+  { name: 'rank_entities', mode: 'isolated', args: {} },
   { name: 'wanted_pages', mode: 'isolated', args: {} },
   { name: 'takes_list', mode: 'isolated', args: { limit: 50 } },
   { name: 'takes_search', mode: 'isolated', args: { query: 'BETAMARKER', limit: 20 } },

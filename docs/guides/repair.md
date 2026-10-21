@@ -59,7 +59,7 @@ timeline: 12 item(s) to repair
 
 ```bash
 gbrain repair timeline --apply
-gbrain repair visibility --apply
+gbrain repair visibility --apply                # every class; or preview one window and apply it (below)
 gbrain repair safe-chunks --apply
 gbrain repair safe-chunks --apply --no-embed   # re-seal text now, embed later
 gbrain repair contextual-mode --apply
@@ -67,6 +67,23 @@ gbrain repair request-indexes --apply
 gbrain repair google-file-modes --apply             # explicit-only: runs only when named
 gbrain repair --all --apply                    # every automatic kind in order
 ```
+
+On a large brain, apply `visibility` one previewed window at a time. The preview
+plans one class at a time in the order remote callers are exposed (world facts
+from a private page, remotely readable ones first; Life Chronicle events;
+alias-only pages; then atoms and concepts, the only class that reads
+concept-provenance links), reports progress on stderr, lists one window
+(1,000 items; `--limit` up to 10,000) and prints the apply command for it:
+
+```bash
+gbrain repair visibility --class facts        # one class: facts, events, aliases or lineage
+gbrain repair visibility --class facts --apply --expect <hash>   # exactly that window
+```
+
+The apply touches only the listed items and resumes after its last applied
+item if it stops. Apply the window (or decide not to), then preview again for
+the next one. Each plan statement is bounded at 120 s; a class that overruns is
+reported and skipped while the other classes are listed.
 
 `--apply` writes without a prompt, so review the preview first. With
 `--apply` you must name a kind or pass `--all`; `--yes` is refused, and so is

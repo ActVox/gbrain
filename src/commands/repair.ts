@@ -164,7 +164,7 @@ const VALUE_FLAGS = new Set(['--source', '--limit', '--expect', '--only', '--ski
 /** Flags only some kinds accept, with the kinds that do. */
 const KIND_FLAGS: Record<string, readonly string[]> = {
   '--only': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--skip': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--diff': ['frontmatter', 'fences', 'slug-conflicts', CONTENT_LANE], '--yes': ['frontmatter', 'conversation-labels', 'stuck-recovery', 'ghost-pages', 'legacy-twins', 'rename-identity', 'url-clone-fences'],
-  '--slug': ['fences', 'file-drift', 'rename-identity', 'overwritten-edits', 'origin-twins'], '--from': ['rename-identity'], '--close': ['rename-identity'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift'], '--since': ['file-drift'],
+  '--slug': ['fences', 'file-drift', 'rename-identity', 'overwritten-edits', 'origin-twins'], '--from': ['rename-identity'], '--close': ['rename-identity'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift', 'visibility'], '--since': ['file-drift'],
   '--held': ['file-drift'], '--side': ['file-drift'], '--state': ['file-drift'], '--cursor': ['file-drift'],
   '--keep': ['stuck-recovery'], '--request-id': ['stuck-recovery'],
   '--older-than': ['receipt-compaction'], '--include-failures': ['receipt-compaction'], '--force': ['receipt-compaction'],
@@ -415,6 +415,7 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
   const results = await runRepairKinds(kinds, scope, { apply, source, noEmbed, named: kind !== undefined }, k => runner.run(k, scope, { limit, sourceFlag: source, explicit: k === kind, expect, includeAmbiguous,
     ...(k === kind && KIND_FLAGS['--only']!.includes(k) ? { only, skip } : {}), ...(k === kind && slugs.length ? { slugs } : {}),
     ...(k === kind && noLlm ? { noLlm } : {}), ...(k === kind && maxUsd !== undefined ? { maxLlmUsd: maxUsd } : {}),
+    ...(k === kind && k === 'visibility' && driftClass ? { driftClass } : {}),
     ...(k === kind && k === 'file-drift' ? { prefer, requests, allDrifted, driftClass, since, ...(held ? { held } : {}), ...(side ? { side } : {}), ...(state ? { state } : {}), ...(cursor ? { cursor } : {}),
       ...(apply ? {} : { progress: createProgress(cliOptsToProgressOptions(getCliOptions())) }) } : {}),
     ...(k === kind && keep ? { keep } : {}), ...(k === kind && requestId ? { requestId } : {}),
@@ -429,48 +430,3 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
     console.log(`Scope: brain ${scope.brain_id}; sources ${scope.source_ids.join(', ') || '(none)'}`);
     for (const result of results) console.log(renderRepairResult(result, { diff }));
     const embedKinds = results.filter(r => repairMayEmbed(repairSpec(r.kind), noEmbed)).map(r => r.kind);
-    if (!apply && embedKinds.length) console.log(`Kinds that may queue paid embeddings: ${embedKinds.join(', ')} (pass --no-embed to skip; `
-      + 'page-write kinds are re-embedded by their publication either way; cap spend with gbrain doctor --remediate --yes --include-repairs --max-usd <n> --expect <plan_hash> from gbrain doctor --remediation-plan --json).');
-    const llmResults = results.filter(r => r.cost.llm_usd !== undefined);
-    if (!apply && llmResults.length) {
-      const usd = llmResults.some(r => r.cost.llm_usd === null) ? null : llmResults.reduce((sum, r) => sum + (r.cost.llm_usd ?? 0), 0);
-      const left = llmResults.map(r => r.cost.llm_cap_remaining_usd).filter((cap): cap is number => typeof cap === 'number');
-      console.log(`Kinds that may call a paid model: ${llmResults.map(r => r.kind).join(', ')} (${usd === null ? 'estimate unavailable: the model is unpriced' : `estimated $${usd.toFixed(4)}`}`
-        + `${left.length ? `; $${Math.min(...left).toFixed(4)} left under today's cap` : ''}).`);
-    }
-    if (explicitKindsNotRun.length) console.log(`Explicit-only kinds (not run without their name; preview each): ${explicitKindsNotRun.map(n => n.preview_command).join('; ')}`);
-  }
-  if (repairExitVerdict(results) !== 0) setCliExitVerdict(1);
-}
-
-/**
- * Runs each kind in order; a kind that stops (capacity, a held writer, a pending write) ends the loop. A kind whose plan
- * or apply throws item-scoped (GBRA-130 A-45) is reported as a result stopped with reason `error` and the loop goes on;
- * a run-scoped error, or most kinds failing (`item_failures_systemic`), stops the command. `named`: the operator named
- * one kind, whose error is the command's error. `registry`: the kinds' specs (tests pass stubs).
- */
-export async function runRepairKinds(kinds: readonly RepairKind[], scope: RepairScope, opts: { apply: boolean; source?: string; noEmbed: boolean; named: boolean; registry?: readonly RepairKindSpec[] },
-  run: (kind: RepairKind) => Promise<RepairResult>): Promise<Array<RepairResult & { paid: boolean }>> {
-  const results: Array<RepairResult & { paid: boolean }> = [];
-  const kindRun = new ItemRun('repair.all_kinds');
-  for (const k of kinds) {
-    let result: RepairResult;
-    try {
-      result = await run(k);
-      kindRun.succeed();
-    } catch (error) {
-      if (opts.named) throw error;
-      kindRun.fail(k, error);
-      results.push({ ...kindErrorResult(k, scope, { apply: opts.apply, error, source: opts.source }), paid: false });
-      continue;
-    }
-    results.push({ ...result, paid: repairMaySpend(repairSpec(k, opts.registry), opts.noEmbed) });
-    if (result.stopped) break;
-  }
-  return results;
-}
-
-/** Exit 1 when any kind stopped early or refused an item; 0 only when every pending item was attempted and applied or skipped. */
-export function repairExitVerdict(results: ReadonlyArray<Pick<RepairResult, 'stopped' | 'failed'>>): 0 | 1 {
-  return results.some(r => r.stopped || r.failed.length > 0) ? 1 : 0;
-}

@@ -935,6 +935,10 @@
       },
       {
         "category": "brain",
+        "name": "person_title_duplicates"
+      },
+      {
+        "category": "brain",
         "name": "fence_integrity"
       },
       {
