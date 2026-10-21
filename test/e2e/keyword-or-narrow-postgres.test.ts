@@ -11,6 +11,7 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { seedPage } from '../helpers/keyword-paging-fixture.ts';
 import { narrowOrFallbackTokens, orTokenSharesSql } from '../../src/core/search/keyword-or-narrow.ts';
+import { KEYWORD_RANK_CANDIDATES } from '../../src/core/search/keyword-chunk-match.ts';
 
 const run = process.env.DATABASE_URL ? describe : describe.skip;
 let engine: BrainEngine;
@@ -44,6 +45,35 @@ run('keyword OR fallback narrowing on Postgres', () => {
     expect(narrowOrFallbackTokens(tokens, Number(rows[0].rows), 10)).toEqual(['zzqxv', 'nebulith']);
     expect(narrowOrFallbackTokens(tokens, Number(rows[0].rows))).toBeNull();
   });
+
+  test('a page with hundreds of matching chunks does not crowd the only other match out of the pool', async () => {
+    await seedPage(engine, 'notes/crowd-log', 'The crowdlex log. Each entry below cites the crowdlex survey.');
+    await engine.executeRaw(
+      `INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, modality)
+       SELECT cc.page_id, cc.chunk_index + g, cc.chunk_text || ' entry ' || g, cc.chunk_source, cc.modality
+       FROM content_chunks cc JOIN pages p ON p.id = cc.page_id, generate_series(1, 299) g
+       WHERE p.slug = 'notes/crowd-log' AND cc.chunk_index = 0`);
+    await seedPage(engine, 'notes/solitar-field', 'Field notes on the solitar deposit.');
+    const rows = await engine.searchKeyword('crowdlex OR solitar', { limit: 10 });
+    expect(rows.map(r => r.slug).sort()).toEqual(['notes/crowd-log', 'notes/solitar-field']);
+  });
+
+  test('a match set over KEYWORD_RANK_CANDIDATES ranks a bounded sample and says so', async () => {
+    await seedPage(engine, 'notes/plentix-log', 'The plentix log. Each entry below cites the plentix survey.');
+    await engine.executeRaw(
+      `INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, modality)
+       SELECT cc.page_id, cc.chunk_index + g, cc.chunk_text || ' entry ' || g, cc.chunk_source, cc.modality
+       FROM content_chunks cc JOIN pages p ON p.id = cc.page_id, generate_series(1, $1::int) g
+       WHERE p.slug = 'notes/plentix-log' AND cc.chunk_index = 0`, [KEYWORD_RANK_CANDIDATES]);
+    const bounded: string[] = [];
+    const rows = await engine.searchKeyword('plentix', { limit: 10, onKeywordIncomplete: reason => bounded.push(reason) });
+    expect(rows.map(r => r.slug)).toEqual(['notes/plentix-log']);
+    expect(bounded).toEqual(['candidate_budget']);
+
+    const exact: string[] = [];
+    expect((await engine.searchKeyword('nebulith', { limit: 10, onKeywordIncomplete: reason => exact.push(reason) })).length).toBe(1);
+    expect(exact).toEqual([]);
+  }, 300_000);
 
   test('an OR retry within the cap still returns relaxed rows for every term', async () => {
     expect(await engine.searchKeyword('quasar nebulith zzqxv', { limit: 10 })).toEqual([]);

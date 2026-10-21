@@ -116,7 +116,7 @@ import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, rowT
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery, boundWebsearchQuery, collapseWebsearchDashRuns } from './search/sql-ranking.ts';
 import { narrowedOrFallbackQuery } from './search/keyword-or-narrow.ts';
-import { buildKeywordChunkMatch } from './search/keyword-chunk-match.ts';
+import { buildKeywordChunkMatch, KEYWORD_RANK_CANDIDATES } from './search/keyword-chunk-match.ts';
 import { privatePagesFilterFragment, privateSnapshotFilterFragment, privateLinkOriginFilterFragment, privateTimelineEventFilterFragment, privateProvenanceFilterFragment } from './search/private-visibility.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { readStoredEmbeddingIdentity } from './stored-embedding-identity.ts';
@@ -1102,7 +1102,7 @@ export class PostgresEngine implements BrainEngine {
     const chunk = buildKeywordChunkMatch(ftsLang, opts?.excludePrivate);
     const rawQuery = `
       WITH ranked_chunks AS (
-        SELECT
+        SELECT * FROM (SELECT *, count(*) OVER () AS bounded_rows, row_number() OVER (PARTITION BY page_id ORDER BY score DESC, chunk_id ASC) AS page_rank FROM (SELECT
           p.slug, p.id as page_id, p.title, p.type, p.source_id,
           p.effective_date, p.effective_date_source,
           CASE WHEN NULLIF(regexp_replace(p.frontmatter->>'message_id', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL
@@ -1127,6 +1127,7 @@ export class PostgresEngine implements BrainEngine {
           ${hardExcludeClause}
           ${visibilityClause}
           ${chunk.modality}
+        LIMIT ${KEYWORD_RANK_CANDIDATES}) bounded) per_page WHERE page_rank = 1
         ORDER BY score DESC, page_id ASC, chunk_id ASC
         LIMIT ${innerLimitParam}
       ),
@@ -1134,7 +1135,7 @@ export class PostgresEngine implements BrainEngine {
       SELECT slug, page_id, title, type, source_id,
         effective_date, effective_date_source,
         message_id, thread_id, source_subject,
-        chunk_id, chunk_index, chunk_text, chunk_source, score,
+        chunk_id, chunk_index, chunk_text, chunk_source, score, bounded_rows,
         false AS stale
       FROM best_per_page
       ORDER BY score DESC, page_id ASC, chunk_id ASC
@@ -1168,13 +1169,16 @@ export class PostgresEngine implements BrainEngine {
     if (rows.length === 0 && opts?.orFallback) {
       const orQuery = buildOrFallbackWebsearchQuery(query);
       if (orQuery) {
-        rows = await runKeyword(await narrowedOrFallbackQuery((sql, p) => this.executeRaw(sql, p), query, ftsLang) ?? orQuery, true, orQuery);
+        const narrowed = await narrowedOrFallbackQuery((sql, p) => this.executeRaw(sql, p), query, ftsLang);
+        rows = await runKeyword(narrowed ?? orQuery, true, orQuery);
+        if (narrowed || Number(rows[0]?.bounded_rows) >= KEYWORD_RANK_CANDIDATES) opts?.onKeywordIncomplete?.('candidate_budget');
         // 2026-09 (#3617 follow-up): relaxed rows are TAGGED so hybrid's
         // fusion can demote them — an OR-of-common-terms match must not
         // outvote a healthy vector arm (SearchResult.keyword_relaxed doc).
         return rows.map((r) => ({ ...rowToSearchResult(r), keyword_relaxed: true as const }));
       }
     }
+    if (Number(rows[0]?.bounded_rows) >= KEYWORD_RANK_CANDIDATES) opts?.onKeywordIncomplete?.('candidate_budget');
     return rows.map(rowToSearchResult);
   }
 

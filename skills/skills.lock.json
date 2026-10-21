@@ -45,7 +45,7 @@
   "context-audit/SKILL.md": "6d786629d40544ddaab4f4e6e333569d270bcb8b581589dc16fb9f8bcb4f6207",
   "context-audit/routing-eval.jsonl": "fb1832e24cc1b04163a74c5cde72bca53050a66246ca902e1a5f40303f52b5ab",
   "conventions/agent-operator-protocol.md": "d7cfc7e4c84f61392658cbe969058b1e8237b7d44c3ebdeec352569ffddbe001",
-  "conventions/brain-first.md": "a207e18b0a988aee2435c001278484b7bd9a82ee93472d8f6b918e0e952c2dcc",
+  "conventions/brain-first.md": "b98dc24e086a35f136f74ca4abd856949d8b282e1298a47a250b2d18f69e0927",
   "conventions/brain-routing.md": "392998d9a109b330c9225af4ca5c8798b0ff02eba4d441c93fdb7c263687d0c6",
   "conventions/calibration.md": "500dc26bd7c8400f50dc4c16fd83f1a588f3e7e68c59050a21fd8a0f69e4d198",
   "conventions/cron-via-minions.md": "badb1cd6cd825d6f1ac0b6b28cc47e5d80facc783a3e59a14146ae901ee0f933",

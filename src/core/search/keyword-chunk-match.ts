@@ -16,6 +16,19 @@
  *
  * `ftsLang` must already be validated (getFtsLanguage); `$1` is the websearch text.
  */
+/**
+ * Most matching chunks the Postgres keyword statement ranks (GBRA-156).
+ * ts_rank runs on every row it is given, so a query whose terms match
+ * hundreds of thousands of chunks (one common word on a 2M-chunk brain)
+ * spent 3-8 s ranking and ran into the keyword statement timeout, which
+ * returns no rows at all. The statement takes the first matching chunks
+ * that pass its filters, up to this bound, and ranks those; a match set under
+ * the bound ranks exactly as before. When the bound applies the caller is
+ * told (SearchOpts.onKeywordIncomplete), and hybrid reports
+ * `keyword_candidates_incomplete`, because the rows come from a sample.
+ */
+export const KEYWORD_RANK_CANDIDATES = 50_000;
+
 export function buildKeywordChunkMatch(ftsLang: string, excludePrivate: boolean | undefined): { from: string; match: string; modality: string } {
   const tsq = `websearch_to_tsquery('${ftsLang}', $1)`;
   if (!excludePrivate) return { from: 'content_chunks cc', match: `cc.search_vector @@ ${tsq}`, modality: `AND cc.modality = 'text'` };

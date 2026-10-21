@@ -13,6 +13,11 @@ frontmatter, before gbrain: gbrain reads the index across sources, ranks results
 filters by type, date and source, and returns the slug to read next. Use the
 files only when gbrain is unreachable or for an edit not yet synced.
 
+Prefer the gbrain MCP tools (`search`, `query`, `get_page`, `recall`) when your
+harness has the server connected: it stays connected, so each call skips the
+CLI's startup, which costs seconds per call on a large pooled Postgres brain.
+The CLI commands below take the same filters.
+
 ```bash
 gbrain search "Acme Example"                                    # names, codes, exact phrases
 gbrain search '"ZEBRA-42" OR "inventory sync"' --match keyword  # every page with any term (instead of grep)
