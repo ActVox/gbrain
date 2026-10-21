@@ -4,7 +4,7 @@
 <!-- Regenerate: bun run scripts/generate-tool-catalog.ts -->
 <!-- Freshness-guarded by scripts/check-tool-catalog-fresh.sh (bun run verify). -->
 
-Every non-localOnly operation on the MCP surface: 159 tools across 25 areas. **Starter** marks membership in the ~40-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
+Every non-localOnly operation on the MCP surface: 160 tools across 25 areas. **Starter** marks membership in the ~40-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
 
 ## admin
 
@@ -123,6 +123,7 @@ Every non-localOnly operation on the MCP surface: 159 tools across 25 areas. **S
 | `get_backlinks` | Links to a page, ≤500/call; group:"page" by referrer, newest first. | read | yes |  |
 | `get_links` | List a page's outgoing links (typed edges to other pages). | read |  |  |
 | `list_link_sources` | Link provenances (e.g. | read | yes |  |
+| `rank_entities` | Rank pages by graph connections: the most-linked people, companies or other entities. | read |  |  |
 | `remove_link` | Remove a link between two pages (optionally only one link_type or link_source). | write |  |  |
 | `traverse_graph` | Walk the link graph from a page. | read | yes |  |
 | `wanted_pages` | Link targets that have no page yet, most-referenced first: each was written as a link but its page does not exist, so no edge exists. | read |  |  |

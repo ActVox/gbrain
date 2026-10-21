@@ -1651,6 +1651,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'mcp.strict_params',
   'mcp.result_rows', // C1 row shape, read dual-plane by src/mcp/result-rows.ts
   'mcp.allow_session_widen', // stdio request_tools session widening (default on), read dual-plane by src/mcp/surface.ts
+  'entity.name_variants', // #7160 entity card name-variant arm and possible_duplicates (default on; verbs/entity-variants.ts)
   'entity.names_references', 'entity.record_types', 'entity.row_page_status', // names-row referenced_by_count + card `next` (default on); canonical page types listed as `records` (default empty); F3 page_status on context_pack/get_backlinks rows (default on); src/core/entity-references-config.ts
   'mcp.instructions_governing_rule', // instruction 7: in_effect (default: the record in effect on the date asked about governs) | newest (the earlier recency sentence); src/mcp/instructions.ts
   // Skill-nag suppression (#2180): brain-resident pack install nag off-switch.

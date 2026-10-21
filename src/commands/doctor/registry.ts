@@ -106,6 +106,7 @@ import { factAdmissionFloorsEntry } from './checks/fact-admission-floors.ts';
 import { unlinkedFactsEntry } from './checks/unlinked-facts.ts';
 import { edgeValidityEntry } from './checks/edge-validity.ts';
 import { coreMemoryEntry } from './checks/core-memory.ts';
+import { personTitleDuplicatesEntry } from './checks/entity-duplicates.ts';
 import { plannerStatsEntry } from './checks/planner-stats.ts';
 import { revisionBackfillEntry } from './checks/revision-backfill.ts';
 import { beliefLedgerEntry } from './checks/belief-ledger.ts';
@@ -273,6 +274,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   syncConfigKeysEntry,
   // #6712 PR 4a: the read-only convergence shadow (deep tier: a full level read per source).
   managedSyncConvergenceEntry,
+  // #7160: title-prefixed person pages next to the unprefixed page (read-only, preview-first).
+  personTitleDuplicatesEntry,
   fenceIntegrityEntry,
   searchModeEntry,
 ];

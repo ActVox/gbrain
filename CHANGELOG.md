@@ -12,27 +12,64 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.350.0] - 2026-10-21
 
-**Reading the timeline of a very large page uses less memory.** When gbrain rebuilds a page's timeline links, it keeps track of the timeline lines it has already seen, so it never writes one twice. On a page with tens of thousands of dated lines, that tracking took about 80 bytes per line, roughly a third of an 8 MiB page's own size. It now takes about 25 bytes per line, and the results are exactly the same.
+**The warm CLI socket now works when serve and the CLI connect through different pooler lanes.** A serve on a Supabase pooler's session lane (port 5432, prepared statements on, a larger pool) refused every CLI call made on the transaction lane (port 6543, `?prepare=false`), because the identity it compared included the port, the URL's query string and every `GBRAIN_*` value, pool sizes included. Each call then took the cold path, so with the socket on nothing got faster. The identity now leaves out what cannot change an answer, and a refusal says which part differed.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| Memory held while reading the timeline of an 8 MiB page with about 43,000 dated lines (PGLite) | 4.9–6.6 MiB | 1.7–3.4 MiB |
-| The same page on Postgres | about 5.3 MiB | 2.8–5.1 MiB |
-| A dense page with about 113,000 dated lines (PGLite / Postgres) | 5.6–6.5 / 6.3–7.3 MiB | 2.7–2.9 / 4.5–5.1 MiB |
-| Which timeline entries are kept or dropped | — | unchanged |
+| Serve on the session lane (5432), CLI on the transaction lane (6543) of the same Supavisor host, user and database | refused (`identity_mismatch`) | answered warm |
+| `GBRAIN_POOL_SIZE`, `GBRAIN_DIRECT_POOL_SIZE`, `GBRAIN_PREPARE` or the database URL variables differ | refused | answered warm |
+| Driver-only URL parameters (`prepare=`, `sslmode`, `application_name`, timeouts) differ | refused | answered warm |
+| Another port on plain Postgres, another host, user or database, or a different `options` parameter | refused | still refused |
+| A read-behavior setting (model, embeddings, search tuning, visibility, timeouts, schema pack, AI call log, contributor capture) differs | refused | still refused |
+| A refusal | `refused (identity_mismatch)` with no detail | names the part, never its value: `database port`, `env GBRAIN_MODEL`, `provider key VOYAGE_API_KEY`, `config contents`; the serve logs each distinct one once |
 
-Nothing changes on upgrade, and nothing is rewritten.
+### What to watch for after you upgrade
+
+- Restart the serve after upgrading. A serve and a CLI on different gbrain versions never match, so until the restart every CLI call takes its cold path (`refused (identity_mismatch): version`).
+- Nothing changes for a serve without `--cli-socket` or `serve.cli_socket`; the socket stays off by default.
+- With `GBRAIN_DEBUG=1`, a CLI call that still falls back prints the part that differed. Align that setting between the serve's environment and the CLI's, or restart the serve with it.
 
 ### Itemized changes
 
-- `src/core/timeline-extract.ts`: `TimelineKeySet` stores its digests with open addressing over two flat number arrays (`firsts` and `values`, growing at 3/4 load) instead of a `Map<number, number>`. Collision handling (`AMBIGUOUS`), `mark` and `marked` behave as before.
+- `src/core/cli-socket/identity.ts`: the identity is now structured: brain, version, engine, config home, file and content, `databaseTarget` (host, port, database, user, `options`) and `behaviorEnv` (SHA-256 values of the explicit `READ_BEHAVIOR_ENV` list and the provider routing variables, plus the names of the provider keys that are set). `cliSocketIdentityMismatch` compares it part by part, and lets the port differ only on a `*.pooler.supabase.com` host.
+- The handshake refusal carries `mismatch`, and the CLI's debug line prints it. An older CLI sends the old token and is refused as `malformed_request`, so it takes its cold path.
+- `test/cli-socket.test.ts` classifies every `GBRAIN_*` name in `src` as read behavior or not, so a new setting can't skip the decision.
 
-### For contributors
+## [0.60.349.0] - 2026-10-21
 
-- `test/large-pages/managed-links-timeline-heap.test.ts` now has margin under its unchanged bound (`held < page bytes`). The bound and the test are untouched.
-- Unit and serial shard weights are refreshed from a recent full run (`scripts/test-weights.json`, `scripts/serial-weights.json` and their metadata files).
+**`gbrain entity` now finds a person by a nickname, an initial plus surname, a title, reversed order, a one-letter surname typo or a surname only one page has; search and query put pages that contain an exact identifier first; `recall <entity>` reads the same facts the recall op does; and a lookup that matches nothing can exit 12 for scripts (#7160, #7161, #7163, #4828, #7166, #7168, #7177).** An agent asking for a person, a thing it saved or an exact email, URL, phone number or code got a miss or a lower-ranked page even though the brain held it.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain entity "Bob Example"` when the page is "Robert Example" (or "R. Example", "Dr. Example", "Example, Robert", "Robert Exampel") | a miss | resolves **one unambiguous** variant across every readable source; `card.match {kind, via}` says which variant matched; an exact hit always wins and an ambiguous variant is a miss with `ambiguous: true` |
+| A person page with a title-prefixed twin (`people/mayor-x` next to `people/robert-x`) | no hint | the card lists `possible_duplicates`; new doctor check `person_title_duplicates` lists the pairs to review (preview-only, never merged) |
+| A name that only appears in page text, or a stub card with no backlinks or facts | an empty card | `text_mentions` lists pages whose text contains the name (verified containment, 1.5 s deadline, `unread` on a deadline or failed read) |
+| search / query on an email, URL, phone number, long number, hex id or code | ranked like ordinary words | pages containing it verbatim rank first (`exact_lookup: 'identifier'`); dates and ordinary words are unchanged |
+| Local `gbrain recall <entity>` | facts under the page slug only | the same slugs the recall op reads (identity siblings, title subject) plus the bare basename when no other page claims it |
+| `gbrain recall "<name> <topic words>"` | nothing matched | the leading or trailing 1–3 words resolve to an entity, its facts print with topic matches first, and a note names the equivalent `--entity` / `--question` command |
+| `gbrain recall --entity <x>` | rejected | accepted; an explicit entity is never split or widened |
+| A recall or entity lookup that matches nothing | exit 0 | still exit 0 by default; with `GBRAIN_FAIL_ON_EMPTY=1` it exits 12 (`NO_RESULTS_EXIT_CODE`) with one stderr line, and recall's list `--json` adds `status: "no_results"` |
+| Ranking entities by how connected they are | not possible | new read-only op `rank_entities` (CLI `gbrain rank-entities`); remote callers count only edges whose endpoints and origin page they can read, and see coverage as a state only |
+
+On a synthetic seeded fixture (318 pages, invented names), entity name variants went from 44.3% to 96.4% hit@1 and exact identifiers from 95% to 100% hit@1 in both search and query; LongMemEval-S retrieval and NamedThingBench are unchanged.
+
+**Spend effect:** none. No new model calls, no default or cap changes. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- `gbrain entity` may now return a card for a name it used to miss; check `card.match` when you need an exact match, or turn variants off with `gbrain config set entity.name_variants false` (or `variants: false` on the op).
+- The entity miss line is now just `No entity found.`; timing and mention coverage print on their own lines.
+
+### Itemized changes
+
+- `src/core/entities/name-variants.ts` (pure matching) and `src/core/verbs/entity-variants.ts` (one trigram-indexed candidate read per source, capped at 200; a capped read resolves nothing).
+- Hyphenated surnames count as one name word in variant matching, title-stub pairing and the text-mention probe.
+- `rank_entities` checks each page once in a `readable` CTE (live, in the token's sources, not quarantined, not private when private pages are excluded, in a non-archived source); redirect folding needs every hop readable, in one source, at most 5 hops.
+- Documented in `docs/guides/graph-ranking.md` and the exit-code tables.
 
 ## [0.60.348.0] - 2026-10-21
 
