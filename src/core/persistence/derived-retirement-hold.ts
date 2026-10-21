@@ -12,26 +12,31 @@
 import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
 import { maintenanceTransaction } from './attribution.ts';
+import { GENERATION_BOUNDS, RESTORE_DAYS_SQL } from '../generations/config.ts';
 
 /** The `retired_by` stamps derived writers put on the pages they retire. */
-export const DERIVED_RETIRED_BY = ['extract-atoms', 'managed-reextract', 'stale-atoms', 'life-chronicle'] as const;
+export const DERIVED_RETIRED_BY = ['extract-atoms', 'managed-reextract', 'stale-atoms', 'life-chronicle', 'generation-restore'] as const;
 export type DerivedRetiredBy = typeof DERIVED_RETIRED_BY[number];
 
 /** The unmanaged extract_atoms retirement of atoms a completed re-extraction did not reproduce. */
 export const ATOM_RETIRED_BY_EXTRACT: DerivedRetiredBy = 'extract-atoms';
 
-/** Days after `deleted_at` that the purge keeps a derived retirement. */
-export const DERIVED_RETIREMENT_HOLD_DAYS = 30;
+/** Days after `deleted_at` that the purge keeps a derived retirement by default; `generations.restore_days` (3 to 365) overrides it. */
+export const DERIVED_RETIREMENT_HOLD_DAYS = GENERATION_BOUNDS.restoreDays.fallback;
 
 /** Frontmatter keys only a trusted derived writer sets; a remote page write never carries them. */
 export const RESERVED_RETIREMENT_KEYS = ['retired_by', 'retired_at', 'retired_generation'] as const;
 
 const stamps = DERIVED_RETIRED_BY.map(stamp => `'${stamp}'`).join(',');
 
-/** SQL predicate for a purge scan over `pages` aliased `alias`: the page is not a derived retirement inside its hold. */
+/**
+ * SQL predicate for a purge scan over `pages` aliased `alias`: the page is not a derived retirement inside its hold. The
+ * window is the configured `generations.restore_days` read in the statement (GBRA-161 PR 1a), so a longer window is
+ * never purged early.
+ */
 export function derivedRetirementPurgeHold(alias: string): string {
   return `NOT (COALESCE(${alias}.frontmatter->>'retired_by','') IN (${stamps})
-    AND ${alias}.deleted_at > now() - interval '${DERIVED_RETIREMENT_HOLD_DAYS} days')`;
+    AND ${alias}.deleted_at > now() - interval '1 day' * ${RESTORE_DAYS_SQL})`;
 }
 
 /** Stamps pages the caller soft-deleted in this transaction as retired by `retiredBy`. */
@@ -41,15 +46,19 @@ async function stampDerivedRetirement(tx: BrainEngine, sourceId: string, slugs: 
     WHERE source_id=$3 AND slug=ANY($4::text[]) AND deleted_at IS NOT NULL`, [retiredBy, new Date().toISOString(), sourceId, [...slugs]]);
 }
 
+/** Versions, soft-deletes and stamps `slugs` as retired by `retiredBy` inside the caller's attributed transaction. */
+export async function retireDerivedPagesInTransaction(tx: BrainEngine, sourceId: string, slugs: readonly string[], retiredBy: DerivedRetiredBy): Promise<void> {
+  if (!slugs.length) return;
+  for (const slug of slugs) await tx.createVersion(slug, { sourceId });
+  await tx.softDeletePages([...slugs], { sourceId });
+  await stampDerivedRetirement(tx, sourceId, slugs, retiredBy);
+}
+
 /** Versions, soft-deletes and stamps `slugs` as retired by `retiredBy`, one attributed transaction per 500 pages. */
 export async function retireDerivedPages(engine: BrainEngine, sourceId: string, slugs: readonly string[], retiredBy: DerivedRetiredBy): Promise<void> {
   for (let i = 0; i < slugs.length; i += 500) {
     const batch = slugs.slice(i, i + 500);
-    await maintenanceTransaction(engine, async tx => {
-      for (const slug of batch) await tx.createVersion(slug, { sourceId });
-      await tx.softDeletePages(batch, { sourceId });
-      await stampDerivedRetirement(tx, sourceId, batch, retiredBy);
-    });
+    await maintenanceTransaction(engine, tx => retireDerivedPagesInTransaction(tx, sourceId, batch, retiredBy));
   }
 }
 
