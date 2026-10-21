@@ -67,7 +67,9 @@ function homeWithConfig(name: string, body = '{"engine":"postgres"}'): { dir: st
  * its text goes: writes, sync, jobs, workers, locks, doctor, setup and hooks,
  * other transports (HTTP, MCP surface, thin client), the database URL variables
  * (compared as a database target), connection sizing and driver tuning,
- * diagnostics, and constants that only share the prefix. Families are listed
+ * diagnostics, settings only the CLI's own renderer reads (GBRAIN_FAIL_ON_EMPTY:
+ * the warm path renders and sets the exit code in the CLI, with the CLI's
+ * environment), and constants that only share the prefix. Families are listed
  * by prefix only where no member reads; anything else is named.
  */
 const NOT_READ_BEHAVIOR_PREFIXES = [
@@ -78,7 +80,7 @@ const NOT_READ_BEHAVIOR_PREFIXES = [
   'GBRAIN_PROGRESSIVE_BATCH_', 'GBRAIN_QUEUE_', 'GBRAIN_SETUP_', 'GBRAIN_STOP_PUSH', 'GBRAIN_SUPERVIS', 'GBRAIN_SWEEP', 'GBRAIN_SYNC', 'GBRAIN_WORKER_',
 ];
 const NOT_READ_BEHAVIOR = new Set([
-  'GBRAIN_CLI_SOCKET', 'GBRAIN_DEBUG', 'GBRAIN_SQL_TRACE', 'GBRAIN_SQL_TRACE_LABEL', 'GBRAIN_LME_DEBUG', 'GBRAIN_SOURCE',
+  'GBRAIN_FAIL_ON_EMPTY', 'GBRAIN_CLI_SOCKET', 'GBRAIN_DEBUG', 'GBRAIN_SQL_TRACE', 'GBRAIN_SQL_TRACE_LABEL', 'GBRAIN_LME_DEBUG', 'GBRAIN_SOURCE',
   'GBRAIN_DATABASE_URL', 'GBRAIN_DIRECT_DATABASE_URL', 'GBRAIN_DIRECT_POOL_SIZE', 'GBRAIN_DISABLE_DIRECT_POOL', 'GBRAIN_PREPARE',
   'GBRAIN_IDLE_TX_TIMEOUT', 'GBRAIN_MAX_CONNECTIONS', 'GBRAIN_NO_RETRY_CONNECT', 'GBRAIN_DB_ACCESS',
   'GBRAIN_ACCEPT_PENDING', 'GBRAIN_ACCEPT_SILENT_WIDEN', 'GBRAIN_WRITE_WAIT_MS', 'GBRAIN_PREADMIT_CACHE', 'GBRAIN_PREPARATION_DEADLINES',
