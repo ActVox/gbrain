@@ -58,6 +58,7 @@ import { isBooleanLiteral, isKnownOpFlag } from '../core/op-flag-tokens.ts';
 import { conceptNudge } from '../core/search/query-intent.ts';
 import { redactRetrievalOutput } from '../core/search/output-redaction.ts';
 import { formatSearchExact } from './search-exact-format.ts';
+import { routeCommand } from './command-route.ts';
 import type { CliOptions } from '../core/cli-options.ts';
 import { RemoteMcpError, extractResponseMeta } from '../core/remote-mcp-error.ts';
 import { assertSingleSourceScopeFlag, checkHostHonoredParams, hintAmbientNarrowing, type AmbientSourceBinding } from './source-scope.ts';
@@ -359,15 +360,10 @@ async function main() {
     if (command !== 'hook') (await import('../core/ai/key-warnings.ts')).warnShadowedProviderKeys();
   }
 
-  const subArgs = args.slice(1);
-
-  // DX alias: `ask` is a natural-language alias for `query`
-  if (command === 'ask') {
-    command = 'query';
-  }
-  // #7191: `search --exact "<phrase>"` is the exhaustive literal scan, routed before any ranked-search flag is parsed.
-  const exactAt = command === 'search' ? subArgs.indexOf('--exact') : -1;
-  if (exactAt >= 0 && (subArgs.indexOf('--') < 0 || exactAt < subArgs.indexOf('--'))) { command = 'search-exact'; subArgs.splice(exactAt, 1); }
+  // DX aliases (`ask` -> query, #7191 `search --exact` -> search-exact): cli/command-route.ts.
+  const routed = routeCommand(command, args.slice(1));
+  command = routed.command;
+  const subArgs = routed.subArgs;
   dispatchedCommand = command;
 
   // Local patch 2026-06-11 — mark one-shot CLI processes so the facts

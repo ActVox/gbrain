@@ -10,6 +10,7 @@ import { operations, type OperationContext } from '../src/core/operations.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
 import { runExactScan, phrasePattern } from '../src/core/search/exact-scan.ts';
+import { routeCommand } from '../src/cli/command-route.ts';
 
 let engine: PGLiteEngine;
 
@@ -177,6 +178,16 @@ describe('search_exact remote visibility', () => {
 
   test('a source outside the grant is refused', async () => {
     await expect(exact(remote(), { phrase: 'x y', source_id: 'source-b' })).rejects.toBeDefined();
+  });
+});
+
+describe('gbrain search --exact routing', () => {
+  test('--exact routes search to search-exact and is dropped; after a bare -- it is a positional', () => {
+    expect(routeCommand('search', ['--exact', 'board pack', '--limit', '5'])).toEqual({ command: 'search-exact', subArgs: ['board pack', '--limit', '5'] });
+    expect(routeCommand('search', ['board pack', '--exact'])).toEqual({ command: 'search-exact', subArgs: ['board pack'] });
+    expect(routeCommand('search', ['--', '--exact'])).toEqual({ command: 'search', subArgs: ['--', '--exact'] });
+    expect(routeCommand('query', ['--exact', 'x'])).toEqual({ command: 'query', subArgs: ['--exact', 'x'] });
+    expect(routeCommand('ask', ['who?'])).toEqual({ command: 'query', subArgs: ['who?'] });
   });
 });
 
