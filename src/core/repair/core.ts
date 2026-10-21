@@ -114,7 +114,9 @@ export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmb
   /** `rename-identity` (#6729): the old slug that disambiguates a pair (`--from`), and the close disposition (`--close`). */
   from?: string; close?: boolean;
   /** `uncommitted-deletions` (#7130): the preview window starts below this page id (`--after`). */
-  afterPage?: number }
+  afterPage?: number;
+  /** `visibility`: the preview window's size (`--limit`); an apply still stops after `--limit` items. */
+  limit?: number }
 
 export interface RepairHandler {
   kind: RepairKind;
@@ -334,7 +336,8 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
     ...(opts.held ? { held: true } : {}), ...(opts.side ? { side: opts.side } : {}), ...(opts.state ? { state: opts.state } : {}),
     ...(opts.keep ? { keep: opts.keep } : {}), ...(opts.requestId ? { requestId: opts.requestId } : {}),
     ...(opts.olderThan ? { olderThan: opts.olderThan } : {}), ...(opts.includeFailures ? { includeFailures: true } : {}), ...(opts.force ? { force: true } : {}),
-    ...(opts.from ? { from: opts.from } : {}), ...(opts.close ? { close: true } : {}), ...(opts.afterPage !== undefined ? { afterPage: opts.afterPage } : {}) };
+    ...(opts.from ? { from: opts.from } : {}), ...(opts.close ? { close: true } : {}), ...(opts.afterPage !== undefined ? { afterPage: opts.afterPage } : {}),
+    ...(opts.limit !== undefined ? { limit: opts.limit } : {}) };
   const plan = await handler.plan(ctx.engine, scope, resumed, planOpts);
   const pending = opts.limit !== undefined ? plan.items.slice(0, opts.limit) : plan.items;
   const counters = await capacity(ctx);
