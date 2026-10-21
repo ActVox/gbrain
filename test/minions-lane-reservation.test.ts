@@ -36,7 +36,13 @@ async function statusOf(id: number): Promise<string | undefined> {
   return (await queue.getJob(id))?.status;
 }
 
-/** Long handler blocks on a shared gate; short handler returns at once. Claim order is recorded by job id. */
+/** Ids in the order the queue claimed them (started_at is stamped by the claim UPDATE; handler start order can differ). */
+async function claimOrder(): Promise<number[]> {
+  const rows = await engine.executeRaw<{ id: number }>('SELECT id FROM minion_jobs WHERE started_at IS NOT NULL ORDER BY started_at, id');
+  return rows.map(r => Number(r.id));
+}
+
+/** Long handler blocks on a shared gate; short handler returns at once. */
 async function runMixed(opts: { concurrency: number; shortJobReservedSlots: number }) {
   const [long1, long2, short] = await submitInOrder(['fixture-long', 'fixture-long', 'fixture-short']);
   let release!: () => void;
@@ -61,7 +67,7 @@ describe('claim-time lane reservation for long jobs (#7242)', () => {
     const run = await runMixed({ concurrency: 2, shortJobReservedSlots: 1 });
     try {
       await waitFor(async () => (await statusOf(run.short)) === 'completed', { timeoutMs: 10_000, label: 'short job completed' });
-      expect(run.started.slice(0, 2)).toEqual([run.long1, run.short]);
+      expect(await claimOrder()).toEqual([run.long1, run.short]);
       // Several poll ticks with a free slot: the second long job must stay waiting.
       await new Promise(r => setTimeout(r, 300));
       expect(await statusOf(run.long2)).toBe('waiting');
@@ -72,14 +78,14 @@ describe('claim-time lane reservation for long jobs (#7242)', () => {
       run.worker.stop();
       await run.running;
     }
-    expect(run.started).toEqual([run.long1, run.short, run.long2]);
+    expect(await claimOrder()).toEqual([run.long1, run.short, run.long2]);
   }, 30_000);
 
   test('reserved slots 0 keeps the old FIFO claim: the second long job takes the second slot', async () => {
     const run = await runMixed({ concurrency: 2, shortJobReservedSlots: 0 });
     try {
       await waitFor(() => run.started.length >= 2, { timeoutMs: 10_000, label: 'two jobs claimed' });
-      expect(run.started.slice(0, 2)).toEqual([run.long1, run.long2]);
+      expect(await claimOrder()).toEqual([run.long1, run.long2]);
       expect(await statusOf(run.short)).toBe('waiting');
     } finally {
       run.release();
