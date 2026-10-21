@@ -1213,7 +1213,6 @@
           "private resolveFactsEmbeddingCast",
           "private rlsScopeBindingEnabled",
           "private runUnsafe",
-          "private runUnsafeOnce",
           "private runVectorAttempt",
           "private transactionOn",
           "private vectorIterativeScan",

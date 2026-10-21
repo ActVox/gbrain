@@ -67,7 +67,6 @@ export const DOMAIN_OF: Record<string, string> = {
   'onCheckout': OOS.lifecycle,
   'reconnect': OOS.lifecycle,
   'runUnsafe': OOS.helper,
-  'runUnsafeOnce': OOS.helper,
   'executeRaw': OOS.lifecycle,
   'executeRawDirect': OOS.lifecycle,
   'keywordBoundedRead': OOS.lifecycle,

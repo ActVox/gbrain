@@ -1562,7 +1562,6 @@ export class MinionWorker extends EventEmitter {
 
       const stored = result != null ? (typeof result === 'object' ? result as Record<string, unknown> : { value: result }) : undefined;
       const verdict = jobResultOutcome(stored);
-      // Complete the job (token-fenced); a result that reports a failure (#7188) ends it failed instead.
       const completed = verdict.outcome === 'failed'
         ? await this.queue.failJob(job.id, lockToken, verdict.reason!, 'failed', 0, jobOutcomeResult(stored, verdict))
         : await this.queue.completeJob(job.id, lockToken, jobOutcomeResult(stored, verdict));

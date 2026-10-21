@@ -2846,12 +2846,7 @@ export class PostgresEngine implements BrainEngine {
    * Cancellable statements retain an exclusive connection through query and
    * cancellation settlement so a late CancelRequest cannot hit its successor.
    */
-  private runUnsafe<T>(conn: ReturnType<typeof postgres>, sql: string, params?: unknown[], opts?: RunUnsafeOpts): Promise<T[]> {
-    if (opts?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
-    return retryReadOnlyAutocommit(conn, c => this.runUnsafeOnce<T>(c, sql, params, opts));
-  }
-
-  private runUnsafeOnce<T>(
+  private runUnsafe<T>(
     conn: ReturnType<typeof postgres>,
     sql: string,
     params?: unknown[],
@@ -2922,7 +2917,7 @@ export class PostgresEngine implements BrainEngine {
       if (opts?.timeoutMs !== undefined && !this._pageTransaction) {
         return await runBoundedStatement<T>(this.sql, sql, params, { ...opts, timeoutMs: opts.timeoutMs }, () => this.checkoutGauge.checkedOut());
       }
-      return await this.runUnsafe<T>(this.sql, sql, params, opts);
+      return await retryReadOnlyAutocommit(this.sql, c => this.runUnsafe<T>(c, sql, params, opts));
     } finally {
       this.checkoutGauge.release('raw');
     }
@@ -2971,7 +2966,7 @@ export class PostgresEngine implements BrainEngine {
     // try/finally, not .finally — see executeRaw (sync throw on pre-aborted signal).
     this.checkoutGauge.acquire('direct');
     try {
-      return await this.runUnsafe<T>(conn, sql, params, opts);
+      return await retryReadOnlyAutocommit(conn, c => this.runUnsafe<T>(c, sql, params, opts));
     } finally {
       this.checkoutGauge.release('direct');
     }
