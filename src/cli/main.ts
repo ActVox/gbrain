@@ -361,7 +361,11 @@ async function main() {
     if (command !== 'hook') (await import('../core/ai/key-warnings.ts')).warnShadowedProviderKeys();
   }
 
-  // DX aliases (`ask` -> query, #7191 `search --exact` -> search-exact): cli/command-route.ts.
+  // DX alias: `ask` is a natural-language alias for `query`
+  if (command === 'ask') {
+    command = 'query';
+  }
+  // #7191: `search --exact` -> search-exact, before any ranked-search flag is parsed (cli/command-route.ts).
   const routed = routeCommand(command, args.slice(1));
   command = routed.command;
   const subArgs = routed.subArgs;

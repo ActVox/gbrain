@@ -162,7 +162,7 @@ export function flagRejection(inv: Invocation): string | null {
   }
   const [typed, ...typedArgs] = rest;
   if (!typed || typedArgs.some((a) => a === '--help' || a === '-h')) return null;
-  const { command, subArgs } = routeCommand(typed, typedArgs);
+  const { command, subArgs } = routeCommand(typed === 'ask' ? 'query' : typed, typedArgs);
   if (dispatchedBeforeValidation(command, subArgs)) return null;
   const migrationError = migrationCliArgumentError(command, subArgs);
   if (migrationError) return migrationError.message;

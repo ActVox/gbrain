@@ -187,7 +187,6 @@ describe('gbrain search --exact routing', () => {
     expect(routeCommand('search', ['board pack', '--exact'])).toEqual({ command: 'search-exact', subArgs: ['board pack'] });
     expect(routeCommand('search', ['--', '--exact'])).toEqual({ command: 'search', subArgs: ['--', '--exact'] });
     expect(routeCommand('query', ['--exact', 'x'])).toEqual({ command: 'query', subArgs: ['--exact', 'x'] });
-    expect(routeCommand('ask', ['who?'])).toEqual({ command: 'query', subArgs: ['who?'] });
   });
 });
 
