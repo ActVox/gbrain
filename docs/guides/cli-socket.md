@@ -37,6 +37,11 @@ A serve on a mount brain (`gbrain serve --brain <mount>`, `GBRAIN_BRAIN_ID`, a
 host brain only.
 Turn it off by removing the flag or running
 `gbrain config set serve.cli_socket false`, then restarting the serve.
+The serve reads the key from the config it already loaded when it connected,
+so a serve with the socket off does no work for it: it loads none of the
+socket's code and sends the database nothing extra. A serve that started
+degraded (database unreachable at boot) does not see the key; pass
+`--cli-socket` there.
 
 ## What goes through it
 

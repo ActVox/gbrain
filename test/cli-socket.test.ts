@@ -37,6 +37,7 @@ import { isResultFrame, reviveOperationError, serializeOperationError, type CliS
 import { queueFirstFallbackHop, takeChatFallbackHopNotices, __resetChatFallbackHopNoticeForTests } from '../src/core/ai/fallback-hop-queue.ts';
 import { installOutputCapture, OutputCapture, withOutputCapture } from '../src/core/cli-socket/output-capture.ts';
 import { opError, OperationError } from '../src/core/ops/contract.ts';
+import { loadConfigWithEngine, type GBrainConfig } from '../src/core/config.ts';
 
 const uid = process.getuid!();
 const engine = { kind: 'postgres', connectedDatabaseUrl: 'postgresql://alice-example@db.acme-example.test/brain' } as unknown as BrainEngine;
@@ -456,4 +457,21 @@ test('an OperationError round-trips with every field the CLI renderer reads', ()
   expect(revived).toBeInstanceOf(OperationError);
   expect(revived.toJSON()).toEqual(original.toJSON());
   expect({ ...revived }).toEqual({ ...original });
+});
+
+test('serve.cli_socket joins the connect-time config merge from its bulk snapshot only, never a read of its own', async () => {
+  const base: GBrainConfig = { engine: 'postgres' };
+  const reads: string[] = [];
+  const reader = (table: Record<string, string> | null) => ({
+    getConfig: async (key: string) => { reads.push(key); return table?.[key] ?? null; },
+    ...(table ? { getAllConfig: async () => ({ ...table }) } : {}),
+  });
+  expect((await loadConfigWithEngine(reader({ 'serve.cli_socket': ' Yes ' }), base))?.serve_cli_socket).toBe(true);
+  expect((await loadConfigWithEngine(reader({ 'serve.cli_socket': 'false' }), base))?.serve_cli_socket).toBe(false);
+  expect((await loadConfigWithEngine(reader({}), base))?.serve_cli_socket).toBeUndefined();
+  expect(reads).toEqual([]);
+  const perKey = await loadConfigWithEngine({ getConfig: async (key: string) => { reads.push(key); return key === 'serve.cli_socket' ? 'true' : null; } }, base);
+  expect(perKey?.serve_cli_socket).toBeUndefined();
+  expect(reads.length).toBeGreaterThan(0);
+  expect(reads).not.toContain('serve.cli_socket');
 });

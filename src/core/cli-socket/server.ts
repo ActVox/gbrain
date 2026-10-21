@@ -22,7 +22,6 @@ import { peerCredSupport, peerUid, type PeerCredSupport } from './peer-cred.ts';
 import { FrameReader, isCliSocketRequest, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_ROUND_TRIP_MS, REQUEST_READ_TIMEOUT_MS,
   type CliSocketRequest, type HandshakeFrame, type ResultFrame } from './protocol.ts';
 
-export const CLI_SOCKET_CONFIG_KEY = 'serve.cli_socket';
 const MAX_CONNECTIONS = 32;
 const MAX_ACTIVE_REQUESTS = 8;
 
@@ -42,16 +41,11 @@ export interface CliSocketServerOptions {
   stuckAfterMs?: number;
 }
 
-/** Whether this serve should open the socket: the flag, or the DB-plane config key set to a true value. */
-export async function cliSocketRequested(engine: BrainEngine, flag: boolean): Promise<boolean> {
-  if (flag) return true;
-  try { return /^(1|true|on|yes)$/i.test((await engine.getConfig(CLI_SOCKET_CONFIG_KEY))?.trim() ?? ''); }
-  catch { return false; }
-}
-
-/** serve's entry (`flag` is `--cli-socket`): opens the socket only when asked; logs (never throws) when it cannot. */
-export async function maybeStartCliSocket(engine: BrainEngine, flag: boolean, log: (line: string) => void): Promise<CliSocketBinding | null> {
-  if (!await cliSocketRequested(engine, flag)) return null;
+/**
+ * serve's entry, called only when the socket was asked for (`--cli-socket`, or `serve.cli_socket` in the connect-time
+ * config merge): serve decides that without loading this module. Logs (never throws) when it cannot open the socket.
+ */
+export async function startCliSocket(engine: BrainEngine, log: (line: string) => void): Promise<CliSocketBinding | null> {
   try { return await startCliSocketServer({ engine, log }); }
   catch (error) { log(`[gbrain serve] cli-socket: not started: ${(error as Error).message}`); return null; }
 }

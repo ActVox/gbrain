@@ -132,6 +132,19 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     await stopServe();
   }, 90_000);
 
+  test('serve.cli_socket true opens it without the flag (read from the connect-time config merge)', async () => {
+    expect((await cli(['config', 'set', 'serve.cli_socket', 'true'])).exitCode).toBe(0);
+    try {
+      serve = await startServe([]);
+      for (let i = 0; i < 120 && !serveLog.includes('cli-socket: listening'); i++) await Bun.sleep(250);
+      expect(serveLog).toContain('cli-socket: listening');
+      await stopServe();
+      expect(existsSync(socketPath)).toBe(false);
+    } finally {
+      expect((await cli(['config', 'set', 'serve.cli_socket', 'false'])).exitCode).toBe(0);
+    }
+  }, 90_000);
+
   test('serve --cli-socket binds a 0600 socket in a 0700 run directory', async () => {
     serveTrace = join(home, 'serve-trace.jsonl');
     serve = await startServe(['--cli-socket'], { GBRAIN_SQL_TRACE: serveTrace });
