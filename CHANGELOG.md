@@ -10,6 +10,138 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.354.0] - 2026-10-21
+
+**New `search_exact` (CLI `gbrain search --exact "<phrase>"`) is an unranked, exhaustive literal scan: it returns every page that contains the phrase, plus a `complete` flag that is true only when the whole scope was read (#7191).** Ranked search can miss a rare phrase, so agents fell back to grepping the brain checkout for exact lookups.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Finding every page that contains an exact phrase | ranked search, which can rank a rare phrase out of the results, or a grep of the checkout | `gbrain search --exact "<phrase>"` / MCP `search_exact`: the phrase's words in order with any whitespace between them, substring, case-insensitive unless `case_sensitive`; regex and LIKE metacharacters are literal; every matching page in page-id order with matching chunks and up to 3 snippets |
+| Knowing the scan saw everything | not possible | `complete: true` only when the whole scope was read; otherwise `incomplete_reasons`: `limit` (default 100 pages, max 1000) or `deadline` (default 30 s, max 120), both resumable with `after: resume_after`, and `unreadable_pages` counted by reason (`unchunked`, `projection_pending`, `unsealed`, `scan_timeout`) |
+| Scope | n/a | `source_id`, `types`, `slug_prefix`, plus the prefixes ranked search hides, echoed as `excluded_slug_prefixes` |
+| `gbrain search --exact` with a ranked-only flag | n/a | refused as an unknown flag instead of ignored |
+
+The scan uses ranked search's visibility rules: remote callers read safe chunks only and never see private, foreign-source or quarantined pages, so fenced facts and takes never match. On Postgres 16 with 50,000 pages and 328 MB of chunk text, a full scan for a rare phrase takes 2.1–2.7 s locally and 2.9 s remotely; a common phrase stops at the 100-page limit in 1.3 s.
+
+**Spend effect:** none. No model calls, no default or cap changes, no schema change. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- Quotes mean different things: in ranked search a quoted phrase is stemmed; `--exact` matches the characters you typed (punctuation, accents and quote styles are literal).
+- Pages with body text but no chunks yet (for example held pages) show up as `unreadable_pages` with reason `unchunked`, not as misses.
+
+### Itemized changes
+
+- New op `search_exact` (registered `filtered` with `retrieval` output redaction; covered by both privacy sweeps), scanned in keyset batches of 2,000 pages per statement with JIT off; a batch that hits the statement timeout is retried at half the size, down to one page.
+- `src/cli/command-route.ts` rewrites `search --exact` to `search-exact` before ranked-search flags parse.
+- Docs: `docs/guides/exact-search.md`, linked from the search-modes guide.
+
+## [0.60.353.0] - 2026-10-21
+
+**Resolving held file-drift pages in bulk now shows progress and prints its preview within a minute.** `gbrain repair file-drift --held` used to prepare every selected held page before it printed anything. Each page reads the database a few dozen times, so a held set of a few thousand pages against a remote database printed nothing for over an hour: no preview, no hash, and nothing to apply. It also quietly stopped at the first 1,000 held pages. A held preview now covers one window of at most 200 pages, or 60 seconds of work, and reports each page on stderr as it goes. A partial window prints the next preview command with `--cursor <next_cursor>`, and walking the windows covers every held page.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Previewing a few thousand held pages against a remote database | No output for over an hour | One window of at most 200 pages or 60 s, with progress on stderr |
+| More than 1,000 held pages selected | The rest were silently left out | The windows walk every held page in held-path order |
+| What a preview's hash and apply command cover | The whole selection | That window only; the apply carries its `--cursor` |
+| Applying a preview of large pages | The artifact was parsed again for every page (seconds per page), with no output | Parsed once, with each page reported on stderr |
+
+With Git durability off, a preview that recreates or removes files now leads with "The next sync undoes this repair unless …" and the commit to run, and reports `undone_by_next_sync_unless_committed`. The apply also reports each page on stderr and reads the preview artifact once, instead of parsing it again for every page (with large pages that cost seconds per page). Nothing changes on upgrade, and nothing is rewritten.
+
+### Itemized changes
+
+- `src/core/repair/file-drift.ts`: `--held` selects holds in held-path order (`COLLATE "C"`), previews at most `HELD_WINDOW_PAGES` (200) after `--cursor`, and starts no page after `HELD_WINDOW_BUDGET_MS` (60 s) or the run's deadline. A partial window adds `after_window` (and `before_cursor`) to the residuals, a warning naming the next command, and `details.window` (`previewed`, `remaining`, `complete`, `next_cursor`, `next_command`). The selection digest binds the cursor, and a cursor no preview printed is refused (`invalid_params`).
+- `src/core/repair/file-drift.ts`: `readArtifact` keeps the parsed artifact while the file's identity (device, inode, size, mtime) is unchanged.
+- `src/commands/repair.ts`, `src/core/repair/core.ts`, `src/core/repair/registry.ts`: `--cursor <next_cursor>` for `file-drift --held`, carried into the printed apply command, plus a progress reporter for the CLI preview (`repair.file_drift.preview`) and apply (`repair.file-drift.apply`).
+- `docs/guides/repair.md`: how held windows work.
+- Tests: `test/repair-file-drift-held-window-gbra133.test.ts` (PGLite and Postgres).
+
+## [0.60.352.0] - 2026-10-21
+
+**Reading the timeline of a very large page uses less memory.** When gbrain rebuilds a page's timeline links, it keeps track of the timeline lines it has already seen, so it never writes one twice. On a page with tens of thousands of dated lines, that tracking took about 80 bytes per line, roughly a third of an 8 MiB page's own size. It now takes about 25 bytes per line, and the results are exactly the same.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Memory held while reading the timeline of an 8 MiB page with about 43,000 dated lines (PGLite) | 4.9–6.6 MiB | 1.7–3.4 MiB |
+| The same page on Postgres | about 5.3 MiB | 2.8–5.1 MiB |
+| A dense page with about 113,000 dated lines (PGLite / Postgres) | 5.6–6.5 / 6.3–7.3 MiB | 2.7–2.9 / 4.5–5.1 MiB |
+| Which timeline entries are kept or dropped | — | unchanged |
+
+Nothing changes on upgrade, and nothing is rewritten.
+
+### Itemized changes
+
+- `src/core/timeline-extract.ts`: `TimelineKeySet` stores its digests with open addressing over two flat number arrays (`firsts` and `values`, growing at 3/4 load) instead of a `Map<number, number>`. Collision handling (`AMBIGUOUS`), `mark` and `marked` behave as before.
+
+### For contributors
+
+- `test/large-pages/managed-links-timeline-heap.test.ts` now has margin under its unchanged bound (`held < page bytes`). The bound and the test are untouched.
+- Unit and serial shard weights are refreshed from a recent full run (`scripts/test-weights.json`, `scripts/serial-weights.json` and their metadata files).
+
+## [0.60.351.0] - 2026-10-21
+
+**Remote page reads now hide a page marked private only by a privacy alias, and `gbrain repair visibility` and doctor `derived_visibility` finish on a large brain: the preview plans one class at a time, world facts from a private page first, lists one bounded window and applies exactly that window with `--apply --expect <hash>`.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page with `access: private` (or `confidentiality: secret`, ...) and no `visibility`, read remotely | shown unless `visibility.honor_aliases` was set | hidden by default, like `visibility: private`; local CLI reads are unchanged; opt out with `gbrain config set visibility.honor_aliases false` |
+| `gbrain repair visibility` on a brain with tens of thousands of atoms and concepts | the plan ran a join that paired every concept with every atom (and every world fact with every page) and could time out before printing anything | set-based plans; one class at a time in the order remote callers are exposed (facts, remotely readable first; chronicle events; alias-only pages; atoms and concepts); only `--class lineage` reads concept-provenance links |
+| Preview size and apply | every row, then `--apply` applied them all | one window (1,000 items, `--limit` up to 10,000) with progress on stderr; `--apply --expect <hash>` applies exactly that window and resumes after its last item; preview again for the next window |
+| A plan class over its statement bound | the whole preview failed | that class is reported and skipped (120 s per statement); the others are listed |
+| Doctor `derived_visibility` | one long pass; the fact count came last | the fact count (what remote callers can read) runs first; derived-page counts that overrun the bound read as unknown |
+| A doctor rerun hint capped to fit an agent tool call | named only the capped `--budget-ms` | also names the uncapped budget to use in a terminal |
+
+On a synthetic brain of about 600k pages (40k atoms, 1k concepts, 20k facts), the default preview takes 0.5 s on Postgres and 0.7 s on PGLite, a lineage preview 0.5 s and 0.75 s, and doctor `derived_visibility` 1.3 s and 1.0 s.
+
+**Spend effect:** none. No model calls; repaired pages are re-embedded by their publication as before. Nothing is rewritten on upgrade: the repair is preview-first and only tightens.
+
+### What to watch for after you upgrade
+
+- Remote callers stop seeing alias-only private pages. Doctor `derived_visibility` counts them; `gbrain repair visibility --class aliases` stamps `visibility: private` on them after you agree.
+- Use the apply command a preview prints. A bare `gbrain repair visibility --apply` (and `--all`, the remediation plan) still applies every class at once.
+
+### Itemized changes
+
+- `visibility.honor_aliases` defaults to on; remote `get_page` and `list_pages` honor the aliases.
+- `gbrain repair visibility`: `--class facts|events|aliases|lineage`, a windowed preview bound to `--expect`, stderr progress, a per-statement bound, set-based fact and concept-lineage queries.
+- Doctor `derived_visibility`: facts first, bounded derived-page counts; the preview hint names the windowed apply.
+
+## [0.60.350.0] - 2026-10-21
+
+**The warm CLI socket now works when serve and the CLI connect through different pooler lanes.** A serve on a Supabase pooler's session lane (port 5432, prepared statements on, a larger pool) refused every CLI call made on the transaction lane (port 6543, `?prepare=false`), because the identity it compared included the port, the URL's query string and every `GBRAIN_*` value, pool sizes included. Each call then took the cold path, so with the socket on nothing got faster. The identity now leaves out what cannot change an answer, and a refusal says which part differed.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Serve on the session lane (5432), CLI on the transaction lane (6543) of the same Supavisor host, user and database | refused (`identity_mismatch`) | answered warm |
+| `GBRAIN_POOL_SIZE`, `GBRAIN_DIRECT_POOL_SIZE`, `GBRAIN_PREPARE` or the database URL variables differ | refused | answered warm |
+| Driver-only URL parameters (`prepare=`, `sslmode`, `application_name`, timeouts) differ | refused | answered warm |
+| Another port on plain Postgres, another host, user or database, or a different `options` parameter | refused | still refused |
+| A read-behavior setting (model, embeddings, search tuning, visibility, timeouts, schema pack, AI call log, contributor capture) differs | refused | still refused |
+| A refusal | `refused (identity_mismatch)` with no detail | names the part, never its value: `database port`, `env GBRAIN_MODEL`, `provider key VOYAGE_API_KEY`, `config contents`; the serve logs each distinct one once |
+
+### What to watch for after you upgrade
+
+- Restart the serve after upgrading. A serve and a CLI on different gbrain versions never match, so until the restart every CLI call takes its cold path (`refused (identity_mismatch): version`).
+- Nothing changes for a serve without `--cli-socket` or `serve.cli_socket`; the socket stays off by default.
+- With `GBRAIN_DEBUG=1`, a CLI call that still falls back prints the part that differed. Align that setting between the serve's environment and the CLI's, or restart the serve with it.
+
+### Itemized changes
+
+- `src/core/cli-socket/identity.ts`: the identity is now structured: brain, version, engine, config home, file and content, `databaseTarget` (host, port, database, user, `options`) and `behaviorEnv` (SHA-256 values of the explicit `READ_BEHAVIOR_ENV` list and the provider routing variables, plus the names of the provider keys that are set). `cliSocketIdentityMismatch` compares it part by part, and lets the port differ only on a `*.pooler.supabase.com` host.
+- The handshake refusal carries `mismatch`, and the CLI's debug line prints it. An older CLI sends the old token and is refused as `malformed_request`, so it takes its cold path.
+- `test/cli-socket.test.ts` classifies every `GBRAIN_*` name in `src` as read behavior or not, so a new setting can't skip the decision.
+
 ## [0.60.349.0] - 2026-10-21
 
 **`gbrain entity` now finds a person by a nickname, an initial plus surname, a title, reversed order, a one-letter surname typo or a surname only one page has; search and query put pages that contain an exact identifier first; `recall <entity>` reads the same facts the recall op does; and a lookup that matches nothing can exit 12 for scripts (#7160, #7161, #7163, #4828, #7166, #7168, #7177).** An agent asking for a person, a thing it saved or an exact email, URL, phone number or code got a miss or a lower-ranked page even though the brain held it.
