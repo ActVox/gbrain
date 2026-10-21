@@ -980,6 +980,23 @@ function passNext(stop: DrainStopReason | undefined, result: SyncResult, resumeC
 }
 
 /** What the agent runs next, or null when the sync is done (DX-A2). */
+/**
+ * GBRA-133: what stopped a drain that did not converge, as `key=value` log fields: the stop reason, the write that stopped it
+ * (its error code and request), and the failed files by code. A blocked stop with none of them says `cause=unrecorded`
+ * instead of looking like a clean end. Empty for a synced result.
+ */
+export function drainStopFields(result: Pick<SyncResult, 'status' | 'reason' | 'managedWrite' | 'drain' | 'failedFiles' | 'failureCodes'>): string {
+  const outcome = syncOutcome(result);
+  if (outcome === 'synced') return '';
+  const write = result.managedWrite;
+  const fields = [
+    result.drain?.stop_reason ? `stop=${result.drain.stop_reason}` : result.reason ? `stop=${result.reason}` : '',
+    write ? `write_error=${write.write_error}${write.reason && write.reason !== write.write_error ? ` write_reason=${write.reason}` : ''} request=${write.write_request.request_id}` : '',
+    result.failedFiles ? `failed_files=${result.failedFiles}${result.failureCodes?.length ? ` failures=${result.failureCodes.map(c => `${c.code}:${c.count}`).join(',')}` : ''}` : '',
+  ].filter(Boolean);
+  return ` ${outcome === 'blocked' && !write && !result.failedFiles ? [...fields, 'cause=unrecorded'].join(' ') : fields.join(' ')}`.trimEnd();
+}
+
 export function drainNext(result: SyncResult, resumeCommand: string, sourceId: string): DrainNext | null {
   const outcome = syncOutcome(result);
   if (outcome === 'synced') return null;

@@ -18,7 +18,7 @@ import { DelegatedSyncDeadline } from '../src/commands/sync-persistence-delegate
 import { noteCommittedProgress, noteForwardProgress, onCommittedProgress, onForwardProgress, registerRunDeadline } from '../src/core/forward-progress.ts';
 import { progressDeadlineDecision } from '../src/core/process-watchdog.ts';
 import { syncDeadlineStallNotice, syncWatchdogPlan } from '../src/core/sync-reconcile.ts';
-import { drainNext, formatDrainSummary, runDrain, type DrainClaim, type DrainOwnerRow, type StallProbe } from '../src/core/persistence/sync-drain.ts';
+import { drainNext, drainStopFields, formatDrainSummary, runDrain, type DrainClaim, type DrainOwnerRow, type StallProbe } from '../src/core/persistence/sync-drain.ts';
 import { startServeHeadWatcher, type OnCommitJobStatus, type ServeHeadWatcherOptions } from '../src/core/serve-head-watcher.ts';
 import { RETRY_BACKOFF_MS } from '../src/core/commit-notifier.ts';
 import { CODES } from '../src/core/error-registry.ts';
@@ -207,5 +207,26 @@ describe('commit notifier: committed runs are progress, and a stalled lease hold
     h.advance(RETRY_BACKOFF_MS.at(-1)!); await h.w.tick();
     expect(h.decisions('defer_drain_lease').length).toBeGreaterThan(0);
     expect(h.s.starts).toEqual([]);
+  });
+});
+
+describe('GBRA-133: a drain that stops short names its cause on the serve done line', () => {
+  const base = { added: 3, modified: 0, deleted: 0, renamed: 0, chunksCreated: 0, embedded: 0, pagesAffected: [], fromCommit: null, toCommit: 'a'.repeat(40) } as unknown as SyncResult;
+  test('a synced result adds nothing', () => {
+    expect(drainStopFields({ ...base, status: 'synced', drain: { outcome: 'synced' } as never })).toBe('');
+  });
+  test('a blocked stop names its stop reason, the write that stopped it, and the failed files by code', () => {
+    const managedWrite = { write_error: 'storage_error', reason: 'database_contention', write_request: { request_id: '123e4567-e89b-42d3-a456-426614174000' } } as never;
+    expect(drainStopFields({ ...base, status: 'blocked_by_failures', drain: { outcome: 'blocked', stop_reason: 'blocked_by_failures' } as never, managedWrite }))
+      .toBe(' stop=blocked_by_failures write_error=storage_error write_reason=database_contention request=123e4567-e89b-42d3-a456-426614174000');
+    expect(drainStopFields({ ...base, status: 'blocked_by_failures', failedFiles: 3, failureCodes: [{ code: 'invalid_frontmatter', count: 2 }, { code: 'file_too_large', count: 1 }] }))
+      .toBe(' failed_files=3 failures=invalid_frontmatter:2,file_too_large:1');
+  });
+  test('a blocked stop that recorded no write and no failed file says cause=unrecorded instead of reading like a clean end', () => {
+    expect(drainStopFields({ ...base, status: 'blocked_by_failures', drain: { outcome: 'blocked', stop_reason: 'blocked_by_failures' } as never }))
+      .toBe(' stop=blocked_by_failures cause=unrecorded');
+  });
+  test('a resumable stop names its reason', () => {
+    expect(drainStopFields({ ...base, status: 'partial', reason: 'deadline', drain: { outcome: 'resumable', stop_reason: 'deadline' } as never })).toBe(' stop=deadline');
   });
 });

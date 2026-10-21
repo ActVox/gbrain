@@ -420,8 +420,10 @@ async function startVerifiedDelegatedSync(
         });
         job.result = toWireSyncResult(r);
         job.drain = r.drain;
+        let stopFields = '';
         if (managed) {
-          const { drainNext } = await import('./persistence/sync-drain.ts');
+          const { drainNext, drainStopFields } = await import('./persistence/sync-drain.ts');
+          stopFields = drainStopFields(r);
           const { managedSyncResumeArgs, syncResumeCommand } = await import('./sync-reconcile.ts');
           const id = sourceId ?? 'default';
           job.next = drainNext(r, syncResumeCommand(managedSyncResumeArgs({ sourceId: id, processingOptions: options })), id);
@@ -429,8 +431,9 @@ async function startVerifiedDelegatedSync(
         job.state = 'done';
         log(
           `done job=${job.id} status=${r.status} added=${r.added} modified=${r.modified} ` +
-          `deleted=${r.deleted}${r.drain ? ` drain=${r.drain.outcome}` : ''} in=${Math.round((Date.now() - job.startedAt) / 1000)}s`,
+          `deleted=${r.deleted}${r.drain ? ` drain=${r.drain.outcome}` : ''}${stopFields} in=${Math.round((Date.now() - job.startedAt) / 1000)}s`,
         );
+        if (stopFields && job.next) log(`next job=${job.id}: ${job.next.command} (${job.next.why})`);
         // GBRA-133 PR 2a.3: the post-run re-check (generation-checked); whatever is still due goes to this serve's notifier.
         if (!options.dryRun) await settleRunMarkers(engine, sourceId ?? 'default', markers, { pulled: !managed && !options.noPull, full: options.full === true }, { queue: false });
         if (!managed && !options.dryRun && !options.noEmbed && r.added + r.modified > 0) {
