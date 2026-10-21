@@ -106,24 +106,17 @@ async function writeDuringDrain(lanes: number, slug: (queued: Row[]) => string, 
   // groups queued ahead of the write stay queued however long the write takes to be admitted. (Parking a lane at
   // `lane:applied` of its next group instead let each lane past that point claim one more group first: with as many
   // groups queued as lanes, both could start before the write was admitted.)
-  // A claim already past `consumer:claiming` when the parking began still takes its row, which can be the last queued
-  // group. Claims run one at a time in a process (one consumer tick at a time), so once a claim waits at the gate
-  // (`parked`) none is in flight: the groups queued then are the ones that stay queued. When none is left, the gate opens
-  // and the test waits for the next moment groups are queued.
-  let gate = Promise.withResolvers<void>(), parked = false;
+  const counted = Promise.withResolvers<void>();
   // `force` (forced probe of that race): the write is admitted only after every group running when the test parked has
   // committed and the lanes have had their chance to claim the queued ones, and the drain admits no new group meanwhile
-  // (`sync:after_freeze`), so only the parking keeps groups queued ahead of the write. Every claim made with the gate open
-  // takes 300 ms longer, so a claim begun before the parking usually takes a queued group after it.
+  // (`sync:after_freeze`), so only the parking keeps groups queued ahead of the write.
   const runningAtReady = new Set<string>();
   // With `preparingHoldMs`, whichever process claims the write holds its preparation that long, and this process stamps
   // its claims with another process's owner, so either way the write is claimed elsewhere and unpublished meanwhile.
   let heldHere: [number, number] | undefined;
   if (preparingHoldMs) setClaimOwnerForTest({ kind: 'mcp', pid: 1, version: 'test', nonce: 'another-process' });
   installFaultHook(async (point, detail) => {
-    if (!laneHold && holdStarts && point === 'consumer:claiming') { const held = gate.promise; parked = true; await Promise.race([held, Bun.sleep(30_000)]); }
-    // `force` also slows every claim that passes the gate open, so one is usually still in flight when the parking begins.
-    else if (force && point === 'consumer:claiming') await Bun.sleep(300);
+    if (!laneHold && holdStarts && point === 'consumer:claiming') await Promise.race([counted.promise, Bun.sleep(30_000)]);
     if (preparingHoldMs && point === 'consumer:preparing' && detail.operation === 'put_page' && !heldHere) {
       const start = Date.now();
       await Bun.sleep(preparingHoldMs);
@@ -136,7 +129,7 @@ async function writeDuringDrain(lanes: number, slug: (queued: Row[]) => string, 
       laneOpen++;
       try { await Promise.race([written.promise, Bun.sleep(laneHold)]); } finally { laneOpen--; }
     }
-    if (force && holdStarts && point === 'sync:after_freeze') await Promise.race([gate.promise, Bun.sleep(30_000)]);
+    if (force && holdStarts && point === 'sync:after_freeze') await Promise.race([counted.promise, Bun.sleep(30_000)]);
     if (!laneHold && point === 'publication:before_commit' && detail.operation === 'submit_job') await Bun.sleep(150);
   });
   try {
@@ -145,34 +138,28 @@ async function writeDuringDrain(lanes: number, slug: (queued: Row[]) => string, 
     // The writer process starts now and writes (the slug the go file names) once a sync group is queued that nobody has started.
     const go = join(home, `go-${randomUUID()}`);
     const finish = writer(source, [], 0, go, preparingHoldMs);
-    const unstarted = (all: Row[]) => {
+    await until(async () => {
+      const all = await rows(e, source);
       const begun = new Set(all.filter(row => row.state !== 'queued').map(row => row.request_id));
-      return all.filter(row => row.state === 'queued' && row.kind?.startsWith('managed_sync_') && !(row.grp && begun.has(row.grp)) && !begun.has(row.request_id));
-    };
-    for (;;) {
-      await until(async () => {
-        const all = await rows(e, source);
-        queued = unstarted(all);
-        // With lanes the drain admits groups ahead; without them only the publishing group is out, so the write comes while one runs.
-        const ready = all.some(row => row.state === 'committed') && (lanes > 1 ? queued.length >= 4 : all.some(row => row.state === 'running' && row.kind?.startsWith('managed_sync_')));
-        if (ready && lanes > 1) {
-          for (const row of all) if (row.state === 'running' && row.kind?.startsWith('managed_sync_')) runningAtReady.add(row.grp ?? row.request_id);
-          holdStarts = true;
-        }
-        return ready;
-      });
-      if (lanes === 1 || laneHold) break;
-      if (force) await until(async () => (await rows(e, source)).every(row => !runningAtReady.has(row.grp ?? row.request_id) || !['queued', 'running'].includes(row.state)));
-      await until(async () => parked);
-      queued = unstarted(await rows(e, source));
-      if (queued.length) break;
-      holdStarts = false; parked = false; runningAtReady.clear();
-      gate.resolve(); gate = Promise.withResolvers<void>();
-    }
+      queued = all.filter(row => row.state === 'queued' && row.kind?.startsWith('managed_sync_') && !(row.grp && begun.has(row.grp)) && !begun.has(row.request_id));
+      // With lanes the drain admits groups ahead; without them only the publishing group is out, so the write comes while one runs.
+      const ready = all.some(row => row.state === 'committed') && (lanes > 1 ? queued.length >= 4 : all.some(row => row.state === 'running' && row.kind?.startsWith('managed_sync_')));
+      if (ready && lanes > 1) {
+        for (const row of all) if (row.state === 'running' && row.kind?.startsWith('managed_sync_')) runningAtReady.add(row.grp ?? row.request_id);
+        holdStarts = true;
+      }
+      return ready;
+    });
     const target = slug(queued.length ? queued : await rows(e, source).then(all => all.filter(row => row.state === 'queued')));
     armed = true;
     // With `laneHold`, the write is sent while a lane group holds the worktree lease, so only the drain's process can publish it.
     if (laneHold) await until(async () => laneOpen > 0);
+    if (force) {
+      const ids = new Set(queued.map(row => row.grp ?? row.request_id));
+      await until(async () => (await rows(e, source)).every(row => !runningAtReady.has(row.grp ?? row.request_id) || !['queued', 'running'].includes(row.state)));
+      const deadline = Date.now() + 1000;
+      while (Date.now() < deadline && (await rows(e, source)).some(row => ids.has(row.request_id) && row.state === 'queued')) await Bun.sleep(10);
+    }
     writeFileSync(go, target);
     let before: Row[] = [];
     await until(async () => {
@@ -185,11 +172,11 @@ async function writeDuringDrain(lanes: number, slug: (queued: Row[]) => string, 
         && !(row.grp && started.has(row.grp)));
       return true;
     });
-    gate.resolve();
+    counted.resolve();
     const [written] = await finish();
     const result = await drain;
     return { source, target, before, written: written!, result, claims: recorder.claims, final: await rows(e, source), beside, held: heldHere ?? written!.held };
-  } finally { gate.resolve(); recorder.restore(); installFaultHook(undefined); setClaimOwnerForTest(undefined); }
+  } finally { counted.resolve(); recorder.restore(); installFaultHook(undefined); setClaimOwnerForTest(undefined); }
 }
 
 for (const [lanes, force] of [[2, false], [1, false], [2, true]] as const) {
