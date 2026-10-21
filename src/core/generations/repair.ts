@@ -178,6 +178,7 @@ type Approved = Entry & { selection: GenerationsSelection; sources: string[] };
 
 export const generationsRepair: RepairHandler = {
   kind: 'generations',
+  publication: 'projection',
   embeds: true,
   outcomeItemsLimit: 1000,
   async plan(engine, scope, after, opts): Promise<RepairPlan> {

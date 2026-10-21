@@ -85,13 +85,13 @@ export async function activateGeneration(tx: BrainEngine, key: GenerationKey, li
   if (live) await tx.executeRaw(`UPDATE derived_generations SET state='superseded', updated_at=now() WHERE id=$1 AND state='live'`, [live.id]);
   const [created] = await tx.executeRaw<{ id: number }>(
     `INSERT INTO derived_generations (source_id, kind, owner_key, generation, state, run_id, operation_id, input_pin, input_size, completeness, item_set_hash, restore_of)
-     VALUES ($1,$2,$3,$4,'live',$5,$6,$7,$8,$9::jsonb,$10,$11) RETURNING id`,
+     VALUES ($1,$2,$3,$4,'live',$5,$6,$7,$8,$9::text::jsonb,$10,$11) RETURNING id`,
     [key.sourceId, key.kind, key.ownerKey, generation, row.runId ?? null, row.operationId, row.input?.pin ?? null, row.input?.size ?? null,
       JSON.stringify(row.completeness), row.setHash, row.restoreOf ?? null]);
   const id = Number(created!.id);
   if (live) await tx.executeRaw('UPDATE derived_generations SET superseded_by=$1 WHERE id=$2', [id, live.id]);
   for (const item of items) {
-    await tx.executeRaw(`INSERT INTO derived_generation_items (generation_id, item_key, identity_hash, action, preimage, preimage_bytes) VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
+    await tx.executeRaw(`INSERT INTO derived_generation_items (generation_id, item_key, identity_hash, action, preimage, preimage_bytes) VALUES ($1,$2,$3,$4,$5::text::jsonb,$6)`,
       [id, item.key, item.identityHash, item.action, item.preimage?.json ? JSON.stringify(item.preimage.json) : null, item.preimage?.bytes ?? null]);
   }
   await tx.executeRaw(`DELETE FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='held'`, [key.sourceId, key.kind, key.ownerKey]);
@@ -124,7 +124,7 @@ async function recordHeld(tx: BrainEngine, key: GenerationKey, config: Generatio
   await tx.executeRaw(
     `INSERT INTO derived_generations (source_id, kind, owner_key, generation, state, run_id, operation_id, hold_id, input_pin, input_size, item_set_hash,
        held_reason, held_context, proposal, proposal_bytes, attempts)
-     VALUES ($1,$2,$3,0,'held',$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,1)`,
+     VALUES ($1,$2,$3,0,'held',$4,$5,$6,$7,$8,$9,$10,$11::text::jsonb,$12::text::jsonb,$13,1)`,
     [key.sourceId, key.kind, key.ownerKey, request.runId ?? null, `held:${holdId}`, holdId, request.input?.pin ?? null, request.input?.size ?? null, setHash,
       reason, JSON.stringify({ ...context, partial: request.partial === true }), bytes <= HELD_PROPOSAL_MAX_BYTES ? JSON.stringify(proposal) : null, bytes]);
   return { state: 'held', reason, holdId, context };
