@@ -224,6 +224,8 @@ type ChangeText = string | ((chain: ChainDisclosure | null, remote: boolean) => 
 
 /** Every disclosed behavior change, with the release that introduced it. Append new rows; never edit a shipped `since`. */
 export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; id?: string }> = [
+  // #7236 (GBRA-151). `since` is stamped at the merge slot.
+  { since: 'TBD', text: 'An autopilot tick reads the brain health aggregate once (it used to read it twice), and on Postgres the read is bounded at 120 s. A read that runs out reports `health_degraded` (an NDJSON event under `--json`) and the tick runs with an unknown score: no healthy sleep, no score-forced full cycle before the hourly floor, the base interval, and `brain_score: null`. The timeout is not counted as a failed cycle.' },
   { since: '0.60.68.0', text: (chain, remote) => {
     if (!chain) return null;
     if (remote) return 'A chat fallback chain is configured on this brain host: when a chat call\'s own model fails it is retried on other models. Its entries and providers are visible to the brain host operator in gbrain doctor --only chat_fallback_chain.';
