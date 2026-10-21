@@ -10,6 +10,40 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.349.0] - 2026-10-21
+
+**`gbrain entity` now finds a person by a nickname, an initial plus surname, a title, reversed order, a one-letter surname typo or a surname only one page has; search and query put pages that contain an exact identifier first; `recall <entity>` reads the same facts the recall op does; and a lookup that matches nothing can exit 12 for scripts (#7160, #7161, #7163, #4828, #7166, #7168, #7177).** An agent asking for a person, a thing it saved or an exact email, URL, phone number or code got a miss or a lower-ranked page even though the brain held it.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain entity "Bob Example"` when the page is "Robert Example" (or "R. Example", "Dr. Example", "Example, Robert", "Robert Exampel") | a miss | resolves **one unambiguous** variant across every readable source; `card.match {kind, via}` says which variant matched; an exact hit always wins and an ambiguous variant is a miss with `ambiguous: true` |
+| A person page with a title-prefixed twin (`people/mayor-x` next to `people/robert-x`) | no hint | the card lists `possible_duplicates`; new doctor check `person_title_duplicates` lists the pairs to review (preview-only, never merged) |
+| A name that only appears in page text, or a stub card with no backlinks or facts | an empty card | `text_mentions` lists pages whose text contains the name (verified containment, 1.5 s deadline, `unread` on a deadline or failed read) |
+| search / query on an email, URL, phone number, long number, hex id or code | ranked like ordinary words | pages containing it verbatim rank first (`exact_lookup: 'identifier'`); dates and ordinary words are unchanged |
+| Local `gbrain recall <entity>` | facts under the page slug only | the same slugs the recall op reads (identity siblings, title subject) plus the bare basename when no other page claims it |
+| `gbrain recall "<name> <topic words>"` | nothing matched | the leading or trailing 1–3 words resolve to an entity, its facts print with topic matches first, and a note names the equivalent `--entity` / `--question` command |
+| `gbrain recall --entity <x>` | rejected | accepted; an explicit entity is never split or widened |
+| A recall or entity lookup that matches nothing | exit 0 | still exit 0 by default; with `GBRAIN_FAIL_ON_EMPTY=1` it exits 12 (`NO_RESULTS_EXIT_CODE`) with one stderr line, and recall's list `--json` adds `status: "no_results"` |
+| Ranking entities by how connected they are | not possible | new read-only op `rank_entities` (CLI `gbrain rank-entities`); remote callers count only edges whose endpoints and origin page they can read, and see coverage as a state only |
+
+On a synthetic seeded fixture (318 pages, invented names), entity name variants went from 44.3% to 96.4% hit@1 and exact identifiers from 95% to 100% hit@1 in both search and query; LongMemEval-S retrieval and NamedThingBench are unchanged.
+
+**Spend effect:** none. No new model calls, no default or cap changes. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- `gbrain entity` may now return a card for a name it used to miss; check `card.match` when you need an exact match, or turn variants off with `gbrain config set entity.name_variants false` (or `variants: false` on the op).
+- The entity miss line is now just `No entity found.`; timing and mention coverage print on their own lines.
+
+### Itemized changes
+
+- `src/core/entities/name-variants.ts` (pure matching) and `src/core/verbs/entity-variants.ts` (one trigram-indexed candidate read per source, capped at 200; a capped read resolves nothing).
+- Hyphenated surnames count as one name word in variant matching, title-stub pairing and the text-mention probe.
+- `rank_entities` checks each page once in a `readable` CTE (live, in the token's sources, not quarantined, not private when private pages are excluded, in a non-archived source); redirect folding needs every hop readable, in one source, at most 5 hops.
+- Documented in `docs/guides/graph-ranking.md` and the exit-code tables.
+
 ## [0.60.348.0] - 2026-10-21
 
 **Job rows now say who submitted a job, why it isn't running, whether it is alive and what it cost; agents can wait on a job instead of polling; long jobs can't hold every worker slot; and the background doctor refresh no longer holds a one-job worker for up to two hours (#7241, #7242, #7263).** A large deployment found an empty submitter on every row, a sync job waiting most of an hour with no reason given, no way to learn a job finished except polling or a cron, and short facts-absorb jobs waiting days at p95 behind long cycles in a 2-slot queue.
