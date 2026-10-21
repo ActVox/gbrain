@@ -94,7 +94,7 @@ function declaredLineagePrivateSql(p: string): string {
 export function privateSnapshotFilterFragment(alias: string): string {
   return `(COALESCE(${alias}.frontmatter->>'visibility', CASE WHEN ${derivedPageSql(alias)} THEN 'private' ELSE 'world' END) <> 'private'
     AND NOT COALESCE(${alias}.frontmatter ? 'pinned_question', false)
-    AND NOT (${alias}.frontmatter->>'visibility' IS NULL AND ${privacyAliasSql(alias)} AND ${HONOR_ALIASES_SQL}))`;
+    ${honorAliasEngines.size > 0 ? `AND NOT (${alias}.frontmatter->>'visibility' IS NULL AND ${privacyAliasSql(alias)})` : ''})`;
 }
 
 /**
@@ -161,9 +161,14 @@ export function privacyAliasSql(alias: string): string {
     `lower(btrim(${alias}.frontmatter->>'${key}')) IN (${values.map(v => `'${v}'`).join(',')})`).join(' OR ')})`;
 }
 
-/** True in SQL when the operator opted remote page reads into honoring the privacy aliases. */
-const HONOR_ALIASES_SQL = `EXISTS (SELECT 1 FROM config honor_aliases WHERE honor_aliases.key='${HONOR_ALIASES_KEY}'
-    AND lower(btrim(honor_aliases.value)) IN ('true','1','on','yes'))`;
+/**
+ * Brains in this process whose operator set `visibility.honor_aliases`, as last
+ * read by resolveExcludePrivatePages (the resolver every remote read runs before
+ * it builds SQL). The fragments are synchronous, so the flag is process-wide:
+ * one opted-in brain makes every brain in the process hide alias-only pages,
+ * which only ever hides more. Off (the default), the SQL carries no alias test.
+ */
+const honorAliasEngines = new Set<BrainEngine>();
 
 /** A page whatever is derived from it must not outrank: private to remote readers, or carrying a privacy alias. */
 export function isDerivationPrivate(page: { type?: string | null; frontmatter?: unknown }): boolean {
@@ -283,6 +288,7 @@ let cache = new WeakMap<BrainEngine, { at: number; expose: boolean }>();
 /** Test helper: drop the per-engine config cache. */
 export function __resetPrivateVisibilityCacheForTests(): void {
   cache = new WeakMap();
+  honorAliasEngines.clear();
 }
 
 /**
@@ -307,6 +313,12 @@ export async function resolveExcludePrivatePages(
       expose = v === 'visible' || v === 'true' || v === '1';
     } catch {
       expose = false; // config unreadable → enforce (fail-closed)
+    }
+    try {
+      const honor = (await engine.getConfig(HONOR_ALIASES_KEY))?.trim().toLowerCase() ?? '';
+      if (['true', '1', 'on', 'yes'].includes(honor)) honorAliasEngines.add(engine); else honorAliasEngines.delete(engine);
+    } catch {
+      // unreadable: keep the last value read
     }
     cache.set(engine, { at: Date.now(), expose });
   }

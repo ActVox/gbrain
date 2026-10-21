@@ -130,8 +130,9 @@ export async function importRendered(
 ): Promise<string> {
   markdown = connectorRender(markdown, { path: relPath, account: deps.cfg.account, ...identity });
   const slug = slugifyPath(relPath);
-  const existing = await deps.engine.getPage(slug, { sourceId: deps.sourceId });
-  if (existing && isPrivatePage(existing)) markdown = withPrivateVisibility(markdown);
+  const [labels] = await deps.engine.executeRaw<{ type: string; frontmatter: unknown }>(
+    'SELECT type, frontmatter FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL', [deps.sourceId, slug]);
+  if (labels && isPrivatePage(labels)) markdown = withPrivateVisibility(markdown);
   if (deps.managed) {
     const result = await deps.managed.importMarkdown(relPath, markdown);
     if (result.status === 'imported') {
@@ -146,6 +147,7 @@ export async function importRendered(
   }
   const filePath = join(deps.cfg.dir, relPath);
   assertContained(deps.cfg.dir, filePath);
+  const existing = await deps.engine.getPage(slug, { sourceId: deps.sourceId });
   if (existing) assertInlineBody(existing, 'Google connector materialization');
   const databaseOnly = await isWriteThroughDisabled(deps.engine) || isSourceDbOnlySlug(deps.cfg.dir, slug, 'refuse');
   const guard = databaseOnly ? null : await replaceableFile(deps.engine, deps.sourceId, slug, filePath);

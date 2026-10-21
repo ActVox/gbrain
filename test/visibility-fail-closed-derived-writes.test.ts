@@ -36,7 +36,7 @@ import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { derivedVisibilityCheck } from '../src/commands/doctor/checks/derived-visibility.ts';
 import { visibilityRepair } from '../src/core/repair/visibility.ts';
 import { resolveRepairScope, runRepair } from '../src/core/repair/core.ts';
-import { effectiveVisibility, isDerivationPrivate } from '../src/core/search/private-visibility.ts';
+import { __resetPrivateVisibilityCacheForTests, effectiveVisibility, isDerivationPrivate } from '../src/core/search/private-visibility.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
@@ -250,8 +250,9 @@ describe('privacy aliases (access, confidentiality) count for everything derived
       const read = () => operationsByName.get_page!.handler(s.remote, { slug: 'meetings/aliased-example' }).then(() => true, () => false);
       expect(await read()).toBe(true);
       await engine.setConfig('visibility.honor_aliases', 'true');
+      __resetPrivateVisibilityCacheForTests();
       try { expect(await read()).toBe(false); }
-      finally { await engine.executeRaw("DELETE FROM config WHERE key='visibility.honor_aliases'"); }
+      finally { await engine.executeRaw("DELETE FROM config WHERE key='visibility.honor_aliases'"); __resetPrivateVisibilityCacheForTests(); }
       expect(await read()).toBe(true);
     });
   }, 120_000);
