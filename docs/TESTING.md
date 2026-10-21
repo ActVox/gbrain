@@ -466,6 +466,8 @@ own VMs. `scripts/ubicloud/ubi-runner.sh usage` shows vCPUs by owner.
 A sleeping machine kills the run with no signal, so teardown never runs: on Capy, run
 `ci:ubicloud` as a watched background operation. After any interrupted run, check
 `ubi-runner.sh list --mine` and reap leftovers with `down NAME` (or `gc HOURS`, own VMs only).
+Both cover every VM this machine created, whatever `UBI_OWNER` the run used, and the
+run's VM names are also in `vms.txt` in its run directory from before provisioning.
 
 The project quota is 512 vCPUs, shared with PR CI; a full gate takes 64, or 160 when it is free.
 In a multi-lane wave, lanes run `ci:ubicloud:diff` or targeted suites (`bun
