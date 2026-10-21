@@ -177,6 +177,33 @@ describe('first attempts: index walk, then scope scan', () => {
     expect(exhausted.attempts[0]).toMatchObject({ scopeScan: true, exact: false });
   });
 
+  test('a full walk window holding fewer pages than the limit widens the walk the way the pool escalates, before any joined statement', async () => {
+    // Many chunks per page: a full 100-chunk window covers 4 pages, 400 chunks cover 16.
+    const attempts: VectorPoolAttempt[] = [];
+    const result = await searchIndexWalk({ indexWalkSql: 'w', innerLimit: 100, indexWalkOverfetch: 2 }, 10, async attempt => {
+      attempts.push(attempt);
+      return { rows: rows(Math.floor(attempt.innerLimit / 25)), candidatePool: attempt.innerLimit };
+    });
+    expect(result).toHaveLength(16);
+    expect(attempts.map(a => [a.indexWalk, a.innerLimit, a.maxScanTuples])).toEqual([[true, 100, 2000], [true, 400, 2000]]);
+  });
+
+  test('a widened walk stops at the pool escalation cap and leaves the rest to the pool', async () => {
+    const attempts: number[] = [];
+    const result = await searchIndexWalk({ indexWalkSql: 'w', innerLimit: 100, indexWalkOverfetch: 2 }, 10, async attempt => {
+      attempts.push(attempt.innerLimit);
+      return { rows: rows(2), candidatePool: attempt.innerLimit };
+    });
+    expect(result).toBeNull();
+    expect(attempts).toEqual([100, 400, 1600, 6400]);
+    const dry: number[] = [];
+    expect(await searchIndexWalk({ indexWalkSql: 'w', innerLimit: 100, indexWalkOverfetch: 2 }, 10, async attempt => {
+      dry.push(attempt.innerLimit);
+      return { rows: rows(2), candidatePool: attempt.innerLimit === 100 ? 100 : 150 };
+    })).toBeNull();
+    expect(dry).toEqual([100, 400]);
+  });
+
   test('a full scan window that stale rows left short, or a timed-out attempt, falls back to the pool', async () => {
     expect((await run({ scopeScanSql: 's' }, { scan: { rows: rows(8), candidatePool: 100, eligiblePool: 90 } })).result).toBeNull();
     expect((await run({ indexWalkSql: 'w' }, { walk: { rows: rows(4), candidatePool: 40 } })).result).toBeNull();

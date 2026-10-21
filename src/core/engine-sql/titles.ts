@@ -24,21 +24,22 @@
  * collapse: a regexp measured +37 ms); the tier's JS `normalizeAlias` recheck
  * stays authoritative, so a mismatch can only miss, never promote.
  *
- * Remote predicate (title FTS; diagnosis credited to PR #5853 by morven-ai):
- * safe-chunks callers must match the title alone, which used to mean a
- * per-row `to_tsvector(title)` that no index serves (a scan of every page in
- * scope). `pages.search_vector` carries the title, and only the title, at
- * weight A (schema trigger, `reindex-search-vector`, page-state projection),
- * so the remote arm matches `search_vector @@ q_a`, where `q_a` is the
- * websearch query with every lexeme labeled `:A`. That is served by
- * `idx_pages_search`, and negated or phrase terms are evaluated on title
- * lexemes only, so timeline text can never change which titles a remote
- * caller sees. Ranking uses the weight-A slice (`ts_filter(..., '{a}')`).
- * Remote matching follows the language `search_vector` was built with;
- * `gbrain reindex-search-vector` rebuilds it after an FTS language change.
- * A page with a NULL `search_vector` is absent from the remote arm (the
- * BEFORE INSERT/UPDATE trigger keeps it non-NULL). The local arm keeps
- * ranking the whole `search_vector` (title weight A dominates).
+ * Title predicate (title FTS; diagnosis credited to PR #5853 by morven-ai):
+ * the arm matches the title alone, which used to mean a per-row
+ * `to_tsvector(title)` that no index serves (a scan of every page in scope).
+ * `pages.search_vector` carries the title, and only the title, at weight A
+ * (schema trigger, `reindex-search-vector`, page-state projection), so the
+ * arm matches `search_vector @@ q_a`, where `q_a` is the websearch query
+ * with every lexeme labeled `:A`. That is served by `idx_pages_search`, and
+ * negated or phrase terms are evaluated on title lexemes only, so timeline
+ * text (weight C) never changes which titles a caller sees. Ranking uses the
+ * weight-A slice (`ts_filter(..., '{a}')`). Matching follows the language
+ * `search_vector` was built with; `gbrain reindex-search-vector` rebuilds it
+ * after an FTS language change. A page with a NULL `search_vector` is absent
+ * from the arm (the BEFORE INSERT/UPDATE trigger keeps it non-NULL). Local
+ * callers used to match the whole vector, so a date in a question pulled every
+ * dated timeline into `ts_rank_cd` on the OR fallback: 3-5 s on a large brain
+ * (#7135, diagnosed by @veltri-23 in #7136).
  */
 import type { SearchOpts, SearchResult } from '../types.ts';
 import { searchLimitCap } from '../search/eval-pool-depth.ts';

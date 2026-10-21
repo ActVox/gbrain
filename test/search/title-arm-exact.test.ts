@@ -7,10 +7,10 @@
  * so an identity page titled exactly "Acme" (created last) was buried under
  * 60+ "Acme weekly sync N" pages for local and remote callers.
  *
- * Remote predicate: safe-chunks callers match weight-A (title) lexemes of
+ * Title predicate: every caller matches weight-A (title) lexemes of
  * pages.search_vector. Parity cases compare against the previous title-only
  * predicate (`to_tsvector(lang, title) @@ websearch_to_tsquery(lang, q)`),
- * so timeline text can never change which titles a remote caller sees.
+ * so timeline text can never change which titles a caller sees.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
