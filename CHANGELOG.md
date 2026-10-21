@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.341.0] - 2026-10-21
+## [0.60.342.0] - 2026-10-21
 
 **A model or dimension swap now finishes re-embedding on a large brain, and one overlong fact no longer stops the fact backfill.** After a swap, `gbrain embed --stale`, the background backfill and `gbrain migrate embeddings` mark every chunk from the old model for re-embedding. That marking was one statement over the whole brain, so on a large brain the statement timeout cancelled it, nothing was marked, and the next run hit the same timeout. Separately, before probing the embedder, every embed run counted drifted chunks with two full joins over every chunk. On a large drifted brain those counts timed out too, and the timeout was read as "no drift", so the swap was silently skipped.
 
@@ -36,6 +36,32 @@ identifiers and attribution are available in the pre-removal Git revision
 - `gbrain embed --facts` skips facts over the input limit (`readOversizedStaleFacts`) and reports `refused_oversized`, `refused_samples` and `refused_fix`; doctor `fact_take_vectors` adds `facts.oversized`, and `gbrain embed --held` lists them with `oversized_facts`.
 
 Follow-up to #7117 (#7148). Oversized facts reported by @dyana1lyons-ai (#7211).
+
+## [0.60.341.0] - 2026-10-21
+
+**Facts, events and memories derived from a private page stay private, and a retry can no longer widen them.** A fact extracted from a `visibility: private` page took the brain default, so on a world-default brain it was stored world, and remote callers read it through `recall` and the entity card. `remember` without a `visibility` saved world even onto a private page, and a reworded retry that dropped the parameter did the same.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Facts from a private page (page-write backstop, `extract_facts` with `source_slug`, `extract-conversation-facts`) | brain default or the caller's `world` | private |
+| Remote `extract_facts` whose source page it cannot see | caller's value | private, the same answer as a missing page |
+| `remember` with no `visibility` onto a private page, or under an explicit private `facts.default_visibility` | world | private; still world otherwise. The resolved value is stored on the request, so retries keep it |
+| A page marked private only by `access: private\|restricted\|confidential` or `confidentiality: confidential\|secret\|private\|restricted` | its facts, chronicle events, meeting timeline rows and `remember` saves were world | they are private |
+| Remote page reads of such a page | visible | unchanged by default; hidden when you set `visibility.honor_aliases true` |
+| Google Calendar events marked private or confidential | page had no visibility | `visibility: private`; a re-sync never drops a private label |
+
+### Check and repair what was written before
+
+Run `gbrain doctor`: `derived_visibility` now counts pages that rely on a privacy alias, chronicle events looser than their origin, and world facts from private pages (with the ids of those a remote caller can read). `gbrain repair visibility` previews every row; `gbrain repair visibility --apply` only tightens them. Nothing changes on upgrade.
+
+Not covered: Calendar events with default visibility on a calendar that is itself private (that needs the Calendar ACL scope), and timeline rows already written from alias-private meetings.
+
+### For contributors
+
+- `test/visibility-fail-closed-derived-writes.test.ts` runs every path on PGLite and Postgres with remote callers.
+- `access` and `confidentiality` are protected frontmatter keys: an ambiguous value is held instead of guessed.
 
 ## [0.60.340.0] - 2026-10-21
 
