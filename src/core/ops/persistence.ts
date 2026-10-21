@@ -163,7 +163,7 @@ export const persistenceOperations: Operation[] = [
     outputRedaction: 'no_stored_text',
     description: 'Your write\'s receipt by request_id (after write_pending or a lost reply). Poll at retry_after_ms until final.',
     params: { request_id: requestParam,
-      applied: { type: 'boolean', description: 'Also return applied (#7190): whether the write is searchable yet, the gap and the source write watermark. A few more reads.' } },
+      applied: { type: 'boolean', fullSurfaceOnly: true, description: 'Also return applied: searchable yet, the gap, the write watermark.' } },
     scope: 'write', mutating: false, area: 'pages',
     cliHints: { name: 'write-request', positional: ['request_id'] },
     handler: async (ctx, params) => {

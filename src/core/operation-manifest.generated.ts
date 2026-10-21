@@ -1147,7 +1147,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "applied": {
         "type": "boolean",
-        "description": "Also return applied (#7190): whether the write is searchable yet, the gap and the source write watermark. A few more reads."
+        "fullSurfaceOnly": true,
+        "description": "Also return applied: searchable yet, the gap, the write watermark."
       }
     },
     "scope": "write",

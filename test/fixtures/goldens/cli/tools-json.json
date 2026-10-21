@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 255004,
-    "stdoutSha256": "b796b0ea4dc65bf1f4e6dcb410d1712243e32a8f66da3357e40842f66dc01537",
+    "stdoutBytes": 254947,
+    "stdoutSha256": "d15f7e02e13db3fc95b5bae7a18a78979d513d9d17a2430f6666365a14ad2c92",
     "toolNames": [
       "remember",
       "entity",
@@ -1476,7 +1476,7 @@
         "schema": {
           "properties": {
             "applied": {
-              "description": "Also return applied (#7190): whether the write is searchable yet, the gap and the source write watermark. A few more reads.",
+              "description": "Also return applied: searchable yet, the gap, the write watermark.",
               "type": "boolean"
             },
             "request_id": {
