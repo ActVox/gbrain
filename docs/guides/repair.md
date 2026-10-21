@@ -2152,6 +2152,24 @@ the two `--prefer` values do opposite things in each state.
 | `purged_differs` | Removes the file. | Imports the file as a new page. |
 | `file_gone` | Recreates the file from the page. | Soft-deletes the page (the mass-delete valve applies). |
 
+A held preview covers one window of the selected holds, in held-path order:
+at most 200 pages, and it starts no page after 60 seconds of work (each page
+reads the database a few dozen times, so a large held set against a remote
+database takes minutes per hundred pages). It reports each page on stderr as
+it goes. The hash and the printed apply command cover only that window. A
+partial window lists `after_window` in its residuals and prints the next
+preview command with `--cursor <next_cursor>` (JSON: `details.window`):
+
+```bash
+gbrain repair file-drift --source <id> --held --side deleted --state file_gone --prefer database             # window 1
+gbrain repair file-drift --source <id> --held --side deleted --state file_gone --prefer database --apply --expect <hash>
+gbrain repair file-drift --source <id> --held --side deleted --state file_gone --cursor <next_cursor> --prefer database  # window 2
+```
+
+The apply reports each page on stderr as well. Apply each window (or decide not to), then preview the next one. Pages the
+apply resolved leave the held set, so rerunning without `--cursor` also
+starts from the first page still held.
+
 A `file_gone` hold whose `meta.reason` is `never_committed` or `ignored`
 (#7130) is a page whose file is missing although Git never committed it: the
 sync could not tell a deletion from a file that never reached the repository,
