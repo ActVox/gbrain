@@ -32,7 +32,7 @@ Nothing changes on upgrade, and nothing is rewritten.
 - New fault point `effect:embedding:page_read`, with a regression case in `test/e2e/put-page-persistence-postgres.test.ts`.
 - `check:vendor-postgres` in `bun run verify` runs `vendor/update-postgres.sh --check`, so a driver fix made only in `vendor/postgres/src` (missing from the patch or the `cjs`/`cf` copies) fails verify. The pinned downloads are retried with backoff and cached by hash (`~/.cache/gbrain-vendor`, cached in the verify job); a hash mismatch still fails.
 - `scripts/ubicloud/ubi-runner.sh list --mine`, `gc` and the `up` sweep cover every VM this machine created, under any `UBI_OWNER` tag.
-- Nine timing-dependent tests are fixed at their cause, each proven with a forced probe: the #6511 purge budget, the lp-c publication-ceiling wait, the #5762 lock-timeout receipt, the #6712 shared-budget level, the origin-native legacy deletion, the long-page off-path comparison with a provider key, and the MCP tool-list snapshot boot. No bound, timeout or assertion is loosened.
+- Seven timing-dependent tests are fixed at their cause, each proven with a forced probe: the #6511 purge budget, the lp-c publication-ceiling wait, the #5762 lock-timeout receipt, the #6712 shared-budget level, the origin-native legacy deletion, the long-page off-path comparison with a provider key, and the MCP tool-list snapshot boot. No bound, timeout or assertion is loosened.
 
 ## [0.60.340.0] - 2026-10-21
 
