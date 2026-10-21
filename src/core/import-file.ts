@@ -29,7 +29,7 @@ import { sanitizeText } from './batch-rows.ts';
 import { hasProtectedBody, OCR_REQUIRED_ERROR, provenanceDistrusted, safeChunksFilter } from './search/safe-chunks.ts';
 import { planEmbeddingReuse } from './embed-reuse.ts';
 import { reuseStoredChunkVectors, type KeptChunkRow } from './import-chunk-reuse.ts';
-import { applyMoveWaves, CHUNK_ROW_WRITE_BUDGET, planMoveWaves, type ChunkMove } from './page-state/chunk-moves.ts';
+import { applyMoveWaves, planImportChunkWrites } from './page-state/chunk-moves.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 // #3374 — import-path embeds ride the shared retry loop (429 retry-after +
@@ -255,10 +255,7 @@ export async function importFromContent(
     prepare?: (prepared: import('./persistence/prepared-import.ts').PreparedContentImport) => Promise<ImportResult>;
     /** #5984, with `prepare`: the coordinator proves the base revision under its page guard, and the caller seals the text projection and checks the read-back (`contentHash`) from its own read after apply; apply skips all three. */
     coordinated?: boolean;
-    /**
-     * #7172, with `prepare`: the caller forwards `afterCommit` and seals nothing when apply returns `projectionPending`, so
-     * a chunk replacement over CHUNK_ROW_WRITE_BUDGET row writes commits its page pending and finishes after commit.
-     */
+    /** #7172, with `prepare`: the caller forwards `afterCommit` and seals nothing on `projectionPending` (chunk-moves.ts). */
     boundedChunkWrites?: true;
     /** With `coordinated`: the caller's own read of this page (deleted rows included) just before, reused as the import base. */
     existingSnapshot?: import('./page-state/types.ts').PageSnapshot | null;
@@ -765,19 +762,10 @@ export async function importFromContent(
     const kept = new Map([...(fresh !== chunks ? await reuseStoredVectors(tx, fresh, true) : [])]
       .filter((entry): entry is [number, KeptChunkRow] => entry[1] !== null));
     const keptIds = [...kept.values()].map(row => row.id);
-    // #7172: a kept row whose chunk moved (an entry inserted above it) changes index in place. Each move and each
-    // inserted row is a row write (chunk-moves.ts); a managed publication makes at most CHUNK_ROW_WRITE_BUDGET of them
-    // and otherwise deletes the rows it does not keep, commits the page with its projection pending and finishes after
-    // commit (continueDeferredProjection).
-    const moves: ChunkMove[] = [...kept].filter(([i, row]) => row.chunk_index !== fresh[i]!.chunk_index)
-      .map(([i, row]) => ({ id: row.id, from: row.chunk_index, to: fresh[i]!.chunk_index,
-        projected_byte_start: fresh[i]!.projected_byte_start ?? null, projected_byte_end: fresh[i]!.projected_byte_end ?? null }));
-    const inserts = fresh.length - kept.size;
-    const bounded = !segmented && !!opts.prepare && opts.boundedChunkWrites === true;
-    const moveBudget = bounded ? Math.max(0, CHUNK_ROW_WRITE_BUDGET - inserts) : Number.POSITIVE_INFINITY;
-    const movePlan = planMoveWaves(moves, new Map([...kept.values()].map(row => [row.chunk_index, row.id])), moveBudget);
-    const deferChunks = bounded && chunks.length > 0 && (!movePlan.done || inserts > CHUNK_ROW_WRITE_BUDGET);
-    chunkReplacementDeferred = deferChunks;
+    // #7172: a kept row whose chunk moved changes index in place; a managed publication over CHUNK_ROW_WRITE_BUDGET row
+    // writes deletes the rows it does not keep, commits the page pending and finishes after commit (chunk-moves.ts).
+    const chunkWrites = planImportChunkWrites(fresh, kept, !segmented && !!opts.prepare && opts.boundedChunkWrites === true);
+    const deferChunks = chunkReplacementDeferred = chunkWrites.defer;
     let written: Page | undefined;
     await pipelined(tx, [
       () => assertPreparedFactWithdrawals(tx, txOpts.sourceId, parsed.compiled_truth, parsed.timeline || '', slug),
@@ -841,7 +829,7 @@ export async function importFromContent(
       async () => {
         if (deferChunks) return;
         if (chunks.length > 0) {
-          if (movePlan.waves.length) await applyMoveWaves(tx, Number(pageId), movePlan.waves);
+          await applyMoveWaves(tx, Number(pageId), chunkWrites.waves);
           const embeddingColumn = await stampEmbeddingInputs(tx, fresh, null,
             { title: parsed.title, tier: effectiveCRMode === 'title' ? 'title' : 'none', corpusGeneration });
           await tx.upsertChunks(slug, kept.size ? fresh.filter((_, i) => !kept.has(i)) : fresh, { ...txOpts, ...(embeddingColumn ? { embeddingColumn } : {}), sealChunkerVersion: MARKDOWN_CHUNKER_VERSION,
@@ -891,11 +879,9 @@ export async function importFromContent(
       persistedProjection = await readProjectionSnapshot(tx, slug, txOpts.sourceId);
     }
     if (segmented?.applied) return { pageId, sealed: !opts.coordinated && segmented.applied.complete, segmented: { complete: segmented.applied.complete } };
-    if (deferChunks) {
-      // The trigger queued this revision's projection; the reason routes a resident or drain rebuild to the bounded continuation.
-      await queuePageProjection(tx, txOpts.sourceId, slug, DEFERRED_CHUNK_REPLACEMENT);
-      return { pageId, sealed: false, projectionPending: true as const };
-    }
+    // The reason routes a resident or drain rebuild of this revision to the bounded continuation.
+    if (deferChunks) await queuePageProjection(tx, txOpts.sourceId, slug, DEFERRED_CHUNK_REPLACEMENT);
+    if (deferChunks) return { pageId, sealed: false, projectionPending: true as const };
     return { pageId, sealed: !opts.coordinated && !opts.beforeCommit, ...(deferSeal ? { chunkerSeal: MARKDOWN_CHUNKER_VERSION } : {}) };
   };
   if (opts.prepare) return opts.prepare({

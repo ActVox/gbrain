@@ -1,4 +1,5 @@
 import type { BrainEngine } from '../engine.ts';
+import type { ChunkInput } from '../types.ts';
 
 /**
  * #7172: the most row writes one page's chunk replacement makes in one transaction.
@@ -24,9 +25,10 @@ export interface ChunkMove { id: number; from: number; to: number; projected_byt
  * The UPDATE statements (waves) that move `moves` without breaking the (page_id, chunk_index) unique index, using at
  * most `budget` row updates. `occupied` maps each index a remaining row holds to its id. A wave moves rows whose
  * target is free; when none is (a cycle), one row parks at the negative index `-1 - to` and lands later. `done` says
- * every move fits.
+ * every move fits; `pending` and `at` are the moves left and the occupied indexes once the waves ran.
  */
-export function planMoveWaves(moves: readonly ChunkMove[], occupied: ReadonlyMap<number, number>, budget: number): { waves: ChunkMove[][]; updates: number; done: boolean } {
+export function planMoveWaves(moves: readonly ChunkMove[], occupied: ReadonlyMap<number, number>, budget: number):
+  { waves: ChunkMove[][]; updates: number; done: boolean; pending: ChunkMove[]; at: Map<number, number> } {
   const at = new Map(occupied);
   let pending = moves.map(move => ({ ...move }));
   const waves: ChunkMove[][] = [];
@@ -40,7 +42,22 @@ export function planMoveWaves(moves: readonly ChunkMove[], occupied: ReadonlyMap
     if (free.length) pending = pending.filter(move => !free.includes(move));
     else pending[0]!.from = wave[0]!.to;
   }
-  return { waves, updates, done: pending.length === 0 };
+  return { waves, updates, done: pending.length === 0, pending, at };
+}
+
+/**
+ * #7172: an import's chunk row writes. `kept` maps a new chunk's position in `fresh` to the stored row it keeps; a kept
+ * row whose chunk sits at another index moves there (`waves`). With `bounded` (a managed publication), `defer` says the
+ * moves and inserts pass CHUNK_ROW_WRITE_BUDGET, so the publication leaves them to `continueDeferredProjection`.
+ */
+export function planImportChunkWrites(fresh: readonly ChunkInput[], kept: ReadonlyMap<number, { id: number; chunk_index: number }>, bounded: boolean):
+  { waves: ChunkMove[][]; defer: boolean } {
+  const moves = [...kept].filter(([i, row]) => row.chunk_index !== fresh[i]!.chunk_index).map(([i, row]) => ({ id: row.id, from: row.chunk_index,
+    to: fresh[i]!.chunk_index, projected_byte_start: fresh[i]!.projected_byte_start ?? null, projected_byte_end: fresh[i]!.projected_byte_end ?? null }));
+  const inserts = fresh.length - kept.size;
+  const plan = planMoveWaves(moves, new Map([...kept.values()].map(row => [row.chunk_index, row.id])),
+    bounded ? Math.max(0, CHUNK_ROW_WRITE_BUDGET - inserts) : Number.POSITIVE_INFINITY);
+  return { waves: plan.waves, defer: bounded && fresh.length > 0 && (!plan.done || inserts > CHUNK_ROW_WRITE_BUDGET) };
 }
 
 /** One UPDATE per wave; a landed row takes its new chunk's span, a parked row keeps its own until it lands. */

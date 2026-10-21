@@ -19,7 +19,7 @@ identifiers and attribution are available in the pre-removal Git revision
 | Situation | Before | Now |
 |---|---|---|
 | An entry shifts unchanged passages to new indexes | each moved passage deleted and re-inserted (vector copied) | the row keeps its id and vector and changes index in place |
-| A write whose passages need more than 5 inserted or renumbered rows | all of them in one statement inside the publication; on a slow index, 57014 on every attempt, then `write_interrupted` | the page commits first; its passages finish in post-commit transactions of at most 5 row writes each, then the projection is sealed |
+| A managed put_page, edit_page, add_timeline_entry, tag write, import or sync whose passages need more than 5 inserted or renumbered rows | all of them in one statement inside the publication; on a slow index, 57014 on every attempt, then `write_interrupted` | the page commits first; its passages finish in post-commit transactions of at most 5 row writes each, then the projection is sealed |
 | Search during those steps | n/a | the page's passages are hidden until the seal (as for any pending projection); the receipt says `searchable: "pending"` and turns `true` when sealed |
 | The embedding step after a write, page signature missing or older format | every passage re-embedded (paid) | passages whose recorded embedding input is current keep their vectors; the page signature is restamped |
 
@@ -35,7 +35,8 @@ The 5-row bound is derived in `src/core/page-state/chunk-moves.ts` (`CHUNK_ROW_W
 
 - `reuseStoredChunkVectors` matches a stored row by source and text at any index (its own index first), so a kept row can move.
 - New `src/core/page-state/chunk-moves.ts`: the row-write bound and the move planner (one UPDATE per wave; a cycle parks one row at a negative index).
-- `continueDeferredProjection` runs the bounded steps after commit; the projection drain resumes a page whose steps were interrupted (queue reason `chunk_replacement_deferred`).
+- `continueDeferredProjection` runs the bounded steps after commit, holding the page's queue row under a claim it renews each step (the lease a segmented projection claim uses); the projection drain resumes a page whose steps stopped (queue reason `chunk_replacement_deferred`). A group publication now runs its members' post-commit work, as a single publication does.
+- Writes that wrap a page publication in their own (takes, the facts fence, maintenance pages) still replace passages in one transaction.
 - `readEmbeddingEffectProjection` accepts a vector whose recorded input hash is one the current page accepts, whatever the page-level signature says, and restamps the page.
 
 ## [0.60.328.0] - 2026-10-20

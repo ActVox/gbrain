@@ -172,8 +172,9 @@ for (const kind of testBackends()) {
       expect((await pageState(slug)).sealed).toBe(false);
       const [job] = await brain.engine.executeRaw<{ reason: string }>("SELECT reason FROM page_projection_jobs WHERE slug=$1", [slug]);
       expect(job?.reason).toBe('chunk_replacement_deferred');
-      const drained = await rebuildPendingPageProjections(brain.engine, 10);
-      expect(drained.rebuilt).toBeGreaterThanOrEqual(1);
+      // The drain resumes it from the stored rows: this call, or the resident's drain when it got there first (it holds the claim).
+      await rebuildPendingPageProjections(brain.engine, 10);
+      for (let i = 0; i < 600 && !(await pageState(slug)).sealed; i++) await new Promise(resolve => setTimeout(resolve, 100));
       await settle();
       await runEmbedCore(brain.engine, { stale: true, quiet: true } as never);
       const after = await rows(slug);
