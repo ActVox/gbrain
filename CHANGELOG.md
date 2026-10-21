@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.356.0] - 2026-10-21
+## [0.60.357.0] - 2026-10-21
 
 **Held deleted files now show who deleted them, so each group can be resolved on its own.** A held `file_gone` file can be a page no commit ever held (the database copy is the only one), a file a commit deleted on purpose, or a deletion only the worktree lost. A held preview showed them all the same way, so a single `--prefer` either brought back pages that were culled on purpose or deleted the only copy of others. Each previewed page now names its provenance, and `--provenance` selects one group at a time.
 
@@ -34,6 +34,33 @@ identifiers and attribution are available in the pre-removal Git revision
 - `src/core/repair/core.ts`: database refusals (`recordDatabaseStops`, set by the CLI; the cycle and doctor remediation keep the rethrow their own stops rely on) and the CLI's termination signal stop an apply with a result; `src/commands/repair.ts` owns SIGTERM/SIGHUP during an apply.
 - `docs/guides/repair.md` (provenance), `docs/ENGINES.md#pool-sizing` (sync workers and a derived direct route in the pooler sum).
 - Tests: `test/repair-file-drift-provenance-gbra133.test.ts`, `test/repair-database-stop-gbra133.test.ts` (PGLite and Postgres).
+
+## [0.60.356.0] - 2026-10-21
+
+**Two rare races in managed writes are closed: a retried page in a grouped import always prepares again, and a sync that normalizes a fence ends at the commit it was asked to sync.** Both showed up only under load.
+
+The first was in grouped imports. When a group of pages took too long to publish, gbrain cancelled the group and scheduled each page to retry after a short pause. If putting the files back took longer than that pause, the same pass could pick a page up again and publish the version it had prepared before the cancellation, without preparing it again. The page's content was still right, but the retry skipped the fresh preparation it was meant to get. Now a page that was cancelled this way always waits for its next turn and prepares again.
+
+The second was in syncs that rewrite a fixable fence and commit the rewritten file. If gbrain's own commit landed in the gap before it was recorded, the sync could record that commit as the one it had synced, instead of the commit it was asked to sync. The next sync then had nothing to do. Now the sync recognizes its own commit in that gap too and records the commit it was asked to sync.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A grouped import cancelled at the publication ceiling, when restoring the files outlasts the 1 s retry pause | a page could be republished from its old preparation in the same pass | the page waits for its retry and prepares again |
+| A sync whose fence rewrite is committed by gbrain right before the sync records it | `last_commit` could be gbrain's own commit | `last_commit` is the commit the sync targeted, and the next sync reads gbrain's commit as a no-op |
+
+Nothing changes on upgrade, and nothing is rewritten.
+
+### Itemized changes
+
+- `src/core/persistence/group-publish.ts`: a group member charged a transient interruption is no longer listed as reclaimable after the group's files are restored.
+- `src/core/persistence/sync-pass-fold.ts`: `ownWritebackCommit` accepts a writeback effect that is still running when Git already shows its commit byte for byte. Every changed path and blob is still checked.
+
+### For contributors
+
+- `scripts/ci-bounded-run.ts`: a stalled CI setup attempt ends only once its whole process group is gone (bounded by the grace period), so nothing it started overlaps the retry.
+- New forced-probe cases in `test/pathological/lp-c-publication-ceiling-retry.test.ts` and `test/persistence-sync-fence-holds.test.ts` cover both races deterministically.
 
 ## [0.60.355.0] - 2026-10-21
 
