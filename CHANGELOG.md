@@ -10,26 +10,21 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.340.0] - 2026-10-21
+## [0.60.339.0] - 2026-10-21
 
-**Cold one-shot reads behind a transaction pooler make fewer round trips and open at most two connections.** A cold `gbrain search` used to pay a round trip for each startup probe and open a connection for each parallel arm. On a 5,000-page test brain behind PgBouncer, cold search drops from 70 to 56 round trips, `get` from 15 to 13 and `recall` from 20 to 11.
+**A managed source with thousands of pre-managed pages that no longer match their files advances again (#7189).** The first managed full round screened every legacy page before importing anything. A page whose body differs from its file is never recorded, so a pass stopped by its deadline kept nothing, and the next pass screened the same pages from the top. On a large brain every pass ran its full hour, ended partial with 0 changes, and the commits waiting behind the sweep never became searchable.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| Config reads in a one-shot read | the startup read and the operation each took a config snapshot | one snapshot per command, handed from startup to the read; the keyword statement timeout reads it too |
-| Source resolution | the sources table was read up to three times per request | read once per request snapshot |
-| The search-statistics guard on every cold search | several statements | one statement |
-| Connections in a one-shot read | one per parallel arm (up to 8 for `entity`) | at most two (`GBRAIN_POOL_SIZE` still wins) |
-| Modules loaded by `gbrain get` | 1,299, including the write path and PGLite WAL repair on a Postgres brain | 663; write handlers load `page-mutations.ts` only when they write |
-
-Nothing changes on upgrade.
+| The first managed full round of a source with legacy pages | screened every legacy page before importing the round's changes | screens at most 500, then imports the round's changes in the same pass |
+| A pass stopped mid-sweep | the next pass screened the same pages again from the top | the next full round resumes at the last screened path (`obligations.legacy_sweep.cursor`) |
+| Legacy pages whose body differs from the file | the first full sweep never finished, so every pass was another first full round | the first sweep finishes once and records `first_full_at`; later sweeps rotate through the rest, 500 per pass |
 
 ### For contributors
 
-- `test/e2e/cli-read-startup-round-trips.test.ts` sets per-verb statement budgets on direct Postgres and through PgBouncer.
-- `test/cold-read-module-graph.test.ts` pins the read path's module graph.
+- `test/sync-legacy-sweep-resume-7189.test.ts` (PGLite and Postgres) stops any pass past 500 screens and checks that the waiting commit imports and the next full round screens only the rest.
 
 ## [0.60.338.0] - 2026-10-21
 
