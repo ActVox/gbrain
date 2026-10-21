@@ -70,12 +70,25 @@ describe('cliRequestContext mirrors makeContext', () => {
   });
 
   test('a serve-side timeout answers fallback (the CLI runs the call itself) while the work keeps the request active until it settles', async () => {
-    const { frame, settled } = await executeCliSocketRequest(engine, { v: 1, identity: 'x', command: 'search', kind: 'op', op: 'search', params: { query: 'alpha' },
-      routing: { cwd: process.cwd(), source_env: null }, cli: { quiet: false, timeout_ms: 1 } });
+    // Config reads wait on a gate, so the request is still working when its deadline passes. A bare short deadline
+    // is not enough: PGLite can finish the whole search before the timer gets a turn (stress gate, seed 193478).
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const gated = new Proxy(engine, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (key === 'getConfig' || key === 'getAllConfig') return async (...args: unknown[]) => { await gate; return (value as (...a: unknown[]) => unknown).apply(target, args); };
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const { frame, settled } = await executeCliSocketRequest(gated, { v: 1, identity: 'x', command: 'search', kind: 'op', op: 'search', params: { query: 'alpha' },
+      routing: { cwd: process.cwd(), source_env: null }, cli: { quiet: false, timeout_ms: 5 } });
     let done = false;
     void settled.then(() => { done = true; });
     expect(frame).toEqual({ v: 1, kind: 'fallback', reason: 'timeout' });
+    await Bun.sleep(20);
     expect(done).toBe(false);
+    release();
     await settled;
     expect(done).toBe(true);
   });
