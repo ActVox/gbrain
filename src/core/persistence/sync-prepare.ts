@@ -48,7 +48,7 @@ import { companyBrainPolicyFingerprint } from '../company-brain/policy.ts';
 import { isUnboundSourcePage, UNBOUND_COLLISION_MESSAGE } from './unbound-source.ts';
 import { checkpointRetryCommand, findIncompleteSyncReceipt, findOpenPassWork, type SyncSettledIndexes } from './checkpoint-validation.ts';
 import { CURSOR_CHANGED_REFUSAL_MESSAGE, SYNC_CURSOR_FENCE_ORIGIN } from './sync-knock-on.ts';
-import { checkpointCursorReplaced } from './sync-checkpoint-replaced.ts';
+import { checkpointCursorReplaced, SYNC_PASS_SUPERSEDED } from './sync-checkpoint-replaced.ts';
 import { recordPassTail, recordSyncTail } from './sync-tail-record.ts';
 import { readPassRow, writePassRow, OPEN_AT_STAMP_CAP, type ManagedSyncPassValue } from './sync-pass-row.ts';
 import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
@@ -511,7 +511,7 @@ async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIn
   const stamp = p.stamp!;
   const lease = await tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]);
   const pass = lease.length ? await readPassRow(tx, row.source_id, stamp.incarnation) : null;
-  if (!pass || pass.value.lease_token !== stamp.leaseToken || pass.value.telemetry.pass_id !== p.passId) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
+  if (!pass || pass.value.lease_token !== stamp.leaseToken || pass.value.telemetry.pass_id !== p.passId) throw syncPublicationRefusal(SYNC_PASS_SUPERSEDED, PASS_LEASE_LOST_MESSAGE, row, p,
     `The pass that admitted checkpoint ${row.request_id} of ${row.source_id} lost the source's drain lease, or another pass started since, so nothing was stamped.`);
   const open = await findOpenPassWork(tx, row.worktree_id!, row.request_id);
   if (open) throw opError('recovery_required', `An unfinished sync request (request ${open}) still blocks the sync checkpoint.`,
@@ -559,7 +559,7 @@ export async function publishPassStamp(tx: BrainEngine, row: WriteRequest, p: Sy
   Object.assign(value.obligations, { not_converged_streak: 0, mismatch: {}, faults: {}, stuck_since: null });
   value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: stamp.configured ? null : 'selection_scoped', ended_at: at, remaining: 0,
     duration_ms: Date.parse(at) - Date.parse(value.telemetry.started_at) };
-  if (!await writePassRow(tx, value)) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
+  if (!await writePassRow(tx, value)) throw syncPublicationRefusal(SYNC_PASS_SUPERSEDED, PASS_LEASE_LOST_MESSAGE, row, p,
     `Another pass of ${row.source_id} started while checkpoint ${row.request_id} published, so nothing was stamped.`);
   return { status: 'synced', source_id: row.source_id, pass_id: p.passId, configured: stamp.configured };
 }

@@ -143,10 +143,15 @@ export function runnerStart(engine: BrainEngine): Pick<CommitNotifierOptions, 's
     jobStatus: (jobId) => {
       const s = runner?.getDelegatedSyncStatus(jobId);
       if (!s || !s.ok || !s.state) return null;
-      return { state: s.state, ...(s.drain ? { outcome: s.drain.outcome, ...(s.drain.stop_reason ? { reason: s.drain.stop_reason } : {}) } : {}), ...(s.jobError ? { error: s.jobError } : {}) };
+      return { state: s.state, ...(s.drain ? { outcome: s.drain.outcome, committed: s.drain.written + s.drain.waived > 0, ...(s.drain.stop_reason ? { reason: s.drain.stop_reason } : {}) } : {}),
+        ...(s.jobError ? { error: s.jobError } : {}) };
     },
     syncRunning: async () => (await load()).isDelegatedSyncRunning(),
-    drainHeld: async (sourceId) => (await (await import('../persistence/sync-lease.ts')).readDrainHolder(engine, sourceId)) !== null,
+    drainHeld: async (sourceId) => {
+      const { holderStalled, readDrainHolder } = await import('../persistence/sync-lease.ts');
+      const holder = await readDrainHolder(engine, sourceId);
+      return holder === null ? false : holderStalled(holder) ? 'stalled' : true;
+    },
   };
 }
 
