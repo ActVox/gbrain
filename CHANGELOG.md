@@ -10,6 +10,35 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.346.0] - 2026-10-21
+
+**A timeline entry no longer rewrites the passages it didn't change, and a big passage replacement can't time out the write that carries it (#7172).** A managed write replaced its page's passages inside its publication, under the publication's 5 s statement bound. A passage whose index moved (a long entry near the top of a descending timeline adds a passage above the others) was deleted and inserted again with its vector, and on a large index each inserted row can cost about half a second, so the write ended `write_interrupted` (SQLSTATE 57014) on every attempt. Separately, a page whose stored embedding signature was missing or in an older format had every passage re-embedded after each write, which looked the same from outside: every passage got a new embedding time.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An entry shifts unchanged passages to new indexes | each moved passage deleted and re-inserted (vector copied) | the row keeps its id and vector and changes index in place |
+| A managed put_page, edit_page, add_timeline_entry, tag write, import or sync whose passages need more than 5 vector-index writes (a passage that carries a vector, inserted or renumbered) | all of them in one statement inside the publication; on a slow index, 57014 on every attempt, then `write_interrupted` | the page commits first; its passages finish in post-commit transactions of at most 5 vector-index writes each, then the projection is sealed. Passages without a vector (new text, a new page) are still written in the publication, as before |
+| Search during those steps | n/a | the page's passages are hidden until the seal (as for any pending projection); the receipt says `searchable: "pending"` and turns `true` when sealed |
+| The embedding step after a write, page signature missing or older format | every passage re-embedded (paid) | passages whose recorded embedding input is current keep their vectors; the page signature is restamped |
+
+The bound of 5 is derived in `src/core/page-state/chunk-moves.ts` (`CHUNK_VECTOR_WRITE_BUDGET`): a row version that carries a vector adds an HNSW entry, a graph search over the whole index that nothing amortizes across rows, while one without a vector adds no HNSW entry and only cheap b-tree and GIN pending-list entries (measured on pgvector: 300 passages inserted in 2.2 s with vectors and 0.06 s without; 300 renumbered in about 1 s with vectors and 0.002 s without). The slowest reported rate on a large index is about 0.5 s per vector-carrying row, and half of the 5 s statement bound is left for the rest of the write. No timeout, retry or deadline is raised, and nothing is configurable.
+
+### What to watch for after you upgrade
+
+- A write that was blocked by repeated `write_interrupted` (57014) on a large page can be submitted again; it commits and finishes its passages right after.
+- If a page's receipt stays `searchable: "pending"` for more than a minute, no process is finishing it: run `gbrain projections drain`.
+- When a top entry changes the text of every passage below it (the chunker packs about 300 words with a 50-word overlap, so a short entry can shift every boundary), those passages are new text and are embedded again; this release does not change the chunker.
+
+### Itemized changes
+
+- `reuseStoredChunkVectors` matches a stored row by source and text at any index (its own index first), so a kept row can move.
+- New `src/core/page-state/chunk-moves.ts`: the vector-index write bound and the move planner (one UPDATE per wave; a cycle parks one row at a negative index).
+- `continueDeferredProjection` runs the bounded steps after commit, holding the page's queue row under a claim it renews each step (the lease a segmented projection claim uses); the projection drain resumes a page whose steps stopped (queue reason `chunk_replacement_deferred`). A group publication now runs its members' post-commit work, as a single publication does.
+- Writes that wrap a page publication in their own (takes, the facts fence, maintenance pages) still replace passages in one transaction.
+- `readEmbeddingEffectProjection` accepts a vector whose recorded input hash is one the current page accepts, whatever the page-level signature says, and restamps the page.
+
 ## [0.60.345.0] - 2026-10-21
 
 **Background jobs stop burning retries on refusals that can never succeed, the dream synthesize phase stops cancelling every child over one bad transcript, and job sweeps stop tripping over the sync lease record.** A sync that runs on a host that doesn't own the checkout, or that needs `--no-pull`, used to fail the same way on every retry and was queued again every few minutes. One transcript with a character Postgres refuses in JSON failed the whole synthesize fan-out. A long sync's lease record made the stall and timeout sweeps fail, so nothing else stuck got reaped and synthesize reported a failure after its work finished.
