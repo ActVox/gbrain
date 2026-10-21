@@ -2624,7 +2624,9 @@ async function connectCliOnlyEngine(command: string, args: string[]): Promise<Br
   try {
     // A4: an observational command connects probe-only and completes startup only after consent.
     // A one-shot `recall` only reads the brain (its --since-last-run cursor is a file); --watch polls for minutes.
-    engine = await connectEngine({ probeOnly: findCliCommand(command)?.startup === 'observational' || (command === 'jobs' && args[0] === 'supervisor' && args[1] === 'status'), oneShotRead: command === 'recall' && !args.includes('--watch') });
+    let oneShotRead = false;
+    if (command === 'recall') oneShotRead = !args.includes('--watch');
+    engine = await connectEngine({ probeOnly: findCliCommand(command)?.startup === 'observational' || (command === 'jobs' && args[0] === 'supervisor' && args[1] === 'status'), oneShotRead });
   } catch (serveConnectError) {
     if (command === 'jobs' && args[0] === 'child-readiness') {
       const { writeChildReadinessFailure } = await import('../core/minions/child-readiness.ts');
