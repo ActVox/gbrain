@@ -57,6 +57,7 @@ import { runCliPreflight } from '../core/cli-preflight.ts';
 import { isBooleanLiteral, isKnownOpFlag } from '../core/op-flag-tokens.ts';
 import { conceptNudge } from '../core/search/query-intent.ts';
 import { redactRetrievalOutput } from '../core/search/output-redaction.ts';
+import { formatSearchExact } from './search-exact-format.ts';
 import type { CliOptions } from '../core/cli-options.ts';
 import { RemoteMcpError, extractResponseMeta } from '../core/remote-mcp-error.ts';
 import { assertSingleSourceScopeFlag, checkHostHonoredParams, hintAmbientNarrowing, type AmbientSourceBinding } from './source-scope.ts';
@@ -364,6 +365,9 @@ async function main() {
   if (command === 'ask') {
     command = 'query';
   }
+  // #7191: `search --exact "<phrase>"` is the exhaustive literal scan, routed before any ranked-search flag is parsed.
+  const exactAt = command === 'search' ? subArgs.indexOf('--exact') : -1;
+  if (exactAt >= 0 && (subArgs.indexOf('--') < 0 || exactAt < subArgs.indexOf('--'))) { command = 'search-exact'; subArgs.splice(exactAt, 1); }
   dispatchedCommand = command;
 
   // Local patch 2026-06-11 — mark one-shot CLI processes so the facts
@@ -1643,6 +1647,7 @@ export function formatResult(
       return pages.map((p) => formatVolunteeredPage(p)).join('\n') + '\n';
     }
     case 'get_page': return formatGetPage(result as Record<string, any>);
+    case 'search_exact': return formatSearchExact(result as Parameters<typeof formatSearchExact>[0]);
     case 'list_pages': {
       const pages = result as any[];
       if (pages.length === 0) return 'No pages found.\n';
