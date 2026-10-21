@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 253415,
-    "stdoutSha256": "3e0e1e0f0e497886944151f27349e995ee3fd14df9526bc28e6f5f309e66bb2b",
+    "stdoutBytes": 254111,
+    "stdoutSha256": "e8043920af2950bd095caa6cc393dd9a0843a9880ec6292a242f81be18cff4d5",
     "toolNames": [
       "remember",
       "entity",
@@ -733,7 +733,7 @@
         "scope": "write"
       },
       {
-        "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.",
+        "description": "List pages by type, slug_prefix, frontmatter where; what did I touch this week: sort=updated_desc. Default 50; truncated: continue with updated_after + updated_after_slug from the last row.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -742,12 +742,14 @@
           "include_deleted": "boolean?",
           "limit": "number?",
           "offset": "number?",
+          "slug_prefix": "string?",
           "sort": "string?",
           "source_id": "string?",
           "tag": "string?",
           "type": "string?",
           "updated_after": "string?",
-          "updated_after_slug": "string?"
+          "updated_after_slug": "string?",
+          "where": "object?"
         },
         "required_scopes": [],
         "schema": {
@@ -763,6 +765,10 @@
             "offset": {
               "description": "Rows to skip.",
               "type": "number"
+            },
+            "slug_prefix": {
+              "description": "Literal slug prefix, e.g. 'deals/'.",
+              "type": "string"
             },
             "sort": {
               "description": "Default updated_desc.",
@@ -793,6 +799,10 @@
             "updated_after_slug": {
               "description": "Last row's slug (with updated_after).",
               "type": "string"
+            },
+            "where": {
+              "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any.",
+              "type": "object"
             }
           },
           "required": [],
@@ -1602,7 +1612,8 @@
           "snippet_chars": "number?",
           "source_id": "string?",
           "token_budget": "number?",
-          "types": "array?"
+          "types": "array?",
+          "where": "object?"
         },
         "required_scopes": [],
         "schema": {
@@ -1706,6 +1717,10 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "where": {
+              "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any.",
+              "type": "object"
             }
           },
           "required": [
@@ -1752,7 +1767,8 @@
           "token_budget": "number?",
           "types": "array?",
           "until": "string?",
-          "walk_depth": "number?"
+          "walk_depth": "number?",
+          "where": "object?"
         },
         "required_scopes": [],
         "schema": {
@@ -1918,6 +1934,10 @@
             "walk_depth": {
               "description": "Code walk depth 1-2.",
               "type": "number"
+            },
+            "where": {
+              "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any.",
+              "type": "object"
             }
           },
           "required": [],

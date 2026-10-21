@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.334.0] - 2026-10-21
+
+**Agents can now filter search and page listings by frontmatter, pass `--types` as plain words, and see what each search cost in time and money.** Without these, agents fell back to grep and raw SQL to answer "which company pages mention this" or "what did I touch this week". Retrieval now answers those questions directly and says where the time went.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain search q --types company` or `--types person,company` | failed with "--types requires a JSON array" | a bare value or a comma list works; a JSON array still works (#7173) |
+| Filter by a frontmatter field | not possible from search, query or `list_pages` | `--where key=value` (repeat to AND keys; `key=a,b` matches any value), MCP `where: { key: value \| [values] }`. The existing GIN index serves it; no migration (#7159) |
+| List pages under a slug prefix | not possible | `list_pages --slug-prefix <prefix>` (#7159) |
+| A search names a page type or a time period without filtering on it | no hint | one `search_filter_hint` info notice with the filtered command; results are unchanged |
+| What a search or query cost | not reported | `_meta.retrieval.cost` lists the embedding, rerank, chat, expansion and decide calls with tokens and USD (#7158) |
+| Where a CLI search spent its time | not reported | `--json --timings` prints `{results, timings_ms, cost}` with startup, connect, context and stage timings. Plain `--json` still prints the bare array |
+| A query-expansion call | wrote no usage row | writes a `chat_usage_log` row (phase `expansion`); `think` synthesis records phase `think` (#7176) |
+
+Nothing changes on upgrade. Every new parameter is optional, and existing `--json` output keeps its shape.
+
+### For contributors
+
+- A per-request `AsyncLocalStorage` meter (`withAIInvocationMeter`) keeps cost from concurrent MCP requests separate.
+- Frontmatter `where` keys must be plain identifiers, and values travel only as bound JSON (8 keys, 32 values, 256 characters).
+
 ## [0.60.333.0] - 2026-10-21
 
 **`gbrain doctor` has a quick tier for agents on large brains, grades checks that ran out of budget honestly, and stops counting sync-failure ledger rows nothing can retry. One-shot CLI reads also start faster behind a pooler.** On a large brain a full doctor run used to blow its budget and report a wall of unknowns. Agents read those as failures and repeated the run. `gbrain doctor --tier quick` answers the questions an agent gates on within 10 seconds. Every other check comes from its last known result, with the result's age.
