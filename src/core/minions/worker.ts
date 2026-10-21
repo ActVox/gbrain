@@ -89,7 +89,7 @@ import { evaluateQuietHours, type QuietHoursConfig } from './quiet-hours.ts';
 import { endedByShutdown, releaseUndrainedClaims, settleShutdownInterruptedJob } from './worker-shutdown.ts';
 import { isWatchdogSuspect, settleWatchdogAbort } from './watchdog-attribution.ts';
 import { IdleWaiter } from './idle-wait.ts';
-import { jobResultOutcome } from './job-outcome.ts';
+import { jobOutcomeResult, jobResultOutcome } from './job-outcome.ts';
 import { readFileSync } from 'fs';
 
 /**
@@ -1564,8 +1564,8 @@ export class MinionWorker extends EventEmitter {
       const verdict = jobResultOutcome(stored);
       // Complete the job (token-fenced); a result that reports a failure (#7188) ends it failed instead.
       const completed = verdict.outcome === 'failed'
-        ? await this.queue.failJob(job.id, lockToken, verdict.reason!, 'failed', 0, stored)
-        : await this.queue.completeJob(job.id, lockToken, verdict.outcome === 'partial' ? { ...stored, job_outcome: 'partial' } : stored);
+        ? await this.queue.failJob(job.id, lockToken, verdict.reason!, 'failed', 0, jobOutcomeResult(stored, verdict))
+        : await this.queue.completeJob(job.id, lockToken, jobOutcomeResult(stored, verdict));
       const execution = this.executions.get(lockToken);
       if (execution) execution.stopped = true;
 

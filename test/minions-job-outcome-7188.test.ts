@@ -1,6 +1,7 @@
 /**
  * #7188: a job whose handler result reports a failed phase, a failed or blocked status, or unfinished work no longer
- * ends a plain `completed`. A failure ends `failed` with the phase and reason (result kept); unfinished work
+ * ends a plain `completed`. A failure ends `failed` with the phase and reason (result kept, marked `job_outcome`
+ * `phase_failed` with `failed_phase`, or `failed`); unfinished work
  * completes with `job_outcome: 'partial'` on its result (the queue has no partial status); a clean result or a
  * deliberate skip completes as before.
  */
@@ -20,7 +21,7 @@ const cycleResult = (phases: unknown[], status: string) => ({ partial: status !=
 describe('#7188 jobResultOutcome', () => {
   test('a failed phase fails the job and names the phase, code and message', () => {
     expect(jobResultOutcome(cycleResult([{ phase: 'lint', status: 'ok' }, failedSyncPhase], 'partial'))).toEqual({
-      outcome: 'failed', reason: 'phase sync failed (25006): cannot execute INSERT in a read-only transaction',
+      outcome: 'failed', phase: 'sync', reason: 'phase sync failed (25006): cannot execute INSERT in a read-only transaction',
     });
   });
 
@@ -73,7 +74,7 @@ describe('#7188 worker records the outcome', () => {
     expect(job.status).toBe('failed');
     expect(job.attempts_made).toBe(1);
     expect(job.error_text).toBe('phase sync failed (25006): cannot execute INSERT in a read-only transaction');
-    expect(job.result).toEqual(result);
+    expect(job.result).toEqual({ ...result, job_outcome: 'phase_failed', failed_phase: 'sync' });
     expect(job.finished_at).not.toBeNull();
   });
 
