@@ -232,14 +232,17 @@ async function planProjectionKeep(tx: BrainEngine, current: PageSnapshot, contex
  * seals the projection. Idempotent: each step re-reads the page and plans from what is stored, so a crash between
  * steps resumes where the last committed one left it. 'skipped' when the page is not an unsealed inline Markdown page.
  */
-export async function continueDeferredProjectionStep(engine: BrainEngine, sourceId: string, slug: string, budget = CHUNK_ROW_WRITE_BUDGET): Promise<'sealed' | 'more' | 'skipped'> {
+export async function continueDeferredProjectionStep(engine: BrainEngine, sourceId: string, slug: string, budget = CHUNK_ROW_WRITE_BUDGET,
+  memo: { revision?: string; chunks?: ChunkInput[] } = {}): Promise<'sealed' | 'more' | 'skipped'> {
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId, slug }]);
     const prepared = await readGuardedProjectionSnapshot(tx, slug, sourceId, { allowUnsealed: true });
     if (!prepared || prepared.pageKind !== 'markdown' || prepared.snapshot.page.text_projection_revision === prepared.snapshot.revision) return 'skipped';
     const current = prepared.snapshot;
     const pageId = Number(current.page.id);
-    const { chunks } = await preparePageProjection(prepared);
+    // The chunks of one revision are computed once per continuation (`memo`), not once per step.
+    if (memo.revision !== current.revision) Object.assign(memo, { revision: current.revision, chunks: (await preparePageProjection(prepared)).chunks });
+    const chunks = memo.chunks!;
     const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride);
     const plan = await planProjectionKeep(tx, current, context, prepared.chunks, chunks);
     await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=$1 AND NOT(id=ANY($2::int[]))', [pageId, plan.kept.map(chunk => Number(chunk.id))]);
@@ -272,8 +275,9 @@ export async function continueDeferredProjectionStep(engine: BrainEngine, source
 
 /** `continueDeferredProjectionStep` until the page is sealed, skipped, or `until` says stop (a resident's time budget). */
 export async function continueDeferredProjection(engine: BrainEngine, sourceId: string, slug: string, until: () => boolean = () => false): Promise<'sealed' | 'more' | 'skipped'> {
+  const memo = {};
   for (;;) {
-    const step = await continueDeferredProjectionStep(engine, sourceId, slug);
+    const step = await continueDeferredProjectionStep(engine, sourceId, slug, CHUNK_ROW_WRITE_BUDGET, memo);
     if (step !== 'more' || until()) return step;
   }
 }
