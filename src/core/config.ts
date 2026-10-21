@@ -37,6 +37,8 @@ export interface GBrainConfig {
    * `gbrain config set` routes these two dotted keys here, not to the DB. */
   push?: { allow_unverified_remote?: boolean };
   hooks?: { stop_push_debounce_min?: number | string };
+  /** #7242 terminal hook (minions/terminal-hook.ts): file plane only, read by `gbrain jobs work`. */
+  minions?: { terminal_hook?: string[] | { argv: string[]; timeout_ms?: number } };
   /** Ambient-writeback MIRROR of the DB-plane `memory.*` keys — `gbrain
    * config set memory.*` dual-writes both planes so the engine-free Stop-hook
    * child and the stdio boot resolve see the same truth the serve does. The

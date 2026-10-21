@@ -18,8 +18,10 @@ import { rowToMinionJob, rowToInboxMessage, rowToAttachment } from './types.ts';
 import { WATCHDOG_SUSPECT_MARK, releaseWatchdogClaim, requeueCoRunnerStalls, unmarkedJobSql } from './watchdog-attribution.ts';
 export { WATCHDOG_SUSPECT_MARK } from './watchdog-attribution.ts';
 import { coalesceOnIdempotencyKey, decideCoalesce, insertOrCoalesce } from './idempotency-coalesce.ts';
+import { withSubmitterLabel } from './job-insight.ts';
 import { adoptSpendAuthorization, legacyDefaultClaimSetSql, legacyDefaultClaimParams, type SpendAuthorization } from './spend-authorization.ts';
 import { validateAttachment } from './attachments.ts';
+import type { QueueFamilyStats } from './queue-families.ts';
 import { isProtectedJobName } from './protected-names.ts';
 import { assertEmbedBackfillQueueAdmission } from './embed-backfill-admission.ts';
 import { lockDelegatedSubmission, checkDelegatedCapacity, prepareDelegatedReplay, admitDelegatedRetry } from './delegated-admission.ts';
@@ -619,7 +621,7 @@ export class MinionQueue {
         opts?.queue ?? 'default',
         childStatus,
         opts?.priority ?? 0,
-        data ?? {},
+        withSubmitterLabel(data, authority.kind === 'application'),
         opts?.max_attempts ?? 3,
         opts?.backoff_type ?? 'exponential',
         opts?.backoff_delay ?? 1000,
@@ -1285,6 +1287,7 @@ export class MinionQueue {
       drained_completed: number; drained_failed: number; drained_dead: number; drained_cancelled: number;
       waiting_now: number; oldest_waiting_minutes: number | null }>;
     queue_health: { waiting: number; active: number; stalled: number };
+    by_queue: QueueFamilyStats[];
     /**
      * issue #1801 — QUEUE-SCOPED wedge signature for the `jobs stats` WEDGED
      * line. by_status/by_type/queue_health above stay GLOBAL (dashboard
@@ -1412,6 +1415,7 @@ export class MinionQueue {
         active: by_status['active'] ?? 0,
         stalled,
       },
+      by_queue: await (await import('./queue-families.ts')).queueFamilyStats(this.engine, since),
       wedge: {
         queue: wedgeQueue,
         active_healthy: parseInt(wr.active_healthy ?? '0', 10),
@@ -1442,8 +1446,9 @@ export class MinionQueue {
    * The map binds as a RAW object (never JSON.stringify into ::jsonb — the
    * postgres.js double-encode trap; PGLite hides it, real PG does not).
    */
-  /** `excludeWatchdogSuspects`: a worker with jobs in flight never claims a job marked by a shared watchdog drain (watchdog-attribution.ts). */
-  async claim(lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[], opts: { excludeWatchdogSuspects?: boolean } = {}): Promise<MinionJob | null> {
+  /** `excludeWatchdogSuspects`: a worker with jobs in flight never claims a job marked by a shared watchdog drain (watchdog-attribution.ts).
+   *  `excludeNames`: skip these job names (the worker's long-job lane reservation, lanes.ts). */
+  async claim(lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[], opts: { excludeWatchdogSuspects?: boolean; excludeNames?: string[] } = {}): Promise<MinionJob | null> {
     if (registeredNames.length === 0) return null;
     await assertNoUnreviewedJobs(this.engine);
 
@@ -1462,6 +1467,7 @@ export class MinionQueue {
     // submit surfaces clamp already, but a bypass-written row (direct SQL
     // repair, foreign tooling) must not grant a ~24-day lease to a worker
     // that crashes before its first renewal (or a 1ms one that thrashes).
+    const excludeNames = opts.excludeNames?.length ? opts.excludeNames : null;
     const rows = await this.engine.executeRawDirect<Record<string, unknown>>(
       `UPDATE minion_jobs SET
         status = 'active',
@@ -1481,14 +1487,14 @@ export class MinionQueue {
         updated_at = now()
        WHERE id = (
          SELECT id FROM minion_jobs
-         WHERE queue = $3 AND status = 'waiting' AND submission_authority IS NOT NULL AND name = ANY($4)${opts.excludeWatchdogSuspects ? ` AND ${unmarkedJobSql('$9')}` : ''}
+         WHERE queue = $3 AND status = 'waiting' AND submission_authority IS NOT NULL AND name = ANY($4)${opts.excludeWatchdogSuspects ? ` AND ${unmarkedJobSql('$9')}` : ''}${excludeNames ? ` AND NOT (name = ANY($${opts.excludeWatchdogSuspects ? 10 : 9}))` : ''}
          ORDER BY priority ASC, created_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
        RETURNING *`,
       [lockToken, lockDurationMs, queue, registeredNames, HANDLER_DEFAULT_TIMEOUT_MS, HANDLER_DEFAULT_LOCK_DURATION_MS, ...legacyDefaultClaimParams(),
-        ...(opts.excludeWatchdogSuspects ? [WATCHDOG_SUSPECT_MARK] : [])]
+        ...(opts.excludeWatchdogSuspects ? [WATCHDOG_SUSPECT_MARK] : []), ...(excludeNames ? [excludeNames] : [])]
     );
     return rows.length > 0 ? rowToMinionJob(rows[0]) : null;
   }

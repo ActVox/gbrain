@@ -524,6 +524,8 @@ export interface CycleOpts {
    * + refreshes the cycle-lock-table TTL.
    */
   yieldBetweenPhases?: () => Promise<void>;
+  /** #7241: awaited as each selected phase starts its work (index and count within this cycle's selection); errors are logged, never fatal. */
+  onPhaseStart?: (phase: CyclePhase, index: number, count: number) => Promise<void> | void;
   /**
    * Generic in-phase keepalive (v0.23). Long-running phases (synthesize
    * waiting on a fan-out aggregator, patterns rolling up reflections)
@@ -2185,7 +2187,11 @@ async function runCycleUnscoped(
   // synthesize_concepts still can't carry one (W6). Steal-free cycles behave
   // byte-identically to timePhase.
   // Phase containment (#5484): a failing phase returns a `fail` result so later phases run; abort, lease loss and budget exhaustion still stop the job.
-  const timePhase = <T extends PhaseResult,>(fn: () => Promise<T>, phase: CyclePhase) => timeContainedPhase({ engine, sourceId: cycleSourceId ?? 'default', signal: cycleSignal }, phase, fn);
+  const timePhase = async <T extends PhaseResult,>(fn: () => Promise<T>, phase: CyclePhase) => {
+    try { await opts.onPhaseStart?.(phase, phases.indexOf(phase), phases.length); }
+    catch (e) { console.warn(`[cycle] onPhaseStart hook error (non-fatal): ${e instanceof Error ? e.message : String(e)}`); }
+    return timeContainedPhase({ engine, sourceId: cycleSourceId ?? 'default', signal: cycleSignal }, phase, fn);
+  };
   const racedTimePhase = <T extends PhaseResult,>(fn: () => Promise<T>, phase: CyclePhase) => raceStolen(timePhase(fn, phase));
 
   // #1972: reap dead-holder sync/cycle locks at cycle start — before the sync
