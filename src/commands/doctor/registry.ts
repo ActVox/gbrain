@@ -60,6 +60,7 @@ import {
 } from './checks/embedding-health.ts';
 import { projectionResidentEntry } from './checks/projection-readiness.ts';
 import {
+  derivedVisibilityEntry,
   graphCoverageEntry,
   orphanRatioEntry,
   staleMentionsEntry,
@@ -195,6 +196,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   partialEmbeddingEntry,
   syncLandingGapsEntry,
   pgvectorEntry,
+  // #7276: the privacy check next, with its own entry budget, before any full scan.
+  derivedVisibilityEntry,
   rlsEntry,
   schemaVersionEntry,
   rlsEventTriggerEntry,

@@ -20,7 +20,7 @@
  *             coherent?" question.
  *
  * Why this matters: the doctor's legacy `health_score` ( 100 − 20×fails −
- * 5×warns ) weights every check equally. A skill routing miss costs the same
+ * 5×warns, over the checks that finished: #7276 ) weights every check equally. A skill routing miss costs the same
  * as a corrupt embedding column. With categorization, the doctor surfaces a
  * brain_checks_score and category_scores so operators see signal-to-noise on
  * the question they're actually asking.
