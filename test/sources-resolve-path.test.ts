@@ -152,6 +152,8 @@ test('the operation is read-scoped, takes paths relative to the source root, and
   expect(op).toMatchObject({ scope: 'read', mutating: false });
   const out = await op.handler({ engine, remote: false } as never, { id: s.id, paths: ['./notes/a.md'] }) as Awaited<ReturnType<typeof resolveSourcePaths>>;
   expect(out.paths[0]).toMatchObject({ slug: 'notes/a', in_synced_commit: true });
+  const remote = { engine, remote: true, sourceId: 'other-example', auth: { allowedSources: ['other-example'] } } as never;
+  await expect(op.handler(remote, { id: s.id, paths: ['notes/a.md'] })).rejects.toMatchObject({ code: 'not_found' });
   await expect(s.resolve()).rejects.toMatchObject({ code: 'invalid_params' });
   await expect(s.resolve(...Array.from({ length: RESOLVE_PATHS_MAX + 1 }, (_, i) => `notes/${i}.md`))).rejects.toMatchObject({ code: 'invalid_params' });
 }), 240_000);

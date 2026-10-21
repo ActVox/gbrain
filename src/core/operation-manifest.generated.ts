@@ -4531,7 +4531,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "cliHints": {
       "name": "sources_resolve_path",
       "hidden": true
-    }
+    },
+    "area": "sources"
   },
   {
     "name": "request_tools",

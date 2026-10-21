@@ -35,7 +35,7 @@ import { confirmedSyncDelta } from '../sync-rename-identity.ts';
 import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
   type GitHoldRecord, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
-import { sameSyncOrigin, selectOriginClaimant, syncOriginPath } from './sync-origin.ts';
+import { sameSyncOrigin, selectOriginClaimant, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexDelta, readIndexLevel, readTreeLevel, workingChanged, type GitIndexEntry, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { readOriginEvidence } from './sync-origin-evidence.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
@@ -612,12 +612,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   // #5610: a source-root page whose stored origin is the legacy Git-root spelling (`<scope>/<origin>`) names `<origin>`, by
   // the one rule discovery and preparation use (sameSyncOrigin; it refuses an origin that could name two files).
   const originScope = { sourceId, root, scope, slugMode };
-  const pageOrigin = (sourcePath: string, slug: string): string => {
-    const recorded = originPath(sourcePath);
-    if (slugMode !== 'source-root' || !scope || !recorded.startsWith(`${scope}/`)) return recorded;
-    const stripped = recorded.slice(scope.length + 1);
-    return sameSyncOrigin(recorded, stripped, originScope, slug) ? stripped : recorded;
-  };
+  const pageOrigin = (sourcePath: string, slug: string): string => scopedPageOrigin(originPath(sourcePath), slug, originScope);
   const step = turnYield();
 
   t = timer();
@@ -884,6 +879,14 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
+}
+
+/** A recorded page origin as the level names it: a source-root page's legacy Git-root spelling loses its scope (#5610). */
+function scopedPageOrigin(recorded: string, slug: string, originScope: SyncOriginScope): string {
+  const { scope, slugMode } = originScope;
+  if (slugMode !== 'source-root' || !scope || !recorded.startsWith(`${scope}/`)) return recorded;
+  const stripped = recorded.slice(scope.length + 1);
+  return sameSyncOrigin(recorded, stripped, originScope, slug) ? stripped : recorded;
 }
 
 /** The level's settings, one round trip each and all in flight together; null for a company-brain source. */
