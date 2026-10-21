@@ -142,7 +142,7 @@ describe('repair --apply continues past a per-item invalid_params / source_chang
     expect(stub.store.get(1)).toBe('repaired item 1');
   });
 
-  test('other refusals still stop the run as before (write_pending stops; a lost connection rethrows; an unexpected error is one item\'s failure, GBRA-130)', async () => {
+  test('other refusals still stop the run as before (write_pending stops; a lost connection stops with a result, GBRA-133; an unexpected error is one item\'s failure, GBRA-130)', async () => {
     const stub = stubKind('timeline', 3, {});
     stub.handler.apply = async (_c, it) => {
       stub.attempts.push(it.cursor.id);
@@ -161,7 +161,10 @@ describe('repair --apply continues past a per-item invalid_params / source_chang
     await resetPgliteState(engine);
     const lost = stubKind('timeline', 3, {});
     lost.handler.apply = async (_c, it) => { if (it.cursor.id === 0) throw Object.assign(new Error('Connection terminated unexpectedly'), { code: '08006' }); return { applied: true, outcome: 'repaired' }; };
-    await expect(runRepair(ctx(), lost.handler, await resolveRepairScope(engine), { apply: true, spec: lost.spec })).rejects.toThrow('Connection terminated');
+    // GBRA-133: the run stops at the refused item with a result (reason, SQLSTATE, resume command) instead of rethrowing.
+    const dropped = await runRepair(ctx(), lost.handler, await resolveRepairScope(engine), { apply: true, spec: lost.spec });
+    expect(dropped).toMatchObject({ applied: 0, failed: [], complete: false, stopped: { reason: 'database_contention' } });
+    expect(dropped.stopped!.message).toContain('(08006): Connection terminated unexpectedly');
   });
 
   test('the human output counts the failures, names the slug and the full-scan command; the command exits 1', async () => {
