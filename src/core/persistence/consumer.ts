@@ -1,7 +1,7 @@
 import type { BrainEngine, ReservedConnection } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, publicationGroupKey, syncGroup, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, vacuumPersistenceQueues, independentGroup, sweepSegmentStorage, yieldToEventLoop } from './journal.ts';
-import { finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, transientDatabaseFailure, type PreparedMutation } from './coordinator.ts';
+import { connectionCapFailure, finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, transientDatabaseFailure, type PreparedMutation } from './coordinator.ts';
 import { localHostId } from './identity.ts';
 import { executeClaimedGroup, PAGE_BATCH_GROUP_MAX, publishSingleWrite, singleWrite } from './group-publish.ts';
 import { preparationConfigView } from './config-snapshot.ts';
@@ -872,7 +872,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       return;
     }
     const code = (error as { code?: unknown })?.code;
-    this.lastError = { code: typeof code === 'string' && (/^[A-Z0-9]{5}$/.test(code) || isWriteErrorCode(code)) ? code : 'storage_error', at: new Date().toISOString(),
+    // GBRA-133: a pooler's client cap names itself (and its fix) instead of the pooler's generic code.
+    this.lastError = { code: connectionCapFailure(error) ? 'pool_exhausted' : typeof code === 'string' && (/^[A-Z0-9]{5}$/.test(code) || isWriteErrorCode(code)) ? code : 'storage_error', at: new Date().toISOString(),
       ...(this.lastPhaseError ? { phase: this.lastPhaseError } : {}) };
     if (this.opts.onError) this.opts.onError(error);
     else this.log(this.lastPhaseError ?? 'execution', this.lastError.code, errorDetail(error), this.lastPhaseError ? this.lastPhaseTiming : undefined, row);
@@ -893,7 +894,8 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       this.lastLog = { key, at };
     }
     if (!this.opts.onError) process.stderr.write(`[persistence] phase=${phase} reason=${code}${detail ? ` message="${detail}"` : ''}${timing}${row ? requestLogFields(row) : ''}`
-      + '; unfinished work remains tracked; fix: gbrain sources writer status --json; docs: docs/ENGINES.md#persistence-consumer-log\n');
+      + `; unfinished work remains tracked; fix: ${code === 'pool_exhausted' ? 'every gbrain process on this database shares the pooler\'s client limit: run fewer long-running processes (share one gbrain serve --http) or raise the limit; docs: docs/ENGINES.md#pool-sizing'
+        : 'gbrain sources writer status --json; docs: docs/ENGINES.md#persistence-consumer-log'}\n`);
   }
   /** #5373: tracks work that outlived its claim until it settles; the returned promise never rejects. */
   /**
