@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.354.0] - 2026-10-21
+
+**The warm CLI socket now matches a serve that exports `GBRAIN_HOME` with a CLI that doesn't.** After v0.60.350.0, a serve started with `GBRAIN_HOME=$HOME` still refused every CLI that relied on `HOME` alone, with `refused (identity_mismatch): env GBRAIN_HOME`. Both sides resolved to the same home, but the identity compared whether the variable was set. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID` now count by the config home and brain they resolve to, which the identity already compares.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Serve exports `GBRAIN_HOME`, CLI reaches the same home through `HOME` | refused (`env GBRAIN_HOME`) | answered warm |
+| Serve sets `GBRAIN_BRAIN_ID=host`, CLI leaves it unset | refused | answered warm |
+| A different resolved config home or brain | refused | still refused (`config home`, `brain`) |
+
+### What to watch for after you upgrade
+
+- Restart the serve after upgrading, as before: a serve and a CLI on different gbrain versions never match.
+
+### Itemized changes
+
+- `READ_BEHAVIOR_ENV` drops `GBRAIN_HOME`, `GBRAIN_BRAIN_ID`, `GBRAIN_MOUNTS_PATH` (mount brains, which the socket never serves) and `GBRAIN_CWD_ENV_QUARANTINED` (a re-run marker whose effect already shows in the environment it left). The classification test lists them with the reason.
+
 ## [0.60.353.0] - 2026-10-21
 
 **Resolving held file-drift pages in bulk now shows progress and prints its preview within a minute.** `gbrain repair file-drift --held` used to prepare every selected held page before it printed anything. Each page reads the database a few dozen times, so a held set of a few thousand pages against a remote database printed nothing for over an hour: no preview, no hash, and nothing to apply. It also quietly stopped at the first 1,000 held pages. A held preview now covers one window of at most 200 pages, or 60 seconds of work, and reports each page on stderr as it goes. A partial window prints the next preview command with `--cursor <next_cursor>`, and walking the windows covers every held page.
