@@ -14,7 +14,7 @@
  */
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
-import { derivationPrivateSql, privateSnapshotFilterFragment } from '../../../core/search/private-visibility.ts';
+import { derivationPrivateSql, privateSnapshotFilterFragment, readHonorAliases } from '../../../core/search/private-visibility.ts';
 import { aliasOnlyPagesSql, worldFactsFromPrivateSources } from '../../../core/repair/visibility.ts';
 
 const FACT_SAMPLE = 50;
@@ -22,6 +22,7 @@ const FACT_SAMPLE = 50;
 export async function derivedVisibilityCheck(engine: BrainEngine, sourceId?: string): Promise<Check> {
   const name = 'derived_visibility';
   try {
+    const aliasesHonored = await readHonorAliases(engine);
     const [row] = await engine.executeRaw<{ unstamped_atoms: number; unstamped_concepts: number; looser_atoms: number; looser_concepts: number; looser_events: number; alias_pages_without_visibility: number }>(
       `WITH derived AS (
          SELECT p.* FROM pages p WHERE p.deleted_at IS NULL ${sourceId ? 'AND p.source_id=$1' : ''}
@@ -56,7 +57,8 @@ export async function derivedVisibilityCheck(engine: BrainEngine, sourceId?: str
     const parts: string[] = [];
     if (unstamped + looser) parts.push(`${unstamped} derived page(s) have no explicit visibility (${row.unstamped_atoms} atoms, ${row.unstamped_concepts} concepts) `
       + `and ${looser} are stored looser than their origin (${row.looser_events} chronicle events); remote reads treat the unstamped ones as private.`);
-    if (row.alias_pages_without_visibility) parts.push(`${row.alias_pages_without_visibility} page(s) mark themselves private with a privacy alias (access, confidentiality) but carry no visibility, so remote page reads treat them as world.`);
+    if (row.alias_pages_without_visibility) parts.push(`${row.alias_pages_without_visibility} page(s) mark themselves private with a privacy alias (access, confidentiality) but carry no visibility. `
+      + (aliasesHonored ? 'Remote page reads hide them (to show them: gbrain config set visibility.honor_aliases false).' : 'visibility.honor_aliases is false, so remote page reads show them.'));
     if (facts.length) parts.push(`${facts.length} active world fact(s) are held in or were extracted from a private page; ${readable.length} of them are readable by remote callers (ids in details.remotely_readable_fact_ids).`);
     parts.push('Preview: gbrain repair visibility — apply after the user agrees: gbrain repair visibility --apply');
     return { name, status: 'warn', details, message: parts.join(' ') };
