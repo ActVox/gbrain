@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.357.0] - 2026-10-21
+## [0.60.358.0] - 2026-10-21
 
 **Held deleted files now show who deleted them, so each group can be resolved on its own.** A held `file_gone` file can be a page no commit ever held (the database copy is the only one), a file a commit deleted on purpose, or a deletion only the worktree lost. A held preview showed them all the same way, so a single `--prefer` either brought back pages that were culled on purpose or deleted the only copy of others. Each previewed page now names its provenance, and `--provenance` selects one group at a time.
 
@@ -34,6 +34,26 @@ identifiers and attribution are available in the pre-removal Git revision
 - `src/core/repair/core.ts`: database refusals (`recordDatabaseStops`, set by the CLI; the cycle and doctor remediation keep the rethrow their own stops rely on) and the CLI's termination signal stop an apply with a result; `src/commands/repair.ts` owns SIGTERM/SIGHUP during an apply.
 - `docs/guides/repair.md` (provenance), `docs/ENGINES.md#pool-sizing` (sync workers and a derived direct route in the pooler sum).
 - Tests: `test/repair-file-drift-provenance-gbra133.test.ts`, `test/repair-database-stop-gbra133.test.ts` (PGLite and Postgres).
+
+## [0.60.357.0] - 2026-10-21
+
+**The warm CLI socket now matches a serve that exports `GBRAIN_HOME` with a CLI that doesn't.** After v0.60.350.0, a serve started with `GBRAIN_HOME=$HOME` still refused every CLI that relied on `HOME` alone, with `refused (identity_mismatch): env GBRAIN_HOME`. Both sides resolved to the same home, but the identity compared whether the variable was set. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID` now count by the config home and brain they resolve to, which the identity already compares.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Serve exports `GBRAIN_HOME`, CLI reaches the same home through `HOME` | refused (`env GBRAIN_HOME`) | answered warm |
+| Serve sets `GBRAIN_BRAIN_ID=host`, CLI leaves it unset | refused | answered warm |
+| A different resolved config home or brain | refused | still refused (`config home`, `brain`) |
+
+### What to watch for after you upgrade
+
+- Restart the serve after upgrading, as before: a serve and a CLI on different gbrain versions never match.
+
+### Itemized changes
+
+- `READ_BEHAVIOR_ENV` drops `GBRAIN_HOME`, `GBRAIN_BRAIN_ID`, `GBRAIN_MOUNTS_PATH` (mount brains, which the socket never serves) and `GBRAIN_CWD_ENV_QUARANTINED` (a re-run marker whose effect already shows in the environment it left). The classification test lists them with the reason.
 
 ## [0.60.356.0] - 2026-10-21
 

@@ -17,14 +17,15 @@ import { listRecipes } from '../ai/recipes/index.ts';
  * The GBRAIN_* variables that can change what a socket read (search, query,
  * get, recall) answers or where its text goes. An explicit allow-list:
  * connection sizing and driver tuning (GBRAIN_POOL_SIZE, GBRAIN_PREPARE, ...)
- * never change an answer, so a serve and a CLI may differ there. The database
- * URL variables are compared as a database target instead (`DatabaseTarget`),
- * and GBRAIN_SOURCE travels in every request and is resolved per call.
+ * never change an answer, so a serve and a CLI may differ there. Variables that
+ * only choose a location are compared by what they resolve to, never by whether
+ * they are set: GBRAIN_HOME as the config home, GBRAIN_BRAIN_ID as the brain id,
+ * the database URL variables as the database target (`DatabaseTarget`). GBRAIN_SOURCE
+ * travels in every request and is resolved per call.
  * test/cli-socket.test.ts classifies every GBRAIN_* name in src, so a new one
  * cannot skip this decision.
  */
 export const READ_BEHAVIOR_ENV: readonly string[] = [
-  'GBRAIN_HOME', 'GBRAIN_BRAIN_ID', 'GBRAIN_MOUNTS_PATH', 'GBRAIN_CWD_ENV_QUARANTINED',
   'GBRAIN_SEARCH_EXCLUDE', 'GBRAIN_SEARCH_SALVAGE', 'GBRAIN_SEARCH_DEBUG', 'GBRAIN_SOURCE_BOOST', 'GBRAIN_RECENCY_DECAY',
   'GBRAIN_FTS_LANGUAGE', 'GBRAIN_HNSW_ITERATIVE_SCAN', 'GBRAIN_VECTOR_LEGACY_GUARD', 'GBRAIN_PROJECTION_READINESS_CACHE',
   'GBRAIN_REMOTE_PRIVATE_PAGES', 'GBRAIN_RLS_SCOPE_BINDING', 'GBRAIN_STALENESS_CEILING_HOURS', 'GBRAIN_SERVE_DEGRADED',
