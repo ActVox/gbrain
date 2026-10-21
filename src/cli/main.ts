@@ -2508,7 +2508,7 @@ async function prepareConnectedDispatch(command: string, args: string[]): Promis
     const cfgJobs = loadConfig();
     if (isThinClient(cfgJobs)) {
       const jobsSub = args[0];
-      if (jobsSub === 'list' || jobsSub === 'get') {
+      if (jobsSub === 'list' || jobsSub === 'get' || jobsSub === 'wait') {
         const { runJobs } = await import('../commands/jobs.ts');
         await runJobs(null, args);
         return null;
