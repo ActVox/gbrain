@@ -125,7 +125,7 @@ async function main() {
     const ok = s.filter(x => x.ok), ms = ok.map(x => x.ms);
     const row: Record<string, unknown> = { suite: 'retrieval-scale', label, pages: manifest.pages, chunks: manifest.chunks, op, mode, search_mode: searchMode, n: ok.length, errors: s.length - ok.length, p50_ms: r0(pct(ms, 0.5)), p95_ms: r0(pct(ms, 0.95)), embed_ms: Number(flag('--embed-ms', '0')), rerank_ms: Number(flag('--rerank-ms', '0')) };
     const med = (k: keyof Sample) => { const v = ok.map(x => x[k] as number).filter(x => typeof x === 'number'); return v.length ? r0(pct(v, 0.5)) : undefined; };
-    if (trace) Object.assign(row, { startup_p50_ms: med('startup'), db_p50_ms: med('db'), tail_p50_ms: med('tail'), round_trips_p50: med('trips') });
+    if (trace) { row.startup_p50_ms = med('startup'); row.db_p50_ms = med('db'); row.tail_p50_ms = med('tail'); row.round_trips_p50 = med('trips'); }
     const stageNames = new Set(ok.flatMap(x => Object.keys(x.stages ?? {})));
     if (stageNames.size) row.stages_p50_ms = Object.fromEntries([...stageNames].map(k => [k, r0(pct(ok.map(x => x.stages?.[k] ?? 0), 0.5))]));
     const worst = s.reduce((w, x, i) => (x.ok && x.ms > s[w]!.ms ? i : w), 0);
