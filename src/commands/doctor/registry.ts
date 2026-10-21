@@ -93,6 +93,7 @@ import { legacyTokenGrantsEntry } from './checks/legacy-token-grants.ts';
 import { grantNewOpsEntry } from './checks/grant-new-ops.ts';
 import { linksExtractionLagEntry, syncFreshnessEntry, searchModeEntry } from './checks/sync-search.ts';
 import { persistenceConsumersEntry, serveBuildDriftEntry } from './checks/persistence-consumers.ts';
+import { runtimeBuildSkewEntry } from './checks/runtime-build-skew.ts';
 import { gitConvergenceEntry } from './checks/git-convergence.ts';
 import { retrievalFeedbackEntry } from './checks/retrieval-feedback.ts';
 import { transcriptSecretExposureEntry } from './checks/transcript-secrets.ts';
@@ -105,6 +106,7 @@ import { factAdmissionFloorsEntry } from './checks/fact-admission-floors.ts';
 import { unlinkedFactsEntry } from './checks/unlinked-facts.ts';
 import { edgeValidityEntry } from './checks/edge-validity.ts';
 import { coreMemoryEntry } from './checks/core-memory.ts';
+import { personTitleDuplicatesEntry } from './checks/entity-duplicates.ts';
 import { plannerStatsEntry } from './checks/planner-stats.ts';
 import { revisionBackfillEntry } from './checks/revision-backfill.ts';
 import { beliefLedgerEntry } from './checks/belief-ledger.ts';
@@ -258,6 +260,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   trustSourcesUnclaimedEntry,
   coreMemoryEntry,
   persistenceConsumersEntry,
+  runtimeBuildSkewEntry,
   atomHeldFailedEntry,
   extractionInputTruncatedEntry,
   ghostPagesEntry,
@@ -271,6 +274,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   syncConfigKeysEntry,
   // #6712 PR 4a: the read-only convergence shadow (deep tier: a full level read per source).
   managedSyncConvergenceEntry,
+  // #7160: title-prefixed person pages next to the unprefixed page (read-only, preview-first).
+  personTitleDuplicatesEntry,
   fenceIntegrityEntry,
   searchModeEntry,
 ];

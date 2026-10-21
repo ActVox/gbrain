@@ -59,7 +59,7 @@ timeline: 12 item(s) to repair
 
 ```bash
 gbrain repair timeline --apply
-gbrain repair visibility --apply
+gbrain repair visibility --apply                # every class; or preview one window and apply it (below)
 gbrain repair safe-chunks --apply
 gbrain repair safe-chunks --apply --no-embed   # re-seal text now, embed later
 gbrain repair contextual-mode --apply
@@ -67,6 +67,23 @@ gbrain repair request-indexes --apply
 gbrain repair google-file-modes --apply             # explicit-only: runs only when named
 gbrain repair --all --apply                    # every automatic kind in order
 ```
+
+On a large brain, apply `visibility` one previewed window at a time. The preview
+plans one class at a time in the order remote callers are exposed (world facts
+from a private page, remotely readable ones first; Life Chronicle events;
+alias-only pages; then atoms and concepts, the only class that reads
+concept-provenance links), reports progress on stderr, lists one window
+(1,000 items; `--limit` up to 10,000) and prints the apply command for it:
+
+```bash
+gbrain repair visibility --class facts        # one class: facts, events, aliases or lineage
+gbrain repair visibility --class facts --apply --expect <hash>   # exactly that window
+```
+
+The apply touches only the listed items and resumes after its last applied
+item if it stops. Apply the window (or decide not to), then preview again for
+the next one. Each plan statement is bounded at 120 s; a class that overruns is
+reported and skipped while the other classes are listed.
 
 `--apply` writes without a prompt, so review the preview first. With
 `--apply` you must name a kind or pass `--all`; `--yes` is refused, and so is
@@ -2134,6 +2151,24 @@ the two `--prefer` values do opposite things in each state.
 | `tombstone_edited` | Keeps the deletion and removes the file. | Restores the page and imports the file. |
 | `purged_differs` | Removes the file. | Imports the file as a new page. |
 | `file_gone` | Recreates the file from the page. | Soft-deletes the page (the mass-delete valve applies). |
+
+A held preview covers one window of the selected holds, in held-path order:
+at most 200 pages, and it starts no page after 60 seconds of work (each page
+reads the database a few dozen times, so a large held set against a remote
+database takes minutes per hundred pages). It reports each page on stderr as
+it goes. The hash and the printed apply command cover only that window. A
+partial window lists `after_window` in its residuals and prints the next
+preview command with `--cursor <next_cursor>` (JSON: `details.window`):
+
+```bash
+gbrain repair file-drift --source <id> --held --side deleted --state file_gone --prefer database             # window 1
+gbrain repair file-drift --source <id> --held --side deleted --state file_gone --prefer database --apply --expect <hash>
+gbrain repair file-drift --source <id> --held --side deleted --state file_gone --cursor <next_cursor> --prefer database  # window 2
+```
+
+The apply reports each page on stderr as well. Apply each window (or decide not to), then preview the next one. Pages the
+apply resolved leave the held set, so rerunning without `--cursor` also
+starts from the first page still held.
 
 A `file_gone` hold whose `meta.reason` is `never_committed` or `ignored`
 (#7130) is a page whose file is missing although Git never committed it: the
