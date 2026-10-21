@@ -65,7 +65,7 @@ describe('#6712 PR 4b lane C: cursor readers on the pass', () => {
       deadline.noteSlice(passResult(3, 5));
       await new Promise(resolve => setTimeout(resolve, 350));
       expect(deadline.stop.signal.aborted).toBe(false);
-      expect(lines.join('\n')).toContain('still committing');
+      expect(lines.join('\n')).toContain('still progressing');
       // GBRA-133 PR 3a: this slice settled paths but committed none (screened unchanged): no extension.
       deadline.noteSlice({ ...passResult(3, 2), added: 0 });
       await new Promise(resolve => setTimeout(resolve, 500));

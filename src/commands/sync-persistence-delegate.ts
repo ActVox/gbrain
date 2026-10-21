@@ -117,7 +117,7 @@ export class DelegatedSyncDeadline {
     const now=performance.now();
     if(this.progressWindowMs&&this.progressed&&now-this.lastProgressAt<this.progressWindowMs) {
       this.at=this.lastProgressAt+this.progressWindowMs;
-      if(!this.extended){this.extended=true;this.log(`[sync] past the delegated deadline and still committing; extends while the owner keeps committing pages (stops after ${Math.round(this.progressWindowMs/1000)}s without a commit).`);}
+      if(!this.extended){this.extended=true;this.log(`[sync] past the delegated deadline and still progressing; extends while the owner keeps committing pages (stops after ${Math.round(this.progressWindowMs/1000)}s without progress).`);}
       this.arm();
       return;
     }

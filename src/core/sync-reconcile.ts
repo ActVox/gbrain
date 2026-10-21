@@ -302,7 +302,7 @@ export function syncWatchdogPlan(args: string[], res: HardDeadlineResolution): {
     watchdog: { deadlineMs: res.deadlineMs, graceMs: res.graceMs, label: 'sync-watchdog', heartbeatMs: 60_000,
       progressWindowMs: res.progressWindowMs, stopNotice: syncDeadlineStopNotice(args, res), progressSignal: 'committed', stallNotice: syncDeadlineStallNotice(args, res) },
     armedLine: `[sync-watchdog] hard deadline armed: ${Math.round(res.deadlineMs / 1000)}s + ${Math.round(res.graceMs / 1000)}s grace (${res.reason})` +
-      (res.progressWindowMs ? `; extends while the sync keeps committing pages (stops after ${Math.round(res.progressWindowMs / 1000)}s without a commit)` : '') +
+      (res.progressWindowMs ? `; extends while the sync keeps progressing (stops after ${Math.round(res.progressWindowMs / 1000)}s without progress)` : '') +
       '; disable with --no-hard-deadline\n',
   };
 }

@@ -50,7 +50,7 @@ describe('a deadline never extends a run that committed nothing', () => {
       expect(deadline.stop.signal.aborted).toBe(true);
       expect(deadline.stalled).toBe(true);
       expect(lines.join('\n')).toContain('code=sync_deadline_stalled');
-      expect(lines.join('\n')).not.toContain('still committing');
+      expect(lines.join('\n')).not.toContain('still progressing');
     } finally { deadline.dispose(); }
   });
 
@@ -62,7 +62,7 @@ describe('a deadline never extends a run that committed nothing', () => {
       deadline.noteSlice({ ...screened(3), modified: 1 });
       await sleep(150);
       expect(deadline.stop.signal.aborted).toBe(false);
-      expect(lines.join('\n')).toContain('still committing');
+      expect(lines.join('\n')).toContain('still progressing');
       await sleep(450);
       expect(deadline.stop.signal.aborted).toBe(true);
       expect(deadline.stalled).toBe(false);
@@ -76,7 +76,7 @@ describe('a deadline never extends a run that committed nothing', () => {
     expect(plan.watchdog.stallNotice).toContain('code=sync_deadline_stalled');
     expect(plan.watchdog.stallNotice).toContain('committed nothing');
     expect(plan.watchdog.stallNotice).toContain('Fix: gbrain sync status --source source-a --json');
-    expect(plan.armedLine).toContain('extends while the sync keeps committing pages');
+    expect(plan.armedLine).toContain('extends while the sync keeps progressing');
     const json = JSON.parse(syncDeadlineStallNotice(['--source', 'source-a', '--no-pull', '--json'], res));
     expect(json).toMatchObject({ status: 'stalled', code: 'sync_deadline_stalled', committed: 0, deadline_seconds: 3600,
       fix: { next: 'run', argv: ['gbrain', 'sync', 'status', '--source', 'source-a', '--json'] }, docs: 'docs/guides/error-codes.md#sync_deadline_stalled' });
