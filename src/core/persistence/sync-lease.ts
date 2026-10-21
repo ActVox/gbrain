@@ -65,8 +65,12 @@ export interface DrainHolder { kind: DrainHolderKind | 'unknown'; id: string | n
   version: string | null; progress: DrainHolderProgress | null }
 /** `safe_to_loop` and `retry_after_ms` are the `next` fields of the drain's other owner stops (`owner_wedged_here`). */
 export interface DrainLeaseHeld { code: typeof SYNC_DRAIN_LEASE_HELD; holder: DrainHolder | null; retry_after_ms: number; safe_to_loop: true; lost?: true; fix: Action }
-/** `tailClear`: a pass under this lease read that no tail is owed, and nothing under it owed one since (`withSyncTail` reads none). */
-interface DrainLease { lockId: string; sourceId: string; token: string; signal: AbortSignal; tailClear?: boolean }
+/**
+ * `tailClear`: a pass under this lease read that no tail is owed, and nothing under it owed one since (`withSyncTail` reads none).
+ * `idleClear` (GBRA-133): the last pass under this lease was an idle tick whose pin read no hold, no hold summary, no
+ * recorded failure of the source and no owed tail, so the settles that only act on those (sync-idle-skips.ts) have nothing to do.
+ */
+interface DrainLease { lockId: string; sourceId: string; token: string; signal: AbortSignal; tailClear?: boolean; idleClear?: boolean }
 
 const leases = new AsyncLocalStorage<ReadonlyMap<string, DrainLease>>();
 
