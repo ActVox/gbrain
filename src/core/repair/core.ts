@@ -108,7 +108,7 @@ export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmb
   since?: string;
   /** #6712 PR 4b `file-drift`: the source's held `file_drift` pages, of one side and (for `deleted`) one state. */
   held?: boolean; side?: string; state?: string;
-  /** `file-drift --held`: the window starts after the held file this `next_cursor` names (`--cursor`); `progress` reports the preview's pages on stderr. */
+  /** `file-drift --held`: the window starts after the held file this `next_cursor` names (`--cursor`); `progress` reports the preview's pages, and an apply's items, on stderr. */
   cursor?: string; progress?: ProgressReporter;
   /** `stuck-recovery`: the version an apply keeps, and the one request a run selects. */
   keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string;
@@ -379,6 +379,7 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
   const finish = async (): Promise<RepairResult> => {
     if (failedItems.length && handler.onItemFailures && result.stopped?.reason !== 'item_failures_systemic') await handler.onItemFailures(ctx, failedItems);
     if (handler.report) Object.assign(result, await handler.report(ctx, scope, result, planOpts));
+    if (opts.apply) opts.progress?.finish();
     return result;
   };
   if (!opts.apply) {
@@ -424,8 +425,10 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
     result.stopped = stopped;
     return finish();
   };
+  if (opts.apply) opts.progress?.start(`repair.${handler.kind}.apply`, pending.length);
   for (const [index, item] of pending.entries()) {
     const remaining = pending.length - index;
+    opts.progress?.tick(1, `${item.source_id}:${item.slug}`);
     // A preview-bound kind may retire its approved set with its last item, so every earlier receipt settles before that item runs.
     const lastApproved = !!opts.expect && index === plan.items.length - 1;
     if (unresolved.length && (unresolved.length >= window || lastApproved) && !await settle(lastApproved ? 0 : window - 1)) {

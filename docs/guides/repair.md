@@ -2166,7 +2166,7 @@ gbrain repair file-drift --source <id> --held --side deleted --state file_gone -
 gbrain repair file-drift --source <id> --held --side deleted --state file_gone --cursor <next_cursor> --prefer database  # window 2
 ```
 
-Apply each window (or decide not to), then preview the next one. Pages the
+The apply reports each page on stderr as well. Apply each window (or decide not to), then preview the next one. Pages the
 apply resolved leave the held set, so rerunning without `--cursor` also
 starts from the first page still held.
 

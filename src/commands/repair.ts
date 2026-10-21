@@ -417,7 +417,7 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
     ...(k === kind && noLlm ? { noLlm } : {}), ...(k === kind && maxUsd !== undefined ? { maxLlmUsd: maxUsd } : {}),
     ...(k === kind && k === 'visibility' && driftClass ? { driftClass } : {}),
     ...(k === kind && k === 'file-drift' ? { prefer, requests, allDrifted, driftClass, since, ...(held ? { held } : {}), ...(side ? { side } : {}), ...(state ? { state } : {}), ...(cursor ? { cursor } : {}),
-      ...(apply ? {} : { progress: createProgress(cliOptsToProgressOptions(getCliOptions())) }) } : {}),
+      progress: createProgress(cliOptsToProgressOptions(getCliOptions())) } : {}),
     ...(k === kind && keep ? { keep } : {}), ...(k === kind && requestId ? { requestId } : {}),
     ...(k === kind && k === 'receipt-compaction' ? { olderThan, includeFailures, force } : {}),
     ...(k === kind && k === 'rename-identity' ? { from, close } : {}), ...(k === kind && afterPage !== undefined ? { afterPage } : {}) }));

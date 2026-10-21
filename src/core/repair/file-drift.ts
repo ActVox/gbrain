@@ -219,13 +219,24 @@ function writeArtifact(hash: string, value: unknown): string {
   return path;
 }
 
-function readArtifact(hash: string, command: string): Map<string, PlannedPage> {
+/**
+ * The parsed artifact of the newest preview read, keyed by its path and file identity. An apply reads the artifact once per
+ * page, and a preview of large pages writes hundreds of megabytes, so parsing it again for every page cost seconds each.
+ */
+let artifactMemo: { key: string; pages: Map<string, PlannedPage> } | null = null;
+
+/** The preview artifact's pages by slug; the same parsed map while the file is unchanged. Exported for its test. */
+export function readArtifact(hash: string, command: string): Map<string, PlannedPage> {
   const path = join(artifactDirectory(), `${hash}.json`);
   try {
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('not a regular file');
+    const key = `${path}\0${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    if (artifactMemo?.key === key) return artifactMemo.pages;
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as { pages?: PlannedPage[] };
-    return new Map((parsed.pages ?? []).map(page => [page.slug, page]));
+    const pages = new Map((parsed.pages ?? []).map(page => [page.slug, page]));
+    artifactMemo = { key, pages };
+    return pages;
   } catch { throw previewChangedError(hash, command); }
 }
 

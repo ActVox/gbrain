@@ -28,6 +28,7 @@ import { SYNC_ORIGIN_DELETED_OP } from '../src/core/persistence/sync-pass-row.ts
 import { gitHoldItem, readGitHold, writeGitHold, type FileDriftDeletedState, type FileDriftSide } from '../src/core/persistence/sync-holds.ts';
 import { repairRunner } from '../src/core/repair/registry.ts';
 import { resolveRepairScope } from '../src/core/repair/core.ts';
+import { readArtifact } from '../src/core/repair/file-drift.ts';
 import { withEnv } from './helpers/with-env.ts';
 import type { ProgressReporter } from '../src/core/progress.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -144,6 +145,23 @@ for (const backend of testBackends()) describe(`GBRA-133: a held file-drift prev
     for (const slug of [slugs[0], slugs[2]]) expect(existsSync(join(f.root, `${slug}.md`))).toBe(false);
     const elsewhere = await refusal(run(f.sourceId, { expect: third.preview_hash! }));
     expect(elsewhere.code).toBe('preview_changed');
+  }), 240_000);
+
+  test('an apply parses the preview artifact once while it is unchanged, and reports each item to its progress reporter', () => fixture(async f => {
+    const slugs = await fileGone(f, 3);
+    const preview = await run(f.sourceId, {});
+    const hash = preview.preview_hash!;
+    const command = `gbrain repair file-drift --source ${f.sourceId}`;
+    const first = readArtifact(hash, command);
+    expect([...first.keys()]).toEqual(slugs);
+    expect(readArtifact(hash, command)).toBe(first);
+    const ticks: string[] = [];
+    const progress = { start: (phase: string, total?: number) => ticks.push(`start ${phase} ${total}`), tick: (_n?: number, note?: string) => ticks.push(`tick ${note}`),
+      heartbeat() {}, finish: () => ticks.push('finish'), child: () => progress } as unknown as ProgressReporter;
+    const applied = await run(f.sourceId, { expect: hash, progress });
+    expect(applied.outcomes).toEqual({ repaired: 3 });
+    expect(ticks).toEqual(['start repair.file-drift.apply 3', ...slugs.map(slug => `tick ${f.sourceId}:${slug}`), 'finish']);
+    for (const slug of slugs) expect(existsSync(join(f.root, `${slug}.md`))).toBe(true);
   }), 240_000);
 
   test('a window stops at 200 pages and the next one previews the rest', () => fixture(async f => {
