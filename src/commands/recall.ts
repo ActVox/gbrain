@@ -336,7 +336,7 @@ export async function runRecall(engine: BrainEngine, args: string[]): Promise<vo
   const flags = parseFlags(args);
   if (isOneShotRecall(flags)) {
     try {
-      renderRecallVerbResult(flags, await oneShotRecallResult(engine, flags));
+      await renderRecallVerbResult(flags, await oneShotRecallResult(engine, flags));
     } catch (error) {
       await reportOneShotRecallError(error, flags);
     }
@@ -359,7 +359,7 @@ export async function runRecall(engine: BrainEngine, args: string[]): Promise<vo
   // MEMORY_VERBS v1 [c4]: the verb params route through the recall OP so the
   // CLI and MCP exercise the same arm (query/budget packing/superset envelope).
   if (flags.query !== null || flags.budgetTokens !== null || flags.question !== null) {
-    renderRecallVerbResult(flags, await recallVerbResult(engine, flags, sourceId));
+    await renderRecallVerbResult(flags, await recallVerbResult(engine, flags, sourceId));
     return;
   }
 
@@ -496,7 +496,7 @@ async function recallVerbResult(engine: BrainEngine, flags: ParsedFlags, sourceI
     : await op.handler(ctx, params)) as RecallVerbResult;
 }
 
-export function renderRecallVerbResult(flags: ParsedFlags, result: RecallVerbResult): void {
+export async function renderRecallVerbResult(flags: ParsedFlags, result: RecallVerbResult): Promise<void> {
   // An older server ignores `question` (warn-mode params) and answers without facts_order.
   const unranked = flags.question !== null && result.facts_order !== 'relevance'
     ? 'note: this brain did not rank facts by the question (its server predates question ranking); facts are newest first.' : null;
@@ -570,7 +570,7 @@ async function keylessQuestionFallback(engine: BrainEngine, flags: ParsedFlags, 
   }
   process.stderr.write(`[recall] no entity or fact text matched '${question}'; ranked facts by relevance to it as a question (keyword-only: this brain has no embeddings).\n`);
   const questionFlags = { ...flags, entity: null, question };
-  renderRecallVerbResult(questionFlags, await recallVerbResult(engine, questionFlags, sourceId));
+  await renderRecallVerbResult(questionFlags, await recallVerbResult(engine, questionFlags, sourceId));
   return true;
 }
 
