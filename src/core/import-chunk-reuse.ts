@@ -13,8 +13,11 @@ import { quoteIdentifier } from './search/embedding-column.ts';
 import { chunkGenerationFilter } from './search/safe-chunks.ts';
 import { parseEmbedding } from './utils.ts';
 
-/** A stored row an import keeps: its id and the index it holds now (a kept row whose new chunk sits elsewhere moves there). */
-export interface KeptChunkRow { id: number; chunk_index: number }
+/**
+ * A stored row an import keeps: its id and the index it holds now (a kept row whose new chunk sits elsewhere moves
+ * there). `vector`: the row holds one, so moving it is a vector-index write (page-state/chunk-moves.ts).
+ */
+export interface KeptChunkRow { id: number; chunk_index: number; vector: boolean }
 
 /**
  * A13 reuse for one page import: copies each stored vector the reuse gate
@@ -70,7 +73,7 @@ export async function reuseStoredChunkVectors(
     if (row.model) into[i].model = row.model;
     // The stored row already holds exactly what this chunk would insert (identity, vector, recorded input and text
     // hash, no image or multimodal vector the insert would drop), so it can stay, moved to this chunk's index.
-    reused.set(i, recorded.get(row.chunk_index) != null && textOnly.has(row.chunk_index) && identity(row) === identity(into[i]) ? { id: row.id, chunk_index: row.chunk_index } : null);
+    reused.set(i, recorded.get(row.chunk_index) != null && textOnly.has(row.chunk_index) && identity(row) === identity(into[i]) ? { id: row.id, chunk_index: row.chunk_index, vector: true } : null);
   }
   // A stored row that never got a vector stays in place under a new chunk that
   // will not get one either (a --no-embed or deferred write): the same upsert
@@ -81,7 +84,7 @@ export async function reuseStoredChunkVectors(
     for (const row of all) {
       const i = byIndex.get(row.chunk_index);
       if (i === undefined || reused.has(i) || into[i]!.embedding || !unembedded.has(row.chunk_index)) continue;
-      if (identity(row) === identity(into[i]!)) reused.set(i, { id: row.id, chunk_index: row.chunk_index });
+      if (identity(row) === identity(into[i]!)) reused.set(i, { id: row.id, chunk_index: row.chunk_index, vector: false });
     }
   }
   return reused;

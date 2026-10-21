@@ -17,7 +17,7 @@ import { getEmbeddingModel } from '../ai/gateway.ts';
 import { jsonRowBatches } from '../batch-rows.ts';
 import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
 import { belowSafeChunkFence, chunkGenerationFilter, movableChunkSql } from '../search/safe-chunks.ts';
-import { applyMoveWaves, CHUNK_ROW_WRITE_BUDGET, planMoveWaves, type ChunkMove } from './chunk-moves.ts';
+import { applyMoveWaves, CHUNK_VECTOR_WRITE_BUDGET, planMoveWaves, type ChunkMove } from './chunk-moves.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { pageReadFilter } from '../search/read-policy-sql.ts';
@@ -226,7 +226,7 @@ async function planProjectionKeep(tx: BrainEngine, current: PageSnapshot, contex
   return { kept, moves, current: kept.filter(currentInput).map(chunk => Number(chunk.id)), provenanceModel: context.provenanceModel, column: context.column };
 }
 
-/** #7172: a deferred chunk replacement's remaining row writes, planned once from what is stored and spent in steps. */
+/** #7172: a deferred chunk replacement's remaining writes, planned once from what is stored and spent in steps. */
 interface DeferredReplacement {
   current: PageSnapshot; pageId: number; column: ResolvedColumn; moves: ChunkMove[]; at: Map<number, number>; stale: number[]; inserts: ChunkInput[];
   /** `chunkRowsFingerprint` after the plan's last committed step: a step that finds another one plans again. */
@@ -264,16 +264,16 @@ async function planDeferredReplacement(tx: BrainEngine, sourceId: string, slug: 
 /**
  * #7172: one bounded step of a chunk replacement a publication deferred (the page committed with its text projection
  * pending, its search hiding the page's passages until the seal). Under the page guard, at the page's current
- * revision, a step makes at most `budget` row writes, in this order: kept rows change index (`planMoveWaves`), kept
- * rows whose input is no longer current lose their vector, and the missing chunks are inserted without vectors; the
- * step that finds nothing left seals the projection. The plan (`state`) is made once from what is stored and carried
- * between steps only after a step commits; a step whose page revision or chunk rows differ from what the plan's last
- * step left plans again, so a crash, a concurrent step or a newer write resumes from the stored rows. Each step renews
- * the job's `updated_at`, the lease that keeps the resident's drain off a replacement being continued. 'skipped' when
- * the page is not an unsealed inline Markdown page.
+ * revision, a step moves kept rows (each holds a vector) to their new indexes with at most `budget` vector-index
+ * writes (`planMoveWaves`); the step that finishes the moves clears the vectors whose input is no longer current,
+ * inserts the missing chunks without vectors (neither adds a vector-index entry) and seals the projection. The plan
+ * (`state`) is made once from what is stored and carried between steps only after a step commits; a step whose page
+ * revision or chunk rows differ from what the plan's last step left plans again, so a crash, a concurrent step or a
+ * newer write resumes from the stored rows. Each step renews the job's `updated_at`, the lease that keeps the
+ * resident's drain off a replacement being continued. 'skipped' when the page is not an unsealed inline Markdown page.
  */
 export async function continueDeferredProjectionStep(engine: BrainEngine, sourceId: string, slug: string,
-  state: { plan?: DeferredReplacement; token?: string } = {}, budget = CHUNK_ROW_WRITE_BUDGET): Promise<'sealed' | 'more' | 'skipped' | 'held'> {
+  state: { plan?: DeferredReplacement; token?: string } = {}, budget = CHUNK_VECTOR_WRITE_BUDGET): Promise<'sealed' | 'more' | 'skipped' | 'held'> {
   const claim = `${DEFERRED_CHUNK_CLAIM}:${state.token ??= randomUUID()}`;
   const [step, next] = await engine.transaction(async (tx): Promise<['sealed' | 'more' | 'skipped' | 'held', DeferredReplacement?]> => {
     await tx.lockPageKeys([{ sourceId, slug }]);
@@ -291,21 +291,16 @@ export async function continueDeferredProjectionStep(engine: BrainEngine, source
     const { current, pageId } = base;
     const waves = planMoveWaves(base.moves, base.at, budget);
     await applyMoveWaves(tx, pageId, waves.waves);
-    let left = budget - waves.updates;
-    const nulled = waves.done ? base.stale.slice(0, left) : [];
-    if (nulled.length) {
-      await tx.executeRaw(`UPDATE content_chunks SET ${quoteIdentifier(base.column.name)}=NULL,embedded_at=NULL,embedded_text_hash=NULL,embedding_input_hash=NULL,
-        embedding_pending_since=COALESCE(embedding_pending_since,now()) WHERE page_id=$1 AND id=ANY($2::int[])`, [pageId, nulled]);
-    }
-    left -= nulled.length;
-    const stale = base.stale.slice(nulled.length);
-    const inserts = waves.done && !stale.length ? base.inserts.slice(0, left) : [];
-    if (inserts.length) await tx.upsertChunks(slug, inserts, { sourceId, embeddingColumn: base.column, sealChunkerVersion: MARKDOWN_CHUNKER_VERSION, pageId, deferSeal: true });
     const job = [current.sourceIncarnation, slug, current.revision];
-    if (!waves.done || stale.length || inserts.length < base.inserts.length) {
+    if (!waves.done) {
       await tx.executeRaw('UPDATE page_projection_jobs SET reason=$4,updated_at=now() WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid', [...job, claim]);
-      return ['more', { ...base, moves: waves.pending, at: waves.at, stale, inserts: base.inserts.slice(inserts.length), fingerprint: await chunkRowsFingerprint(tx, pageId) }];
+      return ['more', { ...base, moves: waves.pending, at: waves.at, fingerprint: await chunkRowsFingerprint(tx, pageId) }];
     }
+    if (base.stale.length) {
+      await tx.executeRaw(`UPDATE content_chunks SET ${quoteIdentifier(base.column.name)}=NULL,embedded_at=NULL,embedded_text_hash=NULL,embedding_input_hash=NULL,
+        embedding_pending_since=COALESCE(embedding_pending_since,now()) WHERE page_id=$1 AND id=ANY($2::int[])`, [pageId, base.stale]);
+    }
+    if (base.inserts.length) await tx.upsertChunks(slug, base.inserts, { sourceId, embeddingColumn: base.column, sealChunkerVersion: MARKDOWN_CHUNKER_VERSION, pageId, deferSeal: true });
     await sealImportedPage(tx, slug, sourceId, current, MARKDOWN_CHUNKER_VERSION, pageId);
     await tx.executeRaw('DELETE FROM page_projection_jobs WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid', job);
     return ['sealed'];

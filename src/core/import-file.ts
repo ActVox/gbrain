@@ -762,8 +762,8 @@ export async function importFromContent(
     const kept = new Map([...(fresh !== chunks ? await reuseStoredVectors(tx, fresh, true) : [])]
       .filter((entry): entry is [number, KeptChunkRow] => entry[1] !== null));
     const keptIds = [...kept.values()].map(row => row.id);
-    // #7172: a kept row whose chunk moved changes index in place; a managed publication over CHUNK_ROW_WRITE_BUDGET row
-    // writes deletes the rows it does not keep, commits the page pending and finishes after commit (chunk-moves.ts).
+    // #7172: a kept row whose chunk moved changes index in place; a managed publication over CHUNK_VECTOR_WRITE_BUDGET
+    // vector-index writes deletes the rows it does not keep, commits the page pending and finishes after commit (chunk-moves.ts).
     const chunkWrites = planImportChunkWrites(fresh, kept, !segmented && !!opts.prepare && opts.boundedChunkWrites === true);
     const deferChunks = chunkReplacementDeferred = chunkWrites.defer;
     let written: Page | undefined;

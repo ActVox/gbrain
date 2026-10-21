@@ -7,8 +7,8 @@
  *    changed (effects.ts readEmbeddingEffectProjection accepts a vector whose recorded input is current and restamps
  *    the page); an entry at the top of a descending timeline keeps every passage whose text is unchanged under its
  *    old id, renumbered (import-file.ts, page-state/chunk-moves.ts), and the page ends with the passages a fresh
- *    import of the same body gives; a publication whose replacement needs more than CHUNK_ROW_WRITE_BUDGET row
- *    writes commits with its projection pending and finishes in bounded post-commit steps
+ *    import of the same body gives; a publication whose replacement needs more than CHUNK_VECTOR_WRITE_BUDGET
+ *    vector-index writes commits with its projection pending and finishes in bounded post-commit steps
  *    (page-state/projections.ts continueDeferredProjection), resuming after an interrupted step.
  * 2. Fails when: a stale page signature re-embeds every passage; a passage whose index moves is deleted and
  *    re-inserted; a top insert publishes every moved passage inside the publication's 5 s statement bound (the
@@ -23,7 +23,7 @@ import { testBackends } from './helpers/test-backends.ts';
 import { runEmbedCore } from '../src/commands/embed.ts';
 import { currentEmbeddingSignature } from '../src/core/embedding.ts';
 import { rebuildPendingPageProjections } from '../src/core/page-state/projections.ts';
-import { CHUNK_ROW_WRITE_BUDGET } from '../src/core/page-state/chunk-moves.ts';
+import { CHUNK_VECTOR_WRITE_BUDGET } from '../src/core/page-state/chunk-moves.ts';
 
 const WORDS = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu'.split(' ');
 function prose(seed: number, words: number): string {
@@ -137,7 +137,7 @@ for (const kind of testBackends()) {
       console.log(`[${kind}] top insert: ${before.length} -> ${after.length} passages, ${unchanged.length} unchanged, ${kept.length} kept, ${brain.embedded.length} embedded`);
       // Every passage whose text is unchanged keeps its row (id, vector, embedding time); only the others are new.
       expect(kept.map(key).sort()).toEqual(unchanged.map(key).sort());
-      expect(kept.filter(row => row.chunk_index !== old.get(row.id)!.chunk_index).length).toBeGreaterThan(CHUNK_ROW_WRITE_BUDGET);
+      expect(kept.filter(row => row.chunk_index !== old.get(row.id)!.chunk_index).length).toBeGreaterThan(CHUNK_VECTOR_WRITE_BUDGET);
       for (const row of kept) expect(row.embedded_at).toBe(old.get(row.id)!.embedded_at);
       expect(brain.embedded.length).toBe(after.length - kept.length);
       expect(after.every(row => row.vector)).toBe(true);
@@ -148,13 +148,13 @@ for (const kind of testBackends()) {
     test('an interrupted continuation leaves the entry committed and the drain finishes it', async () => {
       const slug = 'notes/example-interrupted';
       await publish(slug, page(12, 380, 'descending'));
-      // Every chunk_index move past the first CHUNK_ROW_WRITE_BUDGET fails, as a crash after the first step would.
+      // Every chunk_index move past the first CHUNK_VECTOR_WRITE_BUDGET fails, as a crash after the first step would.
       await brain.engine.executeRaw(`CREATE TABLE IF NOT EXISTS probe_7172_moves (n int)`);
       await brain.engine.executeRaw(`CREATE OR REPLACE FUNCTION probe_7172_interrupt() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
           IF NEW.chunk_index IS DISTINCT FROM OLD.chunk_index THEN
             INSERT INTO probe_7172_moves VALUES (1);
-            IF (SELECT count(*) FROM probe_7172_moves) > ${CHUNK_ROW_WRITE_BUDGET} THEN RAISE EXCEPTION 'probe_7172 interrupted'; END IF;
+            IF (SELECT count(*) FROM probe_7172_moves) > ${CHUNK_VECTOR_WRITE_BUDGET} THEN RAISE EXCEPTION 'probe_7172 interrupted'; END IF;
           END IF;
           RETURN NEW;
         END $$`);
@@ -184,16 +184,17 @@ for (const kind of testBackends()) {
     }, 600_000);
 
     if (kind === 'postgres') {
-      test('probe: with each indexed row write charged 0.6 s, a top insert commits and no transaction makes more than the budget', async () => {
+      test('probe: with each vector-index write charged 0.6 s, a top insert commits and no transaction makes more than the budget', async () => {
         const slug = 'notes/example-slow-index';
         await publish(slug, page(12, 380, 'descending'));
-        // Each new row version that adds index entries (an insert; an update of chunk_index, the text or the vector, none
-        // of them HOT) costs 0.6 s, as on a large uncached index, and is counted per transaction.
+        // Each new row version that adds an HNSW entry (one carrying a vector: an insert, or an update of chunk_index, the
+        // text or the vector, none of them HOT) costs 0.6 s, as on a large uncached index, and is counted per transaction.
+        // A version with a NULL vector adds no HNSW entry and is not charged (chunk-moves.ts measures both).
         await brain.engine.executeRaw('CREATE TABLE probe_7172_writes (tx bigint)');
         await brain.engine.executeRaw(`CREATE OR REPLACE FUNCTION probe_7172_slow() RETURNS trigger LANGUAGE plpgsql AS $$
           BEGIN
-            IF TG_OP = 'INSERT' OR NEW.chunk_index IS DISTINCT FROM OLD.chunk_index OR NEW.chunk_text IS DISTINCT FROM OLD.chunk_text
-              OR NEW.embedding IS DISTINCT FROM OLD.embedding THEN
+            IF NEW.embedding IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.chunk_index IS DISTINCT FROM OLD.chunk_index
+              OR NEW.chunk_text IS DISTINCT FROM OLD.chunk_text OR NEW.embedding IS DISTINCT FROM OLD.embedding) THEN
               INSERT INTO probe_7172_writes VALUES (txid_current());
               PERFORM pg_sleep(0.6);
             END IF;
@@ -222,11 +223,11 @@ for (const kind of testBackends()) {
           await brain.engine.executeRaw('DROP FUNCTION IF EXISTS probe_7172_slow()');
           await brain.engine.executeRaw('DROP TABLE IF EXISTS probe_7172_writes');
         }
-        console.log(`[probe] state ${receipt.write_request?.state ?? receipt.state}, interruptions ${interruptions}, row writes per transaction ${JSON.stringify(writes.map(w => w.n))}`);
+        console.log(`[probe] state ${receipt.write_request?.state ?? receipt.state}, interruptions ${interruptions}, vector-index writes per transaction ${JSON.stringify(writes.map(w => w.n))}`);
         if ((receipt.write_request?.state ?? receipt.state) !== 'committed') console.log(JSON.stringify(receipt).slice(0, 1200));
         expect(receipt.write_request?.state ?? receipt.state).toBe('committed');
         expect(Number(interruptions)).toBe(0);
-        expect(Number(writes[0]?.n ?? 0)).toBeLessThanOrEqual(CHUNK_ROW_WRITE_BUDGET);
+        expect(Number(writes[0]?.n ?? 0)).toBeLessThanOrEqual(CHUNK_VECTOR_WRITE_BUDGET);
         await settle();
         expect((await pageState(slug)).sealed).toBe(true);
         expect(passages(await rows(slug))).toEqual(await freshPassages(slug));
