@@ -1799,7 +1799,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'shared_skills.inventory.max_files', 'shared_skills.inventory.max_total_bytes', 'shared_skills.inventory.max_file_bytes', 'shared_skills.inventory.max_entries', 'shared_skills.migration.enabled', // #6466: false declines the 0.53.0 migration (commands/migrations/opt-out.ts)
   'persistence.write_wait_ms', // #5232: file plane, persistence/write-wait.ts
   'migrate.graduation', // file plane, src/commands/migrate-graduation.ts (engine graduation opt-out)
-  'doctor.default_budget_ms', 'doctor.entry_budget_ms', 'doctor.orphan_ratio.full_scan_max_pages', // #6803: file plane (commands/doctor/default-budget.ts); DB plane (doctor/budget.ts, checks/orphan-estimate.ts)
+  'doctor.default_budget_ms', 'doctor.entry_budget_ms', 'doctor.orphan_ratio.full_scan_max_pages', 'doctor.background_refresh', // #6803: file plane (commands/doctor/default-budget.ts); DB plane (doctor/budget.ts, checks/orphan-estimate.ts)
   'consent.preapprove.paid.max_usd_per_run', 'consent.preapprove.persistent_install', // A4: file plane, core/consent.ts
   // F4b: PGLite row-delta ANALYZE (src/core/planner-stats.ts); F4a: get_health memo TTL (src/core/health-memo.ts, 0 disables).
   'planner.auto_analyze', 'planner.first_read_budget_ms', 'import.analyze_every_pages', 'health.cache_ttl_ms',

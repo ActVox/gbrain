@@ -10,12 +10,14 @@
  * `excludeNames` to `MinionQueue.claim` once that budget is used.
  *
  * DEFAULT_LONG_JOB_NAMES holds only single-flight, brain-wide passes with a
- * 30-minute budget in handler-timeouts.ts:
+ * 30-minute budget in handler-timeouts.ts, plus doctor-refresh:
  *   - autopilot-cycle, autopilot-global-maintenance: the per-source and
  *     brain-wide maintenance passes that motivated the issue.
  *   - embed-backfill: a brain-wide embedding backfill.
  *   - connector-sync: a full account sync for a chat connector.
  *   - extract: a brain-wide `extract --stale` sweep or remediation pass.
+ *   - doctor-refresh: the background measure of every standard doctor check
+ *     (#7263; its own overall budget in commands/doctor/last-known.ts).
  * Per-page jobs (facts-absorb, chronicle_extract, contextual_reindex_per_chunk)
  * are deliberately absent: they arrive in large fan-outs, so limiting them to
  * one slot would cut their throughput. subagent jobs are absent too: callers
@@ -30,6 +32,7 @@ export const DEFAULT_LONG_JOB_NAMES: readonly string[] = [
   'embed-backfill',
   'connector-sync',
   'extract',
+  'doctor-refresh',
 ];
 
 export const DEFAULT_SHORT_JOB_RESERVED_SLOTS = 1;

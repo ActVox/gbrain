@@ -109,10 +109,12 @@ describe('resolveLanePolicy', () => {
 });
 
 describe('defaults', () => {
-  test('every built-in long job has a 30-minute-or-longer handler budget', () => {
+  test('every built-in long job has a 30-minute-or-longer handler budget, except doctor-refresh with its own overall budget', () => {
     for (const name of DEFAULT_LONG_JOB_NAMES) {
+      if (name === 'doctor-refresh') continue;
       expect(HANDLER_DEFAULT_TIMEOUT_MS[name]).toBeGreaterThanOrEqual(30 * 60 * 1000);
     }
+    expect(DEFAULT_LONG_JOB_NAMES).toContain('doctor-refresh');
     expect(DEFAULT_LONG_JOB_NAMES).toContain('autopilot-cycle');
     expect(DEFAULT_LONG_JOB_NAMES).toContain('autopilot-global-maintenance');
     expect(DEFAULT_LONG_JOB_NAMES).not.toContain('facts-absorb');
