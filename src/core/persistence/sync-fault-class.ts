@@ -171,6 +171,9 @@ export const SYNC_FAULT_TABLE: ReadonlyArray<SyncFaultRule> = [
   { code: 'owner_unavailable', class: 'systemic', safe_actions: ['none'], needs_human: true, escalate: 'always', human_reason: 'The write owner is gone; start or restart it on the brain host.' },
   { code: 'writer_coordinator_required', class: 'systemic', safe_actions: ['none'], needs_human: true, escalate: 'always', human_reason: 'Managed persistence is not active for this source; activate it or sync unmanaged.' },
   { code: 'permission_denied', class: 'systemic', safe_actions: ['none'], needs_human: true, escalate: 'always', human_reason: 'This principal may not sync the source; the owner grants it.' },
+  // #7183: the server connection defaults to read-only transactions (pooler session state another client left, or a read-only server).
+  { code: 'connection_inherited_read_only', class: 'systemic', safe_actions: ['none'], needs_human: true, escalate: 'always: only the database operator clears read-only server state',
+    human_reason: 'The database refused writes as read-only: a pooled server connection inherited default_transaction_read_only from another client, or the role, database or server is read-only. The database operator resets the pooler\'s server connections and finds the client issuing session-level SET; then sync again.' },
   // #6696 (A6/A7): a cumulative cap is full, or too small for the run; only the brain host's reversible config raise clears it.
   { code: 'write_quota_exhausted', class: 'systemic', safe_actions: ['none'], needs_human: true, escalate: 'always',
     human_reason: 'A cumulative write cap is full; the brain host runs the gbrain config set the error prints (gbrain doctor --only persistence_capacity --json names the value), then the same sync resumes.' },

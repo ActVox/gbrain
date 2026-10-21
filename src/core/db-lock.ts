@@ -24,6 +24,7 @@
 import { hostname } from 'os';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
+import { retryReadOnlyAutocommit } from './postgres-engine/read-write-transactions.ts';
 
 export interface DbLockHandle {
   id: string;
@@ -250,7 +251,7 @@ export async function tryAcquireDbLock(
     // `gbrain sync --break-lock --max-age <s>` uses last_refreshed_at (not
     // acquired_at) to identify wedged-but-alive holders without stealing
     // healthy long-running holders that are actively refreshing.
-    const rows: Array<{ id: string; fence: string }> = await sql`
+    const rows: Array<{ id: string; fence: string }> = await retryReadOnlyAutocommit(sql, (sql: any) => sql`
       INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at, last_refreshed_at, acquisition_token)
       VALUES (${lockId}, ${pid}, ${host}, NOW(), NOW() + ${ttl}::interval, NOW(), ${acquisitionToken}::uuid)
       ON CONFLICT (id) DO UPDATE
@@ -264,17 +265,17 @@ export async function tryAcquireDbLock(
           AND (gbrain_cycle_locks.last_refreshed_at IS NULL
                OR gbrain_cycle_locks.last_refreshed_at < NOW() - ${stealGraceSeconds} * INTERVAL '1 second')
       RETURNING id, extract(epoch from acquired_at)::text AS fence
-    `;
+    `);
     if (rows.length === 0) return null;
     // The UUID is the fence; the epoch text rides on the handle for
     // diagnostics (migration-orchestration-lock.ts reports it when a lease
     // is lost) and is never compared (#6028).
     const fence = rows[0].fence;
     const deregister = registerCleanup(`db-lock:${lockId}`, async () => {
-      await (maybePG.sql as any)`
+      await retryReadOnlyAutocommit(maybePG.sql as any, (sql: any) => sql`
         DELETE FROM gbrain_cycle_locks
         WHERE id = ${lockId} AND holder_pid = ${pid} AND acquisition_token = ${acquisitionToken}::uuid
-      `;
+      `);
     });
     return {
       id: lockId,
@@ -298,10 +299,10 @@ export async function tryAcquireDbLock(
       },
       release: async () => {
         deregister();
-        await (maybePG.sql as any)`
+        await retryReadOnlyAutocommit(maybePG.sql as any, (sql: any) => sql`
           DELETE FROM gbrain_cycle_locks
           WHERE id = ${lockId} AND holder_pid = ${pid} AND acquisition_token = ${acquisitionToken}::uuid
-        `;
+        `);
       },
     };
   }
@@ -660,11 +661,11 @@ export async function deleteLockRow(
 
   if (engine.kind === 'postgres' && maybePG.sql) {
     const sql = maybePG.sql as any;
-    const rows: Array<{ id: string }> = await sql`
+    const rows: Array<{ id: string }> = await retryReadOnlyAutocommit(sql, (sql: any) => sql`
       DELETE FROM gbrain_cycle_locks
        WHERE id = ${lockId} AND holder_pid = ${holderPid} AND acquisition_token = ${acquisitionToken}::uuid
       RETURNING id
-    `;
+    `);
     return { deleted: rows.length > 0 };
   }
   if (engine.kind === 'pglite' && maybePGLite.db) {
@@ -731,7 +732,7 @@ export async function deleteLockRowIfStale(
 
   if (engine.kind === 'postgres' && maybePG.sql) {
     const sql = maybePG.sql as any;
-    const rows: Array<{ id: string; last_refreshed_at: Date | string | null }> = await sql`
+    const rows: Array<{ id: string; last_refreshed_at: Date | string | null }> = await retryReadOnlyAutocommit(sql, (sql: any) => sql`
       DELETE FROM gbrain_cycle_locks
        WHERE id = ${lockId}
          AND holder_pid = ${holderPid}
@@ -739,7 +740,7 @@ export async function deleteLockRowIfStale(
          AND last_refreshed_at IS NOT NULL
          AND last_refreshed_at < NOW() - ${maxAgeSeconds} * INTERVAL '1 second'
       RETURNING id, last_refreshed_at
-    `;
+    `);
     if (rows.length === 0) return { deleted: false, lastRefreshedAt: null };
     const lr = rows[0].last_refreshed_at;
     const lastRefreshed = lr == null ? null : (lr instanceof Date ? lr : new Date(lr));

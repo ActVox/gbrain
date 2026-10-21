@@ -729,6 +729,16 @@ More: [docs/guides/write-refusals.md#concurrent_write](../../docs/guides/write-r
 |---|---|---|---|---|---|---|
 | --source and --all-sources were both given. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### connection_inherited_read_only
+
+<a id="connection_inherited_read_only"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The database refused a write as read-only (SQLSTATE 25006): the server connection defaults to read-only transactions, so nothing was written. | default_transaction_read_only is on for that server connection: session state another client set on a connection a transaction-mode pooler shares, a role or database default, or a read-only server. gbrain opens its transactions READ WRITE and runs a refused autocommit statement once more inside one, so a session default alone no longer stops it; a read-only server (a hot standby) still refuses. | Ask the database operator to reset the pooler's server connections (PgBouncer: RECONNECT, or server_reset_query = DISCARD ALL with server_reset_query_always = 1), find the client that issues session-level SET through the pooler (read-only audits belong in BEGIN READ ONLY ... COMMIT), and check ALTER ROLE / ALTER DATABASE ... SET default_transaction_read_only; then retry. Run: gbrain doctor --json | host_admin | `gbrain doctor --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#inherited-read-only-connections](../../docs/guides/troubleshooting.md#inherited-read-only-connections)
+
 ### connection_lost
 
 <a id="connection_lost"></a>

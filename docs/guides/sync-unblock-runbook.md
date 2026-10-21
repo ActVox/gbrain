@@ -180,6 +180,7 @@ Every hold and error has three fields, from one table
 | `owner_unavailable` | systemic | none | yes | always |
 | `writer_coordinator_required` | systemic | none | yes | always |
 | `permission_denied` | systemic | none | yes | always |
+| `connection_inherited_read_only` | systemic | none | yes | always: only the database operator clears read-only server state |
 | `write_quota_exhausted` | systemic | none | yes | always |
 | `write_quota_insufficient` | systemic | none | yes | always |
 | `plan_stale` | systemic | none | yes | always |
