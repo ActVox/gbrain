@@ -1,5 +1,5 @@
 /**
- * #7190: the answer a write receipt gives to "is this write searchable yet?": the written page's state and
+ * #7190: the answer `get_write_request` gives to "is this write searchable yet?": the written page's state and
  * `searchable` (the resolve-path vocabulary), the gap when it is not, and the source's write watermark.
  *
  *   - pending_write: the request has not settled; `gap.requests_ahead` counts the source's unsettled requests queued before it.
@@ -7,11 +7,10 @@
  *   - deleted: it committed and the page is gone (a delete).
  *   - otherwise the page's state from `page-searchability.ts`; `gap.unembedded_chunks` counts chunks still waiting for a
  *     vector and `embedding_hold` names a budget hold that waits for approval.
- * `searchable_yet` is true only when search finds the page by keyword and vector.
+ * `searchable_yet` is true only when search finds the page by keyword and vector. It is read live on every receipt read, never
+ * frozen into the write's reply: a same-request-id replay of a write returns its first reply unchanged.
  */
 import type { BrainEngine } from '../engine.ts';
-import { OperationError } from '../ops/contract.ts';
-import { isTerminalWriteState } from './types.ts';
 import { readPageSearchability, type PageSearchState } from '../page-searchability.ts';
 import { readWriteWatermark, type WriteWatermark } from './applied-watermark.ts';
 
@@ -45,23 +44,3 @@ export async function readWriteApplied(engine: BrainEngine, row: { source_id: st
     gap: { requests_ahead: 0, unembedded_chunks: page.unembedded } };
 }
 
-/**
- * The reply `reply()` builds for `row`, with `applied` in it and in its `write_request`; a pending write's error receipt
- * carries it too. A failed watermark read leaves it out and never fails the write's reply.
- */
-export async function withWriteApplied(engine: BrainEngine, row: Parameters<typeof readWriteApplied>[1],
-  reply: () => Record<string, unknown> | Promise<Record<string, unknown>>): Promise<Record<string, unknown>> {
-  const read = () => readWriteApplied(engine, row).catch(() => null);
-  let response: Record<string, unknown>;
-  try { response = await reply(); } catch (error) {
-    if (error instanceof OperationError && error.writeRequest && !isTerminalWriteState(error.writeRequest.state)) {
-      const pending = await read();
-      if (pending) error.writeRequest = { ...error.writeRequest, applied: pending };
-    }
-    throw error;
-  }
-  const applied = await read();
-  if (!applied) return response;
-  const receipt = response.write_request as Record<string, unknown> | undefined;
-  return { ...response, applied, ...(receipt ? { write_request: { ...receipt, applied } } : {}) };
-}

@@ -67,7 +67,7 @@ keeps syncing reads `synced` with reason `held_needs_human`; `needs_human` and `
 
 ## Is my write searchable yet?
 
-Every page write receipt (`put_page`, `capture`, `remember`, `edit_page` and the other page writes, and `get_write_request`) carries `applied`, read when the reply is built:
+`gbrain write-request <request_id> --json` (MCP `get_write_request`) carries `applied`, read live each time. The write's own reply stays frozen, so a same-request-id replay returns it unchanged; read the receipt for the live answer:
 
 | Field | Meaning |
 |---|---|
@@ -79,7 +79,7 @@ Every page write receipt (`put_page`, `capture`, `remember`, `edit_page` and the
 | `sequence` | the request's journal sequence; the write has settled once it is at or below `watermark.committed_through_request` |
 | `watermark` | `indexed_through`, `committed_through_request` and `requests_pending` of the source (indexed reads only) |
 
-A receipt whose watermark read fails leaves `applied` out; the write itself is unaffected.
+A receipt read whose watermark read fails leaves `applied` out.
 
 ## The source watermark
 

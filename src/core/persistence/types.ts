@@ -56,8 +56,6 @@ export interface WriteReceipt {
   created_at?: string;
   updated_at?: string;
   diagnostic?: WriteDiagnostic;
-  /** #7190: whether the write is searchable yet, the gap and the source's write watermark (write-applied.ts). */
-  applied?: import('./write-applied.ts').WriteApplied;
 }
 
 /** Wire names stay separate from the engine's camelCase precondition. */
@@ -151,7 +149,6 @@ export function publicWriteReceipt(receipt: WriteReceipt): WriteReceipt {
     } } : {}),
     ...(receipt.created_at !== undefined ? { created_at: receipt.created_at } : {}),
     ...(receipt.updated_at !== undefined ? { updated_at: receipt.updated_at } : {}),
-    ...(receipt.applied !== undefined ? { applied: receipt.applied } : {}),
     ...(!isTerminalWriteState(receipt.state) && isWriteDiagnostic(receipt.diagnostic) ? { diagnostic: {
       age_ms: receipt.diagnostic.age_ms, assessment: receipt.diagnostic.assessment,
       reason: receipt.diagnostic.reason, next_action: receipt.diagnostic.next_action,

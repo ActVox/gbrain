@@ -19,7 +19,7 @@
  *     save or a pass-row write); `stalled` after HOLDER_STALL_MS without progress. A remote caller sees the holder's
  *     kind and times, never its host, pid or job id.
  *
- * `readWriteWatermark` is the cheap subset a write receipt carries (indexed reads only, no git, no lease read).
+ * `readWriteWatermark` is the cheap subset `get_write_request` carries (indexed reads only, no git, no lease read).
  * Read-only; nothing is scheduled or written.
  */
 import type { BrainEngine } from '../engine.ts';
@@ -83,7 +83,7 @@ export const readGitFilesBehind: FilesBehindReader = async (root, from) => {
   return diff.error ? null : diff.stdout.split('\0').filter(Boolean).length;
 };
 
-/** The cheap watermark every write receipt carries: the source row, and two reads on the request journal's indexes. */
+/** The cheap watermark `get_write_request` carries: the source row, and two reads on the request journal's indexes. */
 export async function readWriteWatermark(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, now = Date.now()): Promise<WriteWatermark> {
   const [row] = await engine.executeRaw<{ last_commit: string | null; last_sync_at: unknown; pending_min: number | string | null;
     pending_count: number | string; pending_since: unknown }>(`SELECT s.last_commit, s.last_sync_at, p.pending_min, p.pending_count, p.pending_since

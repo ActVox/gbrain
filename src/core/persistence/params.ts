@@ -122,6 +122,5 @@ export const WRITE_RECEIPT_SCHEMA = {
         next_action: { type: 'string', enum: [...WRITE_HEALTH_ACTIONS] },
       },
     },
-    applied: { type: 'object', description: 'Whether the write is searchable yet (searchable_yet, searchable, state), the gap and the source write watermark.' },
   },
 };

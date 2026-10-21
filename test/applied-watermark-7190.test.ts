@@ -3,7 +3,7 @@
  * result. Red on master (no watermark, no receipt `applied`):
  * - indexed_through moves only when a pass finishes: a sliced pass that stops after one page leaves it where it was;
  * - pending counts the commits and files on HEAD that have not synced yet;
- * - a put_page receipt answers whether the write is searchable yet, with the gap, and get_write_request repeats it;
+ * - get_write_request answers whether a write is searchable yet, with the gap, while the write's own reply stays frozen;
  * - committed_through_request never passes an unsettled request.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
@@ -79,22 +79,21 @@ test('indexed_through is the last finished pass, and pending counts what HEAD ha
   expect(done.pending.files_behind).toBe(0);
 }), 240_000);
 
-test('a put_page receipt says whether the write is searchable yet, and get_write_request repeats it', () => withEnv({ GBRAIN_HOME: home }, async () => {
+test('get_write_request says whether a put_page is searchable yet; the write reply stays frozen for replays', () => withEnv({ GBRAIN_HOME: home }, async () => {
   const { id } = await syncedSource();
   const ctx = { engine, config: { engine: engine.kind } as never, remote: false, sourceId: id } as never;
   const reply = await submitPageMutation(ctx, { operation: 'put_page', params: { slug: 'erin-example', source_id: id, content: note('Erin wrote this.') } });
-  const applied = reply.applied as Awaited<ReturnType<typeof readWriteApplied>>;
+  expect(reply.applied).toBeUndefined();
+  const { operationsByName } = await import('../src/core/operations.ts');
+  const read = await operationsByName.get_write_request!.handler(ctx, { request_id: reply.request_id }) as { applied?: Awaited<ReturnType<typeof readWriteApplied>> };
+  const applied = read.applied!;
   expect(applied).toBeDefined();
-  expect((reply.write_request as { applied?: unknown }).applied).toEqual(applied);
   expect(applied.state).not.toBe('pending_write');
   expect(applied.page!.slug).toBe('erin-example');
   expect(applied.searchable_yet).toBe(applied.searchable === true && !applied.embedding_hold);
   expect(applied.gap.unembedded_chunks).toBe(applied.page!.unembedded);
   expect(applied.watermark.committed_through_request).toBeGreaterThanOrEqual(applied.sequence);
 
-  const { operationsByName } = await import('../src/core/operations.ts');
-  const read = await operationsByName.get_write_request!.handler(ctx, { request_id: reply.request_id }) as { applied?: { sequence: number; state: string } };
-  expect(read.applied).toMatchObject({ sequence: applied.sequence, state: applied.state });
 }), 240_000);
 
 test('committed_through_request stops below an unsettled request, which counts the requests queued before it', () => withEnv({ GBRAIN_HOME: home }, async () => {
