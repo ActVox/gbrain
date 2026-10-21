@@ -154,7 +154,7 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
   try {
     const outcome = await maintenanceTransaction(engine, async tx => {
       await lockGeneration(tx, adapter as GenerationAdapter<unknown>, key, itemKeys);
-      const [replay] = await tx.executeRaw<{ generation: number }>(`SELECT generation FROM derived_generations WHERE operation_id=$1 AND state <> 'held'`, [operationId]);
+      const [replay] = await tx.executeRaw<{ generation: number }>(`SELECT generation FROM derived_generations WHERE operation_id=$1 AND state = 'live'`, [operationId]);
       if (replay) return { state: 'unchanged', generation: Number(replay.generation), retired: [], protected: [] } satisfies PublishOutcome;
       const live = await readLiveGeneration(tx, key);
       if (request.expectedGeneration !== undefined && (live?.generation ?? 0) !== request.expectedGeneration) {
@@ -169,7 +169,10 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
       const plan = planGeneration({ live, rows, proposal: request.items, input, config, modelProduced: adapter.modelProduced, additive: request.partial === true,
         proofHolds: request.proof ? proofHolds(request.proof, input, live?.inputPin) : false, evidence, valve, release: request.release?.reason });
       if (plan.kind === 'held') return recordHeld(tx, key, config, request, setHash, plan.reason, plan.context);
-      if (plan.kind === 'unchanged') return { state: 'unchanged', generation: live?.generation ?? null, retired: [], protected: plan.protectedKeys } satisfies PublishOutcome;
+      if (plan.kind === 'unchanged') {
+        if (!request.partial) await adapter.completeItems?.(tx, key, itemKeys, request.context);
+        return { state: 'unchanged', generation: live?.generation ?? null, retired: [], protected: plan.protectedKeys } satisfies PublishOutcome;
+      }
       const preimage = (itemKey: string) => rows.get(itemKey)?.preimage();
       if (plan.puts.length) await adapter.publishItems(tx, key, plan.puts, request.context);
       await faultPoint('generation:published', { sourceId: key.sourceId, operation: key.kind });

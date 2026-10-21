@@ -33,6 +33,15 @@ export function atomOwnerKey(origin: { kind: 'page'; slug: string } | { kind: 't
   return origin.kind === 'page' ? `source_slug:${origin.slug}` : `source_path:${origin.filePath}`;
 }
 
+/**
+ * A page origin's input pin: its content hash bound to the page row and its knowledge revision, so an extraction of a
+ * page deleted and recreated (or edited back to the same text) during the provider call cannot complete (#4148). The
+ * first 16 characters stay the completion stamp (`source_hash`).
+ */
+export function atomPagePin(contentHash: string, identity: { pageId: number; revision: string } | undefined): string {
+  return identity ? `${contentHash}:${identity.pageId}:${identity.revision}` : contentHash;
+}
+
 function originOf(key: GenerationKey): Origin {
   const at = key.ownerKey.indexOf(':');
   const field = key.ownerKey.slice(0, at);
@@ -51,9 +60,9 @@ export const atomGenerationAdapter: GenerationAdapter<AtomGenerationContext> = {
   async readInput(engine, key, context) {
     const origin = originOf(key);
     if (origin.field === 'source_path') return context?.transcriptInput ?? null;
-    const [row] = await engine.executeRaw<{ content_hash: string | null; body_bytes: number | null }>(
-      'SELECT content_hash, body_bytes FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [key.sourceId, origin.value]);
-    return row?.content_hash ? { pin: row.content_hash, size: Number(row.body_bytes ?? 0) } : null;
+    const [row] = await engine.executeRaw<{ id: number; content_hash: string | null; revision: string | null; body_bytes: number | null }>(
+      'SELECT id, content_hash, knowledge_revision::text AS revision, body_bytes FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [key.sourceId, origin.value]);
+    return row?.content_hash ? { pin: atomPagePin(row.content_hash, row.revision ? { pageId: Number(row.id), revision: row.revision } : undefined), size: Number(row.body_bytes ?? 0) } : null;
   },
   async readItems(engine, key, itemKeys) {
     const origin = originOf(key);

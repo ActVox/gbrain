@@ -40,7 +40,7 @@ export function restoreDaysHint(): number { return restoreDaysSeen; }
 
 /** Reads the five settings; a failed read keeps the default for that setting, the same as an out-of-range value. */
 export async function readGenerationsConfig(engine: Pick<BrainEngine, 'getConfig'>): Promise<GenerationsConfig> {
-  const read = async (bound: Bound) => parseBound(bound, await engine.getConfig(bound.key).catch(() => null)) ?? bound.fallback;
+  const read = async (bound: Bound) => parseBound(bound, await Promise.resolve().then(() => engine.getConfig(bound.key)).catch(() => null)) ?? bound.fallback;
   const config = { restoreDays: await read(GENERATION_BOUNDS.restoreDays), shrinkFloor: await read(GENERATION_BOUNDS.shrinkFloor),
     maxItems: await read(GENERATION_BOUNDS.maxItems), valveMaxPerRun: await read(GENERATION_BOUNDS.valveMaxPerRun), valveMaxRatio: await read(GENERATION_BOUNDS.valveMaxRatio) };
   restoreDaysSeen = config.restoreDays;

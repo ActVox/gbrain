@@ -1244,7 +1244,7 @@ CREATE TABLE IF NOT EXISTS derived_generations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS derived_generations_one_live ON derived_generations (source_id, kind, owner_key) WHERE state = 'live';
 CREATE UNIQUE INDEX IF NOT EXISTS derived_generations_one_hold ON derived_generations (source_id, kind, owner_key) WHERE state = 'held';
-CREATE UNIQUE INDEX IF NOT EXISTS derived_generations_operation ON derived_generations (operation_id);
+CREATE INDEX IF NOT EXISTS derived_generations_operation ON derived_generations (operation_id);
 CREATE INDEX IF NOT EXISTS derived_generations_state_created ON derived_generations (state, created_at);
 CREATE TABLE IF NOT EXISTS derived_generation_items (
   generation_id BIGINT NOT NULL REFERENCES derived_generations(id) ON DELETE CASCADE,

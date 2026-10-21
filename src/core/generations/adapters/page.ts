@@ -77,10 +77,10 @@ export function preimageMarkdown(preimage: Record<string, unknown>): string {
     { type: String(preimage.type) as PageType, title: String(preimage.title), tags: (preimage.tags as string[]) ?? [] });
 }
 
-/** Writes one page item inside the activation transaction; embeddings are left to the embedding backfill. */
+/** Writes one page item inside the activation transaction; without a post-commit embedding hook it leaves embeddings to the backfill. */
 export async function importPageItem(tx: BrainEngine, sourceId: string, slug: string, content: string,
   opts: Partial<Parameters<typeof importFromContent>[3]> = {}): Promise<void> {
-  await importFromContent(tx, slug, content, { ...opts, sourceId, preserveGateMarkers: true, noEmbed: true });
+  await importFromContent(tx, slug, content, { noEmbed: true, ...opts, sourceId, preserveGateMarkers: true });
 }
 
 /** Rows whose retained page version was written by the producer (`producer`: a predicate over version alias `v`) at the row's identity. */
