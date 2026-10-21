@@ -143,6 +143,18 @@ describe.skipIf(!(pooled && pooledAdmin))('#6930 transaction pipelining through 
     expect(new Set(txns.map(rows => rows[0]!.xid)).size).toBe(16);
   }, 60_000);
 
+  test('a reserved transaction\'s body waits for BEGIN\'s answer, so a BEGIN the pooler refuses never leaves its writes in autocommit', async () => {
+    const records = await traced('txn-reserved', 2, async engine => {
+      await engine.withReservedConnection(conn => (conn as unknown as { transaction<R>(run: (tx: PostgresEngine) => Promise<R>): Promise<R> })
+        .transaction(tx => Promise.all([tx.executeRaw('SELECT 1 AS reserved_body'), tx.executeRaw('SELECT 2 AS reserved_body')])));
+    });
+    const begin = records.find(r => /^begin$/i.test(r.sql))!;
+    const first = records.find(r => /AS reserved_body$/.test(r.sql))!;
+    expect(first.conn).toBe(begin.conn);
+    expect(first.t >= end(begin)).toBe(true);
+    expect(sentBeforeAnswer(records, /AS reserved_body$/)).toEqual([true]);
+  }, 60_000);
+
   test('GBRAIN_PG_TXN_PIPELINE=0 restores one round trip per statement inside a transaction', async () => {
     const records = await traced('txn-off', 1, async engine => {
       await engine.sql.begin(tx => Promise.all(Array.from({ length: 4 }, (_, n) => tx.unsafe(`SELECT ${n} AS switched_off`))));
