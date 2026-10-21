@@ -69,6 +69,7 @@ test/fence-repair-receipts.test.ts
 test/forecast-journal.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
 test/get-chunks-paging.test.ts
+test/get-page-slices.test.ts
 test/graduation-copy.test.ts
 test/graduation-digest.test.ts
 test/graduation-drain.test.ts
