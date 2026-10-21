@@ -3,7 +3,7 @@
     "exitCode": 0,
     "stderr": "",
     "stdoutBytes": 253499,
-    "stdoutSha256": "3d0b213b3db1c260314abd46136c79a5ddd0e2b34e6a62bcb6b97cd9d7b89493",
+    "stdoutSha256": "6fe1f75ed4ba8cf69bd122d187764d1d0eb6b49a79a3b716dc6d0dc853600a0a",
     "toolNames": [
       "remember",
       "entity",
@@ -718,7 +718,7 @@
         "scope": "write"
       },
       {
-        "description": "List pages; filters incl. slug_prefix, where (frontmatter). Recent / this week: sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.",
+        "description": "List pages by type, slug_prefix, frontmatter where; what did I touch this week: sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
