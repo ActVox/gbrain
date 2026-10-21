@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.332.0] - 2026-10-20
+
+**`search` and `query` stop spending result slots on copies of one page, and `--explain` shows both retrieval arms again.** The same page in two sources, a merge stub beside its target, and the summary and transcript of one document each used to take their own slot in the top 10. They now fold into the best-ranked row, which lists what it absorbed in `collapsed`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The same slug in two sources with copied bodies | two rows | one row; the other copy is listed in `collapsed` (reason `twin`) |
+| A merge or redirect stub and its target | the stub could rank above the target | the target takes the slot; a stub whose target can't be returned stays, stamped `redirect_to` and ranked ×0.5 |
+| Summary, transcript and diarized copies of one document in one directory | one slot each | one row (reason `family`) |
+| An organization question that names no person | the founder's page could outrank the company | person pages ×0.85 |
+| An image page whose text covers half the query or less | ranked like a text page | ×0.6, stamped `image_page` |
+| An undated page on a "when" question | no penalty | ×0.85 |
+| `score` down the result list | could go up | follows rank; the previous value is `fused_score` |
+| A chunk row longer than 8,000 characters | returned whole | cut at 8,000 with a marker naming the read for the rest; `snippet_chars: 0` returns it whole |
+| `gbrain search/query --explain` on a hybrid brain | printed `arms: []` and `rrf: not_run` | shows both arms, with fusion and blend applied |
+| A keyword or vector arm that timed out, on the CLI | nothing said so | a `degraded_recall` notice on stderr, `--json` included |
+| The `query` tool description | implied expansion helps | says `expand` is one LLM call and rarely helps |
+
+Opt-outs: `search.collapse false` and `search.rank_priors false`. Nothing is rewritten on upgrade.
+
 ## [0.60.330.0] - 2026-10-20
 
 **Sync no longer deletes a page just because its file is missing when Git never had that file, and the autopilot purge no longer hard-deletes what a sync deleted without review.** A large managed source lost thousands of agent-written pages: their write-through files sat in a `.gitignore`d directory, so they were never committed; when they left the disk, sync read their absence as deletions (4% of the source, under the 50% valve), and the purge phase hard-deleted them 72 hours later (#7130, reported by @liuwenyong1985).
