@@ -80,3 +80,16 @@ test('a remote put_page that changes a stored stamp is refused; carrying it unch
   await written('notes/round-trip-example', stamped.replace(/retired_[a-z]+: .*\n/g, ''), true);
   expect(await frontmatter('notes/round-trip-example')).not.toHaveProperty('retired_by');
 });
+
+test('a remote edit_page that writes a stamp key into the frontmatter is refused', async () => {
+  await written('notes/edit-example', '---\ntitle: Edit\ntype: note\nowner: alice-example\n---\n\nBody.\n', false);
+  const read = await withVerifiedLocalRegistration(engine, remoteRegistration, () => dispatchToolCall(engine, 'get_page', { slug: 'notes/edit-example', include_content: true },
+    { remote: true, config: { engine: 'pglite' }, sourceId: 'default', auth: remoteAuth, logger: { info() {}, warn() {}, error() {} } }));
+  const revision = JSON.parse((read.content as Array<{ text: string }>)[0]!.text).revision as string;
+  const response = await withVerifiedLocalRegistration(engine, remoteRegistration, () => dispatchToolCall(engine, 'edit_page',
+    { slug: 'notes/edit-example', expected_revision: revision, request_id: randomUUID(), edits: [{ old_text: 'owner: alice-example', new_text: 'owner: alice-example\nretired_by: stale-atoms' }] },
+    { remote: true, config: { engine: 'pglite' }, sourceId: 'default', auth: remoteAuth, logger: { info() {}, warn() {}, error() {} } }));
+  expect(response.isError).toBe(true);
+  expect(JSON.stringify(response.content)).toContain('reserved_frontmatter_key');
+  expect(await frontmatter('notes/edit-example')).not.toHaveProperty('retired_by');
+});
