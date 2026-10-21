@@ -25,6 +25,15 @@ describe('#7188 jobResultOutcome', () => {
     });
   });
 
+  test('an autopilot-global-maintenance result whose synthesize phase failed fails the job', () => {
+    const result = {
+      partial: true, status: 'partial',
+      report: { status: 'partial', phases: [{ phase: 'lint', status: 'ok' }, { phase: 'synthesize', status: 'fail', duration_ms: 3, summary: 'error: synthesis failed', code: 'SYNTH_PHASE_FAIL', details: {} }] },
+      phase_streaks: [{ phase: 'synthesize', count: 1, fix: 'gbrain dream --phase synthesize' }],
+    };
+    expect(jobResultOutcome(result)).toEqual({ outcome: 'failed', phase: 'synthesize', reason: 'phase synthesize failed (SYNTH_PHASE_FAIL): error: synthesis failed' });
+  });
+
   test('a failed or blocked status fails the job', () => {
     expect(jobResultOutcome({ status: 'blocked_by_failures', reason: 'held_files' })).toEqual({ outcome: 'failed', reason: 'result status blocked_by_failures (held_files)' });
     expect(jobResultOutcome({ partial: true, status: 'failed', report: { status: 'failed', phases: [] } }).outcome).toBe('failed');
