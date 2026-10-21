@@ -275,8 +275,10 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
    * #5984 lanes (Postgres only): a lane group the ceiling cancels while its predecessor group still publishes releases
    * its claims (laneFallback) instead of taking the single path, and charges each member there. Eight pages in bulk
    * groups on two lanes: the first group parks at `lane:applied` until the second's release is seen; the second overruns once at
-   * `lane:applied` (inside its transaction, before its turn) and rejects as the discarded connection does. Without the
-   * charge on release, a lane group the ceiling cancels every time would be released and claimed again without bound.
+   * `lane:applied` (inside its transaction, before its turn) and rejects as the discarded connection does. Its ceiling runs
+   * from the start of its publication, so a stall or a late first BEGIN can cancel it before it reaches `lane:applied`: its
+   * release charge then names it, and it is not overrun again. Without the charge on release, a lane group the ceiling
+   * cancels every time would be released and claimed again without bound.
    */
   (backend === 'postgres' ? describe : describe.skip)('lane group (laneFallback)', () => {
     let lanes: BrainEngine;
@@ -312,6 +314,9 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
           const [charged] = await lanes.executeRaw<{ grp: string | null; blocked: string | null }>(
             "SELECT intent->>'group' AS grp,blocked_reason AS blocked FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
           charges.push(charged!);
+          if (second === null && charged!.grp && charged!.blocked === 'group_member_waiting' && charged!.grp !== (await groupOf(detail.requestId!)).first) {
+            overrun.add(charged!.grp); second = charged!.grp;
+          }
           if (charged!.grp === second) releaseFirst();
           return;
         }
