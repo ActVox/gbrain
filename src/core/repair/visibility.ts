@@ -66,15 +66,24 @@ export async function planVisibilityRepair(engine: BrainEngine, sourceIds: strin
       AND c.source_id=ANY($1::text[]) AND ($2::integer[] IS NULL OR c.id=ANY($2::integer[])) ORDER BY c.id`, [sourceIds, conceptIds]);
   // A member recovered only from an atom's `concepts:` list has no provenance
   // edge, so a later private flip could not reach the concept: it stays private.
-  const inputs = concepts.length ? await engine.executeRaw<InputRow>(`SELECT c.id AS concept_id,a.id AS atom_id,
-      EXISTS (SELECT 1 FROM links l WHERE l.from_page_id=c.id AND l.to_page_id=a.id
-        AND l.link_source='concept-provenance' AND l.link_type='synthesized_from') AS linked
-    FROM pages c JOIN pages a ON a.source_id=c.source_id AND a.type='atom' AND a.deleted_at IS NULL
-    WHERE c.id=ANY($1::integer[]) AND (
-      EXISTS (SELECT 1 FROM links l WHERE l.from_page_id=c.id AND l.to_page_id=a.id
-        AND l.link_source='concept-provenance' AND l.link_type='synthesized_from')
-      OR (jsonb_typeof(a.frontmatter->'concepts')='array' AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(a.frontmatter->'concepts') ref
-        WHERE regexp_replace(ref,'^.*/','')=regexp_replace(c.slug,'^concepts/',''))))`, [concepts.map(c => Number(c.id))]) : [];
+  // Set-based: provenance edges by page id, `concepts:` references by a hash join on the concept name.
+  const inputs = concepts.length ? await engine.executeRaw<InputRow>(`WITH c AS (
+      SELECT id,source_id,regexp_replace(slug,'^concepts/','') AS name FROM pages WHERE id=ANY($1::integer[])),
+    members AS (
+      SELECT l.from_page_id AS concept_id,l.to_page_id AS atom_id,true AS linked FROM links l
+        JOIN c ON c.id=l.from_page_id JOIN pages a ON a.id=l.to_page_id AND a.source_id=c.source_id AND a.type='atom' AND a.deleted_at IS NULL
+        WHERE l.link_source='concept-provenance' AND l.link_type='synthesized_from'
+      UNION ALL
+      SELECT c.id,a.id,false FROM pages a
+        CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(a.frontmatter->'concepts')='array' THEN a.frontmatter->'concepts' ELSE '[]'::jsonb END) ref
+        JOIN c ON c.source_id=a.source_id AND c.name=regexp_replace(ref,'^.*/','')
+        WHERE a.type='atom' AND a.deleted_at IS NULL AND a.source_id IN (SELECT source_id FROM c))
+    SELECT concept_id,atom_id,bool_or(linked) AS linked FROM members GROUP BY concept_id,atom_id`, [concepts.map(c => Number(c.id))]) : [];
+  const inputsByConcept = new Map<number, InputRow[]>();
+  for (const row of inputs) {
+    const list = inputsByConcept.get(Number(row.concept_id));
+    if (list) list.push(row); else inputsByConcept.set(Number(row.concept_id), [row]);
+  }
   const atomIds = only === undefined ? null : kind?.type === 'atom' ? [only] : inputs.map(row => Number(row.atom_id));
   const atoms = await engine.executeRaw<AtomRow>(`SELECT a.id,a.source_id,a.slug,a.type,a.frontmatter->>'visibility' AS visibility,
       length(a.compiled_truth) AS chars, a.frontmatter->>'source_slug' AS source_slug,
@@ -98,7 +107,7 @@ export async function planVisibilityRepair(engine: BrainEngine, sourceIds: strin
   }
   let noLineage = 0;
   for (const concept of concepts) {
-    const rows = inputs.filter(row => Number(row.concept_id) === Number(concept.id));
+    const rows = inputsByConcept.get(Number(concept.id)) ?? [];
     if (!rows.length) { noLineage++; continue; }
     const members = rows.map(row => row.linked ? atomVisibility.get(Number(row.atom_id)) ?? 'private' : 'private');
     const next = tightened(concept.visibility, strictestVisibility(members));
@@ -146,12 +155,12 @@ function factProvenanceSlugSql(f: string): string {
 export async function worldFactsFromPrivateSources(engine: BrainEngine, sourceIds: string[], ids?: number[]) {
   return engine.executeRaw<{ id: number; source_id: string; row_num: number | null; source_markdown_slug: string | null; entity_slug: string | null; readable: boolean }>(
     `SELECT f.id,f.source_id,f.row_num,f.source_markdown_slug,f.entity_slug,
-      (f.source_markdown_slug IS NULL OR NOT EXISTS (SELECT 1 FROM pages pp WHERE pp.source_id=f.source_id
-        AND pp.slug=f.source_markdown_slug AND NOT ${privateSnapshotFilterFragment('pp')})) AS readable
-    FROM facts f WHERE f.visibility='world' AND f.expired_at IS NULL AND f.source_id=ANY($1::text[])
-      AND ($2::bigint[] IS NULL OR f.id=ANY($2::bigint[]))
-      AND EXISTS (SELECT 1 FROM pages o WHERE o.source_id=f.source_id AND o.deleted_at IS NULL
-        AND (o.slug=f.source_markdown_slug OR o.slug=${factProvenanceSlugSql('f')}) AND ${derivationPrivateSql('o')})
+      (f.source_markdown_slug IS NULL OR h.id IS NULL OR ${privateSnapshotFilterFragment('h')}) AS readable
+    FROM facts f
+      LEFT JOIN pages h ON h.source_id=f.source_id AND h.slug=f.source_markdown_slug
+      LEFT JOIN pages o ON o.source_id=f.source_id AND o.slug=${factProvenanceSlugSql('f')} AND o.deleted_at IS NULL
+    WHERE f.visibility='world' AND f.expired_at IS NULL AND f.source_id=ANY($1::text[]) AND ($2::bigint[] IS NULL OR f.id=ANY($2::bigint[]))
+      AND ((h.id IS NOT NULL AND h.deleted_at IS NULL AND ${derivationPrivateSql('h')}) OR (o.id IS NOT NULL AND ${derivationPrivateSql('o')}))
     ORDER BY f.id`, [sourceIds, ids ?? null]);
 }
 
