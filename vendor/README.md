@@ -103,6 +103,16 @@ statements never reach that server connection. Default 0 (stock behaviour);
 GBrain sets 100 on transaction-mode URLs (#6930,
 `test/e2e/pgbouncer-transaction-pipeline-6930.test.ts`).
 
+With `transaction_pipeline` in force, `sql.begin({ first }, fn)` sends the
+transaction's first statement behind BEGIN before BEGIN's answer when
+`first(text)` accepts its text; every later statement, and a first one the
+test refuses, waits for that answer as stock `begin` does. If BEGIN fails,
+the early statement has run in autocommit and the rest are rejected unsent,
+so the test must accept only a read or a transaction-local `set_config`.
+GBrain passes `isPersistenceDeclaration` (`src/core/persistence/protocol.ts`)
+from the persistence transactions that open with the protocol declaration
+(GBRA-156, same test file).
+
 Each statement's row count resets at its ReadyForQuery. Stock postgres.js
 resets it only at CommandComplete. A statement that streams rows and then fails
 never gets there: a runtime error after its first rows, or a cancel or timeout
