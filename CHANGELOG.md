@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.355.0] - 2026-10-21
+
+**`remember` with a folder-less entity now saves only when the name points to exactly one entity page, a pending write receipt names the page the fact is going to, and `remember --replaces` works on a private fact without passing `--visibility` (#7248).** Before, a short name such as "Alice" could be saved under a bare slug that no page has, so the fact never showed up on the person's card. A slow write also gave the caller no way to tell which page it would land on, and replacing a private fenced fact answered `not_found`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `remember` with `entity: "alice-example"` or `"Alice"` (no folder) | saved under a bare slug no page has | saves to the one readable entity page the name points to (by slug, unique basename, alias or name); if several pages match, it only begins a name, it only resembles pages, or the page is not an entity, the call is refused `invalid_params` with `reason` `entity_ambiguous`, `entity_unverified`, `entity_not_entity` or `entity_no_page` and up to 5 candidate slugs, and nothing is saved |
+| A name nothing resembles, or a slug with a folder | saved | unchanged |
+| A `remember` reply that is still publishing | no target in the receipt | `write_request.target {slug, entity_slug}`, and the pending hint names the page |
+| A `remember` batch item still publishing | reported `failed` | reported `pending` |
+| `remember --replaces <id>` on a private fact with no `--visibility`, local caller | `not_found` | replaces it, and the new fact stays private |
+| `remember --replaces <id>` with a `--visibility` that differs from the fact's | `not_found` | `invalid_params` with prefix `replaces_visibility_mismatch` and the visibility to pass |
+| A remote caller replacing a private fact | `not_found` | unchanged (`not_found`) |
+
+**Spend effect:** none. No model calls, no default or cap changes. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- An agent that saved facts under a short first name may now get `entity_ambiguous` or `entity_unverified`; pass one of the candidate slugs it returns.
+
+### Itemized changes
+
+- `entityReferenceCandidates` in `src/core/entities/resolve.ts`; strict resolution in `src/core/persistence/memory-mutations.ts`.
+- `replacementVisibility` in `src/core/facts/single-prepare.ts`; the replaces contract in `docs/protocol/MEMORY_VERBS_v1.md` lists `replaces_visibility_mismatch`.
+
 ## [0.60.354.0] - 2026-10-21
 
 **New `search_exact` (CLI `gbrain search --exact "<phrase>"`) is an unranked, exhaustive literal scan: it returns every page that contains the phrase, plus a `complete` flag that is true only when the whole scope was read (#7191).** Ranked search can miss a rare phrase, so agents fell back to grepping the brain checkout for exact lookups.
