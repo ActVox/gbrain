@@ -72,7 +72,7 @@ export async function readLiveGeneration(db: BrainEngine, key: GenerationKey): P
 
 function fenced(reason: 'stale_generation' | 'pin_moved', key: GenerationKey, detail: string) {
   return opError('generation_fenced', `The ${key.kind} generation of ${key.ownerKey} was not published: ${detail}; nothing was written.`,
-    'Run the producer again; it reads the current generation and input and recomputes.', { reason, docs: 'docs/architecture/generations.md' });
+    'Run the producer again; it reads the current generation and input and recomputes.', { reason, docs: 'docs/architecture/generations.md#publishing' });
 }
 
 export interface LedgerItem { key: string; identityHash: string; action: 'published' | 'retired' | 'revived' | 'kept' | 'adopted'; preimage?: Preimage }
@@ -105,7 +105,7 @@ export async function assertItemsLive(tx: BrainEngine, adapter: GenerationAdapte
   const wrong = [...expected].filter(([itemKey, identity]) => { const row = rows.get(itemKey); return !row?.live || row.identityHash !== identity; }).map(([itemKey]) => itemKey);
   if (wrong.length) {
     throw opError('generation_live_conflict', `The ${key.kind} generation of ${key.ownerKey} was not activated: ${wrong.slice(0, 5).join(', ')} is not live at the content just written; nothing was committed.`,
-      'Run the producer again; it reads the items as they are now.', { docs: 'docs/architecture/generations.md' });
+      'Run the producer again; it reads the items as they are now.', { docs: 'docs/architecture/generations.md#publishing' });
   }
 }
 

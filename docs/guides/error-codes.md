@@ -1567,7 +1567,7 @@ More: [docs/guides/shared-brain-skills.md#approve-publication-following-and-edit
 
 Reasons: `stale_generation`, `pin_moved`.
 
-More: [docs/architecture/generations.md](../../docs/architecture/generations.md)
+More: [docs/architecture/generations.md#publishing](../../docs/architecture/generations.md#publishing)
 
 ### generation_held
 
@@ -1589,7 +1589,7 @@ More: [docs/guides/repair.md#generations](../../docs/guides/repair.md#generation
 |---|---|---|---|---|---|---|
 | A derived generation was not activated because one of its items was not live at the content the publication wrote; nothing was committed. | Activation rechecks every item of the new generation under the key lock; an item another writer changed or deleted in between would make the ledger record a set that is not what the pages say. | Run the producer again; it reads the items as they are now. | agent | `repeat the read that failed` | 11 | yes |
 
-More: [docs/architecture/generations.md](../../docs/architecture/generations.md)
+More: [docs/architecture/generations.md#publishing](../../docs/architecture/generations.md#publishing)
 
 ### ghost_mass_delete_refused
 
