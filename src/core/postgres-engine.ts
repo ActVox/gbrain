@@ -116,7 +116,7 @@ import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, rowT
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery, boundWebsearchQuery, collapseWebsearchDashRuns } from './search/sql-ranking.ts';
 import { narrowedOrFallbackQuery } from './search/keyword-or-narrow.ts';
-import { buildKeywordChunkMatch, KEYWORD_RANK_CANDIDATES } from './search/keyword-chunk-match.ts';
+import { buildKeywordChunkMatch, KEYWORD_RANK_CANDIDATES, KEYWORD_STATEMENT_SETTINGS } from './search/keyword-chunk-match.ts';
 import { privatePagesFilterFragment, privateSnapshotFilterFragment, privateLinkOriginFilterFragment, privateTimelineEventFilterFragment, privateProvenanceFilterFragment } from './search/private-visibility.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { readStoredEmbeddingIdentity } from './stored-embedding-identity.ts';
@@ -1155,7 +1155,7 @@ export class PostgresEngine implements BrainEngine {
       this.withScopedReadTransaction(opts?.sourceIds, opts?.sourceId, (tx) => {
         const boundParams = params.map((v, i) => i === 0 ? collapseWebsearchDashRuns(queryText) : i === rankIdx && !opts?.rankQuery ? collapseWebsearchDashRuns(rankText) : v);
         return tx.unsafe(rawQuery, boundParams as Parameters<typeof tx.unsafe>[1]);
-      }, { alwaysTransaction: true, jitOff: true, settings: relaxed ? { statement_timeout: statementTimeout, enable_seqscan: 'off' } : { statement_timeout: statementTimeout } }));
+      }, { alwaysTransaction: true, jitOff: true, settings: relaxed ? { statement_timeout: statementTimeout, enable_seqscan: 'off', ...KEYWORD_STATEMENT_SETTINGS } : { statement_timeout: statementTimeout, ...KEYWORD_STATEMENT_SETTINGS } }));
     let rows = await runKeyword(query);
     // D2 fix (fix/title-retrieval-arm): websearch AND semantics at chunk
     // grain mean one non-co-occurring token zeroes keyword recall. When the

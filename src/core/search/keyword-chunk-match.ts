@@ -29,6 +29,16 @@
  */
 export const KEYWORD_RANK_CANDIDATES = 50_000;
 
+/**
+ * Transaction-local settings for the keyword statement. At the 4 MB
+ * `work_mem` default, the bitmap over a common word's matches goes lossy, so
+ * the heap scan rechecks every row's tsvector, and the bounded candidate sort
+ * spills to disk: a remote caller's bounded any-word retry took 6.6 s on the
+ * 2M-chunk bench against 1.4 s at 32 MB (128 MB measured the same). The
+ * bound keeps the memory this can use per statement small.
+ */
+export const KEYWORD_STATEMENT_SETTINGS = { work_mem: '32MB' } as const;
+
 export function buildKeywordChunkMatch(ftsLang: string, excludePrivate: boolean | undefined): { from: string; match: string; modality: string } {
   const tsq = `websearch_to_tsquery('${ftsLang}', $1)`;
   if (!excludePrivate) return { from: 'content_chunks cc', match: `cc.search_vector @@ ${tsq}`, modality: `AND cc.modality = 'text'` };
