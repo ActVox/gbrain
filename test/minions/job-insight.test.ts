@@ -66,7 +66,7 @@ async function holdSyncLock(source: string, holderJobId: number) {
      VALUES ($1, 4242, 'host-example', now() + interval '10 minutes', $2::uuid)`, [`gbrain-sync:${source}`, token]);
   await engine.executeRaw(
     `INSERT INTO minion_jobs (name, queue, status, submission_authority, data, max_attempts, max_stalled, lock_token, lock_until, started_at)
-     VALUES ('sync', 'gbrain-drain-lease', 'active', '{"version":1,"kind":"application"}'::jsonb, $1::jsonb, 1, 0, $2, now() + interval '10 minutes', now())`,
+     VALUES ('sync', 'gbrain-drain-lease', 'active', '{"version":1,"kind":"application"}'::jsonb, $1::text::jsonb, 1, 0, $2, now() + interval '10 minutes', now())`,
     [JSON.stringify({ sourceId: source, drain_lease_beacon: { kind: 'job', id: String(holderJobId), version: 'test' } }), token]);
 }
 
@@ -243,7 +243,7 @@ describe('owner fence (remote agent callers)', () => {
   test('a foreign MCP submitter is never named to a fenced caller', async () => {
     const job = await add('noop', { __owner_client_id: 'agent-a' });
     await engine.executeRaw(
-      `UPDATE minion_jobs SET submission_authority = $2::jsonb WHERE id = $1`,
+      `UPDATE minion_jobs SET submission_authority = $2::text::jsonb WHERE id = $1`,
       [job.id, JSON.stringify({ version: 1, kind: 'remote_agent', principal: { kind: 'oauth_client', id: 'agent-b' },
         grant: { scopes: ['agent'], sourceId: 'default', sourceCreatedAt: new Date().toISOString(), allowedTools: ['get_page'], allowedSlugPrefixes: [] },
         payloadHash: 'a'.repeat(64) })]);
