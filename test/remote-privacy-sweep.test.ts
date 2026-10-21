@@ -418,6 +418,7 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   sources_remove: 'error',
   submit_job: 'error',
   get_job: 'error',
+  wait_job: 'error',
   cancel_job: 'error',
   retry_job: 'error',
   get_job_progress: 'error',

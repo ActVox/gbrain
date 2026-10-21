@@ -141,6 +141,7 @@ export const OPERATION_LOADERS: Record<string, readonly [() => Promise<Record<st
   "file_url": [load_files, "filesOperations"],
   "submit_job": [load_jobs, "jobsOperations"],
   "get_job": [load_jobs, "jobsOperations"],
+  "wait_job": [load_jobs, "jobsOperations"],
   "list_jobs": [load_jobs, "jobsOperations"],
   "cancel_job": [load_jobs, "jobsOperations"],
   "retry_job": [load_jobs, "jobsOperations"],
