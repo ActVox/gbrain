@@ -19,6 +19,8 @@ import { managedBrain } from './helpers/managed-brain.ts';
 const PATHS = 60_000;
 /** The ruling's bound: no stretch of a level read blocks timers for more than about this long. */
 const MAX_LAG_MS = 100;
+/** Reads of the same level; the bound holds for the shortest of their worst stretches. */
+const READS = 3;
 
 const git = (root: string, args: string[], input?: string) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', input, maxBuffer: 1 << 28 }).trim();
 
@@ -40,17 +42,24 @@ describe('#6712 PR 4b ruling 4: a level read yields to the event loop', () => {
     // on a VM whose kernel charges host steal to the thread's CPU, that one stretch read 145 ms. A round reads it cached.
     await loadActivePackForEngine(engine, { remote: false, sourceId: 'default' });
     // Lag as the thread's own CPU between timer runs (the stretch that ends the read counts too): the stretches the read
-    // holds, not what a loaded VM adds while the thread is off the CPU.
-    let level: Awaited<ReturnType<typeof readShadowLevel>>;
-    let maxLag = 0, ticks = 0;
-    const lag = watchLoopLag();
-    try {
-      level = await readShadowLevel(engine, { sourceId: 'default', context });
-    } finally {
-      ({ maxLag, ticks } = lag.stop());
+    // holds, not what a loaded VM adds while the thread is off the CPU. A VM whose kernel charges host steal to the thread
+    // still inflates one stretch now and then (a 40 ms stretch read 112 ms once in 10 CI runs, never in 120 on an idle VM),
+    // so the same read runs READS times and the bound holds for its shortest worst stretch: a loop that does not yield
+    // holds the loop in every read of the same level.
+    const lags: number[] = [];
+    for (let read = 0; read < READS; read++) {
+      let level: Awaited<ReturnType<typeof readShadowLevel>>;
+      let maxLag = 0, ticks = 0;
+      const lag = watchLoopLag();
+      try {
+        level = await readShadowLevel(engine, { sourceId: 'default', context });
+      } finally {
+        ({ maxLag, ticks } = lag.stop());
+      }
+      expect(level!.paths.length).toBe(PATHS);
+      expect(ticks).toBeGreaterThan(0);
+      lags.push(Math.round(maxLag));
     }
-    expect(level!.paths.length).toBe(PATHS);
-    expect(ticks).toBeGreaterThan(0);
-    expect(Math.round(maxLag)).toBeLessThan(MAX_LAG_MS);
+    expect(Math.min(...lags)).toBeLessThan(MAX_LAG_MS);
   }, { setup }), 300_000);
 });
