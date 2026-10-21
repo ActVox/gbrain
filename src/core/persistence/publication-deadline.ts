@@ -99,10 +99,11 @@ export async function declarePublication(tx: BrainEngine, bound: Pick<BrainEngin
 export async function publicationTransaction<T>(engine: BrainEngine, fn: (tx: BrainEngine) => Promise<T>,
   { pipelineFirst }: Pick<TransactionOptions, 'pipelineFirst'> = {}): Promise<T> {
   const signal = signals.getStore();
-  if (!signal) return engine.transaction(fn, { pipelineFirst });
+  const first = pipelineFirst ? { pipelineFirst } : {};
+  if (!signal) return pipelineFirst ? engine.transaction(fn, first) : engine.transaction(fn);
   let body: Promise<unknown> = Promise.resolve();
   try {
-    return await engine.transaction(tx => { const run = fn(tx); body = run; return run; }, { signal, pipelineFirst });
+    return await engine.transaction(tx => { const run = fn(tx); body = run; return run; }, { signal, ...first });
   } catch (error) {
     await body.then(() => undefined, () => undefined);
     const closed = (error as { cause?: { code?: unknown } })?.cause?.code;
