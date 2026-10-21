@@ -19,9 +19,9 @@
  * The wave 9 yield between groups is outside any one `boundPublication` call, so it never counts against a group.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { BrainEngine } from '../engine.ts';
+import type { BrainEngine, TransactionOptions } from '../engine.ts';
 import { gucMilliseconds, resolveSessionTimeouts } from '../db.ts';
-import { declareDurablePersistence, isPersistenceDeclaration } from './protocol.ts';
+import { declareDurablePersistence } from './protocol.ts';
 
 export const PUBLICATION_CEILING_KEY = 'persistence.publication_ceiling_ms';
 /** `persistence.publication_ceiling_ms`' default (60000 to 3600000 accepted). */
@@ -92,15 +92,17 @@ export async function declarePublication(tx: BrainEngine, bound: Pick<BrainEngin
 /**
  * `engine.transaction`, passing the current publication's signal on as `{ signal }`. An aborted transaction rejects
  * while its body may still be parked, so a rejection waits for the body to settle first: nothing (recovery included)
- * acts on the publication while the body can still rename a file. Its bodies open with `declarePublication`, which
- * goes out with BEGIN (GBRA-156); a body that opens with anything else waits for BEGIN's answer.
+ * acts on the publication while the body can still rename a file. `pipelineFirst` (GBRA-156) is for a body that opens
+ * with `declarePublication` and does nothing that needs BEGIN answered first; a lane group's body does (its begun mark
+ * orders the next group's BEGIN), so the group runner passes none.
  */
-export async function publicationTransaction<T>(engine: BrainEngine, fn: (tx: BrainEngine) => Promise<T>): Promise<T> {
+export async function publicationTransaction<T>(engine: BrainEngine, fn: (tx: BrainEngine) => Promise<T>,
+  { pipelineFirst }: Pick<TransactionOptions, 'pipelineFirst'> = {}): Promise<T> {
   const signal = signals.getStore();
-  if (!signal) return engine.transaction(fn, { pipelineFirst: isPersistenceDeclaration });
+  if (!signal) return engine.transaction(fn, { pipelineFirst });
   let body: Promise<unknown> = Promise.resolve();
   try {
-    return await engine.transaction(tx => { const run = fn(tx); body = run; return run; }, { signal, pipelineFirst: isPersistenceDeclaration });
+    return await engine.transaction(tx => { const run = fn(tx); body = run; return run; }, { signal, pipelineFirst });
   } catch (error) {
     await body.then(() => undefined, () => undefined);
     const closed = (error as { cause?: { code?: unknown } })?.cause?.code;

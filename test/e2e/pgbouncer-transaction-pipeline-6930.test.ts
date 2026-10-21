@@ -267,6 +267,45 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a transaction\'s first stat
     expect(next.slice(1).filter(sql => /swallowed|^commit|^rollback/i.test(sql))).toEqual([]);
   }, 60_000);
 
+  type Lent = { executeRaw(sql: string): Promise<unknown>; transaction<R>(run: (tx: PostgresEngine) => Promise<R>, opts?: { pipelineFirst?: (s: string) => boolean }): Promise<R> };
+
+  test('a reserved transaction sends the declaration with BEGIN and the rest of its body after BEGIN\'s answer', async () => {
+    const records = await traced('first-reserved', 2, async engine => {
+      await engine.withReservedConnection(conn => (conn as unknown as Lent).transaction(async tx => {
+        await declarePersistenceProtocol(tx);
+        await tx.executeRaw('SELECT 1 AS reserved_after_declaration');
+      }, { pipelineFirst: isPersistenceDeclaration }));
+    });
+    const begin = records.find(r => /^begin$/i.test(r.sql))!;
+    const declared = records.find(r => r.sql === declaration)!;
+    const after = records.find(r => /AS reserved_after_declaration$/.test(r.sql))!;
+    expect([declared.conn, after.conn]).toEqual([begin.conn, begin.conn]);
+    expect(declared.t < end(begin)).toBe(true);
+    expect(after.t >= end(begin)).toBe(true);
+  }, 60_000);
+
+  test('a reserved transaction whose BEGIN fails sends nothing past the declaration, even when the body swallows the rejection', async () => {
+    let outcome: string | undefined;
+    let count = -1;
+    const records = await traced('first-reserved-fails', 2, async engine => {
+      outcome = await engine.withReservedConnection(async conn => {
+        const lent = conn as unknown as Lent;
+        // An aborted transaction left on the reserved connection makes the server refuse the next BEGIN (25P02).
+        await lent.executeRaw('BEGIN');
+        await lent.executeRaw('SELECT 1/0 AS abort_reserved').catch(() => undefined);
+        return lent.transaction(async tx => {
+          await tx.executeRaw(declaration).catch(() => undefined);
+          await tx.executeRaw(`INSERT INTO ${table} VALUES (4) /* reserved swallowed */`).catch(() => undefined);
+          return 'returned';
+        }, { pipelineFirst: isPersistenceDeclaration }).then(value => `resolved:${value}`, (e: { code?: string }) => e.code);
+      });
+      count = await rows(engine);
+    });
+    expect(outcome).toBe('25P02');
+    expect(count).toBe(0);
+    expect(records.filter(r => /reserved swallowed/.test(r.sql))).toEqual([]);
+  }, 60_000);
+
   test('GBRAIN_PG_TXN_PIPELINE=0 keeps the declaration behind BEGIN\'s answer', async () => {
     const records = await traced('first-off', 1, async engine => {
       await engine.transaction(tx => declarePersistenceProtocol(tx), { pipelineFirst: isPersistenceDeclaration });
