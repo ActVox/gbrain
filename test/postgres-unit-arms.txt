@@ -430,11 +430,13 @@ test/sync-page-identity-hold-gbra130.test.ts
 test/sync-page-write-failed-gbra130.test.ts
 test/sync-pass-cost-grouping-gbra130.test.ts
 test/sync-pass-dirty-after-freeze-gbra130.test.ts
+test/sync-pass-phase-lines-7243.serial.test.ts
 test/sync-prescreen-both-delta-6712.test.ts
 test/sync-prescreen-drift-6712.test.ts
 test/sync-slug-root-mode-6694.test.ts
 test/sync-staged-catchup.test.ts
 test/sync-status-failure-detail-6513.test.ts
+test/sync-status-truthful-7243.test.ts
 test/sync-unblock-repair-error-gbra130.test.ts
 test/sync-uncommitted-origin-7130.test.ts
 test/sync-unreadable-file-gbra130.test.ts

@@ -628,6 +628,14 @@ async function envelopeCrossed(engine: BrainEngine, value: ManagedSyncPassValue,
   return true;
 }
 
+/** #7243: a round's level read, then its `managed_sync.round_level` progress event, so a long round (the legacy sweep, the import walk) says where it stands first. */
+async function readLevelReporting(engine: BrainEngine, levelInput: Parameters<typeof readShadowLevel>[1], round: number, onProgress: SyncOpts['onProgress']): Promise<Awaited<ReturnType<typeof readShadowLevel>>> {
+  const started = Date.now();
+  const level = await readShadowLevel(engine, levelInput);
+  if (level) onProgress?.({ phase: 'managed_sync.round_level', round: { round, target: level.head, paths: level.paths.length, read_ms: Date.now() - started } });
+  return level;
+}
+
 export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Promise<SyncResult> {
   const { opts, context, authority, assertActive } = input;
   const { sourceId, incarnation } = context;
@@ -792,7 +800,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       const levelInput = { sourceId, context, workingTree: mode === 'working',
         pass: { noSchemaPack: processingOptions.noSchemaPack, episodeFullId: episode?.full_id ?? null, retryConsumed: round > 1 ? retryConsumed : undefined, exclude: opts.exclude, includeHidden: opts.includeHidden, strategy: opts.strategy, bootstrap: markersOwed(),
           slugMode: value.obligations.slug_mode, cache: levelCache, passId, recorded: applied.recorded } };
-      const level = await readShadowLevel(engine, levelInput);
+      const level = await readLevelReporting(engine, levelInput, round, opts.onProgress);
       await faultPoint('sync:level_read', { sourceId, round, level: level ? { statements: level.statements, confirm: level.confirm ?? null, reused: level.reused ?? 0, shadow: level, input: levelInput } : undefined });
       assertActive();
       if (!level) throw new Error(`Source ${sourceId} became a company-brain source during its sync pass.`);
@@ -869,6 +877,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         value.telemetry = { ...value.telemetry, outcome: 'synced', stop_reason: configured ? null : 'selection_scoped', remaining: 0 };
         return synced(false);
       }
+      opts.onProgress?.({ phase: 'managed_sync.round_admit', round: { round, target: head, paths: level.paths.length, imports: imports.length, deletes: deletes.length, in_flight: inFlight.length } });
       const built = await batchEntries(engine, level, deletes, imports).catch(async (error: unknown) => {
         if ((error as { code?: string } | null | undefined)?.code === 'page_identity_changed') await save('blocked', 'page_identity_changed');
         throw error;
