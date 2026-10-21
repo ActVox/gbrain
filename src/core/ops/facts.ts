@@ -109,8 +109,8 @@ const extract_facts: Operation = {
     // [ENG-8] Explicit caller value wins; UNSET resolves through the shared
     // facts.default_visibility helper (the old ternary coerced unset →
     // 'private' before any config default could run). Garbage stays 'private'.
-    const { resolveVisibilityParam } = await import('../facts/visibility.ts');
-    const visibility: 'private' | 'world' = await resolveVisibilityParam(ctx.engine, p.visibility);
+    const { resolveVisibilityParam, tightenToPage } = await import('../facts/visibility.ts');
+    let visibility: 'private' | 'world' = await resolveVisibilityParam(ctx.engine, p.visibility);
 
     // #4206: optional event-time + provenance threading. An unparseable
     // valid_from fails LOUD — silently defaulting to now() is exactly the
@@ -129,6 +129,11 @@ const extract_facts: Operation = {
       typeof p.source_slug === 'string' && p.source_slug.trim().length > 0
         ? p.source_slug.trim()
         : undefined;
+    // A turn taken from a private page yields private facts, even when the caller asked for world.
+    if (visibility === 'world' && sourceSlug) {
+      const origin = await ctx.engine.readPageSnapshot(sourceSlug.replace(/\.md$/, ''), { sourceId });
+      visibility = tightenToPage(visibility, origin?.page);
+    }
 
     const r = await runFactsPipeline(p.turn_text as string, {
       engine: ctx.engine,

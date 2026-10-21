@@ -1509,6 +1509,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // didn't specify one: 'private' (default) | 'world'. Resolved by
   // src/core/facts/visibility.ts; explicit caller values always win.
   'facts.default_visibility',
+  // Remote page reads honor the privacy aliases (`access`, `confidentiality`) on pages without `visibility`; default off (search/private-visibility.ts).
+  'visibility.honor_aliases',
   'facts.entity_inference', // #5836: write-time subject inference kill switch (subject-infer.ts)
   'facts.candidate_fusion', // C2: 'rrf_free' (default, cosine arm) | 'interleave' (cosine + keyword; facts/single-prepare.ts)
   'facts.supersession_thresholds', // JSON {"provider:model@dims": number | "off"} (facts/supersession-threshold.ts)

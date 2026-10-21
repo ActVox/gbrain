@@ -102,7 +102,7 @@ const remember: Operation = {
     visibility: {
       type: 'string',
       enum: ['world', 'private'],
-      description: 'world (default) or private (local CLI).',
+      description: 'world (default) or private (local CLI). Omitted on a private target page or brain default: private.',
     },
     replaces: { type: 'string', description: 'fact_id this fact replaces (same entity, or none).', fullSurfaceOnly: true },
   },
@@ -196,7 +196,8 @@ const remember: Operation = {
 
     const { submitRememberMutation } = await import('./persistence/memory-mutations.ts');
     const { runMemoryWrite } = await import('./persistence/verb-errors.ts');
-    const result = await runMemoryWrite(() => submitRememberMutation(ctx, { ...p, fact, provenance, kind, visibility, ...(replaces !== undefined ? { replaces } : {}) }));
+    const result = await runMemoryWrite(() => submitRememberMutation(ctx, { ...p, fact, provenance, kind, visibility, ...(replaces !== undefined ? { replaces } : {}) },
+      undefined, { visibilityDefaulted: typeof p.visibility !== 'string' }));
     // F8: the explanation the CLI formatter prints, as a model-visible notice.
     if ((result as { degraded_dedup?: boolean } | null)?.degraded_dedup) {
       const { degradedDedupNotice } = await import('./interop-notices.ts');
