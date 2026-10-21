@@ -77,6 +77,7 @@ import {
   type CliDispatchContext,
 } from './command-table.ts';
 import { formatRememberResult } from './remember-format.ts';
+import { formatEntityResult, markEntityMiss } from './entity-format.ts';
 import { applyCliOpNotices, captureCapacityNotices, captureOpNotice, captureRetrievalNotices } from './op-notices.ts';
 import { searchTimingsDocument, searchTimingsLine, timeCliPhase } from './search-timings.ts';
 
@@ -728,6 +729,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
       );
       setCliExitVerdict(1);
     }
+    markEntityMiss(op.name, result);
     maybePrintConceptNudge(op.name, params);
   } catch (e: unknown) {
     // v0.42.20.0 (codex D4): on error, set exitCode + return so the `finally`
@@ -824,6 +826,7 @@ async function runThinClientRouted(
     const output = formatResult(op.name, result, params);
     // Awaited delivery (#3423) — same contract as the local-engine path.
     if (output) await writeStdoutFinal(output);
+    markEntityMiss(op.name, result);
     maybePrintConceptNudge(op.name, params);
   } catch (e: unknown) {
     if (e instanceof RemoteMcpError) {
@@ -1773,38 +1776,7 @@ export function formatResult(
     }
     case 'entity': {
       if (process.argv.includes('--json')) break;
-      const r = result as any;
-      if (!r.found) {
-        const lines = [`No entity found. (${r.latency_ms}ms)${r.coverage && r.coverage.state !== 'complete' ? ` Mention coverage: ${r.coverage.state}, ${r.coverage.pending_pages} page(s) pending.` : ''}`];
-        if (Array.isArray(r.suggestions) && r.suggestions.length) {
-          lines.push('Did you mean:');
-          for (const s of r.suggestions) lines.push(`  ${s.slug} — ${s.title} [${s.create_safety}]`);
-        }
-        return lines.join('\n') + '\n';
-      }
-      const c = r.card;
-      const lines = [`${c.entity.title} (${c.entity.slug})${c.entity.type ? ` [${c.entity.type}]` : ''}  (${r.latency_ms}ms)`];
-      if (c.summary) lines.push(`  ${c.summary}`);
-      if (c.aka?.length) lines.push(`  aka: ${c.aka.join(', ')}`);
-      const lt = c.last_touched || {};
-      const touched = lt.updated_at || lt.last_retrieved_at || lt.last_timeline_date;
-      if (touched) lines.push(`  last touched: ${String(touched).slice(0, 10)}`);
-      if (c.open_threads?.length) {
-        lines.push('  open threads:');
-        for (const t of c.open_threads) lines.push(`    [${t.kind}] ${t.text}${t.date ? ` (${String(t.date).slice(0, 10)})` : ''}`);
-      }
-      if (c.edges?.length) {
-        lines.push('  edges:');
-        for (const e of c.edges) lines.push(`    ${e.direction === 'out' ? '→' : '←'} ${e.type} ${e.slug}`);
-      }
-      lines.push(`  backlinks: ${c.backlink_count} | active facts: ${c.active_fact_count}`);
-      if (c.referenced_by_count) lines.push(`  referenced by ${c.referenced_by_count} page(s):`, ...c.referenced_by.map((g: any) => `    ${g.canonical_type} (${g.total}): ${g.rows.map((x: any) => x.slug).join(', ')}${g.next ? ', ...' : ''}`));
-      if (c.coverage && c.coverage.state !== 'complete') lines.push(`  mention coverage: ${c.coverage.state}, ${c.coverage.pending_pages} page(s) pending`);
-      if (Array.isArray(r.suggestions) && r.suggestions.length) {
-        lines.push('  other matches:');
-        for (const s of r.suggestions) lines.push(`    ${s.slug} — ${s.title}`);
-      }
-      return lines.join('\n') + '\n';
+      return formatEntityResult(result);
     }
     case 'synthesize': {
       if (process.argv.includes('--json')) break;
