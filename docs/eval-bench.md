@@ -31,6 +31,19 @@ Before repeating an approach, read its measured outcome and limitations:
   retrieval quality. The [experiment guide](eval/ANSWER_PACKET.md) records the
   reproducible setup and spending safeguards.
 
+- [Relative dates in evidence, reranker fusion and titled reranker documents: not adopted](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-10-21-external-ideas-wave-a.md).
+  Each was preregistered in gbrain-evals and run against the release default
+  on LongMemEval-S. Absolute date brackets beside relative phrases in
+  delivered conversation turns, with retrieval frozen: Sonnet 5.5 scored 460.5
+  vs 463 out of 500 (mean of 2 samples, inconclusive). The 60-question
+  synthetic date suite was at ceiling (60/60 in both arms), and a bracket
+  audit found 1 wrong out of 100. Reciprocal-rank fusion of the reranker and
+  first-pass orders (k=60, equal weights): recall_all@5 fell from 451 to 439
+  out of 470, and ranking-shapes hit@1 fell from 91.4% to 65.7%
+  ([wave B](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-10-21-external-ideas-wave-b-results.md)).
+  A page title and date in the reranker document: 450 vs 451 out of 470, with
+  no gain shown. None of these shipped.
+
 - [What actually helps an AI use its memory?](research/answer-evidence/compendium.md)
   explains the relevant research in plain English, separates published findings
   from GBrain's measured failures, and ranks narrowly testable next experiments.
