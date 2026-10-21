@@ -16,6 +16,7 @@ import { getEmbeddingModel } from '../ai/gateway.ts';
 import { jsonRowBatches } from '../batch-rows.ts';
 import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
 import { belowSafeChunkFence, chunkGenerationFilter, movableChunkSql } from '../search/safe-chunks.ts';
+import { applyMoveWaves, CHUNK_ROW_WRITE_BUDGET, planMoveWaves, type ChunkMove } from './chunk-moves.ts';
 import { buildSegmentedProjection } from '../page-body/projection.ts';
 import { isSegmentedPage } from '../page-body/page-shape.ts';
 import { pageReadFilter } from '../search/read-policy-sql.ts';
@@ -171,6 +172,112 @@ async function readGuardedProjectionSnapshot(tx: BrainEngine, slug: string, sour
     ...(fenceOverlay ? { fenceOverlay } : {}) };
 }
 
+/** #7172: the queue reason of a revision whose publication left its chunk replacement to `continueDeferredProjection`. */
+export const DEFERRED_CHUNK_REPLACEMENT = 'chunk_replacement_deferred';
+
+/**
+ * Which stored rows a projection of `chunks` keeps (#5553, A4): each row holding a new chunk at its own index, and
+ * each other row whose chunk the projection holds at another index when its vector is current (`moves`, with the
+ * index and span each lands on). `current` lists the kept rows whose recorded embedding input the page accepts.
+ */
+async function planProjectionKeep(tx: BrainEngine, current: PageSnapshot, context: Awaited<ReturnType<typeof indexingContext>>, stored: Chunk[], chunks: ChunkInput[]) {
+  // #5553: keep a vector only when its recorded embedding input equals the
+  // input the current page would produce. A chunk with no record is kept
+  // only in the pre-contextual NULL mode; explicit none may have inherited
+  // an old title vector, so its missing proof cannot authorize retention.
+  // On a contextual page it is
+  // nulled once and stamped by its re-embed.
+  const mode = current.page.contextual_retrieval_mode;
+  const provenance = embeddingInputContext(context, current.page.title, context.corpusGeneration, chunks);
+  const col = quoteIdentifier(context.column.name);
+  const recorded = new Map((await tx.executeRaw<{ id: number; embedding_input_hash: string | null; movable: boolean }>(
+    `SELECT id,embedding_input_hash,${movableChunkSql(col)} AND model IS NOT DISTINCT FROM $2 AS movable FROM content_chunks WHERE page_id=$1`,
+    [current.page.id, context.provenanceModel])).map(row => [Number(row.id), row]));
+  const currentInput = (chunk: Chunk) => {
+    const hash = recorded.get(Number(chunk.id))?.embedding_input_hash ?? null;
+    return hash === null ? mode == null : acceptedEmbeddingInputHashes(provenance, mode, chunk).includes(hash);
+  };
+  // A4: a chunk unchanged at its index stays; one the new projection holds at
+  // another index stays too when its vector is current, and moves there, so a
+  // top insert re-embeds only the chunks whose text changed.
+  const identity = (chunk: ChunkInput | Chunk) => digest([chunk.chunk_text, chunk.chunk_source,
+    chunk.language ?? null, chunk.symbol_name ?? null, chunk.symbol_type ?? null,
+    chunk.start_line ?? null, chunk.end_line ?? null, chunk.parent_symbol_path ?? null,
+    chunk.doc_comment ?? null, chunk.symbol_name_qualified ?? null, chunk.modality ?? 'text']);
+  const atIndex = new Map(chunks.map(chunk => [chunk.chunk_index, identity(chunk)]));
+  const inPlace = stored.filter(chunk => atIndex.get(chunk.chunk_index) === identity(chunk));
+  const held = new Set(inPlace.map(chunk => chunk.chunk_index));
+  const open = new Map<string, ChunkInput[]>();
+  for (const chunk of chunks) if (!held.has(chunk.chunk_index)) open.set(identity(chunk), [...(open.get(identity(chunk)) ?? []), chunk]);
+  const moves: ChunkMove[] = [];
+  const moved = stored.filter(chunk => {
+    if (held.has(chunk.chunk_index) && atIndex.get(chunk.chunk_index) === identity(chunk)) return false;
+    if (!recorded.get(Number(chunk.id))?.movable || !currentInput(chunk)) return false;
+    const target = open.get(identity(chunk))?.shift();
+    if (!target) return false;
+    moves.push({ id: Number(chunk.id), from: chunk.chunk_index, to: target.chunk_index,
+      projected_byte_start: target.projected_byte_start ?? null, projected_byte_end: target.projected_byte_end ?? null });
+    return true;
+  });
+  const kept = [...inPlace, ...moved];
+  return { kept, moves, current: kept.filter(currentInput).map(chunk => Number(chunk.id)), provenanceModel: context.provenanceModel, column: context.column };
+}
+
+/**
+ * #7172: one bounded step of a chunk replacement a publication deferred (the page committed with its text projection
+ * pending, its search hiding the page's passages until the seal). Under the page guard, at the page's current
+ * revision, a step deletes the rows the projection does not keep (a delete adds no index entry) and then makes at most
+ * `budget` row writes, in this order: kept rows change index (`planMoveWaves`), kept rows whose input is no longer
+ * current lose their vector, and the missing chunks are inserted without vectors. The step that finds nothing left
+ * seals the projection. Idempotent: each step re-reads the page and plans from what is stored, so a crash between
+ * steps resumes where the last committed one left it. 'skipped' when the page is not an unsealed inline Markdown page.
+ */
+export async function continueDeferredProjectionStep(engine: BrainEngine, sourceId: string, slug: string, budget = CHUNK_ROW_WRITE_BUDGET): Promise<'sealed' | 'more' | 'skipped'> {
+  return engine.transaction(async tx => {
+    await tx.lockPageKeys([{ sourceId, slug }]);
+    const prepared = await readGuardedProjectionSnapshot(tx, slug, sourceId, { allowUnsealed: true });
+    if (!prepared || prepared.pageKind !== 'markdown' || prepared.snapshot.page.text_projection_revision === prepared.snapshot.revision) return 'skipped';
+    const current = prepared.snapshot;
+    const pageId = Number(current.page.id);
+    const { chunks } = await preparePageProjection(prepared);
+    const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride);
+    const plan = await planProjectionKeep(tx, current, context, prepared.chunks, chunks);
+    await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=$1 AND NOT(id=ANY($2::int[]))', [pageId, plan.kept.map(chunk => Number(chunk.id))]);
+    const { waves, updates, done } = planMoveWaves(plan.moves, new Map(plan.kept.map(chunk => [chunk.chunk_index, Number(chunk.id)])), budget);
+    await applyMoveWaves(tx, pageId, waves);
+    if (!done) return 'more';
+    let left = budget - updates;
+    const col = quoteIdentifier(plan.column.name);
+    const stale = (await tx.executeRaw<{ id: number }>(`SELECT id FROM content_chunks WHERE page_id=$1 AND ${col} IS NOT NULL
+      AND (model IS DISTINCT FROM $2 OR embedded_text_hash <> md5(chunk_text) OR NOT(id=ANY($3::int[]))) ORDER BY chunk_index`,
+    [pageId, plan.provenanceModel, plan.current])).map(row => Number(row.id));
+    const nulled = stale.slice(0, left);
+    if (nulled.length) {
+      await tx.executeRaw(`UPDATE content_chunks SET ${col}=NULL,embedded_at=NULL,embedded_text_hash=NULL,embedding_input_hash=NULL,
+        embedding_pending_since=COALESCE(embedding_pending_since,now()) WHERE page_id=$1 AND id=ANY($2::int[])`, [pageId, nulled]);
+    }
+    if (stale.length > nulled.length) return 'more';
+    left -= nulled.length;
+    const moved = new Set(plan.moves.map(move => move.id));
+    const occupied = new Set([...plan.kept.filter(row => !moved.has(Number(row.id))).map(row => row.chunk_index), ...plan.moves.map(move => move.to)]);
+    const missing = chunks.filter(chunk => !occupied.has(chunk.chunk_index));
+    const inserts = missing.slice(0, left);
+    if (inserts.length) await tx.upsertChunks(slug, inserts, { sourceId, embeddingColumn: context.column, sealChunkerVersion: MARKDOWN_CHUNKER_VERSION, pageId, deferSeal: true });
+    if (missing.length > inserts.length) return 'more';
+    await sealImportedPage(tx, slug, sourceId, current, MARKDOWN_CHUNKER_VERSION, pageId);
+    await tx.executeRaw('DELETE FROM page_projection_jobs WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid', [current.sourceIncarnation, slug, current.revision]);
+    return 'sealed';
+  });
+}
+
+/** `continueDeferredProjectionStep` until the page is sealed, skipped, or `until` says stop (a resident's time budget). */
+export async function continueDeferredProjection(engine: BrainEngine, sourceId: string, slug: string, until: () => boolean = () => false): Promise<'sealed' | 'more' | 'skipped'> {
+  for (;;) {
+    const step = await continueDeferredProjectionStep(engine, sourceId, slug);
+    if (step !== 'more' || until()) return step;
+  }
+}
+
 /** No provider work under the guard. Delayed derived results lose to newer content. */
 export async function installPageProjection(engine: BrainEngine, prepared: ProjectionSnapshot, chunks: ChunkInput[], opts: { seal?: boolean; signature?: string; preserveEmbeddings?: boolean; code?: Awaited<ReturnType<typeof prepareCodeChunks>> } = {}): Promise<void> {
   const { snapshot } = prepared;
@@ -197,48 +304,14 @@ export async function installPageProjection(engine: BrainEngine, prepared: Proje
     ];
     if (changed.length) throw new PageProjectionConflictError(snapshot.revision, current!.revision, changed, slug, sourceId);
     if (opts.seal && opts.preserveEmbeddings) {
-      // #5553: keep a vector only when its recorded embedding input equals the
-      // input the current page would produce. A chunk with no record is kept
-      // only in the pre-contextual NULL mode; explicit none may have inherited
-      // an old title vector, so its missing proof cannot authorize retention.
-      // On a contextual page it is
-      // nulled once and stamped by its re-embed.
-      const mode = current!.page.contextual_retrieval_mode;
-      const provenance = embeddingInputContext(context, current!.page.title, context.corpusGeneration, chunks);
-      const col = quoteIdentifier(context.column.name);
-      const recorded = new Map((await tx.executeRaw<{ id: number; embedding_input_hash: string | null; movable: boolean }>(
-        `SELECT id,embedding_input_hash,${movableChunkSql(col)} AND model IS NOT DISTINCT FROM $2 AS movable FROM content_chunks WHERE page_id=$1`,
-        [snapshot.page.id, context.provenanceModel])).map(row => [Number(row.id), row]));
-      const currentInput = (chunk: Chunk) => {
-        const hash = recorded.get(Number(chunk.id))?.embedding_input_hash ?? null;
-        return hash === null ? mode == null : acceptedEmbeddingInputHashes(provenance, mode, chunk).includes(hash);
-      };
-      // A4: a chunk unchanged at its index stays; one the new projection holds at
-      // another index stays too when its vector is current, and upsertChunks moves
-      // the row there, so a top insert re-embeds only the chunks whose text changed.
-      const identity = (chunk: ChunkInput | Chunk) => digest([chunk.chunk_text, chunk.chunk_source,
-        chunk.language ?? null, chunk.symbol_name ?? null, chunk.symbol_type ?? null,
-        chunk.start_line ?? null, chunk.end_line ?? null, chunk.parent_symbol_path ?? null,
-        chunk.doc_comment ?? null, chunk.symbol_name_qualified ?? null, chunk.modality ?? 'text']);
-      const atIndex = new Map(chunks.map(chunk => [chunk.chunk_index, identity(chunk)]));
-      const elsewhere = new Map<string, number>();
-      for (const chunk of chunks) elsewhere.set(identity(chunk), (elsewhere.get(identity(chunk)) ?? 0) + 1);
-      const inPlace = stored.filter(chunk => atIndex.get(chunk.chunk_index) === identity(chunk));
-      for (const chunk of inPlace) elsewhere.set(identity(chunk), elsewhere.get(identity(chunk))! - 1);
-      const moved = stored.filter(chunk => {
-        const left = elsewhere.get(identity(chunk)) ?? 0;
-        if (atIndex.get(chunk.chunk_index) === identity(chunk) || left <= 0
-          || !recorded.get(Number(chunk.id))?.movable || !currentInput(chunk)) return false;
-        elsewhere.set(identity(chunk), left - 1);
-        return true;
-      });
-      const kept = [...inPlace, ...moved];
+      const { kept, current: currentIds, provenanceModel, column } = await planProjectionKeep(tx, current!, context, stored, chunks);
+      const col = quoteIdentifier(column.name);
       await tx.executeRaw(`DELETE FROM content_chunks WHERE page_id=$1 AND NOT(id=ANY($2::int[]))`, [snapshot.page.id, kept.map(chunk => chunk.id)]);
       await tx.executeRaw(`UPDATE content_chunks SET ${col}=NULL,
         embedded_at=NULL,embedded_text_hash=NULL,embedding_input_hash=NULL,
         embedding_pending_since=COALESCE(embedding_pending_since,now()) WHERE page_id=$1 AND
         (model IS DISTINCT FROM $2 OR embedded_text_hash <> md5(chunk_text) OR NOT(id=ANY($3::int[])))`,
-      [snapshot.page.id, context.provenanceModel, kept.filter(currentInput).map(chunk => Number(chunk.id))]);
+      [snapshot.page.id, provenanceModel, currentIds]);
     } else if (opts.seal) await tx.deleteChunks(slug, { sourceId });
     await tx.upsertChunks(slug, chunks, { sourceId, expectedRevision: snapshot.revision, embeddingColumn: context.column });
     if (opts.code) await installCodeChunkEdges(tx, slug, sourceId, opts.code);
@@ -680,9 +753,10 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
     try {
       const prepared = await engine.transaction(async tx => {
         await tx.lockPageKeys([{ sourceId: job.source_id, slug: job.slug }]);
-        const pending = await tx.executeRaw(`SELECT 1 FROM page_projection_jobs
+        const pending = await tx.executeRaw<{ reason: string }>(`SELECT reason FROM page_projection_jobs
           WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid`, observed);
         if (!pending.length) return null;
+        if (pending[0]!.reason === DEFERRED_CHUNK_REPLACEMENT) return 'deferred';
         const read = await readGuardedProjectionSnapshot(tx, job.slug, job.source_id, { allowUnsealed: true });
         if (!read) {
           const [segmented] = await tx.executeRaw(`SELECT 1 FROM pages WHERE source_id=$1 AND slug=$2 AND body_storage='segmented' AND deleted_at IS NULL`,
@@ -701,6 +775,19 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
       });
       if (!prepared) { superseded++; continue; }
       if (prepared === 'removed') { superseded++; opts.onHeal?.({ kind: 'removed', source_id: job.source_id, slug: job.slug }); continue; }
+      if (prepared === 'deferred') {
+        // #7172: a publication left this revision's chunk replacement; it finishes in bounded steps, within the deadline.
+        const step = await continueDeferredProjection(engine, job.source_id, job.slug,
+          () => opts.deadlineMs !== undefined && now() - startedAt >= opts.deadlineMs);
+        if (step === 'sealed') rebuilt++;
+        else {
+          superseded++;
+          // A skipped page (sealed meanwhile, or no longer inline Markdown) goes back to the ordinary rebuild.
+          await engine.executeRaw(`UPDATE page_projection_jobs SET updated_at=now()${step === 'skipped' ? ",reason='canonical_change'" : ''}
+            WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid`, observed);
+        }
+        continue;
+      }
       if (prepared === 'segmented') {
         const built = await buildSegmentedProjection(engine, { sourceId: job.source_id, slug: job.slug });
         await engine.executeRaw(built.sealed
