@@ -113,6 +113,16 @@ GBrain passes `isPersistenceDeclaration` (`src/core/persistence/protocol.ts`)
 from the persistence transactions that open with the protocol declaration
 (GBRA-156, same test file).
 
+On a reserved connection (`sql.reserve`), where the pool does not pipeline,
+`reservedTransactions().begin({ first }, fn)`
+(`src/core/postgres-engine/reserved-transactions.ts`) makes the same
+exception outside the driver. It replaces each query's `handler` property,
+the function postgres.js calls when it executes a query, with one that waits
+for BEGIN's answer. That code lives in `src`, not in this patch set, so
+`update-postgres.sh --check` does not cover it: after a driver upgrade,
+check that `Query.handler` is still called on execute, and run
+`test/persistence-pipeline-first.test.ts`.
+
 Each statement's row count resets at its ReadyForQuery. Stock postgres.js
 resets it only at CommandComplete. A statement that streams rows and then fails
 never gets there: a runtime error after its first rows, or a cancel or timeout
