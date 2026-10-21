@@ -108,6 +108,15 @@ describe('a name followed by topic words', () => {
     expect((await recall(['alice enterprise pricing'])).facts).not.toContain('prefers morning meetings');
   });
 
+  test('a leading name that is only a page alias still resolves', async () => {
+    await engine.putPage('people/robert-example', { title: 'Robert Example', type: 'person', compiled_truth: 'Advisor.' } as never);
+    await engine.setPageAliases('people/robert-example', 'default', ['bobby example']);
+    await fact('prefers tea at board meetings', 'people/robert-example', new Date('2026-03-03'));
+    const r = await recall(['Bobby Example board']);
+    expect(r.facts).toEqual(['prefers tea at board meetings']);
+    expect(r.err).toContain("'Bobby Example' is people/robert-example");
+  });
+
   test('an explicit --entity is never split or widened to text', async () => {
     const r = await recall(['--entity', 'alice example enterprise pricing']);
     expect(r.facts).toEqual([]);

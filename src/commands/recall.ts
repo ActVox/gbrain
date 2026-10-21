@@ -576,8 +576,10 @@ function noteEntitySplit(positional: string, name: string, slug: string, topic: 
 
 async function entitySplitLocal(engine: BrainEngine, flags: ParsedFlags, sourceId: string, resolvedSince: Date | null): Promise<FactRow[]> {
   if (!entitySplitApplies(flags)) return [];
+  const spans = entitySplitSpans(flags.entity!);
+  if (!await splitMayMatch(engine, sourceId, spans.map(s => s.name))) return [];
   const { resolveEntitySlugWithSource } = await import('../core/entities/resolve.ts');
-  for (const span of entitySplitSpans(flags.entity!)) {
+  for (const span of spans) {
     const resolved = await resolveEntitySlugWithSource(engine, sourceId, span.name);
     if (!resolved || resolved.source === 'fallback_slugify') continue;
     const rows = await fetchRowsLocal(engine, { ...flags, entity: resolved.slug, entityExplicit: true }, sourceId, resolvedSince);
@@ -586,6 +588,30 @@ async function entitySplitLocal(engine: BrainEngine, flags: ParsedFlags, sourceI
     return rankByTopic(rows, span.topic);
   }
   return [];
+}
+
+/**
+ * One statement before the per-span resolution (four statements a span): a
+ * span can only show facts when some fact is keyed under a slug whose last
+ * segment starts with its name, or the name is a page alias. A miss, the
+ * common case for a topic phrase, then costs one round trip instead of up to
+ * twenty-four (test/e2e/retrieval-round-trip-budget.test.ts).
+ */
+async function splitMayMatch(engine: BrainEngine, sourceId: string, names: string[]): Promise<boolean> {
+  const { slugify } = await import('../core/entities/resolve.ts');
+  const { normalizeAlias } = await import('../core/search/alias-normalize.ts');
+  const tokens = [...new Set(names.map(n => slugify(n)).filter(Boolean))];
+  if (!tokens.length) return false;
+  try {
+    const rows = await engine.executeRaw(
+      `SELECT 1 FROM facts WHERE source_id = $1 AND entity_slug ~ ANY($2::text[])
+       UNION ALL SELECT 1 FROM page_aliases WHERE source_id = $1 AND alias_norm = ANY($3::text[])
+       LIMIT 1`,
+      [sourceId, tokens.map(t => `(^|/)${t}(-|$)`), [...new Set(names.map(n => normalizeAlias(n)).filter(Boolean))]]);
+    return rows.length > 0;
+  } catch {
+    return true;
+  }
 }
 
 async function runRecallOnce(
