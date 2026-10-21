@@ -205,7 +205,7 @@ export function maintenanceDriftRefusal(sourceId: string, slug: string): Operati
  * atom, whose file the retirement removed): a missing canonical file publishes, so it is no ghost.
  */
 export const PUBLISHES_WITHOUT_FILE: ReadonlySet<string> = new Set(['managed_maintenance_chronicle_event', 'managed_maintenance_chronicle_retire', 'managed_maintenance_retire_stale_atoms',
-  'managed_maintenance_retire_ghost_page', 'managed_maintenance_restore_reextract_atom', 'managed_maintenance_file_drift_detach']);
+  'managed_maintenance_retire_ghost_page', 'managed_maintenance_restore_reextract_atom']);
 
 /** #6696 (A12): `source_changed` / `canonical_file_missing` before admission: the page's recorded file is gone; never a new request. */
 export function maintenanceGhostRefusal(sourceId: string, slug: string): OperationError {

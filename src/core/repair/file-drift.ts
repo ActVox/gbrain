@@ -73,7 +73,7 @@ import { protectedReconcileKey, reconcileCanonical, RECONCILE_SCAN_KEYS, type Re
 import { ABSENT_FILE_HASH, canonicalDeletionState, missingFileRoute, readDeletedDriftTarget, readReconcileState, type DeletedDriftChange, type DeletedDriftTarget, type ReconcileArtifact } from '../persistence/reconcile-state.ts';
 import { clearGitHold, fileDriftActionVerb, fileDriftSide, FILE_DRIFT_DELETED_STATES, FILE_DRIFT_SIDES, GIT_HOLD_OP, heldDriftPreviewArgv, type FileDriftDeletedState, type FileDriftSide, type GitHoldRecord } from '../persistence/sync-holds.ts';
 import { prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../persistence/file-repair.ts';
-import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
+import { maintenancePreflight, submitDatabaseMaintenanceIntent, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { resolveSlugForPath } from '../sync.ts';
@@ -629,7 +629,8 @@ async function applyDeletedSide(ctx: OperationContext, page: ApprovedPage, artif
       const authority = await maintenancePreflight(ctx.engine, page.source_id);
       if (!authority) throw opError('owner_unavailable', 'Keeping a held page database-only needs the managed write path.',
         `Managed persistence is off for this brain, so ${artifact.detach_page.path} was not resolved. Held file-drift pages exist only on managed sources; check the source with gbrain sources status ${page.source_id} --json.`);
-      await submitMaintenanceIntent(ctx.engine, authority, artifact.slug, { kind: FILE_DRIFT_DETACH_INTENT, expected_revision: artifact.detach_page.revision, target: artifact.detach_page }, requestId);
+      // Database-only: no file is staged, so the missing file the page still records is not refused before admission.
+      await submitDatabaseMaintenanceIntent(ctx.engine, authority, artifact.slug, { kind: FILE_DRIFT_DETACH_INTENT, expected_revision: artifact.detach_page.revision, target: artifact.detach_page }, requestId);
       return { applied: true, outcome: 'repaired', detail: { request_id: requestId, prefer: 'database', action } };
     }
     const pin = 'remove_file' in artifact ? artifact.remove_file : artifact.import_file;
