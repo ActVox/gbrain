@@ -36,7 +36,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { SyncResult } from '../../commands/sync.ts';
 import type { Action } from '../agent-output.ts';
 import { inspectLock, LockStolenError, LockUnavailableError, syncLockId, withRefreshingLock } from '../db-lock.ts';
-import { currentRunDeadline, lastForwardProgressAt, noteForwardProgress } from '../forward-progress.ts';
+import { currentRunDeadline, lastForwardProgressAt, noteCommittedProgress, noteForwardProgress } from '../forward-progress.ts';
 import { faultPoint } from './fault-points.ts';
 import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
 import { VERSION } from '../../version.ts';
@@ -257,9 +257,13 @@ export async function withDrainLease(engine: BrainEngine, sourceId: string, opts
     const holder = await readDrainHolder(engine, sourceId).catch(() => null);
     if (seen === undefined) { opts.announce?.(holder, 'start'); reportedAt = Date.now(); }
     else if (Date.now() - reportedAt >= (opts.tty ? FOLLOW_REPORT_TTY_MS : FOLLOW_REPORT_MS)) { opts.announce?.(holder, 'progress'); reportedAt = Date.now(); }
-    // The holder's commits and cursor saves are this run's forward progress: the progress-aware watchdog window extends with them.
+    // The holder's commits are this run's committed progress (the progress-aware watchdog window extends with them); a cursor
+    // save alone (GBRA-133 PR 3a: a legacy-sweep slice saves the pass row) is forward progress only.
     const now = `${holder?.started_at ?? ''}|${holder?.progress?.committed ?? ''}|${holder?.progress?.last_progress_at ?? ''}`;
-    if (seen !== undefined && now !== seen) noteForwardProgress();
+    if (seen !== undefined && now !== seen) {
+      const [startedNow, committedNow] = now.split('|'), [startedSeen, committedSeen] = seen.split('|');
+      if (startedNow === startedSeen && Number(committedNow) > Number(committedSeen)) noteCommittedProgress(); else noteForwardProgress();
+    }
     seen = now;
     if (holder && holderStalled(holder)) return leaseStalledResult(sourceId, holder, { remote: opts.remote });
     const stopAt = followStopAt(startedAt, follow.deadlineAtMs);
