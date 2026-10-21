@@ -227,6 +227,7 @@ describe('GBRA-133: a drain that stops short names its cause on the serve done l
       .toBe(' stop=blocked_by_failures cause=unrecorded');
   });
   test('a resumable stop names its reason', () => {
-    expect(drainStopFields({ ...base, status: 'partial', reason: 'deadline', drain: { outcome: 'resumable', stop_reason: 'deadline' } as never })).toBe(' stop=deadline');
+    expect(drainStopFields({ ...base, status: 'partial', reason: 'writer_yield', drain: { outcome: 'resumable', stop_reason: 'deadline' } as never })).toBe(' stop=deadline');
+    expect(drainStopFields({ ...base, status: 'partial', reason: 'writer_yield' })).toBe(' stop=writer_yield');
   });
 });
