@@ -7,10 +7,13 @@ import { readFileSync, readdirSync, lstatSync } from 'fs';
 import { join, relative } from 'path';
 import { parseMarkdown } from '../core/markdown.ts';
 import type { LinkExtractionPack } from '../core/link-extraction.ts';
-import { pathToSlug, pruneDir, isSyncable } from '../core/sync.ts';
+import { pathToSlug, pruneDir, isSyncable, DEFAULT_METAFILE_PAGES_MODE, type MetafilePagesMode } from '../core/sync.ts';
+import { diskMetafileHeads, metafilePagePredicate } from '../core/sync-metafile-pages.ts';
 
 /** The walk behind `walkMarkdownFiles`, in its order; yields after each directory it finishes. */
-export function* markdownWalk(dir: string, d: string, emit: (file: { path: string; relPath: string }) => void): Generator<void> {
+export function* markdownWalk(dir: string, d: string, emit: (file: { path: string; relPath: string }) => void,
+  metafilePages: MetafilePagesMode = DEFAULT_METAFILE_PAGES_MODE,
+  metafilePage: (path: string) => boolean = metafilePagePredicate(metafilePages, diskMetafileHeads(dir))): Generator<void> {
   for (const entry of readdirSync(d)) {
     // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- d is the walk's own directory (the brain root or one of its subdirectories, never a symlink: lstat below) and entry is a directory entry read from it; moved unchanged from extract.ts walkMarkdownFiles
     const full = join(d, entry);
@@ -20,10 +23,10 @@ export function* markdownWalk(dir: string, d: string, emit: (file: { path: strin
         // v0.37.7.0 #1169: pass parentDir so pruneDir can detect git
         // submodule pointers (`.git` as a file inside the candidate).
         if (!pruneDir(entry, d)) continue;
-        yield* markdownWalk(dir, full, emit);
+        yield* markdownWalk(dir, full, emit, metafilePages, metafilePage);
       } else if (entry.endsWith('.md') && !entry.startsWith('_')) {
         const rel = relative(dir, full);
-        if (!isSyncable(rel, { strategy: 'markdown' })) continue;
+        if (!isSyncable(rel, { strategy: 'markdown', metafilePage })) continue;
         emit({ path: full, relPath: rel });
       }
     } catch { /* skip unreadable */ }
@@ -39,14 +42,14 @@ export interface MarkdownTree { files: Array<{ path: string; relPath: string; sl
  * yielding to the event loop after each directory, so a resident's commit-triggered sync never holds its event loop
  * for the whole walk (about 0.75 s at 100k files). The sync hooks share one tree per run.
  */
-export async function indexMarkdownTree(dir: string): Promise<MarkdownTree> {
+export async function indexMarkdownTree(dir: string, metafilePages: MetafilePagesMode = DEFAULT_METAFILE_PAGES_MODE): Promise<MarkdownTree> {
   const tree: MarkdownTree = { files: [], slugToPath: new Map() };
   const emit = (file: { path: string; relPath: string }) => {
     const slug = pathToSlug(file.relPath);
     tree.files.push({ ...file, slug });
     indexSlugPath(tree.slugToPath, slug, file.relPath);
   };
-  for (const _ of markdownWalk(dir, dir, emit)) await new Promise<void>(resolve => setImmediate(resolve));
+  for (const _ of markdownWalk(dir, dir, emit, metafilePages)) await new Promise<void>(resolve => setImmediate(resolve));
   return tree;
 }
 

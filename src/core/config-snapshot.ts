@@ -107,12 +107,27 @@ function activeSnapshot(engine: object): RequestSnapshot | undefined {
  */
 export async function withRequestConfigSnapshot<T>(engine: BulkConfigReader, fn: () => Promise<T>, seed?: Record<string, string>): Promise<T> {
   if (activeSnapshot(engine)) return fn();
-  const held: RequestSnapshot = { engine, open: true, rows: seed ? Promise.resolve(new Map(Object.entries(seed))) : null };
+  const snapshot = openRequestConfigSnapshot(engine, seed);
   try {
-    return await requestSnapshot.run({ held, live: false }, fn);
+    return await snapshot.run(fn);
   } finally {
-    held.open = false;
+    snapshot.close();
   }
+}
+
+/**
+ * One snapshot of `engine` shared by separate calls that cannot sit inside one
+ * callback (#7147: a CLI read builds its context, then runs the operation,
+ * each under its own timeout). Each `run(fn)` reads config the way
+ * `withRequestConfigSnapshot` does, all from the same snapshot; `close()`
+ * ends it, so later reads, and work a run left behind, read live.
+ */
+export function openRequestConfigSnapshot(engine: BulkConfigReader, seed?: Record<string, string>): { run<T>(fn: () => Promise<T>): Promise<T>; close(): void } {
+  const held: RequestSnapshot = { engine, open: true, rows: seed ? Promise.resolve(new Map(Object.entries(seed))) : null };
+  return {
+    run: fn => activeSnapshot(engine) ? fn() : requestSnapshot.run({ held, live: false }, fn),
+    close: () => { held.open = false; },
+  };
 }
 
 /** Run `fn` reading config live (a write operation inside a request); the request's snapshot is retaken after it. */
