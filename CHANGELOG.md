@@ -10,6 +10,139 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.330.0] - 2026-10-20
+
+**Sync no longer deletes a page just because its file is missing when Git never had that file, and the autopilot purge no longer hard-deletes what a sync deleted without review.** A large managed source lost thousands of agent-written pages: their write-through files sat in a `.gitignore`d directory, so they were never committed; when they left the disk, sync read their absence as deletions (4% of the source, under the 50% valve), and the purge phase hard-deleted them 72 hours later (#7130, reported by @liuwenyong1985).
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A live page's file is missing and Git never committed it (ignored, or never added) | managed sync soft-deleted the page | the page is held `file_drift` (side `deleted`, reason `never_committed` or `ignored`); a person decides with `gbrain repair file-drift --prefer file` |
+| A committed file is removed in a commit | the page is deleted | unchanged |
+| One sync run deletes many pages below the 50% valve | nothing stopped it | `sync.max_deletes` (500) and `sync.max_delete_ratio` (1%, above 50 deletes), per source too, withhold the deletes and ask the user; managed passes, classic `sync --full` and working-tree syncs |
+| Classic `sync --full` when `git log --all` fails (a dangling ref) | every stale page was deleted | every stale page is kept, with a warning |
+| The autopilot purge reaches a sync tombstone no live page duplicates | hard-deleted after 72 h | held (`sync_delete_unreviewed`); `gbrain pages purge-deleted` purges it after consent |
+| The purge window | fixed 72 h | `purge.retention_hours`, which can only lengthen it (default and minimum 72) |
+| A managed put_page or capture of a new page into an ignored directory, on a source without Git durability | wrote a file Git would never commit | the page is database-only |
+| Pages a sync already deleted this way | no way to find them | doctor `uncommitted_sync_deletions` and the preview-first `gbrain repair uncommitted-deletions --source <id>` restore them database-only |
+
+Pages the purge already hard-deleted come back only from a backup (`pg_dump`, or a `gbrain backup create` taken before the purge). Nothing changes on upgrade; the repair runs only when named.
+
+## [0.60.329.0] - 2026-10-20
+
+**Five tests that failed once each on CI are fixed at their causes, and two of the causes were real bugs.** An unchanged transcript re-ingest on Postgres could admit a no-op page write (and spend a request id), and a sync that held its lock while a write admission rebuilt the database pool threw at the very end and left its lock row behind.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Re-ingesting an unchanged transcript right after its page was written (Postgres) | the unchanged-page screen counted the just-committed write as still pending while its post-commit cleanup ran, so the rerun admitted a no-op put_page | only unfinished writes (queued, running, recovering) hold the screen; a finished write's page and canonical file are final |
+| A sync whose lock was held across a reconnect (a write admission that lost its connection) | the lock release ran on the ended pool: `CONNECTION_ENDED` after the work finished, lock row left until its TTL | release and exit cleanup run on the engine's live pool |
+| `worker-shutdown-error-matrix`, `persistence-memory-mutations`, belief-ledger probe 17 | each could fail on a loaded runner | each waits for the event its contract names (handler started, provider call in flight, consumer disposed) |
+
+No timeout, budget, retry or assertion is loosened.
+
+## [0.60.328.0] - 2026-10-20
+
+**A Google API that's disabled in your OAuth project is now reported as itself, all at once, instead of looking like a different account.** When Gmail, Calendar or People was disabled (or a scope wasn't granted), a managed Google source could not read the account, so the sync failed or refused with `connector_account_changed`, and setup only found out one API at a time. The account now resolves through Google's sign-in identity, the services that work keep syncing, and setup, `gbrain google status` and doctor name every disabled API with its project and enable link in one report.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed source whose Gmail (or People) API is disabled, other services fine | the whole sync failed with `api_not_enabled`, or refused as an account change | the account resolves through userinfo, the other services sync, the run is `partial` and names the disabled API |
+| Nothing can name the account because of a network failure | refused as `connector_account_changed` (`account_unresolved`), and autopilot skipped the source | fails with the network error and retries next interval |
+| A credential that really belongs to another account | refused `connector_account_changed` | unchanged |
+| `gbrain google setup` with two APIs disabled | registered the source, then failed one API per sync | stops before registering (exit 2, `status: api_access_blocked`) naming every disabled API with its project and console link, every ungranted scope, and a narrower `--services` command for what already works |
+| `gbrain google status` | refresh and calendar checks only | also `accounts[].api_access`, with `ok: false` and exit 1 while an API is disabled or a scope is missing |
+| A Google 403 "insufficient authentication scopes" on a calendar read | reported as `calendar_unreadable` (pick another calendar) | `scope_missing`, fixed with `gbrain google connect --reauth <email>` |
+
+### What to watch for after you upgrade
+
+- Run `gbrain google status`. If it lists `api_access` problems, open each enable link (only the Google Cloud project owner can enable an API), or reauth for a missing scope, then run it again.
+- Doctor's new `google_api_access` check reads what the last sync recorded; it makes no network call, so it clears after the next sync reaches the API.
+
+### Itemized changes
+
+- New doctor check `google_api_access` (operator resolution).
+- `gbrain google setup` probes every requested service before registering a source; `gbrain google status` probes the services each linked source syncs.
+- A disabled-API error carries the API, its title, the project and the enable link from Google's error body; only Google Cloud console links are relayed.
+- When the Gmail label list fails, the loop-exclusion log says the label names could not be checked rather than that they are not labels.
+
+## [0.60.327.0] - 2026-10-20
+
+**Facts keep their words again, and a brain whose facts already lost them can get them back. The embed sweep for changed chunks now finishes on large brains.** Fact extraction ran the prompt-injection filter over the text it saved, and one rule matched the word "System" before a parenthesis, so "Acme Business System (ABS)" was saved as "Acme Business [redacted](ABS)" in the fact, its page's `## Facts` fence and its search chunks. Separately, the sweep that re-embeds chunks whose text changed was one statement over the whole brain; on a large brain it hit the statement timeout every run, from embed jobs and from the hourly maintenance pass, and kept nothing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A fact names "Business System (ABS)" or similar | saved as "Business [redacted](ABS)" | saved as written; the filter rule matches only a code call such as `os.system("…")` |
+| A stored fact holding an injection phrase reaches a model prompt (standing questions, turn context, proactive briefs) | sent as stored | the phrase is neutralized in the prompt copy; the stored fact is unchanged |
+| Facts damaged before this release | stayed damaged | doctor `facts_redaction_marker` counts them; `gbrain repair redacted-facts` previews each restoration a source page proves, and `--apply --expect <hash>` writes exactly that set |
+| The content-drift embed sweep on a large brain | one statement over every chunk; cancelled by the statement timeout on every run | 5,000-chunk batches with a saved cursor, at most 60 seconds per run, a new pass once a day (`embed.content_drift.pass_interval_hours`, default 24) |
+
+### What to watch for after you upgrade
+
+- Nothing is repaired on upgrade. Run `gbrain doctor --only facts_redaction_marker`; if it warns, `gbrain repair redacted-facts` shows what it can restore and changes nothing until you apply the printed command.
+- The repair restores a fact only when the words on both sides of every marker occur in a page the fact came from. A fact with no such page, with two possible spans, or with its row in the fence of a page stored in segments is listed and left for you to edit by hand.
+- A restored database-only fact gets `restored: redacted-facts repair` appended to its context, and its vector is re-embedded by the next `gbrain embed`.
+- On a large brain the first drift pass now spans several runs; `gbrain doctor --only content_drift_sweep` shows each pass, its cursor and any error.
+
+### Itemized changes
+
+- New repair kind `redacted-facts` (explicit-only, preview-bound) and maintenance intent `managed_maintenance_restore_redacted_facts`.
+- New doctor checks `facts_redaction_marker` and `content_drift_sweep`; new setting `embed.content_drift.pass_interval_hours`.
+- Embed and embed-backfill job results report the sweep's state (`content_drift`).
+- Google loops and `gbrain enrich` keep the raw text and quote instead of the filtered copy.
+- Dependencies: `@modelcontextprotocol/sdk` 1.31.0 → 1.32.1 and the admin console's `vite` 6.4.3 → 6.4.4.
+  - GHSA-22jm-h49p-29qw (high): the SDK's experimental task store did not tie a task to the session that created it, so clients sharing one store could list, read and cancel each other's tasks. gbrain's servers (`gbrain serve`, `serve --http`, `mcp expose`) never pass `taskStore`, so they were not exposed.
+  - GHSA-6prh-2h8m-c8cw (medium): the SDK's HTTP client transport followed redirects to any origin, re-sending custom headers, the `mcp-session-id` and, on a 307 or 308, the request body. gbrain uses that transport as a client: the thin client, `gbrain connect`'s probe, harness verify and the shared-skills installer. Bun drops the `Authorization` header across origins, so a redirect could not take the bearer token. It could take the tool-call body (for example, page text sent to `put_page`), but only when the configured brain URL redirected to another origin. Redirects now stay on the same origin.
+  - GHSA-698v-4r3x-3vcv (medium) is in the admin console's build tool (`vite`) and affects development servers only.
+
+Reported by @mje-xyz (#7125) and @DaCal90 (#7117).
+
+## [0.60.326.0] - 2026-10-20
+
+**Managed sync works on Postgres 15 again, and a database error in a write receipt now says what failed.** On a Postgres 15 brain every managed sync stopped at its checkpoint with `storage_error` (PostgreSQL 42601, `syntax_error`), run after run, because the statement that merges `sources.config` used the `IS JSON` predicate, which only Postgres 16 and newer parse. The receipt kept only the error class and SQLSTATE, so nobody could tell which statement failed. Both are fixed. A new CI lane now runs the write, sync, jobs and migration suites on Postgres 15 for every full run, and a unit-tier check refuses Postgres 16+ only SQL in `src/`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Managed sync, put_page with a slug-root mode, source config updates, archive/restore and the shared-skills opt-out on Postgres 15 | every statement that merges `sources.config` failed to parse (42601); the managed sync checkpoint never committed | the merge uses `gbrain_try_jsonb(text)` (migration v263), which parses on Postgres 15, 16 and 17 and PGLite |
+| Doctor `jsonb_integrity` and `gbrain repair-jsonb` on Postgres 15 | `pg_input_is_valid` (Postgres 16+) failed the check | the same `gbrain_try_jsonb` guard |
+| A double-encoded config or dream-breaker map whose text is JSON but not jsonb (a `\u0000` escape) | passed `IS JSON`, then the cast raised and the whole update failed, on every server | reads as an empty object, like other unparseable text |
+| A write that failed on an unexpected database error | the receipt named the class and SQLSTATE only | owner-side the receipt also keeps `error_text` (the server message; object names survive only in known catalog messages or when the statement names them, any other quoted run is replaced by `…`), `statement` (the SQL's keywords, identifiers and operators, every literal, number and comment replaced, never parameters) and `position`; `gbrain write-request <id> --json` on the brain host prints `error_detail`, and the consumer log line carries the same fields |
+
+### What to watch for after you upgrade
+
+- On Postgres 15 the first sync after the upgrade publishes the checkpoint that kept failing. The failed checkpoint receipts from before then count as superseded and stop warning; nothing needs replaying.
+- Remote and agent readers of a receipt see no new field. A PL/pgSQL `RAISE` (a trigger refusal) keeps no text, because it can carry page values.
+- #6719's older `0A000` receipts were written before error text was stored, so their cause stays unknown; once a later checkpoint of the source commits they count as historical (since #6834). A new failure of that kind now records its statement.
+
+### Itemized changes
+
+- New SQL function `gbrain_try_jsonb(text) RETURNS jsonb` (schema.sql and migration v263), used by the `sources.config` normalizer (`src/core/source-config-sql.ts`), the dream-breaker reset, doctor `jsonb_integrity` and `gbrain repair-jsonb`.
+- `ownerExceptionFailure` keeps a server-generated database error's redacted `error_text`, `statement` and `position`; `get_write_request` returns `error_detail` to trusted local callers only.
+- CI: an E2E job `postgres15-compat` runs `scripts/e2e-postgres15.txt` on `pgvector/pgvector:pg15` wherever the gated E2E jobs run and gates `e2e-status` (so `e2e-full-suite`); `bun run ci:ubicloud --lanes pg-arms,e2e --pg-image pgvector/pgvector:pg15` reruns the whole corpus on Postgres 15 as a diagnostic; `test/postgres15-sql-compat-7112.test.ts` fails on Postgres 16+ only SQL in `src/`.
+- Reported by @Justinn231 (#7112, who found the failing statement in the server log) and @Kkkkkuro (#6719).
+
+## [0.60.325.0] - 2026-10-20
+
+**The crash robot no longer fails a run because a sync race made one round fewer than its count saw.** `sync_and_connector_race_direct_write` races a sync pass against a direct write to the same page; when the write is still in flight as round 1 reads its level, the page gets a round of its own, so the same schedule makes two or three rounds per pass. The robot counted every round's sync seams, so a fault drawn from a three-round count (`sync:level_chunk#7`, seed 5105) went unreached in a run that made two (#7124). How many chunks one Git read arrived in also followed pipe timing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Round seams (`round_start`, `level_read`, `level_chunk`, `level_result`, `level_take`, `confirm_parallel`, `level_narrow`, `batch_entries`) | counted every time a round reached them | counted in round slots: per pass, round 1 and the first later round; `batch_entries` in round 1 only |
+| A Git level read in a robot worker | arrived in as many chunks as the pipe delivered | re-cut at fixed 512-byte offsets, so every chunk of a read is a slot every run reaches |
+| Crashes between two chunks of one read | only when timing produced a second chunk | always: seed 5105's race scenario now has 30 `level_chunk` slots (was 7) |
+
+No seam is allowlisted, skipped or given more time. Shard weights are refreshed from the latest unit, serial and E2E runs. The `hono` override moves to `^4.13.11` (now 4.13.13), clearing GHSA-5r4p-p66f-jhc7 (medium), which OSV began reporting against 4.13.7.
+
 ## [0.60.324.0] - 2026-10-20
 
 **Agents can now add to a page without rewriting it, and write pages larger than one request.** Before, adding a line to a long conversation log meant sending the whole page back with put_page, which got slower as the page grew, and a remote or thin client could not write a page bigger than its connection's request limit at all. Now `append_page` adds text to the end of a page in time proportional to the text added, upload sessions carry a page of any size up to the page ceiling in parts, and `edit_page` can edit a very large page by rewriting only the stretch it changes.
