@@ -95,7 +95,9 @@ The CLI falls back to its normal path, silently, when:
   Connection sizing and driver settings (`GBRAIN_POOL_SIZE`,
   `GBRAIN_DIRECT_POOL_SIZE`, `GBRAIN_PREPARE`, ...), the database URL
   variables and `GBRAIN_SOURCE` (which every request carries and the serve
-  resolves for that call) may differ. Editing `config.json`, changing a listed
+  resolves for that call) may differ. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID`
+  count by the config home and brain they resolve to, so a serve that exports
+  `GBRAIN_HOME` matches a CLI that reaches the same home through `HOME`. Editing `config.json`, changing a listed
   variable or upgrading gbrain while a serve runs sends CLI calls to the normal
   path until the serve restarts with the same settings. The refusal names the
   part that differed, never its value: `refused (identity_mismatch): database

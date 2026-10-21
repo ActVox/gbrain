@@ -239,6 +239,14 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     expect({ stdout: run.stdout, exitCode: run.exitCode }).toEqual({ stdout: cold.get('search')!.stdout, exitCode: 0 });
   }, 90_000);
 
+  test('a CLI that resolves the same home through HOME, without the serve\'s GBRAIN_HOME, is answered warm', async () => {
+    const trace = traceFile();
+    const run = await cli(READS.search!, { GBRAIN_DEBUG: '1', GBRAIN_SQL_TRACE: trace, GBRAIN_HOME: '' });
+    expect(run.stderr).not.toContain('[cli-socket] cold path');
+    expect(roundTrips(trace)).toBe(0);
+    expect({ stdout: run.stdout, exitCode: run.exitCode }).toEqual({ stdout: cold.get('search')!.stdout, exitCode: 0 });
+  }, 90_000);
+
   test('a CLI with its own GBRAIN_SOURCE is answered warm, with that source applied', async () => {
     const coldB = await cli(['search', WORD], { GBRAIN_CLI_SOCKET: '0', GBRAIN_SOURCE: 'source-b' });
     expect(coldB.stdout).toContain('notes/gamma-example');
