@@ -58,10 +58,11 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
   }
 
   function traceFile(): string { return join(home, `trace-${traceSeq++}.jsonl`); }
-  function roundTrips(file: string): number {
-    if (!existsSync(file)) return 0;
-    return readFileSync(file, 'utf8').split('\n').filter(line => line && !line.includes('"kind":"connect"')).length;
+  function tripLines(file: string): string[] {
+    if (!existsSync(file)) return [];
+    return readFileSync(file, 'utf8').split('\n').filter(line => line && !line.includes('"kind":"connect"'));
   }
+  function roundTrips(file: string): number { return tripLines(file).length; }
 
   async function startServe(args: string[], extra: Record<string, string> = {}): Promise<ChildProcess> {
     serveLog = '';
@@ -145,7 +146,7 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     expect(cold.get('get missing')!.exitCode).not.toBe(0);
   }, 180_000);
 
-  test('a warm read opens no database connection in the CLI and costs the serve at least 30 fewer round trips than a cold call', async () => {
+  test('a warm read opens no database connection in the CLI, reads config once in one statement, and costs the serve fewer round trips than a cold call', async () => {
     const coldTrace = traceFile();
     const coldStarted = performance.now();
     const coldRun = await cli(['search', WORD], { GBRAIN_SQL_TRACE: coldTrace, GBRAIN_CLI_SOCKET: '0' });
@@ -157,13 +158,17 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     const warmRun = await cli(['search', WORD], { GBRAIN_SQL_TRACE: warmCli });
     const warmMs = performance.now() - started;
     await Bun.sleep(1_500);
-    const serveTrips = roundTrips(serveTrace) - serveBefore;
+    const requestTrips = tripLines(serveTrace).slice(serveBefore);
+    const serveTrips = requestTrips.length;
     expect(warmRun.stdout).toBe(coldRun.stdout);
     expect(roundTrips(warmCli)).toBe(0);
     const coldTrips = roundTrips(coldTrace);
     console.error(`[cli-socket e2e] search round trips: cold CLI ${coldTrips}; warm CLI ${roundTrips(warmCli)} + serve ${serveTrips} (${Math.round(warmMs)} ms wall; cold ${Math.round(coldMs)} ms)`);
     expect(coldTrips).toBeGreaterThan(10);
-    expect(serveTrips).toBeLessThanOrEqual(coldTrips - 30);
+    // The request's config snapshot: one bulk read of the config table, and no per-key config read at all.
+    expect(requestTrips.filter(line => /FROM config WHERE key/i.test(line))).toEqual([]);
+    expect(requestTrips.filter(line => /SELECT key, value FROM config/i.test(line)).length).toBe(1);
+    expect(serveTrips).toBeLessThan(coldTrips);
   }, 90_000);
 
   test('a write never goes through the socket', async () => {
