@@ -196,8 +196,11 @@ export async function submitRememberMutation(ctx: OperationContext, params: Reco
   // A source-scoped absent identity serializes subjectless facts. Bound writers
   // cannot use it to escape their namespace grant.
   const { slug, authority, snapshot, fence, binding, writeThrough } = linked?.target ?? await planRememberTarget(ctx, sourceId, source, entitySlug, null, call);
-  const { assertFactNotWithdrawn, decideReplacement } = await import('../facts/single-prepare.ts');
-  const visibility = await rememberVisibility(ctx, call, snapshot?.page);
+  const { assertFactNotWithdrawn, decideReplacement, replacementVisibility } = await import('../facts/single-prepare.ts');
+  const defaultedVisibility = await rememberVisibility(ctx, call, snapshot?.page);
+  const visibility = call.visibilityDefaulted && p.replaces !== undefined && p.replaces !== null
+    ? await replacementVisibility(ctx.engine, sourceId, Number(p.replaces), defaultedVisibility, { remote: ctx.remote !== false })
+    : defaultedVisibility;
   const factIntent = { fact: String(p.fact).trim(), kind: (p.kind ?? 'fact') as never, visibility, entity_slug: entitySlug };
   // Fail fast on an invalid target or a withdrawn claim; the coordinator re-checks both under its locks before publishing.
   if (p.replaces !== undefined && p.replaces !== null) {
