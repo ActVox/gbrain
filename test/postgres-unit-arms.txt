@@ -63,6 +63,7 @@ test/extract-endpoint-revision.serial.test.ts
 test/extract-entities-managed.test.ts
 test/extract-timeline-from-meetings-managed.test.ts
 test/extraction-watermark-atoms.test.ts
+test/fact-embedding-oversized-7211.test.ts
 test/fact-fence-adoption-exits.test.ts
 test/fact-purge-lookup-timeout-6511.test.ts
 test/facts-insert-guards-7105.test.ts
@@ -197,6 +198,7 @@ test/large-pages/v252-master-reader-compat.test.ts
 test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
 test/links-attendance-blocked.test.ts
+test/links-extraction-yield.test.ts
 test/managed-cycle-pull-upstream.test.ts
 test/managed-facts-withdrawal-recovery-6506.test.ts
 test/managed-facts-withdrawn-skip-6506.test.ts
@@ -378,6 +380,7 @@ test/repair-failed-writes-drift-w411.test.ts
 test/repair-fences.test.ts
 test/repair-file-drift-deleted-6712.test.ts
 test/repair-file-drift-held-6712.test.ts
+test/repair-file-drift-held-window-gbra133.test.ts
 test/repair-frontmatter-keys-sweep-6454.test.ts
 test/repair-frontmatter.test.ts
 test/repair-receipt-compaction.test.ts
@@ -442,6 +445,7 @@ test/sync-waiver-run-imports.test.ts
 test/take-resolution-survives-publish.test.ts
 test/takes-vector-lifecycle-5885.serial.test.ts
 test/terminal-failures-6650.test.ts
+test/timeline-chunk-reuse.test.ts
 test/trust-channel-writes.test.ts
 test/trust-guarded-supersession.test.ts
 test/trust-held-removals.test.ts
@@ -450,6 +454,7 @@ test/unbound-source-6536.test.ts
 test/unindexed-files.test.ts
 test/vector-manifest-probe-bound.test.ts
 test/visibility-fail-closed-derived-writes.test.ts
+test/visibility-repair-scale.test.ts
 test/withdrawal-overlay-concurrency.test.ts
 test/withdrawal-publication-file.test.ts
 test/worktree-refresh-recovery-row-gbra130.test.ts

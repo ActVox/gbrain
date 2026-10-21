@@ -4,7 +4,8 @@
  * - indexed_through moves only when a pass finishes: a sliced pass that stops after one page leaves it where it was;
  * - pending counts the commits and files on HEAD that have not synced yet;
  * - get_write_request answers whether a write is searchable yet, with the gap, while the write's own reply stays frozen;
- * - committed_through_request never passes an unsettled request.
+ * - committed_through_request never passes an unsettled request;
+ * - a pending write hint names the applied read.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
@@ -20,6 +21,7 @@ import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { formatAppliedWatermark, readAppliedWatermark, readWriteWatermark } from '../src/core/persistence/applied-watermark.ts';
 import { readWriteApplied } from '../src/core/persistence/write-applied.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
+import { pendingWriteHint } from '../src/core/persistence/health.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-watermark-7190-'));
@@ -112,3 +114,13 @@ test('committed_through_request stops below an unsettled request, which counts t
     await engine.executeRaw("UPDATE persistence_requests SET state='committed', completed_at=now() WHERE id=$1", [row!.id]);
   }
 }), 240_000);
+
+test('a pending write hint names the applied read; an inspect-owner hint does not', () => {
+  const request_id = randomUUID();
+  const poll = pendingWriteHint({ request_id, state: 'queued', retry_after_ms: 800, target: { slug: 'people/alice-example' } } as any, 'remember');
+  expect(poll).toContain('applied: true');
+  expect(poll).toContain(`gbrain write-request ${request_id} --applied --json`);
+  expect(poll).toContain('page people/alice-example');
+  const inspect = pendingWriteHint({ request_id, state: 'queued', retry_after_ms: 30_000, diagnostic: { next_action: 'inspect_owner' } } as any);
+  expect(inspect).not.toContain('--applied');
+});
