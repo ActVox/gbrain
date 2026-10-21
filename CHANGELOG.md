@@ -10,25 +10,87 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.354.0] - 2026-10-21
+## [0.60.356.0] - 2026-10-21
 
-**The warm CLI socket now matches a serve that exports `GBRAIN_HOME` with a CLI that doesn't.** After v0.60.350.0, a serve started with `GBRAIN_HOME=$HOME` still refused every CLI that relied on `HOME` alone, with `refused (identity_mismatch): env GBRAIN_HOME`. Both sides resolved to the same home, but the identity compared whether the variable was set. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID` now count by the config home and brain they resolve to, which the identity already compares.
+**Two rare races in managed writes are closed: a retried page in a grouped import always prepares again, and a sync that normalizes a fence ends at the commit it was asked to sync.** Both showed up only under load.
+
+The first was in grouped imports. When a group of pages took too long to publish, gbrain cancelled the group and scheduled each page to retry after a short pause. If putting the files back took longer than that pause, the same pass could pick a page up again and publish the version it had prepared before the cancellation, without preparing it again. The page's content was still right, but the retry skipped the fresh preparation it was meant to get. Now a page that was cancelled this way always waits for its next turn and prepares again.
+
+The second was in syncs that rewrite a fixable fence and commit the rewritten file. If gbrain's own commit landed in the gap before it was recorded, the sync could record that commit as the one it had synced, instead of the commit it was asked to sync. The next sync then had nothing to do. Now the sync recognizes its own commit in that gap too and records the commit it was asked to sync.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| Serve exports `GBRAIN_HOME`, CLI reaches the same home through `HOME` | refused (`env GBRAIN_HOME`) | answered warm |
-| Serve sets `GBRAIN_BRAIN_ID=host`, CLI leaves it unset | refused | answered warm |
-| A different resolved config home or brain | refused | still refused (`config home`, `brain`) |
+| A grouped import cancelled at the publication ceiling, when restoring the files outlasts the 1 s retry pause | a page could be republished from its old preparation in the same pass | the page waits for its retry and prepares again |
+| A sync whose fence rewrite is committed by gbrain right before the sync records it | `last_commit` could be gbrain's own commit | `last_commit` is the commit the sync targeted, and the next sync reads gbrain's commit as a no-op |
 
-### What to watch for after you upgrade
-
-- Restart the serve after upgrading, as before: a serve and a CLI on different gbrain versions never match.
+Nothing changes on upgrade, and nothing is rewritten.
 
 ### Itemized changes
 
-- `READ_BEHAVIOR_ENV` drops `GBRAIN_HOME`, `GBRAIN_BRAIN_ID`, `GBRAIN_MOUNTS_PATH` (mount brains, which the socket never serves) and `GBRAIN_CWD_ENV_QUARANTINED` (a re-run marker whose effect already shows in the environment it left). The classification test lists them with the reason.
+- `src/core/persistence/group-publish.ts`: a group member charged a transient interruption is no longer listed as reclaimable after the group's files are restored.
+- `src/core/persistence/sync-pass-fold.ts`: `ownWritebackCommit` accepts a writeback effect that is still running when Git already shows its commit byte for byte. Every changed path and blob is still checked.
+
+### For contributors
+
+- `scripts/ci-bounded-run.ts`: a stalled CI setup attempt ends only once its whole process group is gone (bounded by the grace period), so nothing it started overlaps the retry.
+- New forced-probe cases in `test/pathological/lp-c-publication-ceiling-retry.test.ts` and `test/persistence-sync-fence-holds.test.ts` cover both races deterministically.
+
+## [0.60.355.0] - 2026-10-21
+
+**`remember` with a folder-less entity now saves only when the name points to exactly one entity page, a pending write receipt names the page the fact is going to, and `remember --replaces` works on a private fact without passing `--visibility` (#7248).** Before, a short name such as "Alice" could be saved under a bare slug that no page has, so the fact never showed up on the person's card. A slow write also gave the caller no way to tell which page it would land on, and replacing a private fenced fact answered `not_found`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `remember` with `entity: "alice-example"` or `"Alice"` (no folder) | saved under a bare slug no page has | saves to the one readable entity page the name points to (by slug, unique basename, alias or name); if several pages match, it only begins a name, it only resembles pages, or the page is not an entity, the call is refused `invalid_params` with `reason` `entity_ambiguous`, `entity_unverified`, `entity_not_entity` or `entity_no_page` and up to 5 candidate slugs, and nothing is saved |
+| A name nothing resembles, or a slug with a folder | saved | unchanged |
+| A `remember` reply that is still publishing | no target in the receipt | `write_request.target {slug, entity_slug}`, and the pending hint names the page |
+| A `remember` batch item still publishing | reported `failed` | reported `pending` |
+| `remember --replaces <id>` on a private fact with no `--visibility`, local caller | `not_found` | replaces it, and the new fact stays private |
+| `remember --replaces <id>` with a `--visibility` that differs from the fact's | `not_found` | `invalid_params` with prefix `replaces_visibility_mismatch` and the visibility to pass |
+| A remote caller replacing a private fact | `not_found` | unchanged (`not_found`) |
+
+**Spend effect:** none. No model calls, no default or cap changes. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- An agent that saved facts under a short first name may now get `entity_ambiguous` or `entity_unverified`; pass one of the candidate slugs it returns.
+
+### Itemized changes
+
+- `entityReferenceCandidates` in `src/core/entities/resolve.ts`; strict resolution in `src/core/persistence/memory-mutations.ts`.
+- `replacementVisibility` in `src/core/facts/single-prepare.ts`; the replaces contract in `docs/protocol/MEMORY_VERBS_v1.md` lists `replaces_visibility_mismatch`.
+
+## [0.60.354.0] - 2026-10-21
+
+**New `search_exact` (CLI `gbrain search --exact "<phrase>"`) is an unranked, exhaustive literal scan: it returns every page that contains the phrase, plus a `complete` flag that is true only when the whole scope was read (#7191).** Ranked search can miss a rare phrase, so agents fell back to grepping the brain checkout for exact lookups.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Finding every page that contains an exact phrase | ranked search, which can rank a rare phrase out of the results, or a grep of the checkout | `gbrain search --exact "<phrase>"` / MCP `search_exact`: the phrase's words in order with any whitespace between them, substring, case-insensitive unless `case_sensitive`; regex and LIKE metacharacters are literal; every matching page in page-id order with matching chunks and up to 3 snippets |
+| Knowing the scan saw everything | not possible | `complete: true` only when the whole scope was read; otherwise `incomplete_reasons`: `limit` (default 100 pages, max 1000) or `deadline` (default 30 s, max 120), both resumable with `after: resume_after`, and `unreadable_pages` counted by reason (`unchunked`, `projection_pending`, `unsealed`, `scan_timeout`) |
+| Scope | n/a | `source_id`, `types`, `slug_prefix`, plus the prefixes ranked search hides, echoed as `excluded_slug_prefixes` |
+| `gbrain search --exact` with a ranked-only flag | n/a | refused as an unknown flag instead of ignored |
+
+The scan uses ranked search's visibility rules: remote callers read safe chunks only and never see private, foreign-source or quarantined pages, so fenced facts and takes never match. On Postgres 16 with 50,000 pages and 328 MB of chunk text, a full scan for a rare phrase takes 2.1–2.7 s locally and 2.9 s remotely; a common phrase stops at the 100-page limit in 1.3 s.
+
+**Spend effect:** none. No model calls, no default or cap changes, no schema change. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- Quotes mean different things: in ranked search a quoted phrase is stemmed; `--exact` matches the characters you typed (punctuation, accents and quote styles are literal).
+- Pages with body text but no chunks yet (for example held pages) show up as `unreadable_pages` with reason `unchunked`, not as misses.
+
+### Itemized changes
+
+- New op `search_exact` (registered `filtered` with `retrieval` output redaction; covered by both privacy sweeps), scanned in keyset batches of 2,000 pages per statement with JIT off; a batch that hits the statement timeout is retried at half the size, down to one page.
+- `src/cli/command-route.ts` rewrites `search --exact` to `search-exact` before ranked-search flags parse.
+- Docs: `docs/guides/exact-search.md`, linked from the search-modes guide.
 
 ## [0.60.353.0] - 2026-10-21
 
