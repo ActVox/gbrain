@@ -135,7 +135,7 @@ export function runnerStart(engine: BrainEngine): Pick<CommitNotifierOptions, 's
       const hard = deadline ? Math.max(1, Math.round(deadline.deadlineMs / 1000)) : 3600;
       const timeoutSeconds = req.sliceSeconds ? Math.min(hard, Math.max(1, Math.round(req.sliceSeconds))) : hard;
       const start = await r.startDelegatedSync(engine, { sourceId, noPull: req.intent !== 'pull', ...(req.intent === 'full' ? { full: true } : {}), timeoutSeconds, origin: 'background' },
-        `on-commit-${randomUUID()}`, { registration: { id: local.id, credential: local.credential, lane: 'cli' } });
+        `on-commit-${randomUUID()}`, { registration: { id: local.id, credential: local.credential, lane: 'cli' }, logLines: true });
       if (start.ok && start.jobId) return { jobId: start.jobId };
       if (start.error === 'busy' || start.error === 'shutting_down') return { busy: true };
       return { refused: String(start.refusal?.message ?? start.error ?? 'refused') };

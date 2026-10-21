@@ -791,6 +791,15 @@ export function deadlinePassed(deadlineAtMs: number | undefined, now = Date.now(
   return deadlineAtMs !== undefined && deadlineAtMs - now <= DEADLINE_MARGIN_MS;
 }
 
+/** #7243: a live pass round's phase line (after its level read, before its import walk), so a long round never looks dead; null for other events. */
+export function passRoundLine(event: Parameters<NonNullable<SyncOpts['onProgress']>>[0]): string | null {
+  const r = event.round;
+  if (!r) return null;
+  if (event.phase === 'managed_sync.round_level') return `[sync] pass round ${r.round}: read ${r.paths} path(s) at ${r.target.slice(0, 8)} in ${formatDuration(Math.round((r.read_ms ?? 0) / 1000))}; settling them next.`;
+  if (event.phase === 'managed_sync.round_admit') return `[sync] pass round ${r.round}: importing ${r.imports ?? 0} file(s) and deleting ${r.deletes ?? 0} page(s)${r.in_flight ? ` (${r.in_flight} write(s) already in flight)` : ''}; progress lines follow as pages commit.`;
+  return null;
+}
+
 /** The managed-sync drain over one engine; the CLI's managed path. */
 export async function drainManagedSync(engine: BrainEngine, opts: SyncOpts, announce: boolean): Promise<SyncResult> {
   const { performManagedSync } = await import('./sync-run.ts');
@@ -815,7 +824,9 @@ export async function drainManagedSync(engine: BrainEngine, opts: SyncOpts, anno
       pass: (signal, onProgress) => {
         const capacityPreflight = !preflighted;
         preflighted = true;
-        return performManagedSync(engine, { ...opts, signal, onProgress, drainStartedAt, capacityPreflight, ...(bulk.enabled ? { bulk: { ...bulk, laneRun } } : {}) });
+        // #7243: an announcing drain prints each pass round's phase lines as the pass reaches them.
+        const rounds: typeof onProgress = event => { const line = announce ? passRoundLine(event) : null; if (line) serr(line); onProgress(event); };
+        return performManagedSync(engine, { ...opts, signal, onProgress: rounds, drainStartedAt, capacityPreflight, ...(bulk.enabled ? { bulk: { ...bulk, laneRun } } : {}) });
       } });
   } finally {
     if (laneRun) {

@@ -194,12 +194,17 @@ export function isDelegatedSyncRunning(): boolean {
  * payload; when present the start is asynchronous (one verification read).
  */
 export function startDelegatedSync(engine: BrainEngine, rawOptions: unknown, clientToken: string, opts?: { boundSourceId?: string }): SyncStartResponse;
-export function startDelegatedSync(engine: BrainEngine, rawOptions: unknown, clientToken: string, opts: { boundSourceId?: string; registration?: unknown }): SyncStartResponse | Promise<SyncStartResponse>;
+/**
+ * `opts.logLines` (in-process callers only, never the wire): also write the job's human lines to the serve log, for a
+ * run nobody polls (the resident notifier's background passes, #7243), whose phase and progress lines would otherwise
+ * reach only the job's line buffer.
+ */
+export function startDelegatedSync(engine: BrainEngine, rawOptions: unknown, clientToken: string, opts: { boundSourceId?: string; registration?: unknown; logLines?: boolean }): SyncStartResponse | Promise<SyncStartResponse>;
 export function startDelegatedSync(
   engine: BrainEngine,
   rawOptions: unknown,
   clientToken: string,
-  opts: { boundSourceId?: string; registration?: unknown } = {},
+  opts: { boundSourceId?: string; registration?: unknown; logLines?: boolean } = {},
 ): SyncStartResponse | Promise<SyncStartResponse> {
   // #6696 (A5): the client's admission origin scopes every write of the job (validated below; a client that sends none is background).
   const origin = (rawOptions as { origin?: unknown } | null)?.origin;
@@ -210,7 +215,7 @@ function startDelegatedSyncScoped(
   engine: BrainEngine,
   rawOptions: unknown,
   clientToken: string,
-  opts: { boundSourceId?: string; registration?: unknown },
+  opts: { boundSourceId?: string; registration?: unknown; logLines?: boolean },
 ): SyncStartResponse | Promise<SyncStartResponse> {
   if (typeof clientToken !== 'string' || clientToken.length === 0 || clientToken.length > 128) {
     return { ok: false, protocol: 2, error: 'invalid_options:clientToken' };
@@ -287,7 +292,7 @@ function startDelegatedSyncScoped(
   };
 
   if (opts.registration !== undefined) {
-    return startVerifiedDelegatedSync(engine, job, options, opts.registration as SyncStartRegistration, { settle, fail });
+    return startVerifiedDelegatedSync(engine, job, options, opts.registration as SyncStartRegistration, { settle, fail }, opts.logLines === true);
   }
 
   job.settled = withLegacySyncDelegation(async () => {
@@ -367,6 +372,7 @@ async function startVerifiedDelegatedSync(
   options: DelegatedSyncOptions,
   registration: SyncStartRegistration,
   hooks: { settle: () => void; fail: (e: unknown) => void },
+  logLines = false,
 ): Promise<SyncStartResponse> {
   const refuse = (e: unknown): SyncStartResponse => {
     hooks.fail(e);
@@ -382,6 +388,7 @@ async function startVerifiedDelegatedSync(
   }
   job.managed = true;
   const push = (text: string): void => {
+    if (logLines) log(`job=${job.id} ${text}`);
     job.lines.push({ seq: ++job.lineSeq, text });
     if (job.lines.length > LINE_BUFFER_MAX) job.lines.splice(0, job.lines.length - LINE_BUFFER_MAX);
   };

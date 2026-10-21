@@ -47,6 +47,16 @@ moving again; ask me only about the ones gbrain will not decide by itself."*
    `terminal_failures_read`, `checkpoint_blockers_read` and `cursors_read` say
    `not_read` with the `--detail` command as `fix`. Never read a `not_read`
    field as "none"; run the fix when the step needs it.
+   `last_commit` is the commit the source's sync applied through, and `live`
+   names the process holding its drain lease (a serve pass, a sync job, a CLI
+   sync), with its heartbeat, `progress` and `stalled`; null means nothing is
+   syncing it now. Holds are bounded: `holds_summary` counts every hold by
+   code and by state (`needs_human`, `actionable`, `held`), and `holds` lists
+   the first 20, needs-human first. When it leaves rows out, `holds_page`
+   names `next_command`; `--detail` pages 100 at a time, `--hold-state
+   needs_human` lists only the holds a person decides. A `last_error` with
+   `superseded` (`by`, `age_seconds`) is history: a later attempt got past
+   the phase it failed in, so it drives neither `state` nor `next`.
 2. If `needs_human` is false and nothing committed in the last ten minutes,
    run `unblock --apply`: it performs the safe action for every hold that has
    one, refuses the rest by name, and prints the sync to run. For a content
