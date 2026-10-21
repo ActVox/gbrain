@@ -644,6 +644,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
 
   try {
     const { withTimeout, OperationTimeoutError } = await import('../core/timeout.ts');
+    const { withRequestIdentityMemo } = await import('../core/persistence/identity.ts');
     const wallclockMs = getCliOptions().timeoutMs ?? READ_OP_TIMEOUT_MS;
     const onWallclockTimeout = (e: InstanceType<typeof OperationTimeoutError>) => {
       const hint = getCliOptions().timeoutMs
@@ -678,7 +679,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
     if (op.scope === 'read') {
       try {
         rawResult = await withTimeout(
-          op.handler(ctx, params).catch(async (e: unknown) => { // large pages: a segmented page streams to stdout
+          withRequestIdentityMemo(() => op.handler(ctx, params)).catch(async (e: unknown) => { // large pages: a segmented page streams to stdout
             if (op.name === 'get_page' && await streamSegmentedGet(engine, params, e, writeStdoutFinal)) return SEGMENTED_STREAMED;
             throw e;
           }),
@@ -693,7 +694,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
         throw e;
       }
     } else {
-      rawResult = await op.handler(ctx, params);
+      rawResult = await withRequestIdentityMemo(() => op.handler(ctx, params));
       if (op.mutating) await captureCapacityNotices(engine); // #6696 (A4)
     }
     if (rawResult === SEGMENTED_STREAMED) return;

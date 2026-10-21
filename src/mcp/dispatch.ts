@@ -48,7 +48,7 @@ import { operationScopesAllowed } from '../core/scope.ts';
 import { enforceReadTrustFloor } from '../core/eligibility/registry.ts';
 import { invalidateHotMemoryForEngine } from '../core/facts/meta-hook.ts';
 import { admittedPendingReceipt, type WriteReceipt } from '../core/persistence/types.ts';
-import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
+import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withRequestIdentityMemo, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
 import { frameOverCap, resultTooLargeError } from '../core/egress-budget.ts';
 
 // WP3: normalization + validation moved to validate-params.ts (direct unit
@@ -872,7 +872,8 @@ export async function dispatchToolCall(
 ): Promise<ToolResult> {
   // #6721: a read op answers every config read from one snapshot of the table
   // (config-snapshot.ts); a write reads config live, so it sees its own writes.
-  const run = () => dispatchResolvedCall(engine, name, params, opts);
+  // GBRA-156: and reads the brain identity and each local writer's credential once for its pre-submission checks.
+  const run = () => withRequestIdentityMemo(() => dispatchResolvedCall(engine, name, params, opts));
   return operations.find(o => o.name === name)?.mutating === false
     ? withRequestConfigSnapshot(engine, run)
     : withoutRequestConfigSnapshot(run);

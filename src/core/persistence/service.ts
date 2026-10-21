@@ -152,6 +152,8 @@ export async function stopPersistenceConsumer(engine: BrainEngine): Promise<void
   service.stopping = true;
   const pending = [...(receiptReads.get(engine)?.values() ?? [])];
   for (const entry of pending) entry.abort.abort();
+  // GBRA-156: a one-shot command's housekeeping runs here, after its reply and before its consumer stops.
+  if (service.consumer instanceof PersistenceConsumer) await service.consumer.runOneShotHousekeeping();
   await service.consumer.stop();
   await service.heartbeat?.stop();
   await Promise.all(pending.map(entry => entry.read));

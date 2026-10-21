@@ -8,13 +8,17 @@ import { readCapacityForecast } from '../src/core/persistence/capacity-forecast.
 import { cachedCapacitySnapshot } from '../src/core/persistence/capacity-snapshot.ts';
 import { randomUUID } from 'node:crypto';
 import { PersistenceConsumer } from '../src/core/persistence/consumer.ts';
-import { claimHousekeepingTurn, HOUSEKEEPING_TURN_OP } from '../src/core/persistence/housekeeping-turn.ts';
+import { claimHousekeepingTurn, completeHousekeepingTurn, HOUSEKEEPING_TURN_OP } from '../src/core/persistence/housekeeping-turn.ts';
 import { markOneShotCommand } from '../src/core/persistence/claim-phase.ts';
 import { disposePersistenceConsumer, startPersistenceConsumer } from '../src/core/persistence/service.ts';
 import { readWriteSwitchSnapshot, resetWriteSwitches } from '../src/core/persistence/switches.ts';
 import { commandStartupConfig, keepCommandStartupConfig, requestConfigValue, withRequestConfigSnapshot } from '../src/core/config-snapshot.ts';
 import { mergeDbPlaneConfig } from '../src/cli/db-plane-config.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readLocalWriter, registerLocalWriter, revokeLocalWriter, verifyLocalWriter, withRequestIdentityMemo } from '../src/core/persistence/identity.ts';
 import { freshBrainFactory, requestFixture } from './helpers/persistence-request-fixture.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
@@ -39,7 +43,10 @@ async function recordStatements<T>(engine: BrainEngine, fn: () => Promise<T>): P
 
 const configReads = (statements: string[]) => statements.filter(s => /FROM config\b/.test(s));
 
-type Gate = { upkeepAllowed(): Promise<boolean>; sweepAllowed(direct: boolean): Promise<boolean>; housekeepingTurn: boolean };
+type Gate = { upkeepAllowed(): Promise<boolean>; sweepAllowed(direct: boolean): Promise<boolean>; housekeepingTurn: boolean;
+  settleTurn(): void; turnDone?: Promise<void>; stopping: boolean };
+const turnState = async (engine: BrainEngine, hostId: string) => (await engine.executeRaw<{ state: string[] }>(
+  'SELECT completed_keys AS state FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [HOUSEKEEPING_TURN_OP, hostId]))[0]?.state;
 const oneShotConsumer = (engine: BrainEngine, hostId: string, waiting: () => boolean) => new PersistenceConsumer(engine, { engine: engine.kind } as never,
   async () => { throw new Error('unused'); }, { hostId, oneShot: { waiting } }) as unknown as Gate;
 const turns = async (engine: BrainEngine, hostId: string) => (await engine.executeRaw<{ n: number }>(
@@ -105,6 +112,39 @@ for (const kind of testBackends()) {
       expect(await claimHousekeepingTurn(engine, host, 60_000)).toBe(true);
     }, 120_000);
 
+    test('a finished turn holds the host for the interval, judged from when it finished', async () => {
+      const engine = await factory.fresh();
+      const host = randomUUID();
+      expect(await claimHousekeepingTurn(engine, host, 60_000)).toBe(true);
+      await engine.executeRaw("UPDATE op_checkpoints SET updated_at=now()-interval '2 minutes' WHERE op=$1 AND fingerprint=$2", [HOUSEKEEPING_TURN_OP, host]);
+      await completeHousekeepingTurn(engine, host);
+      expect(await turnState(engine, host)).toEqual(['done']);
+      expect(await claimHousekeepingTurn(engine, host, 600_000)).toBe(false);
+      expect(await claimHousekeepingTurn(engine, host, 0)).toBe(true);
+    }, 120_000);
+
+    test('a turn cut short is not counted as done: the next process takes it once the lease runs out, not after the interval', async () => {
+      const engine = await factory.fresh();
+      const host = randomUUID();
+      expect(await claimHousekeepingTurn(engine, host, 600_000)).toBe(true);
+      expect(await claimHousekeepingTurn(engine, host, 600_000)).toBe(false);
+      await engine.executeRaw("UPDATE op_checkpoints SET updated_at=now()-interval '2 minutes' WHERE op=$1 AND fingerprint=$2", [HOUSEKEEPING_TURN_OP, host]);
+      expect(await claimHousekeepingTurn(engine, host, 600_000)).toBe(true);
+    }, 120_000);
+
+    test('a consumer marks its turn done when its upkeep settles, and leaves it leased when a stop aborted that upkeep', async () => {
+      const engine = await factory.fresh();
+      for (const aborted of [false, true]) {
+        const host = randomUUID();
+        const consumer = oneShotConsumer(engine, host, () => false);
+        expect(await consumer.upkeepAllowed()).toBe(true);
+        consumer.stopping = aborted;
+        consumer.settleTurn();
+        await consumer.turnDone;
+        expect(await turnState(engine, host)).toEqual([aborted ? 'leased' : 'done']);
+      }
+    }, 120_000);
+
     test('no housekeeping turn while a resident full consumer of the host is live', async () => {
       const engine = await factory.fresh();
       const host = randomUUID();
@@ -157,6 +197,50 @@ for (const kind of testBackends()) {
           await disposePersistenceConsumer(engine);
         }
       }
+    }, 120_000);
+
+    const identity = (statements: string[]) => ({
+      brain: statements.filter(s => s.startsWith('SELECT brain_id FROM persistence_brain')).length,
+      writer: statements.filter(s => s.startsWith('SELECT lane,credential_hash,grant_ceiling,revoked_at FROM persistence_local_writers')).length });
+
+    test('one request reads the brain identity and verifies a local writer once for its pre-submission checks', async () => {
+      const engine = await factory.fresh();
+      await withEnv({ GBRAIN_HOME: mkdtempSync(join(tmpdir(), 'gbra156-identity-')) }, async () => {
+        await registerLocalWriter(engine, 'cli');
+        const { statements } = await recordStatements(engine, () => withRequestIdentityMemo(async () => {
+          const local = await readLocalWriter(engine, 'cli');
+          await verifyLocalWriter(engine, await readLocalWriter(engine, 'cli'));
+          await verifyLocalWriter(engine, local);
+        }));
+        expect(identity(statements)).toEqual({ brain: 1, writer: 1 });
+        const locked = await recordStatements(engine, () => withRequestIdentityMemo(async () => {
+          const local = await readLocalWriter(engine, 'cli');
+          await verifyLocalWriter(engine, local, true);
+        }));
+        expect(locked.statements.filter(s => /persistence_local_writers WHERE id=\$1::uuid FOR SHARE$/.test(s))).toHaveLength(1);
+      });
+    }, 120_000);
+
+    test('a credential revoked between two requests in the same process is refused on the second', async () => {
+      const engine = await factory.fresh();
+      await withEnv({ GBRAIN_HOME: mkdtempSync(join(tmpdir(), 'gbra156-revoke-')) }, async () => {
+        const local = await registerLocalWriter(engine, 'cli');
+        expect((await withRequestIdentityMemo(() => readLocalWriter(engine, 'cli'))).id).toBe(local.id);
+        expect(await revokeLocalWriter(engine, local.id)).toBe(true);
+        await expect(withRequestIdentityMemo(() => readLocalWriter(engine, 'cli'))).rejects.toMatchObject({ code: 'permission_denied' });
+      });
+    }, 120_000);
+
+    test('a revocation inside a request is seen by that request\'s later checks', async () => {
+      const engine = await factory.fresh();
+      await withEnv({ GBRAIN_HOME: mkdtempSync(join(tmpdir(), 'gbra156-revoke-in-')) }, async () => {
+        const local = await registerLocalWriter(engine, 'cli');
+        await withRequestIdentityMemo(async () => {
+          await verifyLocalWriter(engine, local);
+          await revokeLocalWriter(engine, local.id);
+          await expect(verifyLocalWriter(engine, local)).rejects.toMatchObject({ code: 'permission_denied' });
+        });
+      });
     }, 120_000);
 
     test('an unreadable retention setting still falls back to the default, and bad thresholds to theirs', async () => {
