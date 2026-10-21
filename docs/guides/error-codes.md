@@ -3423,6 +3423,14 @@ Reasons: `rename_source_changed`.
 |---|---|---|---|---|---|---|
 | This command needs the brain's local database, and this install is a thin client of a remote brain. | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### reserved_frontmatter_key
+
+<a id="reserved_frontmatter_key"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A remote page write tried to add or change a frontmatter key only a trusted derived writer sets (`retired_by`, `retired_at`, `retired_generation`); nothing was written. | Those keys mark a page a derived writer retired, which the purge holds for 30 days and the repairs treat as machine-owned. A remote caller that could set them could make a page look machine-retired. Carrying the stored value unchanged, or dropping the key, is allowed. | Remove the key from the frontmatter (or keep the stored value) and write the page again. | agent | `repeat the read that failed` | 1 | no |
+
 ### reset_upstream_refused
 
 <a id="reset_upstream_refused"></a>
