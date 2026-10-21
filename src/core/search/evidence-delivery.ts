@@ -60,14 +60,6 @@ export const DEFAULT_RETURN_BUDGET = 6000;
 export const DEFAULT_CONVERSATION_BUDGET = 24000;
 export const DEFAULT_REMOTE_BUDGET_MAX = 32000;
 export const EVIDENCE_BLOCK_CHAR_CAP = 60_000;
-/**
- * #7164: the most text a search/query block grows to around its matching span
- * when the caller named no unit (an implied `auto`). A long meeting or
- * transcript otherwise fills toward EVIDENCE_BLOCK_CHAR_CAP, tens of thousands
- * of characters per row a caller never budgeted for. The row says
- * `delivered.truncated`, and an explicit `return_unit` keeps the full cap.
- */
-export const AUTO_BLOCK_CHAR_CAP = 8_000;
 export const EVIDENCE_OMISSION = '\n\n[…]\n\n';
 export const EVIDENCE_FETCH_TIMEOUT_MS = 5000;
 /** First server release that understands `return_unit` (thin-client skew warning). */
@@ -149,8 +141,6 @@ export interface EvidencePlan {
   longPage?: LongPagePolicy;
   /** W5: page unit + caller budget + `search.page_rank_cut: whole_pages` (page-rank-cut.ts). */
   rankCut?: PageRankCut;
-  /** #7164: set only by the search/query caller for an implied `auto` (withLongPagePolicy): how far a block grows around its match. */
-  blockCharCap?: number;
 }
 
 /** The cap runs only under `auto`, with a budget the caller passed and a packing other than `off`. */
@@ -380,9 +370,8 @@ export function longPageMinCharsValueProblem(value: string): string | null {
  * `snippet_chars` leaves it on; capDeliveredSnippets exempts widened rows.
  * Read errors and unknown values are `off`; an unusable threshold is the default.
  */
-export async function withLongPagePolicy(engine: BrainEngine, input: EvidencePlan | null): Promise<EvidencePlan | null> {
-  if (!input || input.unit !== 'auto' || input.explicitUnit || input.budgetExplicit) return input;
-  const plan = { ...input, blockCharCap: AUTO_BLOCK_CHAR_CAP };
+export async function withLongPagePolicy(engine: BrainEngine, plan: EvidencePlan | null): Promise<EvidencePlan | null> {
+  if (!plan || plan.unit !== 'auto' || plan.explicitUnit || plan.budgetExplicit) return plan;
   const raw = (await engine.getConfig(LONG_PAGE_UNIT_CONFIG_KEY).catch(() => null))?.trim();
   if (raw !== 'window' && raw !== 'section' && raw !== 'page') return plan;
   const min = (await engine.getConfig(LONG_PAGE_MIN_CHARS_CONFIG_KEY).catch(() => null)) ?? '';
@@ -657,11 +646,9 @@ interface Block {
   reason?: AutoReason;
   /** The cap cut this block: its text ends with EVIDENCE_CUT_MARKER. */
   capMarker?: boolean;
-  /** Characters enrichment may grow the block to (the plan's blockCharCap, else EVIDENCE_BLOCK_CHAR_CAP). */
-  charCap: number;
 }
 
-type PlannedBlock = Omit<Block, 'titleTok' | 'title' | 'rank' | 'reason' | 'capMarker' | 'header' | 'headerTok' | 'charCap'>;
+type PlannedBlock = Omit<Block, 'titleTok' | 'title' | 'rank' | 'reason' | 'capMarker' | 'header' | 'headerTok'>;
 
 /**
  * The hit's text as it appears in the page: a fenced_code chunk carries the
@@ -929,7 +916,7 @@ function enrichBlock(b: Block, remaining: number, tokenizer: 'cl100k' | 'heurist
     const adj = adjacent(b, i);
     const cost = tok(b, i, tokenizer) + (adj ? 0 : omitTok);
     const len = b.doc.pieces[i].text.length + (adj ? 0 : EVIDENCE_OMISSION.length);
-    if (cost > remaining || chars + len > b.charCap) break;
+    if (cost > remaining || chars + len > EVIDENCE_BLOCK_CHAR_CAP) break;
     b.selected.add(i);
     remaining -= cost;
     chars += len;
@@ -1098,7 +1085,7 @@ function allocateCapped(blocks: Block[], chunks: ChunkItem[], plan: EvidencePlan
       for (const i of enrichmentOrder(b)) {
         if (!window.has(i)) continue;
         target.add(i);
-        if (selectionCost(b, target, tokenizer, omitTok).chars > b.charCap) { target.delete(i); break; }
+        if (selectionCost(b, target, tokenizer, omitTok).chars > EVIDENCE_BLOCK_CHAR_CAP) { target.delete(i); break; }
       }
       const sel = selectionCost(b, target, tokenizer, omitTok);
       const cost = b.titleTok + b.headerTok + sel.tokens - (b === lead ? floorOf(b, tokenizer).tokens : 0);
@@ -1308,7 +1295,7 @@ export async function deliverEvidence(
     if (b.fallbackReason) fallbacks.add(b.fallbackReason);
     const title = b.hit.title ?? '';
     const header = headerFor(b.hit);
-    planned.push({ ...b, title, titleTok: countEvidenceTokens(title, tokenizer), header, headerTok: countEvidenceTokens(header, tokenizer), rank: g.rank, charCap: plan.blockCharCap ?? EVIDENCE_BLOCK_CHAR_CAP, ...(g.reason ? { reason: g.reason } : {}) });
+    planned.push({ ...b, title, titleTok: countEvidenceTokens(title, tokenizer), header, headerTok: countEvidenceTokens(header, tokenizer), rank: g.rank, ...(g.reason ? { reason: g.reason } : {}) });
   }
 
   const capped = capEngaged(plan);

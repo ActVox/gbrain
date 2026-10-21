@@ -63,7 +63,6 @@ export function applySnippetCap<T extends { chunk_text?: unknown; slug?: unknown
     const slug = typeof r.slug === 'string' ? r.slug : undefined;
     return {
       ...r,
-      chunk_chars: text.length,
       chunk_text: text.slice(0, chars) + buildSnippetMarker(slug, text.length - chars, r.follow_up,
         typeof r.chunk_index === 'number' && r.chunk_index > 0 && typeof r.chunk_id === 'number' ? r.chunk_id : undefined),
     };

@@ -1152,8 +1152,6 @@ export interface SearchResult {
   rank_score?: number;
   /** The fused score when the returned `score` was rewritten to follow rank order (search/score-contract.ts). */
   fused_score?: number;
-  /** Full length of chunk_text when the returned text was cut (snippet-cap.ts). */
-  chunk_chars?: number;
 }
 
 /**

@@ -1479,7 +1479,6 @@
           "base_score?: number | undefined",
           "blend_norm_rrf?: number | undefined",
           "chronicle_boost?: number | undefined",
-          "chunk_chars?: number | undefined",
           "chunk_id: number",
           "chunk_index: number",
           "chunk_source: \"timeline\" | \"compiled_truth\" | \"fenced_code\"",
@@ -7237,13 +7236,6 @@
     "./search/evidence-delivery": [
       {
         "kind": "variable",
-        "name": "AUTO_BLOCK_CHAR_CAP",
-        "signature": [
-          "8000"
-        ]
-      },
-      {
-        "kind": "variable",
         "name": "AUTO_PACKINGS",
         "signature": [
           "readonly [\"off\", \"cap_only\", \"breadth_capped\", \"depth_first\"]"
@@ -7438,7 +7430,6 @@
       {
         "kind": "interface",
         "members": [
-          "blockCharCap?: number | undefined",
           "budgetClamped?: { requested: number; max: number; } | undefined",
           "budgetExplicit: boolean",
           "budgetTokens: number",
@@ -7827,7 +7818,7 @@
         "kind": "function",
         "name": "withLongPagePolicy",
         "signature": [
-          "(engine: BrainEngine, input: EvidencePlan | null) => Promise<EvidencePlan | null>"
+          "(engine: BrainEngine, plan: EvidencePlan | null) => Promise<EvidencePlan | null>"
         ]
       }
     ],
@@ -9499,7 +9490,6 @@
           "base_score?: number | undefined",
           "blend_norm_rrf?: number | undefined",
           "chronicle_boost?: number | undefined",
-          "chunk_chars?: number | undefined",
           "chunk_id: number",
           "chunk_index: number",
           "chunk_source: \"timeline\" | \"compiled_truth\" | \"fenced_code\"",
