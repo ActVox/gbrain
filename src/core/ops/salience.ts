@@ -10,12 +10,17 @@
 
 import type { Operation } from './contract.ts';
 import { readPolicyOpts } from './context.ts';
+import { invalidParam } from './op-fix.ts';
+import { capRowList, LISTING_MAX_LIMIT } from '../bounded-listing.ts';
 import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
 } from '../operations-descriptions.ts';
 
 // --- v0.29: Salience + Anomaly Detection ---
+
+/** #7246: slugs listed per anomalous cohort unless the caller asks for more (count always covers the whole cohort). */
+export const ANOMALY_SLUG_DEFAULT_LIMIT = 20;
 
 const get_recent_salience: Operation = {
   name: 'get_recent_salience',
@@ -79,8 +84,17 @@ const find_anomalies: Operation = {
       type: 'number',
       description: 'Threshold (default 3).',
     },
+    slug_limit: {
+      type: 'number',
+      description: `Slugs listed per cohort (default ${ANOMALY_SLUG_DEFAULT_LIMIT}, max ${LISTING_MAX_LIMIT}); count covers the whole cohort and page_slugs_complete is false when slugs were left out.`,
+    },
   },
   handler: async (ctx, p) => {
+    const slugLimit = p.slug_limit === undefined ? ANOMALY_SLUG_DEFAULT_LIMIT : Number(p.slug_limit);
+    if (!Number.isInteger(slugLimit) || slugLimit < 1 || slugLimit > LISTING_MAX_LIMIT) {
+      throw invalidParam(ctx, 'find_anomalies', 'slug_limit', `find_anomalies: slug_limit must be 1-${LISTING_MAX_LIMIT}`,
+        { def: find_anomalies.params.slug_limit, example: ANOMALY_SLUG_DEFAULT_LIMIT });
+    }
     // Scope by the caller's source (same v0.34.1 #861 source-isolation class as
     // get_recent_salience above — the v0.29 batch missed both). Applied to the
     // baseline AND today windows inside the engine so the anomaly math stays
@@ -93,7 +107,7 @@ const find_anomalies: Operation = {
       ...await readPolicyOpts(ctx),
     });
 
-    return anomalies;
+    return anomalies.map(row => capRowList(row, 'page_slugs', slugLimit));
   },
   // hidden: 'anomalies' is in CLI_ONLY (src/cli.ts) — runAnomalies owns the
   // CLI surface; the non-hidden hint was dead (CLI_ONLY wins at dispatch).

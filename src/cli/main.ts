@@ -2684,8 +2684,8 @@ async function connectCliOnlyEngine(command: string, args: string[]): Promise<Br
           return connectEngine();
         },
       });
-      const { runServe } = await import('../commands/serve.ts');
-      await runServe(degraded, args);
+      (await import('../core/serve-log.ts')).installServeLogSink({ http: args.includes('--http') });
+      await (await import('../commands/serve.ts')).runServe(degraded, args);
       return null; // serve doesn't disconnect
     }
     throw serveConnectError;
