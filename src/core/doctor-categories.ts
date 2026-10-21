@@ -62,6 +62,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'captured_facts_active',
   // #7125: facts whose stored text holds a pre-fix sanitizer redaction marker (doctor/checks/facts-redaction-marker.ts).
   'facts_redaction_marker',
+  // #7247: a calendar day holding a bulk-loaded share of a source's facts as their valid_from (doctor/checks/fact-bulk-dates.ts).
+  'fact_bulk_dates',
   'conversation_label_facts',
   'conversation_outcomes_stale',
   'connector_checkpoints',

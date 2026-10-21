@@ -56,6 +56,7 @@ const EXEMPT: Record<string, string> = {
   'src/core/persistence/memory-mutations.ts': 'forget (lifecycle); remember is gated in memory-prepare.ts',
   'src/core/repair/captured-facts.ts': 'owner repair of existing rows',
   'src/core/repair/consolidate-ties.ts': 'owner repair reopening the validity of existing facts (lifecycle)',
+  'src/core/repair/fact-claim-dates.ts': 'owner repair moving the valid_from of existing database-only facts to the date their claim states (lifecycle)',
   'src/core/repair/extractor-facts.ts': 'owner repair of existing rows',
   'src/core/repair/redacted-facts.ts': 'owner repair behind a preview hash: puts back into existing fact rows the words a stored source page proves; fenced rows publish through put_page, which runs the gate',
   'src/core/repair/facts-rehome.ts': 'owner repair moving existing facts onto their entity page (placement)',

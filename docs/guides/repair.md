@@ -1834,6 +1834,59 @@ take is not changed: if it holds the wrong statement, decide which one is
 current and `gbrain forget` the other. It writes the database only; no page is
 rewritten.
 
+<a id="fact-claim-dates"></a>
+### Facts dated with the day a bulk load ran
+
+A bulk import that writes the day it ran into every facts-fence row's
+`valid_from` cell makes those facts look as if they all happened that day, so
+timelines and as-of reads put them on one date. Those dates record when the
+facts were loaded, not when they happened (#7247). Doctor `fact_bulk_dates`
+warns when one UTC calendar day holds 200 or more of a source's active facts,
+at least a quarter of them, across 20 or more entities. It reports each such
+day with its fact and entity counts, the most frequent source tags, and how
+many of those claims state exactly one earlier ISO date of their own ("Acme
+Example closed a seed round on 2025-03-14"). A remote caller sees only its
+permitted sources. `gbrain repair fact-claim-dates` moves those facts to the
+date their claim states. It is explicit-only, preview-bound and destructive,
+and it never runs on upgrade.
+
+**Say to your agent:** *"Preview which bulk-dated facts can take the date their
+claim states, then move them after I agree."* The agent runs the preview and,
+after you agree, the printed apply command.
+
+```bash
+gbrain doctor --only fact_bulk_dates                                   # the loaded days per source
+gbrain repair fact-claim-dates --source <id>                           # preview: one line per page, residual counts
+gbrain repair fact-claim-dates --source <id> --day 2026-01-15          # preview a loaded day the rule does not detect
+gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes
+```
+
+A candidate is an active fact whose `valid_from` falls on a loaded day and
+whose claim holds exactly one `YYYY-MM-DD` date, a real calendar date from
+1900 up to the day before. Facts with no date (`no_date`), several dates
+(`several_dates`), or one out of range (`date_not_earlier`) keep the load
+day and are counted, and so is a fact whose `valid_until` falls before its
+claim's date (`ends_before_claim_date`).
+
+A fact held by a page's facts fence is moved in the page: only that row's
+`valid_from` cell changes, and the page is published through a revision-bound
+`put_page`, so on a managed brain the canonical file changes and the facts row
+is re-projected from it. A page is listed and kept when its fence does not
+parse (`unparsed`, preview `gbrain repair fences`), it has a fence on both
+sides of the timeline sentinel (`split_fences`, run `gbrain repair
+split-facts` first), it is stored in segments (`segmented_page`), or the
+rewritten fence would not read back as exactly the planned rows
+(`not_conserved`). A row whose cell no longer reads the loaded day is
+`fence_mismatch`. A fact with no fence row is updated in place on an unmanaged
+brain; on a managed brain it is counted `database_only_managed` and kept.
+
+The hash covers each page's revision, row numbers and new dates. The apply
+recomputes the plan first and refuses `preview_changed` when anything moved,
+then changes exactly the previewed rows; a page edited during the run reports
+`changed_since_preview` and is kept. A second preview lists nothing. On a
+managed brain `git revert` of the repair commit undoes it, and page history
+keeps the earlier revision.
+
 <a id="failed-writes"></a>
 ### Failed writes
 
@@ -3008,6 +3061,7 @@ walk me through it before changing anything."*
 | Doctor `google_file_modes` warns, or the upgrade printed `[google] Google source <id> keeps its files in <dir>, outside ~/.gbrain` | `gbrain repair google-file-modes --source <id>` | `gbrain repair google-file-modes --source <id> --apply` | `gbrain doctor --only google_file_modes --json` (`google_file_modes` ok) | brain host, after the user agrees | none |
 | Recall or hot memory returns facts from gbrain's own claude-cli sessions or from pasted text; doctor `captured_facts_active` warns; the upgrade banner prints `captured_facts_active: N (explicit_kind_required; …)` | `gbrain repair captured-facts` (add `--include-ambiguous` to include paste candidates) | `gbrain repair captured-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only captured_facts_active --json` (`captured_facts_active` ok) | brain host, after the user agrees | `destructive` (quarantines facts) |
 | A stored fact reads `[redacted](…)` where a word such as "System" belongs; doctor `facts_redaction_marker` warns; `trust scan` flags the marker | `gbrain repair redacted-facts` | `gbrain repair redacted-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only facts_redaction_marker --json` (ok, or only facts the preview listed as `ambiguous` or `unproven`) | brain host, after the user agrees | none |
+| Timelines put hundreds of facts on one day; doctor `fact_bulk_dates` warns that a day holds a bulk-loaded share of a source's facts | `gbrain repair fact-claim-dates --source <id>` | `gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes` with the hash that preview printed | `gbrain repair fact-claim-dates --source <id>` lists nothing to move (doctor keeps warning while facts without a date in the claim keep the load day) | brain host, after the user agrees | none |
 | A finished promise still shows on entity cards and in recall after its loop was closed; doctor `loop_facts_drift` warns; the upgrade banner prints `loop_facts_drift: N (explicit_kind_required; …)` | `gbrain repair loop-facts` | `gbrain repair loop-facts --apply --expect <hash>` | `gbrain doctor --only loop_facts_drift --json` (`loop_facts_drift` ok) | brain host, after the user agrees | `destructive` (retires facts) |
 | `gbrain upgrade` refuses with `requires Bun >=<floor>` (exit 78), or doctor `self_upgrade_health` says `Auto-upgrade to <target> held` | `bun --version` | `bun upgrade`, then `gbrain upgrade` ([Bun floor](upgrades-auto-update.md#bun-floor)) | `gbrain --version` shows the target; `gbrain doctor --only self_upgrade_health --json` (`self_upgrade_health` ok) | user | `persistent_install` |
 

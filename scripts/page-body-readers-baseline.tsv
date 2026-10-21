@@ -472,6 +472,7 @@ src/core/repair/conversation-labels.ts	classifyLabelFacts	sql	STREAM
 src/core/repair/conversation-labels.ts	countLabelFacts	sql	STREAM	
 src/core/repair/extractor-facts.ts	restorePageFacts	field	STREAM	
 src/core/repair/extractor-facts.ts	restorePageFacts	sql	STREAM	
+src/core/repair/fact-claim-dates.ts	movePage	call:serializePageToMarkdown	SEGW	refuses a segmented page: the plan lists it segmented_page and movePage keeps one as changed_since_preview
 src/core/repair/fences.ts	afterBytes	field	STREAM	
 src/core/repair/fences.ts	fencesRepair	field	STREAM	
 src/core/repair/frontmatter.ts	analyzeFile	field	LEAD	

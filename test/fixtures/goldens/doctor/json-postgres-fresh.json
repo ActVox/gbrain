@@ -1728,6 +1728,24 @@
         {
           "category": "brain",
           "details": {
+            "days": [],
+            "docs": "docs/guides/repair.md#fact-claim-dates",
+            "repair": "fact-claim-dates",
+            "rule": {
+              "min_entities": 20,
+              "min_facts": 200,
+              "min_share": 0.25
+            },
+            "source_ids": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No calendar day holds a bulk-loaded share of any source's facts.",
+          "name": "fact_bulk_dates",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "docs": "docs/guides/repair.md#explicit-only-repair-kinds",
             "drifted": 0,
             "repair": "loop-facts"

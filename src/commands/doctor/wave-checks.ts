@@ -359,6 +359,12 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/facts-redaction-marker.ts')).factsRedactionMarkerCheck(engine, scope.sourceIds),
   },
   {
+    id: 'fact_bulk_dates', resolution: 'repair', registration: 'wave',
+    count: d => Array.isArray(d.days) ? d.days.reduce((sum: number, day: { facts?: number }) => sum + Number(day.facts ?? 0), 0) : 0,
+    impact: 'Some sources hold a large share of facts dated with the day a bulk load ran, which records when they were loaded, not when they happened',
+    run: async (engine, scope) => (await import('./checks/fact-bulk-dates.ts')).factBulkDatesCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'loop_facts_drift', resolution: 'repair', registration: 'wave',
     hostOnly: 'Retiring closed-loop commitment facts is a host-side, explicit-only repair.',
     count: d => Number(d.drifted ?? 0),

@@ -357,6 +357,7 @@
   "test/remediation-manual-only.test.ts": 14638,
   "test/repair-apply-pending-6543.test.ts": 51967,
   "test/repair-embedding-effects.test.ts": 9932,
+  "test/repair-fact-claim-dates-7247.test.ts": 9000,
   "test/repair-failed-writes-conflict-6429.test.ts": 9306,
   "test/repair-failed-writes-drift-w411.test.ts": 5486,
   "test/repair-fences.test.ts": 35248,

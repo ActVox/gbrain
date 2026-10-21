@@ -81,6 +81,7 @@ import { missingTablesRepair } from './missing-tables.ts';
 import { urlCloneFencesRepair } from './url-clone-fences.ts';
 import { segmentedMirrorRepair } from './segmented-mirror.ts';
 import { uncommittedDeletionsRepair, UNCOMMITTED_DELETIONS_CONSENT_TEXT } from './uncommitted-deletions.ts';
+import { factClaimDatesRepair } from './fact-claim-dates.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
 
@@ -499,6 +500,22 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'never deletes it again. Pages already purged cannot be restored by this command; only a backup (pg_dump, or gbrain backup create) can bring them back. '
       + 'Runs only when named; never on upgrade.',
   },
+  'fact-claim-dates': {
+    handler: factClaimDatesRepair, embeds: 'effect', checks: ['fact_bulk_dates'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: 'Set the valid_from of the previewed facts to the date each one\'s claim states',
+      why: 'The preview listed each facts fence row and database-only fact dated with the day a bulk load ran whose claim states exactly one earlier date; that date replaces the load day.',
+      risk: 'Only the listed valid_from cells change; every other row and page stays as it is. Page edits publish through revision-bound put_page (a managed brain commits the file, so git revert undoes it; page history keeps the earlier revision). A page that changed since the preview is skipped.',
+      user_message: 'Move the previewed facts to the date their claim states? Only their valid_from changes',
+    },
+    summary: 'Give facts that a bulk load dated with the day it ran the date their claim states (#7247). Needs --source; --day YYYY-MM-DD names the '
+      + 'loaded day instead of the days doctor fact_bulk_dates detects (200+ active facts, 25%+ of the source, 20+ entities on one UTC day). Candidates '
+      + 'are active facts of that day whose claim holds exactly one ISO date, a real date from 1900 to the day before; facts with none, several or one out '
+      + 'of range are counted and kept. A fence row\'s valid_from cell is rewritten and the page published through revision-bound put_page, so the facts '
+      + 'row follows the file; a database-only fact is updated directly on an unmanaged brain and counted database_only_managed on a managed one. '
+      + 'Preview-bound and destructive: --apply --expect <hash> --yes recomputes the plan (preview_changed when it differs) and moves exactly the '
+      + 'previewed rows. Runs only when named; never on upgrade.',
+  },
 };
 
 export const REPAIR_REGISTRY: readonly RepairKindSpec[] = REPAIR_KINDS.map(kind => ({ kind, ...SPECS[kind] }));
@@ -583,16 +600,17 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
     async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[];
       slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number;
       prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string; held?: boolean; side?: string; state?: string;
-      keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean; afterPage?: number } = {}): Promise<RepairResult> {
+      keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean; afterPage?: number;
+      day?: string } = {}): Promise<RepairResult> {
       const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0], writeWaitMs } as OperationContext;
       const spec = repairSpec(kind, opts.registry);
       return runRepair(ctx, spec.handler, scope, { apply: opts.apply, limit: run.limit, embeddingModel, sourceFlag: run.sourceFlag, spec,
         embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: [...(opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : []),
           ...(run.olderThan ? ['--older-than', run.olderThan] : []), ...(run.includeFailures ? ['--include-failures'] : []), ...(run.force ? ['--force'] : []),
-          ...(run.afterPage !== undefined ? ['--after', String(run.afterPage)] : [])],
+          ...(run.afterPage !== undefined ? ['--after', String(run.afterPage)] : []), ...(run.day ? ['--day', run.day] : [])],
         explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous, only: run.only, skip: run.skip, slugs: run.slugs, noLlm: run.noLlm,
         maxLlmUsd: run.maxLlmUsd, deadline: run.deadline, prefer: run.prefer, requests: run.requests, allDrifted: run.allDrifted, driftClass: run.driftClass, since: run.since,
-        held: run.held, side: run.side, state: run.state, keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force, from: run.from, close: run.close, afterPage: run.afterPage });
+        held: run.held, side: run.side, state: run.state, keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force, from: run.from, close: run.close, afterPage: run.afterPage, day: run.day });
     },
   };
 }

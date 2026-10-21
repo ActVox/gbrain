@@ -373,6 +373,7 @@ test/receipt-compaction-newest-sync-gbra130.test.ts
 test/remediation-manual-only.test.ts
 test/repair-apply-pending-6543.test.ts
 test/repair-embedding-effects.test.ts
+test/repair-fact-claim-dates-7247.test.ts
 test/repair-failed-writes-conflict-6429.test.ts
 test/repair-failed-writes-drift-w411.test.ts
 test/repair-fences.test.ts
