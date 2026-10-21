@@ -392,12 +392,7 @@ async function setConfigWithDecideHooks(engine: BrainEngine, key: string, value:
     if (err) { console.error(`[config] ${err}`); process.exit(1); }
   }
   (await import('./config/enumerated-keys.ts')).refuseUnregisteredEnumeratedKey(key, force);
-  const generationsRefusal = key.startsWith('generations.') ? (await import('../core/generations/config.ts')).generationsConfigRefusal(key, value) : null;
-  if (generationsRefusal) {
-    const { exitCliError, usageError } = await import('../cli/cli-error.ts');
-    exitCliError(usageError(generationsRefusal.message, `Re-run with a value in range, e.g. gbrain config set ${key} ${generationsRefusal.example}.`,
-      { fix: { argv: ['gbrain', 'config', 'get', key], consent: [], actor: 'agent', why: 'Shows the value in effect; nothing was written.', requires_exclusive: false } }), 'config');
-  }
+  if (key.startsWith('generations.')) await (await import('./config/generations-values.ts')).refuseGenerationsValue(key, value);
   const searchRefusal = key.startsWith('search.') ? (await import('../core/search/config-values.ts')).searchConfigValueRefusal(key, value) : null;
   if (searchRefusal) {
     const { exitCliError, usageError } = await import('../cli/cli-error.ts');

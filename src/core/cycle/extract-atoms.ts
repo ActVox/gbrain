@@ -1295,22 +1295,9 @@ export async function runPhaseExtractAtoms(
           totalAtomsExtracted += managedAtoms.length;
           await commitAtomsWatermark(item, input, published);
         } else {
-        // GBRA-161: the atoms, their provenance edges (#3961, #4733), the completion flip (source_hash, #4148) and the
-        // versioned retirement of the atoms this extraction no longer produced (C-14) publish as one generation in one
-        // transaction (#5575 I2/B3: gated and stamped at the origin's taint inside the adapter). #6503: a cut item publishes
-        // additively, stays provisional (`pending:<hash>`), retires nothing and records its partial disposition.
         throwIfAborted(opts.signal, 'extract_atoms');
-        const { key, context } = atomGenerationOrigin(sourceId, item);
-        context.links = provenanceLinks;
-        context.embed = isAvailable('embedding');
-        const outcome = await publishGeneration(engine, atomGenerationAdapter, { key, items: unmanagedAtoms.map(atom => markdownItem(atom.slug, atom.content)),
-          input: { pin: atomInputPin(item), size: Buffer.byteLength(item.content) },
-          partial: truncated, context, runId });
-        for (const complete of context.postCommit ?? []) await complete().catch(error => console.error(`[extract_atoms] ${originLabel}: post-commit embedding failed (the embedding backfill retries it): ${error instanceof Error ? error.message : String(error)}`));
-        if (outcome.state === 'held') {
-          console.error(`[extract_atoms] ${originLabel}: result held (${outcome.reason}); the previous atoms stay live. Preview: gbrain repair generations --kind ${ATOM_KIND} --mode release-held --key ${key.ownerKey} --source ${sourceId}`);
-          continue;
-        }
+        const outcome = await publishUnmanagedAtoms(engine, sourceId, item, unmanagedAtoms, provenanceLinks, { partial: truncated, runId, originLabel });
+        if (outcome.state === 'held') continue;
         await atomFiles?.write(unmanagedAtoms.map(atom => atom.slug), outcome.retired);
         if (truncated) await recordPartialDisposition(engine, sourceId, item, maxInputChars);
         else if (item.kind === 'page') await stampAtomsScanHash(item);
@@ -1464,6 +1451,28 @@ export async function runPhaseExtractAtoms(
       dry_run: opts.dryRun ?? false,
     },
   }, atomFiles?.held, 'atom');
+}
+
+/**
+ * GBRA-161: one unmanaged item's atoms, their provenance edges (#3961, #4733), the completion flip (source_hash, #4148)
+ * and the versioned retirement of the atoms this extraction no longer produced (C-14) publish as one generation in one
+ * transaction (#5575 I2/B3: gated and stamped at the origin's taint inside the adapter). #6503: a cut item publishes
+ * additively, stays provisional (`pending:<hash>`) and retires nothing. A held result changes nothing and is logged.
+ */
+async function publishUnmanagedAtoms(engine: BrainEngine, sourceId: string, item: ExtractAtomsItem, atoms: ReadonlyArray<{ slug: string; content: string }>,
+  links: LinkBatchInput[], opts: { partial: boolean; runId: string; originLabel: string }) {
+  const { key, context } = atomGenerationOrigin(sourceId, item);
+  context.links = links;
+  context.embed = isAvailable('embedding');
+  const outcome = await publishGeneration(engine, atomGenerationAdapter, { key, items: atoms.map(atom => markdownItem(atom.slug, atom.content)),
+    input: { pin: atomInputPin(item), size: Buffer.byteLength(item.content) }, partial: opts.partial, context, runId: opts.runId });
+  for (const complete of context.postCommit ?? []) {
+    await complete().catch(error => console.error(`[extract_atoms] ${opts.originLabel}: post-commit embedding failed (the embedding backfill retries it): ${error instanceof Error ? error.message : String(error)}`));
+  }
+  if (outcome.state === 'held') {
+    console.error(`[extract_atoms] ${opts.originLabel}: result held (${outcome.reason}); the previous atoms stay live. Preview: gbrain repair generations --kind ${ATOM_KIND} --mode release-held --key ${key.ownerKey} --source ${sourceId}`);
+  }
+  return outcome;
 }
 
 /** GBRA-161: the input pin an unmanaged item was read at (a page's is bound to its row and revision, see atomPagePin). */
