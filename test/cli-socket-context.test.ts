@@ -8,13 +8,14 @@
  *    CLI, and the serve's own GBRAIN_SOURCE never leaks into a CLI request.
  * 2. Fails when: makeContext gains or changes a field the mirror lacks, or the
  *    mirror reads process.env instead of the caller's routing.
- * 3. The E2E compares printed bytes for one routing; this pins every tier.
+ * 3. The E2E compares printed bytes for one routing; this pins every tier,
+ *    plus the serve-side timeout answer.
  * 4. No production seam.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { makeContext } from '../src/cli/main.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { cliRequestContext, mergedRequestConfig } from '../src/core/cli-socket/execute.ts';
+import { cliRequestContext, executeCliSocketRequest, mergedRequestConfig } from '../src/core/cli-socket/execute.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -66,6 +67,17 @@ describe('cliRequestContext mirrors makeContext', () => {
     expect(cold.sourceId).toBe('default');
     expect(cold.localSourceImplicit).toBeUndefined();
     expect(warm).toEqual(cold);
+  });
+
+  test('a serve-side timeout answers fallback (the CLI runs the call itself) while the work keeps the request active until it settles', async () => {
+    const { frame, settled } = await executeCliSocketRequest(engine, { v: 1, identity: 'x', command: 'search', kind: 'op', op: 'search', params: { query: 'alpha' },
+      routing: { cwd: process.cwd(), source_env: null }, cli: { quiet: false, timeout_ms: 1 } });
+    let done = false;
+    void settled.then(() => { done = true; });
+    expect(frame).toEqual({ v: 1, kind: 'fallback', reason: 'timeout' });
+    expect(done).toBe(false);
+    await settled;
+    expect(done).toBe(true);
   });
 
   test('explicit --source', async () => {

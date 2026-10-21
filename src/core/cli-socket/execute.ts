@@ -8,6 +8,7 @@
  */
 import type { Notice } from '../agent-output.ts';
 import { takeChatFallbackHopNotices } from '../ai/fallback-hop-queue.ts';
+import { recallInteropNotices } from '../interop-notices.ts';
 import { DEFAULT_CLI_OPTIONS } from '../cli-options.ts';
 import { loadConfig, loadConfigWithEngine, type GBrainConfig } from '../config.ts';
 import { withRequestConfigSnapshot } from '../config-snapshot.ts';
@@ -19,7 +20,7 @@ import { localFederatedSourceIds, resolveSourceWithTier, SourceTargetError } fro
 import { OperationTimeoutError, withTimeout } from '../timeout.ts';
 import { bigintToStringReplacer } from '../utils.ts';
 import { OutputCapture, withOutputCapture } from './output-capture.ts';
-import { DEFAULT_READ_WALLCLOCK_MS, serializeOperationError, type CliSocketRequest, type ResultFrame } from './protocol.ts';
+import { DEFAULT_READ_WALLCLOCK_MS, MAX_ROUND_TRIP_MS, serializeOperationError, type CliSocketRequest, type ResultFrame } from './protocol.ts';
 
 /** File config merged with the DB plane, read fresh for every request (inside its config snapshot), as a cold CLI reads it at connect. */
 export async function mergedRequestConfig(engine: BrainEngine): Promise<GBrainConfig> {
@@ -79,11 +80,19 @@ function errorFrame(error: unknown, capture: OutputCapture): ResultFrame {
   return { v: 1, kind: 'fallback', reason: 'unportable_error' };
 }
 
-async function runOp(engine: BrainEngine, request: Extract<CliSocketRequest, { kind: 'op' }>, capture: OutputCapture): Promise<ResultFrame> {
+/** The promises a request started; the serve counts the request as active until every one settles, even after a timeout answered it. */
+type Work = Promise<unknown>[];
+
+function track<T>(work: Work, promise: Promise<T>): Promise<T> {
+  work.push(promise);
+  return promise;
+}
+
+async function runOp(engine: BrainEngine, request: Extract<CliSocketRequest, { kind: 'op' }>, capture: OutputCapture, work: Work): Promise<ResultFrame> {
   const op = operationsByName[request.op];
   if (!op || op.scope !== 'read' || op.mutating) return { v: 1, kind: 'fallback', reason: 'not_a_read_op' };
   const params = request.params;
-  const wallclockMs = request.cli.timeout_ms ?? DEFAULT_READ_WALLCLOCK_MS;
+  const wallclockMs = Math.min(MAX_ROUND_TRIP_MS, request.cli.timeout_ms ?? DEFAULT_READ_WALLCLOCK_MS);
   let meta: Record<string, unknown> | null = null;
   const notices: Notice[] = [];
   const sinks = {
@@ -92,25 +101,30 @@ async function runOp(engine: BrainEngine, request: Extract<CliSocketRequest, { k
   };
   let stage = `gbrain ${request.command}: context`;
   try {
-    const ctx = await withTimeout(cliRequestContext(engine, params, op, request, await mergedRequestConfig(engine), sinks), wallclockMs, stage);
+    const ctx = await withTimeout(track(work, (async () => cliRequestContext(engine, params, op, request, await mergedRequestConfig(engine), sinks))()), wallclockMs, stage);
     stage = `gbrain ${request.command}`;
-    const raw = await withTimeout(op.handler(ctx, params), wallclockMs, stage);
+    const raw = await withTimeout(track(work, op.handler(ctx, params)), wallclockMs, stage);
+    // src/cli/main.ts runSharedOperation: captureRetrievalNotices after the handler, before the JSON round trip.
+    const retrieval = op.name === 'search' || op.name === 'query'
+      ? recallInteropNotices(op.name, raw, { retrieval: meta ?? {} }, params, { config: ctx.config, transport: 'cli' })
+      : [];
     const result = JSON.parse(JSON.stringify(raw, bigintToStringReplacer) ?? 'null');
-    return { v: 1, kind: 'result', result, meta, notices: [...notices, ...takeChatFallbackHopNotices()], output: capture.chunks };
+    return { v: 1, kind: 'result', result, meta, notices: [...notices, ...retrieval, ...takeChatFallbackHopNotices()], output: capture.chunks };
   } catch (error) {
-    if (error instanceof OperationTimeoutError) return { v: 1, kind: 'timeout', label: error.label, ms: error.ms, output: capture.chunks };
+    if (error instanceof OperationTimeoutError) return { v: 1, kind: 'fallback', reason: 'timeout' };
     if (op.name === 'get_page' && (error as { code?: unknown })?.code === 'page_body_segmented') return { v: 1, kind: 'fallback', reason: 'segmented_page' };
     return errorFrame(error, capture);
   }
 }
 
-async function runRecall(engine: BrainEngine, request: Extract<CliSocketRequest, { kind: 'recall' }>, capture: OutputCapture): Promise<ResultFrame> {
+async function runRecall(engine: BrainEngine, request: Extract<CliSocketRequest, { kind: 'recall' }>, capture: OutputCapture, work: Work): Promise<ResultFrame> {
   const { recallVerbForCaller } = await import('../../commands/recall.ts');
   try {
-    const raw = await recallVerbForCaller(engine, request.args, { cwd: request.routing.cwd, env: request.routing.source_env ?? undefined });
+    const raw = await track(work, recallVerbForCaller(engine, request.args, { cwd: request.routing.cwd, env: request.routing.source_env ?? undefined }));
     if (raw === null) return { v: 1, kind: 'fallback', reason: 'not_a_recall_verb' };
     const result = JSON.parse(JSON.stringify(raw, bigintToStringReplacer) ?? 'null');
-    return { v: 1, kind: 'result', result, meta: null, notices: [], output: capture.chunks };
+    // A cold recall prints the first chat-fallback hop at teardown (src/core/cli-force-exit.ts); the CLI does the same with these.
+    return { v: 1, kind: 'result', result, meta: null, notices: takeChatFallbackHopNotices(), output: capture.chunks };
   } catch (error) {
     return errorFrame(error, capture);
   }
@@ -123,12 +137,20 @@ async function runRecall(engine: BrainEngine, request: Extract<CliSocketRequest,
  * answers from it, and the snapshot closes when the request settles, so
  * nothing is cached across requests. Every op served here is non-mutating.
  */
-export async function executeCliSocketRequest(engine: BrainEngine, request: CliSocketRequest): Promise<ResultFrame> {
+export interface ExecutedRequest {
+  frame: ResultFrame;
+  /** Settles when every promise the request started has settled (never rejects); a timed-out handler keeps it pending. */
+  settled: Promise<unknown>;
+}
+
+export async function executeCliSocketRequest(engine: BrainEngine, request: CliSocketRequest): Promise<ExecutedRequest> {
   const capture = new OutputCapture();
-  const frame = await withOutputCapture(capture, () => withRequestConfigSnapshot(engine, () => request.kind === 'op'
-    ? runOp(engine, request, capture)
-    : runRecall(engine, request, capture)));
-  if (frame.kind === 'fallback') return frame;
-  if (capture.overflow) return { v: 1, kind: 'fallback', reason: 'output_too_large' };
-  return { ...frame, source: capture.resolvedSource ?? null };
+  const work: Work = [];
+  const answered = await withOutputCapture(capture, () => withRequestConfigSnapshot(engine, () => request.kind === 'op'
+    ? runOp(engine, request, capture, work)
+    : runRecall(engine, request, capture, work)));
+  const settled = Promise.allSettled(work);
+  if (answered.kind === 'fallback') return { frame: answered, settled };
+  if (capture.overflow) return { frame: { v: 1, kind: 'fallback', reason: 'output_too_large' }, settled };
+  return { frame: { ...answered, source: capture.resolvedSource ?? null }, settled };
 }

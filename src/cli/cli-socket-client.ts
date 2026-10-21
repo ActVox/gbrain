@@ -14,16 +14,14 @@ import { resolveBrainId } from '../core/brain-resolver.ts';
 import { VERSION } from '../version.ts';
 import { cliSocketDir, cliSocketPath, connectProblem } from '../core/cli-socket/fs-guard.ts';
 import { cliSocketIdentity } from '../core/cli-socket/identity.ts';
-import { peerCredSupport, peerUid } from '../core/cli-socket/peer-cred.ts';
+import { peerCredSupport, peerUid, type PeerCredSupport } from '../core/cli-socket/peer-cred.ts';
 import {
-  CONNECT_TIMEOUT_MS, DEFAULT_READ_WALLCLOCK_MS, FrameReader, HANDSHAKE_TIMEOUT_MS, MAX_RESPONSE_BYTES, reviveOperationError,
-  type CliSocketOp, type CliSocketRequest, type HandshakeFrame, type OutputChunk, type ResultFrame,
+  CONNECT_TIMEOUT_MS, DEFAULT_READ_WALLCLOCK_MS, FrameReader, HANDSHAKE_TIMEOUT_MS, isHandshakeFrame, isResultFrame, MAX_RESPONSE_BYTES,
+  MAX_ROUND_TRIP_MS, reviveOperationError, type CliSocketOp, type CliSocketRequest, type OutputChunk, type ResultFrame,
 } from '../core/cli-socket/protocol.ts';
 
 export const CLI_SOCKET_COMMANDS: readonly string[] = ['search', 'query', 'get', 'recall'];
 const SOCKET_OPS: Record<string, CliSocketOp> = { search: 'search', query: 'query', get_page: 'get_page' };
-/** How long past the read wallclock the CLI waits before treating the serve as wedged. */
-const RESULT_GRACE_MS = 10_000;
 
 function debug(reason: string): void {
   if (process.env.GBRAIN_DEBUG === '1') process.stderr.write(`[cli-socket] cold path: ${reason}\n`);
@@ -31,14 +29,22 @@ function debug(reason: string): void {
 
 type Exchange = { frame: ResultFrame } | { reason: string };
 
-/** One request on one connection: connect, verify the serve's uid, send, read the handshake, then the result. */
-export function exchangeCliSocket(path: string, request: CliSocketRequest, resultTimeoutMs: number): Promise<Exchange> {
+/**
+ * One request on one connection: connect, verify the serve's uid, send, read
+ * the handshake, then the result. `totalTimeoutMs` bounds the whole exchange;
+ * the connect and handshake keep their own shorter bounds inside it. Without a
+ * peer-credential reader on this platform the CLI never connects.
+ */
+export function exchangeCliSocket(path: string, request: CliSocketRequest, totalTimeoutMs: number, peerCred: PeerCredSupport = peerCredSupport()): Promise<Exchange> {
+  if (!peerCred.ok) return Promise.resolve({ reason: `peer_credentials_unsupported (${peerCred.reason})` });
+  const support = peerCred;
   return new Promise(resolve => {
+    const deadline = performance.now() + totalTimeoutMs;
     const socket = net.createConnection(path);
     const reader = new FrameReader(MAX_RESPONSE_BYTES);
     let accepted = false;
     let settled = false;
-    let timer = setTimeout(() => finish({ reason: 'connect_timeout' }), CONNECT_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (outcome: Exchange) => {
       if (settled) return;
       settled = true;
@@ -46,12 +52,16 @@ export function exchangeCliSocket(path: string, request: CliSocketRequest, resul
       socket.destroy();
       resolve(outcome);
     };
-    const arm = (ms: number, reason: string) => { clearTimeout(timer); timer = setTimeout(() => finish({ reason }), ms); };
+    const arm = (ms: number, reason: string) => {
+      clearTimeout(timer);
+      const remaining = deadline - performance.now();
+      timer = setTimeout(() => finish({ reason: remaining <= ms ? 'round_trip_timeout' : reason }), Math.max(0, Math.min(ms, remaining)));
+    };
+    arm(CONNECT_TIMEOUT_MS, 'connect_timeout');
     socket.once('error', error => finish({ reason: `${accepted ? 'lost' : 'connect_failed'} (${(error as NodeJS.ErrnoException).code ?? error.message})` }));
     socket.once('close', () => finish({ reason: accepted ? 'serve_closed_mid_request' : 'serve_closed' }));
     socket.once('connect', () => {
-      const support = peerCredSupport();
-      if (support.ok && peerUid(socket, support.read) !== process.getuid?.()) { finish({ reason: 'serve_uid_mismatch' }); return; }
+      if (peerUid(socket, support.read) !== process.getuid?.()) { finish({ reason: 'serve_uid_mismatch' }); return; }
       arm(HANDSHAKE_TIMEOUT_MS, 'handshake_timeout');
       socket.write(JSON.stringify(request) + '\n');
     });
@@ -62,18 +72,22 @@ export function exchangeCliSocket(path: string, request: CliSocketRequest, resul
         let value: unknown;
         try { value = JSON.parse(text); } catch { finish({ reason: 'malformed_response' }); return; }
         if (!accepted) {
-          const handshake = value as HandshakeFrame;
-          if (handshake?.v !== 1 || handshake.accepted !== true) { finish({ reason: `refused (${(handshake as { reason?: string })?.reason ?? 'unknown'})` }); return; }
+          if (!isHandshakeFrame(value)) { finish({ reason: 'malformed_response' }); return; }
+          if (!value.accepted) { finish({ reason: `refused (${value.reason})` }); return; }
           accepted = true;
-          arm(resultTimeoutMs, 'result_timeout');
+          arm(Number.POSITIVE_INFINITY, 'round_trip_timeout');
           continue;
         }
-        const result = value as ResultFrame;
-        finish(result?.v === 1 && typeof result.kind === 'string' ? { frame: result } : { reason: 'malformed_response' });
+        finish(isResultFrame(value) ? { frame: value } : { reason: 'malformed_response' });
         return;
       }
     });
   });
+}
+
+/** The longest the CLI waits on one whole exchange: MAX_ROUND_TRIP_MS, or the call's --timeout when shorter. */
+export function cliSocketRoundTripMs(timeoutMs: number | null): number {
+  return Math.min(MAX_ROUND_TRIP_MS, timeoutMs ?? DEFAULT_READ_WALLCLOCK_MS);
 }
 
 /** Restores what the cold process would have by now: the pinned fix source and the operation's own output. */
@@ -105,12 +119,6 @@ async function renderOp(command: string, op: import('../core/operations.ts').Ope
   const { applyCliOpNotices, captureOpNotice } = await import('./op-notices.ts');
   const { setCliExitVerdict, writeStdoutFinal } = await import('../core/cli-force-exit.ts');
   await replay(frame);
-  if (frame.kind === 'timeout') {
-    const hint = getCliOptions().timeoutMs ? '' : ` (default ${frame.ms}ms; pass --timeout=Ns to override)`;
-    console.error(`${frame.label} timed out${hint}.`);
-    setCliExitVerdict(124);
-    return;
-  }
   if (frame.kind === 'error') {
     const { writeCliError } = await import('./cli-error.ts');
     const { reportPersistenceCliError } = await import('../commands/persistence-delegate.ts');
@@ -147,16 +155,18 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
   const path = cliSocketPath(home);
   const problem = connectProblem(path, cliSocketDir(home));
   if (problem) { if (problem !== 'missing') debug(`socket refused before connect (${problem})`); return false; }
-  try { if (resolveBrainId(cliOpts.brain) !== 'host') return false; } catch { return false; }
+  let brainId: string;
+  try { brainId = resolveBrainId(cliOpts.brain); } catch { return false; }
+  if (brainId !== 'host') { debug(`mount brain ${brainId}`); return false; }
 
   const base = {
     v: 1 as const,
-    identity: cliSocketIdentity({ config, configDir: home, configFile: configPath(), version: VERSION }),
+    identity: cliSocketIdentity({ config, brainId, configDir: home, configFile: configPath(), version: VERSION, env: process.env }),
     command,
     routing: { cwd: process.cwd(), source_env: process.env.GBRAIN_SOURCE ?? null },
     cli: { quiet: cliOpts.quiet, timeout_ms: cliOpts.timeoutMs },
   };
-  const resultTimeoutMs = (cliOpts.timeoutMs ?? DEFAULT_READ_WALLCLOCK_MS) + RESULT_GRACE_MS;
+  const resultTimeoutMs = cliSocketRoundTripMs(cliOpts.timeoutMs);
 
   if (command === 'recall') {
     const recall = await import('../commands/recall.ts');
@@ -167,9 +177,13 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
     if (!recall.isOneShotRecall(flags)) recall.validateAndNormalizeFlags(flags);
     const outcome = await exchangeCliSocket(path, { ...base, kind: 'recall', args }, resultTimeoutMs);
     if ('reason' in outcome) { debug(outcome.reason); return false; }
-    if (outcome.frame.kind === 'fallback' || outcome.frame.kind === 'timeout') { debug(outcome.frame.kind === 'fallback' ? outcome.frame.reason : 'timeout'); return false; }
+    if (outcome.frame.kind === 'fallback') { debug(outcome.frame.reason); return false; }
     await replay(outcome.frame);
-    if (outcome.frame.kind === 'result') { recall.renderRecallVerbResult(flags, outcome.frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]); return true; }
+    if (outcome.frame.kind === 'result') {
+      recall.renderRecallVerbResult(flags, outcome.frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]);
+      if (outcome.frame.notices.length > 0) (await import('../core/interop-notices.ts')).writeCliNotices(outcome.frame.notices);
+      return true;
+    }
     const error = reviveOperationError(outcome.frame.error);
     if (recall.isOneShotRecall(flags)) await recall.reportOneShotRecallError(error, flags);
     else throw error;

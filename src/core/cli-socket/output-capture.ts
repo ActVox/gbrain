@@ -1,13 +1,15 @@
 /**
  * Serve-side capture of what an operation prints (and the per-process state a
- * one-shot CLI would start fresh: once-only warnings, the pinned fix source)
- * while it answers a warm CLI request. A cold CLI prints a handler's console and stderr lines itself; the
+ * one-shot CLI would start fresh: once-only warnings, the pinned fix source,
+ * the first chat-fallback hop notice) while it answers a warm CLI request.
+ * A cold CLI prints a handler's console and stderr lines itself; the
  * serve records them per request (AsyncLocalStorage, so concurrent MCP work
  * and other requests are untouched) and the CLI replays them in order before
  * rendering the result.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { format } from 'node:util';
+import { setFallbackHopScope, type FallbackHopQueue } from '../ai/fallback-hop-queue.ts';
 import { setSourceNoteScope } from '../fix-routing.ts';
 import { setWarnOnceScope } from '../utils.ts';
 import { MAX_CAPTURED_OUTPUT_BYTES, type OutputChunk } from './protocol.ts';
@@ -16,6 +18,8 @@ export class OutputCapture {
   readonly chunks: OutputChunk[] = [];
   /** This request's warnOncePerProcess keys: a cold CLI process starts with none. */
   readonly warned = new Set<string>();
+  /** This request's chat_fallback_hop queue: a cold CLI process starts with an empty, unarmed one. */
+  readonly fallbackHops: FallbackHopQueue = { queued: false, pending: [] };
   /** The first source this request resolved, which the CLI pins in its fix commands. */
   resolvedSource?: string;
   private bytes = 0;
@@ -39,6 +43,7 @@ export function installOutputCapture(): void {
   installed = true;
   setWarnOnceScope(() => store.getStore()?.warned);
   setSourceNoteScope(() => store.getStore());
+  setFallbackHopScope(() => store.getStore()?.fallbackHops);
   const methods = [['log', 'stdout'], ['info', 'stdout'], ['debug', 'stdout'], ['warn', 'stderr'], ['error', 'stderr']] as const;
   for (const [method, stream] of methods) {
     const original = console[method];

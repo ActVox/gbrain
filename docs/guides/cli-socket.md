@@ -32,6 +32,9 @@ gbrain config set serve.cli_socket true
 
 The serve logs one line on stderr: `cli-socket: listening on …/run/cli.sock`,
 or `cli-socket: not started: <reason>` when it cannot open the socket safely.
+A serve on a mount brain (`gbrain serve --brain <mount>`, `GBRAIN_BRAIN_ID`, a
+`.gbrain-mount` file or a mount path) never opens it: the socket serves the
+host brain only.
 Turn it off by removing the flag or running
 `gbrain config set serve.cli_socket false`, then restarting the serve.
 
@@ -56,14 +59,25 @@ watch, cursor and rollup forms of `recall`, and a page large enough that
 The CLI falls back to its normal path, silently, when:
 
 - no serve has the socket open, or the serve died and left a stale socket;
-- the serve does not answer within about a second (a wedged serve never
-  stalls the CLI), or dies in the middle of the request (the CLI then runs
-  the call itself, once);
-- the serve was started for a different brain: the CLI sends a token built
-  from the database target (without the password), the config home and the
-  config file (path and content) and the gbrain version, and the serve answers
-  only an identical one. Editing `config.json` or upgrading gbrain while a serve
-  runs sends CLI calls to the normal path until the serve restarts.
+- the serve does not accept the request within about a second (a wedged serve
+  never stalls the CLI);
+- the answer takes longer than 30 seconds, or than the call's `--timeout` when
+  that is shorter, the serve's own read deadline passes, or the serve dies in
+  the middle of the request: the CLI then runs the call itself, once, with its
+  usual timeout and exit codes (it can only be a read, so running it again is
+  safe);
+- the serve answers with a frame the CLI cannot fully read;
+- the serve was started for a different brain or environment: the CLI sends a
+  token built from the brain (host or mount), the database target (without
+  the password), the config home, the config file (path and content), the
+  gbrain version and a digest of the environment that changes answers (every
+  `GBRAIN_*` setting except `GBRAIN_CLI_SOCKET`, `GBRAIN_DEBUG` and
+  `GBRAIN_SQL_TRACE`, plus which provider API keys and endpoints are set,
+  never their values), and the serve answers only an identical one. Editing
+  `config.json`, changing those variables or upgrading gbrain while a serve
+  runs sends CLI calls to the normal path until the serve restarts with the
+  same settings;
+- the CLI targets a mount brain (`--brain <mount>` and the other mount tiers).
 
 `GBRAIN_DEBUG=1` prints one `[cli-socket] cold path: <reason>` line on stderr
 whenever a call falls back. `GBRAIN_CLI_SOCKET=0` makes a CLI call skip the
@@ -75,15 +89,21 @@ socket entirely, for comparisons and benchmarks.
 - The `run` directory is created `0700` and must be owned by your uid; the
   socket is `0600`. Both the serve (before binding) and the CLI (before
   connecting) refuse a symlink, a directory or socket owned by another uid, or
-  open permissions.
+  open permissions. `GBRAIN_HOME` and `.gbrain` above it must be yours too and
+  writable by no one else (a sticky directory excepted); the serve refuses
+  otherwise and never repairs them. Right after binding, the serve checks the
+  path is still its own socket before making it `0600`, and the same inode
+  after.
 - On every connection the serve reads the peer's uid from the kernel
   (`SO_PEERCRED` on Linux, `getpeereid` on macOS) and drops any other uid
   before reading the request. The CLI checks the serve's uid the same way.
   Where peer credentials cannot be read (another operating system, or a
   runtime that hides the socket descriptor), the serve refuses to open the
-  socket and says why.
+  socket and says why, and the CLI never connects.
 - One serve per `GBRAIN_HOME` holds the socket; requests and responses are
-  size-bounded and each connection carries exactly one request.
+  size-bounded and each connection carries exactly one request. At most 8
+  requests run at once; a request that timed out keeps its slot until its work
+  actually finishes, so slow requests cannot pile up.
 - Postgres brains only. A PGLite brain's CLI calls already reach its running
   serve through the persistence socket.
 

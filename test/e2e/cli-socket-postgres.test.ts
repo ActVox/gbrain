@@ -1,9 +1,10 @@
 /**
  * The opt-in warm CLI socket against a real Postgres brain: a `gbrain serve
  * --cli-socket` answers CLI search/query/get/recall with the cold path's exact
- * bytes and exit code in a handful of database round trips, writes never use
- * it, a CLI bound to another config is refused by the identity handshake and a
- * dead serve falls back to the cold path. Runs when DATABASE_URL is set.
+ * bytes and exit code in far fewer database round trips, writes never use it,
+ * a CLI bound to another config or another behavior env is refused by the
+ * identity handshake, a serve on a mount brain never answers the host CLI and
+ * a dead serve falls back to the cold path. Runs when DATABASE_URL is set.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -186,11 +187,20 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     const otherHome = mkdtempSync(join(tmpdir(), 'gbrain-cli-socket-other-'));
     mkdirSync(join(otherHome, '.gbrain'));
     writeFileSync(join(otherHome, '.gbrain', 'config.json'), original);
-    const identity = cliSocketIdentity({ config: { engine: 'postgres', database_url: databaseUrl }, configDir: join(otherHome, '.gbrain'), configFile: join(otherHome, '.gbrain', 'config.json'), version: VERSION });
+    const identity = cliSocketIdentity({ config: { engine: 'postgres', database_url: databaseUrl }, brainId: 'host', configDir: join(otherHome, '.gbrain'), configFile: join(otherHome, '.gbrain', 'config.json'), version: VERSION, env });
     const outcome = await exchangeCliSocket(socketPath, { v: 1, identity, command: 'search', kind: 'op', op: 'search', params: { query: WORD },
       routing: { cwd: process.cwd(), source_env: null }, cli: { quiet: false, timeout_ms: null } }, 30_000);
     expect(outcome).toEqual({ reason: 'refused (identity_mismatch)' });
     rmSync(otherHome, { recursive: true, force: true });
+  }, 90_000);
+
+  test('a CLI whose behavior env differs from the serve\'s (GBRAIN_* settings, provider keys present) is refused and falls back', async () => {
+    const extras: Record<string, string>[] = [{ GBRAIN_CONTRIBUTOR_MODE: '1' }, { VOYAGE_API_KEY: 'synthetic-fixture-value' }];
+    for (const extra of extras) {
+      const run = await cli(READS.search!, { GBRAIN_DEBUG: '1', ...extra });
+      expect(run.stderr).toContain('[cli-socket] cold path: refused (identity_mismatch)');
+      expect(run.stdout).toBe(cold.get('search')!.stdout);
+    }
   }, 90_000);
 
   test('a killed serve leaves a stale socket that falls back silently', async () => {
@@ -202,4 +212,35 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     expect(noisy.stderr).toContain('[cli-socket] cold path: connect_failed');
     expect(noisy.stdout).toBe(cold.get('search')!.stdout);
   }, 90_000);
+
+  test('a serve on a mount brain never answers the host CLI with the mount\'s data', async () => {
+    const mountWord = 'quillmountword';
+    const mount = await isolatedPersistencePostgres(DATABASE_URL!);
+    const mountsFile = join(home, '.gbrain', 'mounts.json');
+    try {
+      await importFromContent(mount.engine, 'notes/mount-only-example', `---\ntitle: notes/mount-only-example\ntype: note\n---\n\n${mountWord} lives only in the mount.\n`, {
+        sourceId: 'default', noEmbed: true,
+        prepare: async prepared => { await withManagedFixtureWrite(mount.engine, ['default'], tx => prepared.apply(tx)); return prepared.result; },
+      });
+      await mount.engine.disconnect();
+      const checkout = join(home, 'mnt-checkout');
+      mkdirSync(checkout, { recursive: true });
+      writeFileSync(mountsFile, JSON.stringify({ version: 1, mounts: [{ id: 'mnt', path: checkout, engine: 'postgres', database_url: mount.databaseUrl }] }));
+      const coldHost = await cli(['search', mountWord], { GBRAIN_CLI_SOCKET: '0' });
+      expect(coldHost.stdout).not.toContain('mount-only-example');
+      const viaMount = await cli(['--brain', 'mnt', 'search', mountWord], { GBRAIN_CLI_SOCKET: '0' });
+      expect(viaMount.stdout).toContain('notes/mount-only-example');
+      serve = await startServe(['--brain', 'mnt', '--cli-socket']);
+      for (let i = 0; i < 120 && !serveLog.includes('cli-socket: '); i++) await Bun.sleep(250);
+      const warmHost = await cli(['search', mountWord], { GBRAIN_DEBUG: '1' });
+      expect(warmHost.stdout).toBe(coldHost.stdout);
+      expect(warmHost.exitCode).toBe(coldHost.exitCode);
+      expect(warmHost.stderr).toContain('[cli-socket] cold path:');
+      expect(serveLog).toContain('cli-socket: not started: this serve is on mount brain "mnt"');
+    } finally {
+      await stopServe();
+      rmSync(mountsFile, { force: true });
+      await mount.close();
+    }
+  }, 180_000);
 });

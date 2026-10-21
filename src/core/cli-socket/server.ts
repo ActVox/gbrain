@@ -6,14 +6,16 @@
  * is parsed; a platform where that cannot be read never opens the listener.
  */
 import { timingSafeEqual } from 'node:crypto';
-import { chmodSync, lstatSync, unlinkSync } from 'node:fs';
+import { lstatSync, unlinkSync } from 'node:fs';
 import net, { type Socket } from 'node:net';
 import type { BrainEngine } from '../engine.ts';
-import { configDir, configPath, loadConfig } from '../config.ts';
+import { resolveBrainId } from '../brain-resolver.ts';
+import { getCliOptions } from '../cli-options.ts';
+import { configDir, configPath } from '../config.ts';
 import { tryAcquireNativeLock } from '../persistence/native-lock.ts';
 import { VERSION } from '../../version.ts';
-import { executeCliSocketRequest } from './execute.ts';
-import { CliSocketUnsafeError, cliSocketDir, cliSocketPath, ensurePrivateDir, privateSocketProblem, socketPathFits } from './fs-guard.ts';
+import { executeCliSocketRequest, type ExecutedRequest } from './execute.ts';
+import { CliSocketUnsafeError, cliSocketDir, cliSocketPath, ensurePrivateDir, privateSocketProblem, socketPathFits, tightenBoundSocket } from './fs-guard.ts';
 import { cliSocketIdentity } from './identity.ts';
 import { installOutputCapture } from './output-capture.ts';
 import { peerCredSupport, peerUid, type PeerCredSupport } from './peer-cred.ts';
@@ -34,7 +36,8 @@ export interface CliSocketServerOptions {
   home?: string;
   identity?: string;
   uid?: () => number | undefined;
-  execute?: (request: CliSocketRequest) => Promise<ResultFrame>;
+  brainId?: () => string;
+  execute?: (request: CliSocketRequest) => Promise<ExecutedRequest>;
 }
 
 /** Whether this serve should open the socket: the flag, or the DB-plane config key set to a true value. */
@@ -103,6 +106,12 @@ export async function startCliSocketServer(opts: CliSocketServerOptions): Promis
   const log = (line: string) => opts.log(`[gbrain serve] cli-socket: ${line}`);
   const uid = (opts.uid ?? (() => process.getuid?.()))();
   if (opts.engine.kind !== 'postgres') { log('not started: the CLI socket serves Postgres brains only (PGLite CLI calls already reach a running serve).'); return null; }
+  let brainId: string;
+  try { brainId = (opts.brainId ?? (() => resolveBrainId(getCliOptions().brain)))(); }
+  catch (error) { log(`not started: the serve's brain cannot be resolved (${(error as Error).message}).`); return null; }
+  if (brainId !== 'host') { log(`not started: this serve is on mount brain "${brainId}"; the CLI socket serves the host brain only.`); return null; }
+  const databaseUrl = (opts.engine as { connectedDatabaseUrl?: string }).connectedDatabaseUrl;
+  if (!databaseUrl) { log('not started: the engine does not report the database it connected to.'); return null; }
   const support = opts.peerCred ?? peerCredSupport();
   if (!support.ok || uid === undefined) { log(`not started: peer credentials cannot be verified on this platform (${support.ok ? 'no POSIX uid' : support.reason}).`); return null; }
   const home = opts.home ?? configDir();
@@ -124,8 +133,9 @@ export async function startCliSocketServer(opts: CliSocketServerOptions): Promis
     unlinkSync(path);
   }
 
-  const config = loadConfig();
-  const identity = opts.identity ?? cliSocketIdentity({ config: config ?? { engine: 'postgres' }, configDir: home, configFile: configPath(), version: VERSION });
+  const identity = opts.identity ?? cliSocketIdentity({
+    config: { engine: 'postgres', database_url: databaseUrl }, brainId, configDir: home, configFile: configPath(), version: VERSION, env: process.env,
+  });
   const execute = opts.execute ?? ((request: CliSocketRequest) => executeCliSocketRequest(opts.engine, request));
   installOutputCapture();
 
@@ -161,15 +171,17 @@ export async function startCliSocketServer(opts: CliSocketServerOptions): Promis
         if (!isCliSocketRequest(request)) { socket.end(frame({ v: 1, accepted: false, reason: 'malformed_request' })); return; }
         if (!sameToken(request.identity, identity)) { socket.end(frame({ v: 1, accepted: false, reason: 'identity_mismatch' })); return; }
         if (active >= MAX_ACTIVE_REQUESTS) { socket.end(frame({ v: 1, accepted: false, reason: 'busy' })); return; }
+        // Active until the request's own work settles, not until it answered: a timed-out handler still holds its slot.
         active++;
+        let settled: Promise<unknown> = Promise.resolve();
         try {
           socket.write(frame({ v: 1, accepted: true }));
           let result: ResultFrame;
-          try { result = await execute(request); }
+          try { ({ frame: result, settled } = await execute(request)); }
           catch { result = { v: 1, kind: 'fallback', reason: 'serve_error' }; }
           if (!socket.destroyed) socket.end(frame(result));
         } finally {
-          active--;
+          void settled.then(() => { active--; }, () => { active--; });
         }
       })();
     });
@@ -181,9 +193,9 @@ export async function startCliSocketServer(opts: CliSocketServerOptions): Promis
   });
   if (!bound) { await lock.release(); log(`not started: could not bind ${path}.`); return null; }
   server.on('error', () => {});
-  try { chmodSync(path, 0o600); } catch { /* verified below */ }
-  if (privateSocketProblem(path) !== null) { server.close(); await lock.release(); log(`not started: ${path} did not become a private socket.`); return null; }
-  const inode = lstatSync(path).ino;
+  let inode: number;
+  try { inode = tightenBoundSocket(path); }
+  catch (error) { server.close(); await lock.release(); log(`not started: ${path} did not become a private socket (${(error as Error).message}).`); return null; }
   const close = () => {
     if (closing) return;
     closing = true;

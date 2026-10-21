@@ -1,17 +1,23 @@
 /**
  * Warm CLI socket: the guards that decide whether a CLI may talk to a serve.
  *
- * 1. Protects: the identity token changes with the database target, config home,
- *    config bytes and version (never with the password); the run directory and
- *    socket checks refuse symlinks, foreign owners and open permissions; the
- *    serve rejects a peer whose kernel-reported uid differs, refuses to start
- *    when peer credentials cannot be read, refuses a mismatched identity, and a
- *    serve that dies mid-request sends the CLI to its cold path.
+ * 1. Protects: the identity token changes with the brain, database target,
+ *    config home, config bytes, behavior env and version (never with the
+ *    password or a provider key's value); the run directory, the directories
+ *    above it and the socket checks refuse symlinks, foreign owners, open
+ *    permissions and a socket swapped after bind; the serve rejects a peer
+ *    whose kernel-reported uid differs, refuses to start when peer credentials
+ *    cannot be read or on a mount brain, refuses a mismatched identity, holds a
+ *    request's slot until its work settles, and the CLI never connects without
+ *    a peer-credential reader, bounds the whole exchange, and treats a dying
+ *    serve or a malformed frame as its cold path.
  * 2. Fails when: a token input is dropped, a check follows a symlink or skips
- *    the uid comparison, or the peer-credential branch is removed.
+ *    the uid comparison, the peer-credential branch is removed, or a frame
+ *    field the CLI reads goes unchecked.
  * 3. The Postgres E2E (test/e2e/cli-socket-postgres.test.ts) exercises the
  *    happy path and fallbacks end to end; another uid cannot be produced there.
- * 4. Seams: startCliSocketServer's peerCred/identity/execute/home options.
+ * 4. Seams: startCliSocketServer's peerCred/identity/execute/home/brainId
+ *    options, exchangeCliSocket's peerCred argument, FsGuardDeps.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -19,16 +25,28 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
-import { canonicalDatabaseTarget, cliSocketIdentity } from '../src/core/cli-socket/identity.ts';
-import { cliSocketPath, connectProblem, ensurePrivateDir, privateDirProblem, privateSocketProblem, type FsGuardDeps } from '../src/core/cli-socket/fs-guard.ts';
+import { behaviorEnvDigest, canonicalDatabaseTarget, cliSocketIdentity } from '../src/core/cli-socket/identity.ts';
+import {
+  ancestorProblem, cliSocketPath, connectProblem, ensurePrivateDir, privateDirProblem, privateSocketProblem, tightenBoundSocket, trustedAncestorProblem, type FsGuardDeps,
+} from '../src/core/cli-socket/fs-guard.ts';
 import { peerCredSupport } from '../src/core/cli-socket/peer-cred.ts';
 import { startCliSocketServer, type CliSocketBinding } from '../src/core/cli-socket/server.ts';
-import { exchangeCliSocket } from '../src/cli/cli-socket-client.ts';
-import { reviveOperationError, serializeOperationError, type CliSocketRequest } from '../src/core/cli-socket/protocol.ts';
+import { cliSocketRoundTripMs, exchangeCliSocket } from '../src/cli/cli-socket-client.ts';
+import { isResultFrame, reviveOperationError, serializeOperationError, type CliSocketRequest, type ResultFrame } from '../src/core/cli-socket/protocol.ts';
+import { queueFirstFallbackHop, takeChatFallbackHopNotices, __resetChatFallbackHopNoticeForTests } from '../src/core/ai/fallback-hop-queue.ts';
+import { installOutputCapture, OutputCapture, withOutputCapture } from '../src/core/cli-socket/output-capture.ts';
 import { opError, OperationError } from '../src/core/ops/contract.ts';
 
 const uid = process.getuid!();
-const engine = { kind: 'postgres' } as BrainEngine;
+const engine = { kind: 'postgres', connectedDatabaseUrl: 'postgresql://alice-example@db.acme-example.test/brain' } as unknown as BrainEngine;
+const okFrame: ResultFrame = { v: 1, kind: 'result', result: ['ok'], meta: null, notices: [], output: [], source: null };
+
+/** A run directory under a private home, as the serve lays it out: <root>/home/.gbrain/run. */
+function runDir(): string {
+  const dir = join(root, 'home', '.gbrain', 'run');
+  ensurePrivateDir(dir);
+  return dir;
+}
 let root: string;
 
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'gbrain-cli-sock-')); });
@@ -45,7 +63,7 @@ describe('identity token', () => {
   const url = 'postgresql://alice-example:secret-one@db.acme-example.test:6543/brain?sslmode=require&application_name=x';
   const token = (overrides: Partial<Parameters<typeof cliSocketIdentity>[0]> = {}) => {
     const dir = join(root, 'a', '.gbrain');
-    return cliSocketIdentity({ config: { engine: 'postgres', database_url: url }, configDir: dir, configFile: join(dir, 'config.json'), version: '1.0.0', ...overrides });
+    return cliSocketIdentity({ config: { engine: 'postgres', database_url: url }, brainId: 'host', configDir: dir, configFile: join(dir, 'config.json'), version: '1.0.0', env: {}, ...overrides });
   };
 
   test('ignores the password and query-parameter order, keeps host, port, database and user', () => {
@@ -68,6 +86,25 @@ describe('identity token', () => {
     writeFileSync(home.file, '{"engine":"postgres","edited":true}');
     expect(token()).not.toBe(base);
   });
+
+  test('changes with the resolved brain id (a mount serve never matches a host CLI)', () => {
+    homeWithConfig('a');
+    expect(token({ brainId: 'mnt-example' })).not.toBe(token());
+  });
+
+  test('changes with GBRAIN_* settings and which provider keys are set, never with a key value or the socket/debug switches', () => {
+    homeWithConfig('a');
+    const base = token({ env: { HOME: '/home/alice-example', GBRAIN_HOME: '/home/alice-example' } });
+    expect(token({ env: { HOME: '/elsewhere', GBRAIN_HOME: '/home/alice-example' } })).toBe(base);
+    expect(token({ env: { GBRAIN_HOME: '/home/alice-example', GBRAIN_CONTRIBUTOR_MODE: '1' } })).not.toBe(base);
+    expect(token({ env: { GBRAIN_HOME: '/home/alice-example', GBRAIN_CLI_SOCKET: '1', GBRAIN_DEBUG: '1', GBRAIN_SQL_TRACE: '/tmp/t.jsonl' } })).toBe(base);
+    const keyed = behaviorEnvDigest({ VOYAGE_API_KEY: 'value-one' });
+    expect(behaviorEnvDigest({ VOYAGE_API_KEY: 'value-two' })).toBe(keyed);
+    expect(behaviorEnvDigest({})).not.toBe(keyed);
+    expect(behaviorEnvDigest({ VOYAGE_API_KEY: '' })).toBe(behaviorEnvDigest({}));
+    expect(behaviorEnvDigest({ OPENAI_BASE_URL: 'http://localhost:1' })).not.toBe(behaviorEnvDigest({}));
+    expect(JSON.stringify(behaviorEnvDigest({ VOYAGE_API_KEY: 'value-one' }))).not.toContain('value-one');
+  });
 });
 
 describe('run directory and socket checks', () => {
@@ -86,17 +123,15 @@ describe('run directory and socket checks', () => {
   });
 
   test('a directory or socket owned by another uid is refused, never repaired', () => {
-    const dir = join(root, 'run');
-    ensurePrivateDir(dir);
-    const foreign: FsGuardDeps = { lstat: path => lstatSync(path), uid: () => uid + 1 };
+    const dir = runDir();
+    const foreign: FsGuardDeps = { lstat: path => lstatSync(path), stat: path => statSync(path), uid: () => uid + 1 };
     expect(privateDirProblem(dir, foreign)).toBe('foreign_owner');
     expect(() => ensurePrivateDir(dir, foreign)).toThrow(/foreign_owner/);
     expect(privateDirProblem(dir, { ...foreign, uid: () => undefined })).toBe('no_uid');
   });
 
   test('the CLI refuses a regular file, a symlinked socket and an open socket before connecting', async () => {
-    const dir = join(root, 'run');
-    ensurePrivateDir(dir);
+    const dir = runDir();
     const path = join(dir, 'cli.sock');
     expect(connectProblem(path, dir)).toBe('missing');
     writeFileSync(path, 'x');
@@ -118,6 +153,48 @@ describe('run directory and socket checks', () => {
       server.close();
     }
   });
+
+  test('GBRAIN_HOME and .gbrain must be this user\'s and writable by no one else (sticky excepted), on both sides', () => {
+    const dir = runDir();
+    const home = join(root, 'home');
+    const path = join(dir, 'cli.sock');
+    expect(ancestorProblem(dir)).toBeNull();
+    for (const [target, mode] of [[home, 0o775], [home, 0o757], [join(home, '.gbrain'), 0o770]] as const) {
+      chmodSync(target, mode);
+      expect(ancestorProblem(dir)).toEqual({ path: target, reason: 'open_permissions' });
+      expect(connectProblem(path, dir)).toBe('open_permissions');
+      expect(() => ensurePrivateDir(dir)).toThrow(/open_permissions/);
+      chmodSync(target, 0o700);
+    }
+    chmodSync(home, 0o1777);
+    expect(trustedAncestorProblem(home)).toBeNull();
+    chmodSync(home, 0o700);
+    const foreignHome: FsGuardDeps = { lstat: p => lstatSync(p), stat: p => p === home ? { ...statSync(p), isDirectory: () => true, uid: uid + 1 } as never : statSync(p), uid: () => uid };
+    expect(ancestorProblem(dir, foreignHome)).toEqual({ path: home, reason: 'foreign_owner' });
+    expect(() => ensurePrivateDir(dir, foreignHome)).toThrow(/foreign_owner/);
+  });
+
+  test('after bind the socket is chmod 0600 only while it is still our socket, and must keep its inode', async () => {
+    const dir = runDir();
+    const path = join(dir, 'cli.sock');
+    const server = net.createServer();
+    await new Promise<void>(resolve => server.listen(path, resolve));
+    try {
+      const real: FsGuardDeps = { lstat: p => lstatSync(p), uid: () => uid };
+      expect(tightenBoundSocket(path, real)).toBe(lstatSync(path).ino);
+      expect(lstatSync(path).mode & 0o777).toBe(0o600);
+      let chmods = 0;
+      const symlinked: FsGuardDeps = { ...real, lstat: p => ({ ...lstatSync(p), isSymbolicLink: () => true, isSocket: () => false }) as never };
+      expect(() => tightenBoundSocket(path, symlinked, () => { chmods++; })).toThrow(/symlink/);
+      expect(() => tightenBoundSocket(path, { ...real, uid: () => uid + 1 }, () => { chmods++; })).toThrow(/foreign_owner/);
+      expect(chmods).toBe(0);
+      let reads = 0;
+      const swapped: FsGuardDeps = { ...real, lstat: p => { const st = lstatSync(p); return reads++ < 2 ? st : ({ ...st, isSocket: () => true, isSymbolicLink: () => false, ino: st.ino + 1 }) as never; } };
+      expect(() => tightenBoundSocket(path, swapped, () => {})).toThrow(/replaced/);
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('serve listener', () => {
@@ -130,8 +207,8 @@ describe('serve listener', () => {
   async function start(overrides: Partial<Parameters<typeof startCliSocketServer>[0]> = {}) {
     const lines: string[] = [];
     const home = join(root, 'home', '.gbrain');
-    const binding = await startCliSocketServer({ engine, log: line => lines.push(line), home, identity: 'token-a',
-      execute: async () => ({ v: 1, kind: 'result', result: ['ok'], meta: null, notices: [], output: [], source: null }), ...overrides });
+    const binding = await startCliSocketServer({ engine, log: line => lines.push(line), home, identity: 'token-a', brainId: () => 'host',
+      execute: async () => ({ frame: okFrame, settled: Promise.resolve() }), ...overrides });
     if (binding) bindings.push(binding);
     return { binding, lines, path: cliSocketPath(home) };
   }
@@ -144,7 +221,7 @@ describe('serve listener', () => {
     const { binding, path } = await start();
     expect(binding).not.toBeNull();
     expect(lstatSync(path).mode & 0o777).toBe(0o600);
-    expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toEqual({ frame: { v: 1, kind: 'result', result: ['ok'], meta: null, notices: [], output: [], source: null } });
+    expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toEqual({ frame: okFrame });
     expect(await exchangeCliSocket(path, request('token-b'), 5_000)).toEqual({ reason: 'refused (identity_mismatch)' });
   });
 
@@ -185,10 +262,92 @@ describe('serve listener', () => {
     expect(lines.join('\n')).toContain('(symlink)');
   });
 
-  test('a serve that dies after the handshake sends the CLI to its cold path', async () => {
-    const dir = join(root, 'run');
-    ensurePrivateDir(dir);
+  test('refuses to start on a mount brain, or when the engine does not report the database it connected to', async () => {
+    const mount = await start({ brainId: () => 'mnt-example' });
+    expect(mount.binding).toBeNull();
+    expect(mount.lines.join('\n')).toContain('this serve is on mount brain "mnt-example"');
+    expect(() => lstatSync(mount.path)).toThrow();
+    const unknown = await start({ engine: { kind: 'postgres' } as BrainEngine });
+    expect(unknown.binding).toBeNull();
+    expect(unknown.lines.join('\n')).toContain('does not report the database it connected to');
+  });
+
+  test('a request holds its slot until its work settles, not until it answered', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const { path } = await start({ execute: async () => ({ frame: { v: 1, kind: 'fallback', reason: 'timeout' }, settled: pending }) });
+    for (let i = 0; i < 8; i++) expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toEqual({ frame: { v: 1, kind: 'fallback', reason: 'timeout' } });
+    expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toEqual({ reason: 'refused (busy)' });
+    release();
+    await Bun.sleep(20);
+    expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toHaveProperty('frame');
+  });
+
+  test('without a peer-credential reader the CLI never connects', async () => {
+    const { path } = await start();
+    let connections = 0;
+    const counter = net.createServer(socket => { connections++; socket.destroy(); });
+    const probe = join(runDir(), 'probe.sock');
+    await new Promise<void>(resolve => counter.listen(probe, resolve));
+    try {
+      expect(await exchangeCliSocket(probe, request('token-a'), 5_000, { ok: false, reason: 'no peer-credential call is wired for testos' }))
+        .toEqual({ reason: 'peer_credentials_unsupported (no peer-credential call is wired for testos)' });
+      await Bun.sleep(20);
+      expect(connections).toBe(0);
+      expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toEqual({ frame: okFrame });
+    } finally {
+      counter.close();
+    }
+  });
+
+  test('a response frame missing a field the CLI reads, or of an unknown kind, is malformed', async () => {
+    const valid: unknown[] = [okFrame, { v: 1, kind: 'error', error: { code: 'page_not_found', message: 'm' }, output: [['stderr', 'x']] }, { v: 1, kind: 'fallback', reason: 'r' }];
+    for (const frame of valid) expect(isResultFrame(frame)).toBe(true);
+    const malformed: unknown[] = [
+      { v: 1, kind: 'result', result: 1, meta: null, notices: [] },
+      { v: 1, kind: 'result', result: 1, meta: null, notices: [], output: [['stdout']] },
+      { v: 1, kind: 'result', result: 1, meta: 'x', notices: [], output: [] },
+      { v: 1, kind: 'result', result: 1, meta: null, notices: [{}], output: [] },
+      { v: 1, kind: 'error', output: [] },
+      { v: 1, kind: 'error', error: { message: 'no code' }, output: [] },
+      { v: 1, kind: 'timeout', label: 'l', ms: 1, output: [] },
+      { v: 1, kind: 'mystery' },
+      { v: 1, kind: 'fallback' },
+      { v: 2, kind: 'fallback', reason: 'r' },
+    ];
+    for (const frame of malformed) expect(isResultFrame(frame)).toBe(false);
+    const dir = runDir();
     const path = join(dir, 'cli.sock');
+    const lines = [JSON.stringify(malformed[0]), JSON.stringify({ v: 1, accepted: 'yes' })];
+    for (const [handshake, result] of [['{"v":1,"accepted":true}', lines[0]], [lines[1], '']] as const) {
+      const server = net.createServer(socket => socket.once('data', () => socket.write(`${handshake}\n${result}${result ? '\n' : ''}`)));
+      await new Promise<void>(resolve => server.listen(path, resolve));
+      try {
+        expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toEqual({ reason: 'malformed_response' });
+      } finally {
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }
+  });
+
+  test('the whole exchange is bounded: about 30 s, or the CLI\'s --timeout when shorter', async () => {
+    expect(cliSocketRoundTripMs(null)).toBe(30_000);
+    expect(cliSocketRoundTripMs(5_000)).toBe(5_000);
+    expect(cliSocketRoundTripMs(600_000)).toBe(30_000);
+    const path = join(runDir(), 'cli.sock');
+    const server = net.createServer(socket => socket.once('data', () => socket.write('{"v":1,"accepted":true}\n')));
+    await new Promise<void>(resolve => server.listen(path, resolve));
+    try {
+      const started = performance.now();
+      expect(await exchangeCliSocket(path, request('token-a'), 300)).toEqual({ reason: 'round_trip_timeout' });
+      expect(performance.now() - started).toBeLessThan(2_000);
+    } finally {
+      server.close();
+    }
+  });
+
+  test('a serve that dies after the handshake sends the CLI to its cold path', async () => {
+    const path = join(runDir(), 'cli.sock');
     const server = net.createServer(socket => socket.once('data', () => { socket.write('{"v":1,"accepted":true}\n'); setTimeout(() => socket.destroy(), 20); }));
     await new Promise<void>(resolve => server.listen(path, resolve));
     try {
@@ -199,9 +358,7 @@ describe('serve listener', () => {
   });
 
   test('a wedged serve that never answers the handshake is abandoned within the handshake timeout', async () => {
-    const dir = join(root, 'run');
-    ensurePrivateDir(dir);
-    const path = join(dir, 'cli.sock');
+    const path = join(runDir(), 'cli.sock');
     const server = net.createServer(() => { /* never answers */ });
     await new Promise<void>(resolve => server.listen(path, resolve));
     try {
@@ -212,6 +369,24 @@ describe('serve listener', () => {
       server.close();
     }
   });
+});
+
+test('each warm request has its own first chat-fallback hop queue; the process queue is untouched', async () => {
+  installOutputCapture();
+  __resetChatFallbackHopNoticeForTests();
+  const hop = (why: string) => () => ({ code: 'chat_fallback_hop', kind: 'safety', why }) as never;
+  expect(queueFirstFallbackHop(hop('process'))).toBe(true);
+  const seen: unknown[][] = [];
+  for (const name of ['a', 'b']) {
+    await withOutputCapture(new OutputCapture(), async () => {
+      expect(queueFirstFallbackHop(hop(name))).toBe(true);
+      expect(queueFirstFallbackHop(hop(`${name}-again`))).toBe(false);
+      seen.push(takeChatFallbackHopNotices());
+    });
+  }
+  expect(seen).toEqual([[{ code: 'chat_fallback_hop', kind: 'safety', why: 'a' }], [{ code: 'chat_fallback_hop', kind: 'safety', why: 'b' }]]);
+  expect(takeChatFallbackHopNotices()).toEqual([{ code: 'chat_fallback_hop', kind: 'safety', why: 'process' }]);
+  __resetChatFallbackHopNoticeForTests();
 });
 
 test('an OperationError round-trips with every field the CLI renderer reads', () => {

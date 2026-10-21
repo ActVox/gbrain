@@ -16,6 +16,8 @@ export const HANDSHAKE_TIMEOUT_MS = 1_000;
 export const REQUEST_READ_TIMEOUT_MS = 2_000;
 /** The cold path's read wallclock (src/cli/main.ts READ_OP_TIMEOUT_MS) when --timeout is not given. */
 export const DEFAULT_READ_WALLCLOCK_MS = 180_000;
+/** The longest a CLI waits on one whole exchange (or its --timeout, when shorter) before running the call itself. */
+export const MAX_ROUND_TRIP_MS = 30_000;
 
 /** The read operations a serve answers over the socket. Everything else keeps the cold path. */
 export const CLI_SOCKET_OPS = ['search', 'query', 'get_page'] as const;
@@ -47,11 +49,39 @@ interface Answered { output: OutputChunk[]; source?: string | null }
 export type ResultFrame =
   | { v: 1; kind: 'result'; result: unknown; meta: Record<string, unknown> | null; notices: Notice[] } & Answered
   | { v: 1; kind: 'error'; error: Record<string, unknown> } & Answered
-  | { v: 1; kind: 'timeout'; label: string; ms: number } & Answered
   | { v: 1; kind: 'fallback'; reason: string };
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Shape check for the serve's handshake line. */
+export function isHandshakeFrame(value: unknown): value is HandshakeFrame {
+  if (!record(value) || value.v !== CLI_SOCKET_PROTOCOL) return false;
+  return value.accepted === true || (value.accepted === false && typeof value.reason === 'string');
+}
+
+function isAnswered(value: Record<string, unknown>): boolean {
+  return Array.isArray(value.output)
+    && value.output.every(chunk => Array.isArray(chunk) && chunk.length === 2 && (chunk[0] === 'stdout' || chunk[0] === 'stderr') && typeof chunk[1] === 'string')
+    && (value.source === undefined || value.source === null || typeof value.source === 'string');
+}
+
+/** Shape check for the serve's result line: every field the CLI reads, per kind; anything else is malformed. */
+export function isResultFrame(value: unknown): value is ResultFrame {
+  if (!record(value) || value.v !== CLI_SOCKET_PROTOCOL) return false;
+  switch (value.kind) {
+    case 'result':
+      return 'result' in value && (value.meta === null || record(value.meta))
+        && Array.isArray(value.notices) && value.notices.every(notice => record(notice) && typeof notice.code === 'string')
+        && isAnswered(value);
+    case 'error':
+      return record(value.error) && typeof value.error.code === 'string' && typeof value.error.message === 'string' && isAnswered(value);
+    case 'fallback':
+      return typeof value.reason === 'string';
+    default:
+      return false;
+  }
 }
 
 /** Shape check for an inbound request; anything else is refused before it reaches the engine. */

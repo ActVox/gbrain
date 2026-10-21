@@ -4,21 +4,26 @@
  * TCP) in a directory that is 0700 and owned by the current user, the socket
  * itself 0600. Both the serve (before bind) and the CLI (before connect)
  * lstat the directory and the socket path, so a symlink, a foreign owner or
- * open permissions refuse instead of being followed or repaired.
+ * open permissions refuse instead of being followed or repaired. The
+ * directories above it, GBRAIN_HOME and `.gbrain`, must be this user's and
+ * writable by no one else (a sticky directory excepted), so nobody else can
+ * swap a path component.
  */
-import { chmodSync, lstatSync, mkdirSync, type Stats } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, lstatSync, mkdirSync, statSync, type Stats } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { configDir } from '../config.ts';
 import { UNIX_SOCKET_PATH_MAX_BYTES } from '../context/ipc-path.ts';
 
 export interface FsGuardDeps {
   lstat: (path: string) => Stats;
   uid: () => number | undefined;
+  /** Follows symlinks; used for GBRAIN_HOME and `.gbrain`. Defaults to the real stat. */
+  stat?: (path: string) => Stats;
 }
 
-const realDeps: FsGuardDeps = { lstat: path => lstatSync(path), uid: () => process.getuid?.() };
+const realDeps: FsGuardDeps = { lstat: path => lstatSync(path), stat: path => statSync(path), uid: () => process.getuid?.() };
 
-export type UnsafeReason = 'missing' | 'symlink' | 'not_directory' | 'not_socket' | 'foreign_owner' | 'open_permissions' | 'no_uid';
+export type UnsafeReason = 'missing' | 'symlink' | 'not_directory' | 'not_socket' | 'foreign_owner' | 'open_permissions' | 'no_uid' | 'replaced';
 
 export function cliSocketDir(home: string = configDir()): string {
   return join(home, 'run');
@@ -64,9 +69,48 @@ export function privateSocketProblem(path: string, deps: FsGuardDeps = realDeps)
   return null;
 }
 
-/** The CLI's pre-connect check: both the directory and the socket must pass, or the CLI never connects. */
+/** null when `dir` (symlinks followed) is a directory this uid owns with no group or other write bit, unless sticky. */
+export function trustedAncestorProblem(dir: string, deps: FsGuardDeps = realDeps): UnsafeReason | null {
+  const uid = deps.uid();
+  if (uid === undefined) return 'no_uid';
+  let st: Stats;
+  try { st = (deps.stat ?? statSync)(dir); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing'; throw error; }
+  if (!st.isDirectory()) return 'not_directory';
+  if (st.uid !== uid) return 'foreign_owner';
+  if ((st.mode & 0o022) !== 0 && (st.mode & 0o1000) === 0) return 'open_permissions';
+  return null;
+}
+
+/** GBRAIN_HOME and `.gbrain` above the run directory, outermost first, with the first that fails its check. */
+export function ancestorProblem(dir: string, deps: FsGuardDeps = realDeps): { path: string; reason: UnsafeReason } | null {
+  for (const ancestor of [dirname(dirname(dir)), dirname(dir)]) {
+    const reason = trustedAncestorProblem(ancestor, deps);
+    if (reason) return { path: ancestor, reason };
+  }
+  return null;
+}
+
+/** The CLI's pre-connect check: the directories above, the run directory and the socket must pass, or the CLI never connects. */
 export function connectProblem(path: string, dir: string, deps: FsGuardDeps = realDeps): UnsafeReason | null {
-  return privateDirProblem(dir, deps) ?? privateSocketProblem(path, deps);
+  return ancestorProblem(dir, deps)?.reason ?? privateDirProblem(dir, deps) ?? privateSocketProblem(path, deps);
+}
+
+/**
+ * Right after bind: the path must be a socket this uid owns (lstat, never
+ * followed) before it is chmod 0600, and the same inode, private, after.
+ * Returns that inode; throws when the path changed or is not ours.
+ */
+export function tightenBoundSocket(path: string, deps: FsGuardDeps = realDeps, chmod: (path: string) => void = target => chmodSync(target, 0o600)): number {
+  const uid = deps.uid();
+  const before = deps.lstat(path);
+  if (before.isSymbolicLink() || !before.isSocket()) throw new CliSocketUnsafeError(before.isSymbolicLink() ? 'symlink' : 'not_socket', path);
+  if (before.uid !== uid) throw new CliSocketUnsafeError('foreign_owner', path);
+  chmod(path);
+  const problem = privateSocketProblem(path, deps);
+  if (problem) throw new CliSocketUnsafeError(problem, path);
+  if (deps.lstat(path).ino !== before.ino) throw new CliSocketUnsafeError('replaced', path);
+  return before.ino;
 }
 
 export class CliSocketUnsafeError extends Error {
@@ -78,15 +122,20 @@ export class CliSocketUnsafeError extends Error {
 
 /**
  * The serve's pre-bind step: create the run directory 0700 when it is missing,
- * tighten one this uid already owns, and refuse a symlink, a non-directory or
- * a directory another uid owns.
+ * tighten one this uid already owns, and refuse a symlink, a non-directory, a
+ * directory another uid owns, or a GBRAIN_HOME / `.gbrain` above it that is
+ * not this user's or that others can write to (never repaired).
  */
 export function ensurePrivateDir(dir: string, deps: FsGuardDeps = realDeps, fs: { mkdir: (path: string) => void; chmod: (path: string) => void } = {
   mkdir: path => mkdirSync(path, { recursive: true, mode: 0o700 }),
   chmod: path => chmodSync(path, 0o700),
 }): void {
+  const initial = privateDirProblem(dir, deps);
+  if (initial && initial !== 'missing' && initial !== 'open_permissions') throw new CliSocketUnsafeError(initial, dir);
+  if (initial === 'missing') fs.mkdir(dir);
+  const above = ancestorProblem(dir, deps);
+  if (above) throw new CliSocketUnsafeError(above.reason, above.path);
   let problem = privateDirProblem(dir, deps);
-  if (problem === 'missing') { fs.mkdir(dir); problem = privateDirProblem(dir, deps); }
   if (problem === 'open_permissions') { fs.chmod(dir); problem = privateDirProblem(dir, deps); }
   if (problem) throw new CliSocketUnsafeError(problem, dir);
 }
