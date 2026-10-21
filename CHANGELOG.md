@@ -10,6 +10,135 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.348.0] - 2026-10-21
+
+**Job rows now say who submitted a job, why it isn't running, whether it is alive and what it cost; agents can wait on a job instead of polling; long jobs can't hold every worker slot; and the background doctor refresh no longer holds a one-job worker for up to two hours (#7241, #7242, #7263).** A large deployment found an empty submitter on every row, a sync job waiting most of an hour with no reason given, no way to learn a job finished except polling or a cron, and short facts-absorb jobs waiting days at p95 behind long cycles in a 2-slot queue.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain jobs get/list --json`, MCP `get_job` / `list_jobs` | no submitter, no reason a job waits, no liveness or cost | `submitted_by`, `blocked_by` (queue position, waiting children, delay reason, paused, unreviewed authority, the sync or cycle lock holder), `heartbeat_age_ms` / `lock_expires_in_ms` / `stalled`, `spend` (`cost_usd` from settled reservations, `null` when unpriced, never 0) and phase `progress` |
+| Waiting for a job to finish | poll `get_job` or run a cron | `gbrain jobs wait <id>` (exit 0 completed, 1 failed/dead/cancelled/missing, 124 still running at the timeout) and the read-only MCP op `wait_job` (at most 55 s per call, same owner fence as `get_job`) |
+| Learning which jobs finished | list everything and diff | `gbrain jobs list --finished-since <iso|cursor> --json` and `list_jobs {finished_since}` return terminal jobs in order with `next_cursor` |
+| Running a command when a job ends | not possible | opt-in `minions.terminal_hook` in local file config: an argv run without a shell, the job in fixed env vars and stdin JSON, 10 s timeout, never retried |
+| A worker at concurrency 2 or more | long jobs could hold every slot | one slot stays free of long jobs (autopilot-cycle, autopilot-global-maintenance, embed-backfill, connector-sync, extract, doctor-refresh); `minions.short_job_reserved_slots 0` restores the old claim |
+| The background `doctor-refresh` job | default priority, a 2 h timeout and 600 s per check, so a one-job worker held sync and the cycles behind it | priority 10 (behind sync, the cycles, global maintenance, embed backfill and loops extract), at most 10 minutes of measuring and then `completed` with what it finished, a 15 min timeout, and `doctor.background_refresh false` turns it off |
+| `gbrain jobs stats` | one row per per-run `dream-inline-*` queue | those queues fold into one `dream-inline` row (`get_job_stats.by_queue`) |
+
+On a synthetic 2-slot PGLite load (3 long jobs, 30 short ones, `scripts/bench/minions-lane-load.ts`), short-job queue wait went from p50 663 ms / p95 1246 ms to p50 51 ms / p95 98 ms. Long jobs now run one after another, so their own wait grows.
+
+**Spend effect:** none. No new model calls, no default or cap changes; the doctor refresh makes no model calls (the only one in doctor is the embedding probe, which needs `--probe`). Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- An agent token without admin sees another principal only by kind: a foreign submitter, parent, slot holder or lock holder is never named, and another principal's children are left out of its spend.
+- Jobs queued before this release show `submitted_by: {kind: 'local'}` with no `via`.
+- If a long job now waits behind another long job on a 2-slot worker and you would rather have the old behavior, run `gbrain config set minions.short_job_reserved_slots 0`.
+
+### Itemized changes
+
+- `src/core/minions/job-insight.ts` (new): the computed fields and their owner fence. The submitter label is job data `__submitter`, set only by `MinionQueue.add` for application-authority submits (a caller-supplied one is dropped), excluded from the param hash and read only for application rows; `submission_authority` and the claim gate are unchanged.
+- `src/core/ops/jobs.ts`: the `wait_job` op and `list_jobs` `finished_since`; `src/core/minions/terminal-events.ts` (new) is the cursor.
+- `src/core/minions/terminal-hook.ts` (new), called from the worker's settle step.
+- `src/core/minions/lanes.ts` (new): the long-job reservation, passed to `MinionQueue.claim` as `excludeNames`.
+- `src/commands/doctor/last-known.ts`: the refresh's priority, overall budget (`--budget-ms`), timeout and off switch.
+- `src/core/cycle.ts`: `onPhaseStart` progress for sync, autopilot-cycle and global maintenance.
+- `docs/designs/minion-schedules.md`: schedules were evaluated and deferred (they need a migration, a cron parser and a trust review for unattended spend).
+
+### For contributors
+
+- `scripts/bench/minions-lane-load.ts`: the synthetic lane fixture, with `test/minions-lane-load.slow.test.ts`.
+- The tools-json, export-surface and cli dispatch-phase goldens are regenerated for `wait_job`, the new signatures and `jobs wait` thin-client routing.
+- Thanks to @andreineacsu for the report in #7263.
+
+## [0.60.346.0] - 2026-10-21
+
+**A timeline entry no longer rewrites the passages it didn't change, and a big passage replacement can't time out the write that carries it (#7172).** A managed write replaced its page's passages inside its publication, under the publication's 5 s statement bound. A passage whose index moved (a long entry near the top of a descending timeline adds a passage above the others) was deleted and inserted again with its vector, and on a large index each inserted row can cost about half a second, so the write ended `write_interrupted` (SQLSTATE 57014) on every attempt. Separately, a page whose stored embedding signature was missing or in an older format had every passage re-embedded after each write, which looked the same from outside: every passage got a new embedding time.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An entry shifts unchanged passages to new indexes | each moved passage deleted and re-inserted (vector copied) | the row keeps its id and vector and changes index in place |
+| A managed put_page, edit_page, add_timeline_entry, tag write, import or sync whose passages need more than 5 vector-index writes (a passage that carries a vector, inserted or renumbered) | all of them in one statement inside the publication; on a slow index, 57014 on every attempt, then `write_interrupted` | the page commits first; its passages finish in post-commit transactions of at most 5 vector-index writes each, then the projection is sealed. Passages without a vector (new text, a new page) are still written in the publication, as before |
+| Search during those steps | n/a | the page's passages are hidden until the seal (as for any pending projection); the receipt says `searchable: "pending"` and turns `true` when sealed |
+| The embedding step after a write, page signature missing or older format | every passage re-embedded (paid) | passages whose recorded embedding input is current keep their vectors; the page signature is restamped |
+
+The bound of 5 is derived in `src/core/page-state/chunk-moves.ts` (`CHUNK_VECTOR_WRITE_BUDGET`): a row version that carries a vector adds an HNSW entry, a graph search over the whole index that nothing amortizes across rows, while one without a vector adds no HNSW entry and only cheap b-tree and GIN pending-list entries (measured on pgvector: 300 passages inserted in 2.2 s with vectors and 0.06 s without; 300 renumbered in about 1 s with vectors and 0.002 s without). The slowest reported rate on a large index is about 0.5 s per vector-carrying row, and half of the 5 s statement bound is left for the rest of the write. No timeout, retry or deadline is raised, and nothing is configurable.
+
+### What to watch for after you upgrade
+
+- A write that was blocked by repeated `write_interrupted` (57014) on a large page can be submitted again; it commits and finishes its passages right after.
+- If a page's receipt stays `searchable: "pending"` for more than a minute, no process is finishing it: run `gbrain projections drain`.
+- When a top entry changes the text of every passage below it (the chunker packs about 300 words with a 50-word overlap, so a short entry can shift every boundary), those passages are new text and are embedded again; this release does not change the chunker.
+
+### Itemized changes
+
+- `reuseStoredChunkVectors` matches a stored row by source and text at any index (its own index first), so a kept row can move.
+- New `src/core/page-state/chunk-moves.ts`: the vector-index write bound and the move planner (one UPDATE per wave; a cycle parks one row at a negative index).
+- `continueDeferredProjection` runs the bounded steps after commit, holding the page's queue row under a claim it renews each step (the lease a segmented projection claim uses); the projection drain resumes a page whose steps stopped (queue reason `chunk_replacement_deferred`). A group publication now runs its members' post-commit work, as a single publication does.
+- Writes that wrap a page publication in their own (takes, the facts fence, maintenance pages) still replace passages in one transaction.
+- `readEmbeddingEffectProjection` accepts a vector whose recorded input hash is one the current page accepts, whatever the page-level signature says, and restamps the page.
+
+## [0.60.345.0] - 2026-10-21
+
+**Background jobs stop burning retries on refusals that can never succeed, the dream synthesize phase stops cancelling every child over one bad transcript, and job sweeps stop tripping over the sync lease record.** A sync that runs on a host that doesn't own the checkout, or that needs `--no-pull`, used to fail the same way on every retry and was queued again every few minutes. One transcript with a character Postgres refuses in JSON failed the whole synthesize fan-out. A long sync's lease record made the stall and timeout sweeps fail, so nothing else stuck got reaped and synthesize reported a failure after its work finished.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A job fails with a deterministic refusal (a caller, consent or host-only error code) | retried until `max_attempts`, then requeued by autopilot every slot | ends `dead` after one attempt with `result.job_outcome: 'refused'` and the refusal's code, reason and fix; autopilot holds that source for its failure cooldown |
+| A transcript whose subagent job can't be queued | the synthesize phase failed and cancelled every child already queued | that transcript is skipped as `submit_failed (<code>)` and the rest run |
+| Job data with a lone UTF-16 surrogate or U+0000 | Postgres refused the insert (22P02 / 22P05) | the character becomes U+FFFD |
+| A sync holding its drain lease longer than two lock durations, or a dead lease holder | the stall / timeout / wall-clock sweeps hit `chk_attempts_order`: no stalled job was reaped, and the dream inline drain failed synthesize | the sweeps skip the lease record |
+| serve, the supervisor, workers and job children on different builds | nothing reported it | `/health` carries `build`, doctor `runtime_build_skew` warns and names the restart, and a job child records `job_build_skew:` (or refuses on a protocol mismatch) |
+
+**Spend effect:** synthesize children that were cancelled before they ran now run, inside the existing `dream.synthesize` budget, daily cap and breaker. No default or cap changes. Nothing is rewritten on upgrade.
+
+### Itemized changes
+
+- `src/core/minions/refusal.ts` (new): `jobRefusal` classifies a job error from its registry code. The worker and the dream inline drain end a refused job dead after one attempt. A refusal crosses the per-job child boundary as errorKind `refused`.
+- `src/core/persistence/sync-discovery.ts`: `owner_unavailable` carries a `reason` and is `retryable: false` unless a transfer or clone is in progress.
+- `src/commands/autopilot-dispatch.ts`: a refused sync job holds its source for the existing failure cooldown; a completed sync clears it.
+- `src/core/minions/queue.ts`: `add` passes job data through `jsonbSafeJson`; `failJob` takes an optional `result`; the three sweeps skip `LEASE_BEACON_QUEUE`.
+- `src/core/cycle/synthesize.ts`: a transcript that fails to submit is skipped with its fresh chunks rolled back.
+- `src/core/runtime-build.ts` (new) and doctor check `runtime_build_skew` (new error code): builds of serve, the supervisor, worker parents and recent job children.
+
+### For contributors
+
+- `scripts/bench-minions-load.ts`: a synthetic PGLite job-load fixture (`retry_burn`, `cancel_churn`) with no network and no model calls.
+- Doctor and export goldens are regenerated for the new check and error code. `/health`'s exact-shape test now includes `build`.
+- Thanks to @sameerbopardikar for the root-cause report in #7261.
+
+## [0.60.344.0] - 2026-10-21
+
+**A managed brain on remote Postgres syncs a no-op commit in about half the time, sync work no longer stalls searches running beside it, sync status grades a commit that is still waiting, and an aborted sync returns at once.** A no-op `gbrain sync` used to pay 70 to 90 dependent round trips, more on a bigger brain. It now pays about 32 at any brain size: at 57 ms RTT, p50 drops from 5.9 s to 3.3 s on a direct connection and from 6.1 s to 2.9 s behind PgBouncer. A single-file commit behind PgBouncer goes from 400 round trips to 282. On Postgres, no part of a sync holds a concurrent search past 100 ms anymore.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A transaction behind a transaction-mode pooler (PgBouncer, Supabase 6543, `prepare=false`) | one round trip per statement | the statements of one transaction are pipelined on the connection the pooler pins for it; autocommit statements never are, and nothing is sent after COMMIT. `GBRAIN_PG_TXN_PIPELINE=0` turns it off |
+| Postgres array-type lookup | a `pg_type` fetch on every connection of every pool | one per process (`GBRAIN_PG_TYPE_CACHE=0` turns it off) |
+| An idle sync tick | ran all six post-sync checks | skips each check whose pin found no work for it (`GBRAIN_SYNC_IDLE_FAST_PATH=0` turns the skips off) |
+| The ghost-page report | read every page batch on each sync | is answered from `op_checkpoints` and rescanned in the background at most every 5 minutes (`GBRAIN_SYNC_GHOST_INTERVAL_MS`) |
+| Link and timeline extraction at the end of a sync | two tree walks, and on PGLite every page in one event-loop turn | one walk, yielding after each page |
+| A first sync, a confirm round or a dirtiness probe on 10k pages | stretches of 0.9 to 1.4 s that held every concurrent search | the loops yield |
+| PGLite after a small sync | a full ANALYZE every time | ANALYZE only when the tables really grew |
+| Doctor `managed_sync_latency` with a commit still waiting | `ok` until the commit synced | grades the waiting commit, dated from the reflog, and reports keyword and embedding freshness separately |
+| `gbrain sources mirror-readonly` / `mirror-writable --dry-run` (#7086) | wrote the flag | prints the change under a dry-run banner and writes nothing |
+| A SIGTERM to stdio `gbrain serve` on Postgres | the commit-notifier lease stayed live for about 20 s | the next resident owns it in 0.5 s |
+| An aborted sync waiting on its accepted write | waited out the 5 s write wait | returns within 1.5 s; work accepted and committed is kept, and a write blocked by another owner stays queued |
+| A Postgres socket that died after an error while a statement was queued | the statement could wait on the replacement socket until the drain gave up (331 s seen) | every queued statement is rejected with `CONNECTION_CLOSED`, so the retry runs at once |
+
+### For contributors
+
+- `test/helpers/cpu-time.ts` measures loop lag in the thread's own CPU time, so a loaded CI VM no longer counts its run-queue waits as a held loop. The 100 ms bounds are unchanged.
+- `src/core/sync-idle-skips.ts` defines each idle-tick skip once, and a coverage test seeds a state that makes each skipped check run.
+- `test/postgres-driver-startup-death.test.ts` reproduces the stranded statement against a scripted server.
+
 ## [0.60.343.0] - 2026-10-21
 
 **An opt-in warm CLI socket lets `gbrain search`, `query`, `get` and `recall` skip most of a cold start's database round trips.** A cold CLI process connects, loads config and resolves its source before it can answer. Behind a transaction-mode pooler at 40 ms RTT, that cost a 305k-page brain about 3.4 s per search. With `gbrain serve --cli-socket` running, the same CLI call goes through a local Unix socket to the running serve and returns byte-identical output: 2.3 s for that search and 0.66 s for a get, against 1.19 s cold. It is off by default.
