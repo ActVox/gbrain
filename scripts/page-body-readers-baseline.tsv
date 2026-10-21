@@ -505,7 +505,9 @@ src/core/repair/timeline.ts	removedRowIds	field	STREAM
 src/core/repair/timeline.ts	scanTimelineHistory	sql	STREAM	
 src/core/repair/timeline.ts	timelineRepair	call:serializePageToMarkdown	SEGW	
 src/core/repair/timeline.ts	timelineRepair	field	STREAM	
-src/core/repair/visibility.ts	planVisibilityRepair	sql	META	
+src/core/repair/visibility.ts	planAliases	sql	META	
+src/core/repair/visibility.ts	planEvents	sql	META	
+src/core/repair/visibility.ts	planLineage	sql	META	
 src/core/repair/visibility.ts	visibilityRepair	call:serializePageToMarkdown	SEGW	
 src/core/schema-migrations/v091-pages-generation-trigger-and-bookmark.ts	v091	sql	NONE	not the page body: historical generation trigger
 src/core/schema-migrations/v123-configurable-fts-language.ts	v123	sql	NONE	not the page body: historical
