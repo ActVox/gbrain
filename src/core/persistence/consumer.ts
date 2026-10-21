@@ -894,8 +894,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       this.lastLog = { key, at };
     }
     if (!this.opts.onError) process.stderr.write(`[persistence] phase=${phase} reason=${code}${poolCap ? ' cause=pool_exhausted' : ''}${detail ? ` message="${detail}"` : ''}${timing}${row ? requestLogFields(row) : ''}`
-      + `; unfinished work remains tracked; fix: ${poolCap ? 'every gbrain process on this database shares the pooler\'s client limit, so run fewer long-running ones (share one gbrain serve --http) or raise the limit (docs/ENGINES.md#pool-sizing), then ' : ''}`
-      + 'gbrain sources writer status --json; docs: docs/ENGINES.md#persistence-consumer-log\n');
+      + '; unfinished work remains tracked; fix: gbrain sources writer status --json'
+      + `${poolCap ? '; pool: every gbrain process on this database shares the pooler\'s client limit, so run fewer long-running ones (share one gbrain serve --http) or raise the limit (docs/ENGINES.md#pool-sizing)' : ''}`
+      + '; docs: docs/ENGINES.md#persistence-consumer-log\n');
   }
   /** #5373: tracks work that outlived its claim until it settles; the returned promise never rejects. */
   /**
