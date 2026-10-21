@@ -67,7 +67,7 @@ export async function checkManagedGuardSchemaDrift(engine: BrainEngine): Promise
       if (row.column_name === 'source_id' && PAGE_CHILD_TABLES.includes(row.table_name)) {
         return { column, class: 'guard_source_column' as const,
           why: 'Builds before v0.60.38.0 resolve the row\'s source from it, so a gbrain process still running one refuses every coordinated tag, timeline or take write with writer_coordinator_required; this build resolves the row through its page.',
-          next: 'upgrade or restart every gbrain process on this brain (gbrain sources writer status --json names their versions).' };
+          next: 'upgrade or restart every process running gbrain on this brain (gbrain sources writer status --json names their versions).' };
       }
       return { column, class: 'harmless' as const, why: 'Nullable or defaulted, and gbrain neither reads nor writes it.', next: 'nothing for gbrain.' };
     });
