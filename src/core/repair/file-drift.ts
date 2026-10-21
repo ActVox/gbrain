@@ -702,12 +702,14 @@ export const fileDriftRepair: RepairHandler = {
     const removed = pages.flatMap(page => 'remove_file' in page ? [page.remove_file.path] : []);
     let warnings: string[] = nextCommand ? [`This preview covered ${previewed} of the ${held!.targets.length} selected held pages${opts.cursor ? ' after its cursor' : ''} (one window stops at ${HELD_WINDOW_PAGES} pages or ${HELD_WINDOW_BUDGET_MS / 1000} s); its hash and apply command cover only these. `
       + `After applying this window (or deciding not to), preview the next one: ${nextCommand}`] : [];
+    let undoneBySync: { recreated: number; removed: number } | null = null;
     if (recreated.length || removed.length) {
       const binding = await getWorktreeBinding(engine, sourceId);
       const root = join(binding!.local_path!, binding!.relative_path);
       if (!(await gitDurabilityPolicy(binding, root).catch(() => ({ durable: false }))).durable) {
-        if (recreated.length) warnings.push(`Git durability is off for ${sourceId}, so the apply leaves each recreated file uncommitted. Commit it afterwards (git -C ${root} add -- ${recreated.join(' ')} && git -C ${root} commit), or the next sync imports the committed deletion again.`);
-        if (removed.length) warnings.push(`Git durability is off for ${sourceId}, so the apply leaves each removed file's deletion uncommitted. Commit it afterwards (git -C ${root} add -- ${removed.join(' ')} && git -C ${root} commit), or the next sync holds the committed file again.`);
+        if (removed.length) warnings.unshift(`The next sync undoes this repair unless the removals are committed: Git durability is off for ${sourceId}, so the apply leaves each removed file's deletion uncommitted (${removed.length} file(s)) and the next sync holds the committed file again. Commit them right after the apply: git -C ${root} add -- ${removed.join(' ')} && git -C ${root} commit`);
+        if (recreated.length) warnings.unshift(`The next sync undoes this repair unless the recreated files are committed: Git durability is off for ${sourceId}, so the apply leaves each recreated file uncommitted (${recreated.length} file(s)) and the next sync imports their committed deletion again. Commit them right after the apply: git -C ${root} add -- ${recreated.join(' ')} && git -C ${root} commit`);
+        undoneBySync = { recreated: recreated.length, removed: removed.length };
       }
     }
     let artifact: string | undefined;
@@ -720,6 +722,7 @@ export const fileDriftRepair: RepairHandler = {
     return { items: pages.map((page, index) => item({ source_id: sourceId, slug: page.slug, artifact_digest: digest(page), selection }, index, hash, index === pages.length - 1, opts.prefer)),
       preview_hash: hash, residuals, listing, ...(warnings.length ? { warnings } : {}),
       details: { prefer: opts.prefer, ...(artifact ? { artifact } : {}),
+        ...(undoneBySync ? { undone_by_next_sync_unless_committed: undoneBySync } : {}),
         ...(held ? { window: { previewed, remaining, complete: remaining === 0, ...(nextCursor ? { next_cursor: nextCursor, next_command: nextCommand } : {}) } } : {}),
         pages: pages.map(page => 'soft_delete' in page ? { slug: page.slug, action: 'soft_delete', path: page.soft_delete.ghost.path, verb: fileDriftActionVerb('deleted', 'file_gone', 'file'), exceptions: page.exceptions }
           : 'remove_file' in page ? { slug: page.slug, action: 'remove_file', state: page.remove_file.state, path: page.remove_file.path, verb: fileDriftActionVerb('deleted', page.remove_file.state, 'database'), exceptions: page.exceptions }
