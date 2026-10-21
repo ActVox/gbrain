@@ -306,6 +306,27 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a transaction\'s first stat
     expect(records.filter(r => /reserved swallowed/.test(r.sql))).toEqual([]);
   }, 60_000);
 
+  test('a reserved transaction whose BEGIN fails sends nothing from a nested transaction\'s body, even when it swallows the rejection', async () => {
+    let outcome: string | undefined;
+    let count = -1;
+    const records = await traced('first-reserved-savepoint-fails', 2, async engine => {
+      outcome = await engine.withReservedConnection(async conn => {
+        const lent = conn as unknown as Lent;
+        await lent.executeRaw('BEGIN');
+        await lent.executeRaw('SELECT 1/0 AS abort_reserved').catch(() => undefined);
+        return lent.transaction(async tx => {
+          await tx.executeRaw(declaration).catch(() => undefined);
+          await tx.transaction(inner => inner.executeRaw(`INSERT INTO ${table} VALUES (5) /* savepoint swallowed */`).catch(() => undefined)).catch(() => undefined);
+          return 'returned';
+        }, { pipelineFirst: isPersistenceDeclaration }).then(value => `resolved:${value}`, (e: { code?: string }) => e.code);
+      });
+      count = await rows(engine);
+    });
+    expect(outcome).toBe('25P02');
+    expect(count).toBe(0);
+    expect(records.filter(r => /savepoint swallowed/.test(r.sql))).toEqual([]);
+  }, 60_000);
+
   test('GBRAIN_PG_TXN_PIPELINE=0 keeps the declaration behind BEGIN\'s answer', async () => {
     const records = await traced('first-off', 1, async engine => {
       await engine.transaction(tx => declarePersistenceProtocol(tx), { pipelineFirst: isPersistenceDeclaration });

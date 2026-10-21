@@ -12,6 +12,7 @@ import { declarePublication } from '../src/core/persistence/publication-deadline
 import type { BrainEngine } from '../src/core/engine.ts';
 import type postgres from '#postgres';
 import { reservedTransactions } from '../src/core/postgres-engine/reserved-transactions.ts';
+import { composablePostgresTransaction } from '../src/core/page-state/transactions.ts';
 
 function recorder(kind = 'postgres'): { engine: BrainEngine; sent: string[] } {
   const sent: string[] = [];
@@ -83,21 +84,23 @@ describe('pipelineFirst call sites', () => {
  * `unsafe`, sent through their `handler` when executed. Records each send with whether BEGIN had been answered.
  */
 type LazyQuery = {
-  strings: readonly string[]; args: unknown[]; reject(e: unknown): void; executed: boolean; handler(self: LazyQuery): void; execute(): LazyQuery;
+  strings: string[]; args: unknown[]; reject(e: unknown): void; executed: boolean; handler(self: LazyQuery): void; execute(): LazyQuery;
   then(a?: (v: unknown) => unknown, b?: (e: unknown) => unknown): Promise<unknown>; catch(b: (e: unknown) => unknown): Promise<unknown>;
 };
 function lazyReserved(beginFails: boolean) {
   const sent: Array<{ text: string; beginAnswered: boolean }> = [];
   let beginAnswered = false;
-  const query = (strings: readonly string[], args: unknown[]) => {
+  const query = (strings: string[], args: unknown[], loads?: string) => {
     let resolve!: (v: unknown) => void, reject!: (e: unknown) => void;
     const promise = new Promise((a, b) => { resolve = a; reject = b; });
     promise.catch(() => undefined);
-    const text = strings.reduce((a, s, i) => a + '$' + i + s);
     // A thenable, not a native promise: `await` calls its `then`, which executes it, as a postgres.js Query does.
     const q: LazyQuery = {
       strings, args, reject, executed: false,
       handler: self => {
+        // As postgres.js's file(): the text is read only when the query is sent.
+        if (loads !== undefined) self.strings = [loads];
+        const text = self.strings.reduce((a, s, i) => a + '$' + i + s);
         sent.push({ text, beginAnswered });
         if (text === 'begin') setTimeout(() => { beginAnswered = true; beginFails ? self.reject(Object.assign(new Error('no server connection available'), { code: '08P01' })) : resolve(Object.assign([], { command: 'BEGIN' })); }, 20);
         else resolve(Object.assign([], { command: text.toUpperCase() }));
@@ -109,11 +112,11 @@ function lazyReserved(beginFails: boolean) {
     return q;
   };
   const reserved = Object.assign((strings: TemplateStringsArray, ...args: unknown[]) => query([...strings], args), {
-    unsafe: (text: string, args: unknown[] = []) => query([text], args), options: { max_pipeline: 0 }, discard: () => undefined,
+    unsafe: (text: string, args: unknown[] = []) => query([text], args), file: (path: string) => query([], [], `insert into t values (2) /* ${path} */`), options: { max_pipeline: 0 }, discard: () => undefined,
   }) as unknown as postgres.ReservedSql;
   return { reserved, sent };
 }
-type Handle = { unsafe(text: string, args?: unknown[]): Promise<unknown>; savepoint(fn: (child: unknown) => Promise<unknown>): Promise<unknown> }
+type Handle = { unsafe(text: string, args?: unknown[]): Promise<unknown>; file(path: string): Promise<unknown>; savepoint(fn: (child: Handle) => Promise<unknown>): Promise<unknown> }
   & ((strings: TemplateStringsArray, ...args: unknown[]) => Promise<unknown>);
 const beginFirst = (reserved: postgres.ReservedSql, body: (sql: Handle) => Promise<unknown>) =>
   (reservedTransactions(reserved) as unknown as { begin(o: object, fn: typeof body): Promise<unknown> }).begin({ first: isPersistenceDeclaration }, body);
@@ -151,6 +154,54 @@ describe('reserved transactions: the declaration goes out with BEGIN', () => {
       expect(sent[0]).toEqual({ text: 'begin', beginAnswered: false });
       expect(sent.slice(1).every(s => s.beginAnswered)).toBe(true);
     }
+  });
+
+  // Each way a body reaches a statement that is not its own top-level call: a savepoint body, a nested savepoint
+  // body, an engine-level nested transaction (composablePostgresTransaction's begin), and file().
+  const reaches: Array<[string, (sql: Handle, insert: (child: Handle) => Promise<unknown>) => Promise<unknown>]> = [
+    ['a savepoint body', (sql, insert) => sql.savepoint(insert)],
+    ['a nested savepoint body', (sql, insert) => sql.savepoint(child => child.savepoint(insert))],
+    ['a nested engine transaction', (sql, insert) => (composablePostgresTransaction(sql) as unknown as { begin(fn: (child: Handle) => Promise<unknown>): Promise<unknown> }).begin(insert)],
+  ];
+
+  for (const [name, reach] of reaches) {
+    test(`${name} after the declaration waits for BEGIN's answer`, async () => {
+      const { reserved, sent } = lazyReserved(false);
+      await beginFirst(reserved, async sql => { await sql.unsafe(DECLARATION); await reach(sql, child => child`insert into t values (${1})`); });
+      expect(sent.slice(0, 2)).toEqual([{ text: 'begin', beginAnswered: false }, { text: DECLARATION, beginAnswered: false }]);
+      expect(sent.find(s => s.text === 'insert into t values ($1)')).toEqual({ text: 'insert into t values ($1)', beginAnswered: true });
+      expect(sent.slice(2).every(s => s.beginAnswered)).toBe(true);
+    });
+
+    test(`${name} after a refused BEGIN sends nothing past the declaration, even when it swallows the rejection`, async () => {
+      const { reserved, sent } = lazyReserved(true);
+      let swallowed: unknown;
+      const error = await beginFirst(reserved, async sql => {
+        await sql.unsafe(DECLARATION);
+        await reach(sql, async child => {
+          swallowed = await child`insert into t values (${1})`.then(() => 'sent', (e: { code?: string }) => e.code);
+          return 'returned';
+        }).catch(() => undefined);
+        return 'returned';
+      }).then(() => null, (e: { code?: string }) => e.code);
+      expect(error).toBe('08P01');
+      expect(swallowed).toBe('08P01');
+      expect(sent.map(s => s.text).filter(t => t !== 'rollback')).toEqual(['begin', DECLARATION]);
+    });
+  }
+
+  test('file() after the declaration is held, and rejected unsent when BEGIN is refused', async () => {
+    const answered = lazyReserved(false);
+    await beginFirst(answered.reserved, async sql => { await sql.unsafe(DECLARATION); await sql.file('held.sql'); });
+    expect(answered.sent.map(s => s.beginAnswered)).toEqual([false, false, true, true]);
+    const refused = lazyReserved(true);
+    let swallowed: unknown;
+    await beginFirst(refused.reserved, async sql => {
+      await sql.unsafe(DECLARATION);
+      swallowed = await sql.file('refused.sql').then(() => 'sent', (e: { code?: string }) => e.code);
+    }).catch(() => undefined);
+    expect(swallowed).toBe('08P01');
+    expect(refused.sent.map(s => s.text).filter(t => t !== 'rollback')).toEqual(['begin', DECLARATION]);
   });
 });
 

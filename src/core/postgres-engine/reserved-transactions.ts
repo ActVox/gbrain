@@ -51,8 +51,9 @@ export function reservedTransactions(reserved: postgres.ReservedSql): ReturnType
     const handle = Object.assign(reserved, {
       savepoint: async (inner: (child: unknown) => Promise<unknown>) => {
         const name = `s${savepoints++}`;
-        const marker = (gate ? gate(reserved.unsafe(`savepoint ${name}`) as unknown as HeldQuery) as unknown as ReturnType<typeof reserved.unsafe> : reserved.unsafe(`savepoint ${name}`)).execute();
-        try { return await settle(marker, Promise.resolve().then(() => inner(handle))); }
+        const scope = gate ? gated(handle, gate) as typeof handle : handle;
+        const marker = scope.unsafe(`savepoint ${name}`).execute();
+        try { return await settle(marker, Promise.resolve().then(() => inner(scope))); }
         catch (error) { if (await marker.then(() => true, () => false)) await reserved.unsafe(`rollback to ${name}`); throw error; }
       },
     });
@@ -87,7 +88,7 @@ function holdBehind(opened: Promise<unknown>, first: (statement: string) => bool
     query.handler = q => {
       if (answered) return send(q);
       const strings = Array.isArray(q.strings) ? q.strings as string[] : [String(q.strings)];
-      const early = !firstSeen && q.args.every(plainValue) && first(strings.reduce((a, s, i) => a + '$' + i + s));
+      const early = !firstSeen && strings.length > 0 && q.args.every(plainValue) && first(strings.reduce((a, s, i) => a + '$' + i + s));
       firstSeen = true;
       if (early) return send(q);
       opened.then(() => send(q), error => q.reject(error));
@@ -96,13 +97,13 @@ function holdBehind(opened: Promise<unknown>, first: (statement: string) => bool
   };
 }
 
-/** The handle a held body sees: its statements (tagged, `unsafe`) pass through `gate`; everything else is the reserved connection's. */
+/** The handle a held body sees: its statements (tagged, `unsafe`, `file`) pass through `gate`; everything else is the reserved connection's. */
 function gated(handle: object, gate: (query: HeldQuery) => HeldQuery): unknown {
   return new Proxy(handle as (...args: unknown[]) => unknown, {
     apply: (target, self, args) => gate(Reflect.apply(target, self, args) as HeldQuery),
     get: (target, key) => {
       const value = Reflect.get(target, key, target);
-      return key === 'unsafe' ? (...args: unknown[]) => gate((value as (...a: unknown[]) => HeldQuery)(...args)) : value;
+      return key === 'unsafe' || key === 'file' ? (...args: unknown[]) => gate((value as (...a: unknown[]) => HeldQuery)(...args)) : value;
     },
   });
 }
