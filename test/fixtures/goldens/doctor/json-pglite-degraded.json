@@ -2568,6 +2568,7 @@
             "facts": {
               "missing": 0,
               "other_model": 0,
+              "oversized": 0,
               "partially_embedded": 0,
               "stale": 0
             },
@@ -3077,6 +3078,18 @@
           "elapsed_ms": "<volatile>",
           "message": "No retired sync config key is stored on this brain.",
           "name": "sync_config_keys",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "capped": false,
+            "pairs": [],
+            "scanned": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No title-prefixed person page pairs with an unprefixed page (0 titled page(s) examined).",
+          "name": "person_title_duplicates",
           "status": "ok"
         },
         {
