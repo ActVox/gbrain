@@ -1062,6 +1062,51 @@ It drops generated bullets that carry markup (yours are left alone), deletes
 markup-only rows and strips the rest, under the page lock. A second apply finds
 nothing, and a timeline-only rewrite queues no facts extraction.
 
+<a id="timeline-order"></a>
+### Timeline order
+
+Bulk imports and hand edits appended timeline bullets at the end of a page,
+copied one bullet twice, or started a second `## Timeline` section (#7247).
+`add_timeline_entry` already inserts in date order; this explicit-only,
+preview-bound kind fixes pages written before that. It never runs from
+`--all`, doctor's remediation plan, the maintenance cycle or an upgrade.
+
+**Say to your agent:** *"Preview which timelines are out of order, show me the
+list and the pages it would leave alone, then apply after I agree."*
+
+```bash
+gbrain repair timeline-order --source <id> [--slug <slug>]...                      # preview: reorder / needs_human
+gbrain repair timeline-order --source <id> --apply --expect <hash> --yes           # rewrites exactly the previewed pages
+```
+
+It sorts `- **YYYY-MM-DD** | source — summary` bullets, each with its indented
+lines and the materialized marker above it, in the direction the page already
+uses (ascending unless most neighbouring bullets descend), keeping equal dates
+in their order. Prose, sub-headings, comments and code blocks stay where they
+are, so bullets are sorted only between them. A later exact copy of a bullet in
+the same run is dropped; bullets with one date whose summaries differ only in
+case and punctuation are counted as `near_duplicates` and kept. A later
+timeline section joins the first one, under its heading, when it holds nothing
+but bullets and the first holds one run of them.
+
+The preview counts `pages_to_reorder`, `duplicates_to_merge`,
+`sections_to_join`, `needs_human` and `near_duplicates`. A page is listed
+`needs_human` and kept when a line could belong to a bullet (a line right under
+it, odd indentation, an indented paragraph after a blank line), when dated
+bullets in another format sit among them, when a fence or comment never closes,
+when the sections cannot be joined without moving prose, or when the result
+would not read back with the same text order and timeline rows. A page whose
+database-only timeline rows the write would also put into the page
+(`pending_materialization`) waits for `gbrain repair timeline` (or
+`gbrain extract timeline --prune-orphans` for rows an edit removed).
+
+Each page is one revision-bound `put_page`: a managed source publishes its file
+through the Git effect and the database is projected from it. No timeline row
+is added, removed or rewritten (a dropped copy shared its row with the one that
+stays). An apply refuses `preview_changed` when a previewed page moved since the
+preview; preview again. Undo a page on a managed source with `git revert` of its
+commit, or `gbrain revert`.
+
 ### Timeline history scan coverage
 
 Doctor's `timeline_history` check classifies at most 2,000 pages or 10

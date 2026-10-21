@@ -498,6 +498,9 @@ src/core/repair/take-supersession.ts	readPage	call:serializePageToMarkdown	SEGW
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	call:serializePageToMarkdown	SEGW	
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	field	STREAM	
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	sql	STREAM	
+src/core/repair/timeline-order.ts	plannedChange	call:serializePageToMarkdown	SEGW	
+src/core/repair/timeline-order.ts	plannedChange	field	SEGW	
+src/core/repair/timeline-order.ts	scan	sql	SEGW	SQL exclusion: body_storage='inline' only; segmented pages carrying timeline rows are counted (segmentedTimelinePages) and named in a warning
 src/core/repair/timeline.ts	classifyTimelinePage	field	STREAM	
 src/core/repair/timeline.ts	recountTimelinePages	sql	STREAM	
 src/core/repair/timeline.ts	removedRowIds	field	STREAM	
@@ -549,6 +552,7 @@ src/core/timeline-extract.ts	retractCoordinated	sql	STREAM
 src/core/timeline-extract.ts	retractRemovedTimelineEntries	field	STREAM	
 src/core/timeline-extract.ts	retractRemovedTimelineEntries	sql	STREAM	
 src/core/timeline-extract.ts	retractStoredPage	field	STREAM	
+src/core/timeline-order.ts	orderTimeline	field	SEGW	pure text core; its only caller (repair/timeline-order.ts) passes inline pages
 src/core/timeline-write-through.ts	writeTimelineEntryThrough	field	SEGW	assertInlineBody before the file or row is touched
 src/core/timeline-write-through.ts	writeTimelineEntryThrough	sql	SEGW	assertInlineBody before the file or row is touched
 src/core/transcripts/recover.ts	userlessCodexSessions	sql	STREAM	

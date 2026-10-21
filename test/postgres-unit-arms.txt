@@ -383,6 +383,7 @@ test/repair-frontmatter-keys-sweep-6454.test.ts
 test/repair-frontmatter.test.ts
 test/repair-receipt-compaction.test.ts
 test/repair-rename-identity-6729.test.ts
+test/repair-timeline-order.test.ts
 test/schema-missing-tables.test.ts
 test/scripts/test-stress-postgres.test.ts
 test/search-read-keyword-bound.test.ts

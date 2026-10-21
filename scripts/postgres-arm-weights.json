@@ -367,6 +367,7 @@
   "test/repair-frontmatter.test.ts": 19462,
   "test/repair-receipt-compaction.test.ts": 11290,
   "test/repair-rename-identity-6729.test.ts": 12251,
+  "test/repair-timeline-order.test.ts": 7000,
   "test/schema-missing-tables.test.ts": 7947,
   "test/scripts/test-stress-postgres.test.ts": 13530,
   "test/search-read-keyword-bound.test.ts": 5082,
