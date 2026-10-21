@@ -512,7 +512,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "list_pages",
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row. Filters: type, tag, slug_prefix, updated_after, where (frontmatter fields); sort: updated_desc, updated_asc, created_desc, slug.",
+    "description": "List pages; filters incl. slug_prefix, where (frontmatter). Recent / this week: sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.",
     "params": {
       "type": {
         "type": "string",
@@ -554,11 +554,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "slug_prefix": {
         "type": "string",
-        "description": "Slugs starting with this literal text, e.g. 'deals/' (% and _ match themselves)."
+        "description": "Literal slug prefix, e.g. 'deals/'.",
+        "fullSurfaceOnly": true
       },
       "where": {
         "type": "object",
         "cliKeyValue": true,
+        "fullSurfaceOnly": true,
         "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any."
       },
       "source_id": {
@@ -1234,7 +1236,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "search",
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. NOT proof of coverage; match: \"keyword\" pages every keyword match and takes OR across quoted names or codes (\"A\" OR \"B\" OR …): one call lists every page matching any. Name lists: entity names. Concepts/landscape or people/companies/projects by topic: `query`; lists: list_pages; personal: get_recent_salience. return_unit: sections or conversations. Filters: types, where (frontmatter fields); dates: `query`. fields: \"full\" adds diagnostics.",
+    "description": "Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. NOT proof of coverage; match: \"keyword\" pages every keyword match and takes OR across quoted names or codes (\"A\" OR \"B\" OR …): one call lists every page matching any. Name lists: entity names. Concepts/landscape or people/companies/projects by topic: `query`; lists: list_pages; personal: get_recent_salience. return_unit: sections or conversations. fields: \"full\" adds diagnostics.",
     "params": {
       "query": {
         "type": "string",
@@ -1279,6 +1281,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "where": {
         "type": "object",
         "cliKeyValue": true,
+        "fullSurfaceOnly": true,
         "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any."
       },
       "snippet_chars": {
@@ -1358,7 +1361,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "query",
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. Filters: types, since/until, where (frontmatter fields). fields: \"full\" adds diagnostics.",
+    "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.",
     "params": {
       "query": {
         "type": "string",
@@ -1391,6 +1394,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "where": {
         "type": "object",
         "cliKeyValue": true,
+        "fullSurfaceOnly": true,
         "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any."
       },
       "snippet_chars": {

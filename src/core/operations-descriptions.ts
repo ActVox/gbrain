@@ -46,13 +46,13 @@ export const GET_RECENT_TRANSCRIPTS_DESCRIPTION =
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const LIST_PAGES_DESCRIPTION =
-  "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row. Filters: type, tag, slug_prefix, updated_after, where (frontmatter fields); sort: updated_desc, updated_asc, created_desc, slug.";
+  "List pages; filters incl. slug_prefix, where (frontmatter). Recent / this week: sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.";
 
 export const QUERY_DESCRIPTION =
-  "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. Filters: types, since/until, where (frontmatter fields). fields: \"full\" adds diagnostics.";
+  "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.";
 
 export const SEARCH_DESCRIPTION =
-  "Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. NOT proof of coverage; match: \"keyword\" pages every keyword match and takes OR across quoted names or codes (\"A\" OR \"B\" OR …): one call lists every page matching any. Name lists: entity names. Concepts/landscape or people/companies/projects by topic: `query`; lists: list_pages; personal: get_recent_salience. return_unit: sections or conversations. Filters: types, where (frontmatter fields); dates: `query`. fields: \"full\" adds diagnostics.";
+  "Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. NOT proof of coverage; match: \"keyword\" pages every keyword match and takes OR across quoted names or codes (\"A\" OR \"B\" OR …): one call lists every page matching any. Name lists: entity names. Concepts/landscape or people/companies/projects by topic: `query`; lists: list_pages; personal: get_recent_salience. return_unit: sections or conversations. fields: \"full\" adds diagnostics.";
 
 /** `search`'s `match` param (Cat 40 Hard F2). */
 export const SEARCH_MATCH_DESCRIPTION = 'keyword: every match, paged.';

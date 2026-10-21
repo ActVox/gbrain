@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 253788,
-    "stdoutSha256": "aced261f1a8bf90d1fc1c3d32e7cf472997f3bfafba85d9c7a6890c639b7a5fa",
+    "stdoutBytes": 253499,
+    "stdoutSha256": "3d0b213b3db1c260314abd46136c79a5ddd0e2b34e6a62bcb6b97cd9d7b89493",
     "toolNames": [
       "remember",
       "entity",
@@ -718,7 +718,7 @@
         "scope": "write"
       },
       {
-        "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row. Filters: type, tag, slug_prefix, updated_after, where (frontmatter fields); sort: updated_desc, updated_asc, created_desc, slug.",
+        "description": "List pages; filters incl. slug_prefix, where (frontmatter). Recent / this week: sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -752,7 +752,7 @@
               "type": "number"
             },
             "slug_prefix": {
-              "description": "Slugs starting with this literal text, e.g. 'deals/' (% and _ match themselves).",
+              "description": "Literal slug prefix, e.g. 'deals/'.",
               "type": "string"
             },
             "sort": {
@@ -1576,7 +1576,7 @@
         "scope": "write"
       },
       {
-        "description": "Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. NOT proof of coverage; match: \"keyword\" pages every keyword match and takes OR across quoted names or codes (\"A\" OR \"B\" OR …): one call lists every page matching any. Name lists: entity names. Concepts/landscape or people/companies/projects by topic: `query`; lists: list_pages; personal: get_recent_salience. return_unit: sections or conversations. Filters: types, where (frontmatter fields); dates: `query`. fields: \"full\" adds diagnostics.",
+        "description": "Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. NOT proof of coverage; match: \"keyword\" pages every keyword match and takes OR across quoted names or codes (\"A\" OR \"B\" OR …): one call lists every page matching any. Name lists: entity names. Concepts/landscape or people/companies/projects by topic: `query`; lists: list_pages; personal: get_recent_salience. return_unit: sections or conversations. fields: \"full\" adds diagnostics.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -1716,7 +1716,7 @@
         "scope": "read"
       },
       {
-        "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. Filters: types, since/until, where (frontmatter fields). fields: \"full\" adds diagnostics.",
+        "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,

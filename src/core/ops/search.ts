@@ -126,7 +126,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   const emit = (output: { meta: Record<string, unknown> }, returned: SearchResult[]) => {
     recordRecallOutcome(returned);
     const cost = searchCostSnapshot();
-    ctx.emitResponseMeta?.('retrieval', { ...output.meta, timings: timings.snapshot(), ...(cost ? { cost } : {}) });
+    ctx.emitResponseMeta?.('retrieval', { ...output.meta, timings: timings.snapshot(), ...(cost?.calls ? { cost } : {}) });
     return returned;
   };
   if (!evidence) {

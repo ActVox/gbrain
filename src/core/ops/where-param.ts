@@ -7,7 +7,7 @@ import type { OperationContext, ParamDef } from './contract.ts';
 import { invalidParam } from './op-fix.ts';
 import { FrontmatterWhereError, WHERE_EXAMPLE, parseFrontmatterWhere, type FrontmatterWhere } from '../search/frontmatter-where.ts';
 
-export const WHERE_PARAM: ParamDef = { type: 'object', cliKeyValue: true, description: 'Frontmatter equality, e.g. {status: "active"}; a list matches any.' };
+export const WHERE_PARAM: ParamDef = { type: 'object', cliKeyValue: true, fullSurfaceOnly: true, description: 'Frontmatter equality, e.g. {status: "active"}; a list matches any.' };
 
 /** The validated filter, or undefined when absent; a bad key or value is invalid_params. */
 export function whereOpParam(ctx: Pick<OperationContext, 'remote' | 'transport'>, tool: string, raw: unknown): FrontmatterWhere | undefined {

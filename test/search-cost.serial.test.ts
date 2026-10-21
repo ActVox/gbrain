@@ -69,7 +69,7 @@ describe('search/query cost meta (#7158)', () => {
     keyless();
     const { rows, retrieval } = await callSearch(engine, { query: 'widget pricing' }, false);
     expect(rows.length).toBeGreaterThan(0);
-    expect(retrieval.cost).toEqual({ calls: 0, estimated_usd: 0 });
+    expect(retrieval.cost).toBeUndefined();
     const timings = retrieval.timings as { total_ms: number; stages_ms: Record<string, number> };
     expect(timings.total_ms).toBeGreaterThanOrEqual(0);
     expect(timings.stages_ms.lexical).toBeGreaterThanOrEqual(0);
@@ -110,7 +110,7 @@ describe('search/query cost meta (#7158)', () => {
       callSearch(engine, { query: 'widget', match: 'keyword' }, false),
       callQuery({ query: 'widget pricing', expand: false }),
     ]);
-    expect(keyword.retrieval.cost).toEqual({ calls: 0, estimated_usd: 0 });
+    expect(keyword.retrieval.cost).toBeUndefined();
     expect((hybrid.cost as Record<string, any>).rerank.calls).toBe(1);
   });
 });
