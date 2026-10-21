@@ -144,9 +144,9 @@ export async function readTerminalFailureSummary(engine: BrainEngine, opts: { so
       WHERE (${RECOVERY('r')} OR (${TERMINAL('r')} AND ${ENDED('r')} > now()-($1::int*interval '1 day')))
         AND ($2::text[] IS NULL OR r.source_id=ANY($2::text[]))
     ), resolved AS (
-      SELECT r.id FROM base r WHERE NOT r.has_recovery AND (r.error_code='${SYNC_PASS_SUPERSEDED}' OR EXISTS (SELECT 1 FROM persistence_requests c WHERE ${supersessionSql('r', 'c')}))
+      SELECT r.id FROM base r WHERE NOT r.has_recovery AND EXISTS (SELECT 1 FROM persistence_requests c WHERE ${supersessionSql('r', 'c')})
     ), tagged AS (
-      SELECT b.*, (x.id IS NOT NULL) AS resolved, (b.has_recovery OR b.ended_at > now()-($3::int*interval '1 day')) AS in_window, ${HISTORICAL_BY_BUILD('b')} AS historical_build
+      SELECT b.*, (x.id IS NOT NULL OR (NOT b.has_recovery AND b.error_code='${SYNC_PASS_SUPERSEDED}')) AS resolved, (b.has_recovery OR b.ended_at > now()-($3::int*interval '1 day')) AS in_window, ${HISTORICAL_BY_BUILD('b')} AS historical_build
       FROM base b LEFT JOIN resolved x ON x.id=b.id
     )
     SELECT GROUPING(state) AS set, source_id, state, error_code, origin, reason, cause, operation, intent_kind, has_recovery, blocked_reason, compacted, knock_on, routed_message, build, resolved,
