@@ -79,7 +79,7 @@ async function probe(
   const words = nameWords(name);
   let rows: SearchResult[];
   try {
-    rows = await engine.searchKeyword(`"${words.join(' ')}"`, {
+    rows = await engine.searchKeyword(`"${name.replace(/"/g, ' ').trim()}"`, {
       limit: TEXT_MENTION_POOL,
       ...(sources.length === 1 ? { sourceId: sources[0] } : { sourceIds: [...sources] }),
       excludePrivate: opts.excludePrivate,

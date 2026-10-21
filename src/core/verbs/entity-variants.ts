@@ -16,7 +16,7 @@
 import type { BrainEngine } from '../engine.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { followRetirement, isIdentityEntity } from '../entities/resolve.ts';
-import { NAME_MATCH_RANK, NAME_TITLE_TOKENS, WEAK_NAME_MATCHES, hasLeadingTitle, matchNameVariant, parsePersonName, probeWords, type NameMatchKind } from '../entities/name-variants.ts';
+import { NAME_MATCH_RANK, NAME_TITLE_TOKENS, WEAK_NAME_MATCHES, hasLeadingTitle, matchNameVariant, parsePersonName, probeWords, stripLeadingTitles, type NameMatchKind } from '../entities/name-variants.ts';
 
 /** Candidate rows read per source; a full read means another page may have matched, so nothing resolves. */
 export const VARIANT_CANDIDATE_CAP = 200;
@@ -44,6 +44,7 @@ const basenameName = (slug: string) => (slug.split('/').pop() ?? '').replace(/[-
 
 /** The strongest variant under which `name` names this page (by title or slug basename). */
 function bestKind(name: string, row: VariantRow): NameMatchKind | null {
+  if (isTitleStub(row.title || basenameName(row.slug))) return null;
   const kinds = [row.title ?? '', basenameName(row.slug)]
     .filter(candidate => !isTitleStub(candidate))
     .map(candidate => matchNameVariant(name, candidate))
@@ -139,7 +140,7 @@ export async function readPossibleDuplicates<R extends VariantRow>(
   const resolveRemainder = async (stub: VariantRow): Promise<string | null> => {
     const name = [stub.title ?? '', basenameName(stub.slug)].find(hasLeadingTitle);
     if (!name) return null;
-    const res = await resolveNameVariant<R>(engine, sourceId, parsePersonName(name).core.join(' '), { ...opts, exclude: [stub.slug] });
+    const res = await resolveNameVariant<R>(engine, sourceId, stripLeadingTitles(name), { ...opts, exclude: [stub.slug] });
     return res.hit?.row.slug ?? null;
   };
   try {

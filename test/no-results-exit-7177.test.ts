@@ -13,6 +13,9 @@ import { formatEntityResult, markEntityMiss } from '../src/cli/entity-format.ts'
 import { currentExitCode, _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { NO_RESULTS_EXIT_CODE } from '../src/core/exit-codes.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
+
+const failOnEmpty = <T>(fn: () => T | Promise<T>) => withEnv({ GBRAIN_FAIL_ON_EMPTY: '1' }, fn);
 
 let engine: PGLiteEngine;
 const origOut = process.stdout.write.bind(process.stdout);
@@ -55,7 +58,6 @@ beforeEach(async () => {
   await engine.insertFact({ fact: 'prefers morning meetings', kind: 'preference', entity_slug: 'people/alice-example', source: 'test', visibility: 'world' } as never, { source_id: 'default' });
 });
 afterEach(() => {
-  delete process.env.GBRAIN_FAIL_ON_EMPTY;
   _resetCliExitVerdictForTests();
   process.exitCode = 0;
 });
@@ -74,27 +76,25 @@ describe('recall, default', () => {
 });
 
 describe('recall, GBRAIN_FAIL_ON_EMPTY=1', () => {
-  beforeEach(() => { process.env.GBRAIN_FAIL_ON_EMPTY = '1'; });
-
-  test('a hit exits 0', async () => {
+  test('a hit exits 0', () => failOnEmpty(async () => {
     expect(await recall(['people/alice-example'])).toBe(0);
     expect(await recall(['--grep', 'morning'])).toBe(0);
-  });
+  }));
 
-  test('an entity, text or --grep lookup that matches nothing exits 12 with one stderr line', async () => {
+  test('an entity, text or --grep lookup that matches nothing exits 12 with one stderr line', () => failOnEmpty(async () => {
     for (const args of [['people/carol-example'], ['zebra'], ['--grep', 'zebra'], ['people/alice-example', '--grep', 'zebra']]) {
       expect(await recall(args)).toBe(NO_RESULTS_EXIT_CODE);
       expect(err).toContain('[recall] exit 12 (no_results): nothing matched (GBRAIN_FAIL_ON_EMPTY=1).');
     }
-  });
+  }));
 
-  test('a --json miss exits 12 too', async () => {
+  test('a --json miss exits 12 too', () => failOnEmpty(async () => {
     expect(await recall(['people/carol-example', '--json'])).toBe(NO_RESULTS_EXIT_CODE);
-  });
+  }));
 
-  test('a feed read with nothing new is not a miss', async () => {
+  test('a feed read with nothing new is not a miss', () => failOnEmpty(async () => {
     expect(await recall(['--grep', 'zebra', '--since-last-run'])).toBe(0);
-  });
+  }));
 });
 
 describe('entity', () => {
@@ -106,17 +106,15 @@ describe('entity', () => {
     expect(currentExitCode()).toBe(0);
   });
 
-  test('with GBRAIN_FAIL_ON_EMPTY=1 a miss exits 12; the miss line is plain, timing and coverage on their own lines', () => {
-    process.env.GBRAIN_FAIL_ON_EMPTY = '1';
+  test('with GBRAIN_FAIL_ON_EMPTY=1 a miss exits 12; the miss line is plain, timing and coverage on their own lines', () => failOnEmpty(() => {
     _resetCliExitVerdictForTests();
     silenced(() => markEntityMiss('entity', miss));
     expect(currentExitCode()).toBe(NO_RESULTS_EXIT_CODE);
     expect(err).toContain('[entity] exit 12 (no_results)');
     expect(formatEntityResult(miss).split('\n')).toEqual(['No entity found.', '  mention coverage: pending, 40 page(s) pending', '  (2613ms)', '']);
-  });
+  }));
 
-  test('a found card, a miss with text mentions and other ops exit 0', () => {
-    process.env.GBRAIN_FAIL_ON_EMPTY = '1';
+  test('a found card, a miss with text mentions and other ops exit 0', () => failOnEmpty(() => {
     for (const [op, r] of [
       ['entity', { found: true, card: {} }],
       ['entity', { ...miss, text_mentions: { total: 2, pages: [] } }],
@@ -126,5 +124,5 @@ describe('entity', () => {
       silenced(() => markEntityMiss(op, r));
       expect(currentExitCode()).toBe(0);
     }
-  });
+  }));
 });

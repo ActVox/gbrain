@@ -39,6 +39,18 @@ async function check() {
 }
 
 describe('person_title_duplicates', () => {
+  test('a hyphenated surname pairs too, in both title styles', async () => {
+    await person('people/ada-quill-example', 'Ada Quill-Example');
+    await person('people/mayor-quill-example', 'Mayor Quill-Example');
+    await person('people/ceo-fen-example', 'CEO Fen-Example');
+    await person('people/cy-fen-example', 'Cy Fen-Example');
+    const c = await check();
+    expect(c.details.pairs.map((p: any) => [p.stub, p.canonical])).toEqual([
+      ['people/ceo-fen-example', 'people/cy-fen-example'],
+      ['people/mayor-quill-example', 'people/ada-quill-example'],
+    ]);
+  });
+
   test('ok when no titled person page exists', async () => {
     const c = await check();
     expect(c).toMatchObject({ name: 'person_title_duplicates', status: 'ok' });

@@ -143,7 +143,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "variants": {
         "type": "boolean",
-        "description": "Default true: when no exact name matches, resolve one unambiguous name variant (nickname, initial, title, order, surname typo, unique surname; card.match says which). false: exact names only."
+        "description": "false: exact names only. Default true: with no exact match, one unambiguous name variant (card.match says which).",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",

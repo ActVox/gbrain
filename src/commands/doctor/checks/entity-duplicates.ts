@@ -18,7 +18,7 @@
  * (PAIR_SCAN_CAP per brain), one variant read each, one batched link count.
  */
 import type { Check } from '../../doctor.ts';
-import { NAME_TITLE_TOKENS, parsePersonName } from '../../../core/entities/name-variants.ts';
+import { NAME_TITLE_TOKENS, hasLeadingTitle, stripLeadingTitles } from '../../../core/entities/name-variants.ts';
 import { resolveNameVariant } from '../../../core/verbs/entity-variants.ts';
 import { retiredPageSql } from '../../../core/entities/resolve.ts';
 import { doctorVerify } from '../check-fix.ts';
@@ -54,7 +54,8 @@ async function runPersonTitleDuplicates(ctx: DoctorContext): Promise<Check[]> {
       if (stubs.length > PAIR_SCAN_CAP - scanned) capped = true;
       for (const stub of stubs.slice(0, PAIR_SCAN_CAP - scanned)) {
         scanned++;
-        const remainder = parsePersonName((stub.slug.split('/').pop() ?? '').replace(/-/g, ' ')).core.join(' ');
+        const named = [stub.title ?? '', (stub.slug.split('/').pop() ?? '').replace(/-/g, ' ')].find(hasLeadingTitle);
+        const remainder = named ? stripLeadingTitles(named) : '';
         if (!remainder) continue;
         const res = await resolveNameVariant(engine, sourceId, remainder, {
           selectColumns: 'slug, title, type, frontmatter', privatePredicate: '', retirementPrivacy: '', entityTypes: new Set(['person']), exclude: [stub.slug],

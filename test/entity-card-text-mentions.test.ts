@@ -52,6 +52,12 @@ describe('a name with no page', () => {
     expect(res.text_mentions!.pages.map(p => p.slug)).toEqual(['notes/2026-04-02', 'notes/2026-03-01']);
   });
 
+  test('a hyphenated surname is found as written', async () => {
+    await note('notes/2026-07-01', 'Coffee with Bea Marsh-Example and Cy Fen-Example about the harbor grant.');
+    const res = await card('Bea Marsh-Example');
+    expect(res.text_mentions!.pages.map(p => p.slug)).toEqual(['notes/2026-07-01']);
+  });
+
   test('a name nobody wrote has no text_mentions', async () => {
     const res = await card('Quentin Nobody');
     expect(res.found).toBe(false);

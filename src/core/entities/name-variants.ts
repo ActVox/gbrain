@@ -103,14 +103,29 @@ export interface PersonName {
   titles: string[];
 }
 
+/** nameWords, keeping a hyphenated word whole ("Smith-Jones" is one surname, not two names); a slug basename (`alice-example`, no space, lowercase) splits. */
+function personTokens(text: string): string[] {
+  if (!/\s/.test(text ?? '') && text === (text ?? '').toLowerCase()) return nameWords(text);
+  const folded = foldNonDecomposingLatin((text ?? '').normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase());
+  return folded.split(/[^\p{L}\p{N}-]+/u).map(t => t.replace(/^-+|-+$/g, '')).filter(Boolean);
+}
+
 /** Split a name into its core words and the titles in front of it; a name that is only titles keeps them as its core. */
 export function parsePersonName(text: string): PersonName {
-  const words = nameWords(text);
+  const words = personTokens(text);
   let start = 0;
   while (start < words.length - 1 && NAME_TITLE_TOKENS.has(words[start]!)) start++;
   let end = words.length;
   while (end - 1 > start && NAME_SUFFIX_TOKENS.has(words[end - 1]!)) end--;
   return { core: words.slice(start, end), titles: words.slice(0, start) };
+}
+
+/** The name as written, without its leading title words ("Mayor Quill-Example" -> "Quill-Example"). */
+export function stripLeadingTitles(text: string): string {
+  const parts = (text ?? '').trim().split(/\s+/);
+  let start = 0;
+  while (start < parts.length - 1 && nameWords(parts[start]!).every(w => NAME_TITLE_TOKENS.has(w))) start++;
+  return parts.slice(start).join(' ');
 }
 
 /** True when the page name starts with a title word ("Mayor Example", `people/dr-alice-example`). */

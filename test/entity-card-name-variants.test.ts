@@ -106,6 +106,15 @@ describe('title-prefixed duplicates are reported, never substituted', () => {
     expect(res.card!.possible_duplicates).toEqual([{ slug: 'people/mayor-thistlewood', title: 'Mayor Thistlewood', reason: 'title_prefix' }]);
   });
 
+  test('a hyphenated surname pairs both ways', async () => {
+    await person('people/ada-quill-example', 'Ada Quill-Example');
+    await person('people/mayor-quill-example', 'Mayor Quill-Example');
+    const stub = await buildEntityCard(engine, 'default', 'Mayor Quill-Example', { remote: false, includeReferences: true, variants: true });
+    expect(stub.card!.possible_duplicates).toEqual([{ slug: 'people/ada-quill-example', title: 'Ada Quill-Example', reason: 'title_prefix' }]);
+    const real = await buildEntityCard(engine, 'default', 'Ada Quill-Example', { remote: false, includeReferences: true, variants: true });
+    expect(real.card!.possible_duplicates).toEqual([{ slug: 'people/mayor-quill-example', title: 'Mayor Quill-Example', reason: 'title_prefix' }]);
+  });
+
   test('a surname two people share pairs the stub with nobody', async () => {
     await person('people/margaret-thistlewood', 'Margaret Thistlewood');
     const res = await buildEntityCard(engine, 'default', 'Mayor Thistlewood', { remote: false, includeReferences: true, variants: true });
