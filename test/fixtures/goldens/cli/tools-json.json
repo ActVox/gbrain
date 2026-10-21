@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 253502,
-    "stdoutSha256": "a1ece00524cff610896149b1a6e998e9a2521d2845bd0f16afa916ed18019c43",
+    "stdoutBytes": 253497,
+    "stdoutSha256": "20f59ef5300b32f55ca0d2378f7cc7eabd91200d64212dcdcddeef7fd27c4e15",
     "toolNames": [
       "remember",
       "entity",
@@ -718,7 +718,7 @@
         "scope": "write"
       },
       {
-        "description": "List pages by type, slug_prefix, frontmatter where; what did I touch this week: sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.",
+        "description": "List pages by type, slug_prefix, frontmatter where; what did I touch this week: sort=updated_desc. Default 50; truncated: continue with updated_after + updated_after_slug from the last row.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
