@@ -159,6 +159,26 @@ test('status names last_commit and a live block for the drain-lease holder, a se
   }
 }), 300_000);
 
+test('GBRA-133: status reports when the source last converged and when a sync write last committed, so a catch-up never reads as stale', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const s = await syncedSource(engine);
+    const synced = await readSyncStatus(engine, s.id, { detail: false });
+    expect(synced.last_sync_at).not.toBeNull();
+    expect(synced.last_committed_at).not.toBeNull();
+    // A source that last converged a day ago and has committed sync writes since (a long catch-up blocked short of convergence).
+    await disposePersistenceConsumer(engine);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    await engine.executeRaw("UPDATE sources SET last_sync_at=now() - interval '26 hours' WHERE id=$1", [s.id]);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    const catchingUp = await readSyncStatus(engine, s.id, { detail: false });
+    expect(Date.parse(catchingUp.last_committed_at!) - Date.parse(catchingUp.last_sync_at!)).toBeGreaterThan(25 * 3600_000);
+    const json = await statusJson(engine, ['--source', s.id, '--json']) as { last_sync_at?: string; last_committed_at?: string };
+    expect(json.last_sync_at).toBe(catchingUp.last_sync_at!);
+    expect(json.last_committed_at).toBe(catchingUp.last_committed_at!);
+    expect(await printed(() => runSyncStatus(engine, ['--source', s.id]))).toContain(`last committed write: ${catchingUp.last_committed_at} (still importing since it last converged)`);
+  }
+}), 300_000);
+
 test('a last error a later pass got past reads superseded with what passed it and its age; one it did not get past stays live', async () => withEnv(env, async () => {
   for (const engine of engines) {
     const s = await syncedSource(engine);

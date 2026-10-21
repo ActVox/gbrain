@@ -121,6 +121,13 @@ export interface SyncStatus {
   /** #7243: the commit the source's sync applied through (`sources.last_commit`, stamped when a sync converges), or null before the first. */
   last_commit: string | null;
   /**
+   * GBRA-133: when the source's sync last converged (`sources.last_sync_at`: every path of its target imported, deleted or
+   * held), and when a managed sync write of the source last committed. A source still importing after its last convergence
+   * reads `last_committed_at` newer than `last_sync_at`, so it does not read as stale while it is catching up.
+   */
+  last_sync_at: string | null;
+  last_committed_at: string | null;
+  /**
    * #7243: the job doing the work now: the holder of the source's drain lease (a serve pass, a sync job, a CLI sync, the
    * cycle), its heartbeat and progress, `job_id` when it is a Minions sync job, and `stalled` once it has made no commit
    * or save for the stall window. Null when nothing holds the lease.
@@ -302,9 +309,9 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const detail = opts.detail !== false;
   // #6712 PR 4b (design §9): the pass row and the withheld-delete record ride the source read (primary-key probes), so the plain status keeps its statement budget.
   const admissionSql = syncAdmissionSettingSql(4);
-  const [source] = await engine.executeRaw<{ incarnation: string; last_commit: string | null; drain_lock: boolean; pass_value: PassRow['value'] | null; pass_updated_at: Date | string | null; withheld: DeletesWithheld | null;
+  const [source] = await engine.executeRaw<{ incarnation: string; last_commit: string | null; last_sync_at: Date | string | null; drain_lock: boolean; pass_value: PassRow['value'] | null; pass_updated_at: Date | string | null; withheld: DeletesWithheld | null;
     admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null; writeback_failed: string | null }>(
-    `SELECT s.incarnation::text AS incarnation, s.last_commit, EXISTS (SELECT 1 FROM gbrain_cycle_locks l WHERE l.id=$${4 + SYNC_ADMISSION_SETTING_PARAMS.length}) AS drain_lock,
+    `SELECT s.incarnation::text AS incarnation, s.last_commit, s.last_sync_at, EXISTS (SELECT 1 FROM gbrain_cycle_locks l WHERE l.id=$${4 + SYNC_ADMISSION_SETTING_PARAMS.length}) AS drain_lock,
       p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns},
       (SELECT r.request_id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE e.kind='git' AND e.state='failed'
         AND e.request_id IN (SELECT id::uuid FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(p.completed_keys->0->'obligations'->'converged'->'writeback')='array'
@@ -318,8 +325,10 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const selected = await cursorHeader(engine, sourceId, source.incarnation, failures[0]?.cursor_key ?? null);
   const header = selected?.header ?? null;
   // #7010: the push-hold probe rides this statement, so a source with no held Git effect costs no extra round trip.
-  const [committed] = await engine.executeRaw<{ n: number | string; git_push_held: boolean }>(`SELECT count(*) AS n, EXISTS (SELECT 1 FROM persistence_effects e
-      WHERE e.source_id=$1 AND e.kind='git' AND e.state IN ('queued','running','failed') AND e.error_code IN ('targets_parked', ${GIT_PUSH_CODES.map(code => `'${code}'`).join(',')})) AS git_push_held
+  const [committed] = await engine.executeRaw<{ n: number | string; git_push_held: boolean; last_committed_at: Date | string | null }>(`SELECT count(*) AS n, EXISTS (SELECT 1 FROM persistence_effects e
+      WHERE e.source_id=$1 AND e.kind='git' AND e.state IN ('queued','running','failed') AND e.error_code IN ('targets_parked', ${GIT_PUSH_CODES.map(code => `'${code}'`).join(',')})) AS git_push_held,
+      (SELECT max(r.completed_at) FROM persistence_source_bindings b JOIN persistence_requests r ON r.worktree_id=b.worktree_id AND r.source_incarnation=b.source_incarnation
+        WHERE b.source_id=$1 AND r.state='committed' AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%') AS last_committed_at
     FROM persistence_requests WHERE source_id=$1 AND state='committed'
     AND intent->>'kind' IN ('managed_sync_import','managed_sync_delete') AND completed_at > now() - interval '10 minutes'`, [sourceId]);
   const records = await observeDirtyEditors(engine, sourceId, source.incarnation,
@@ -349,6 +358,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     ...classifySyncFault({ code: failure.code, detail: laneFault, message: failure.message, repeated: failure.repeats ? { path: failure.path, runs: failure.repeats } : null }) }
     : retired ? { code: 'cursor_incarnation_retired', category: 'sync_fault', public_category: 'superseded', message: `An unfinished sync cursor of ${sourceId} was recorded under an incarnation the source no longer has; no current sync selects it, and it says nothing about whether the current files are imported. `
       + `Retire it with ${repairPreview.argv!.join(' ')} (preview, then --apply with the printed hash).`, phase: 'resume', first_seen: retired.first_seen, attempts: 1, ...classifySyncFault({ code: 'cursor_incarnation_retired' }) } : null;
+  const iso = (value: Date | string | null | undefined) => value == null ? null : new Date(value).toISOString();
   if (failure && lastError) {
     const [seen] = await engine.executeRaw<{ failure_at: Date | string | null; committed_at: Date | string | null; admitted_at: Date | string | null; now_at: Date | string }>(`SELECT now() AS now_at,
       (SELECT f.updated_at FROM op_checkpoints f WHERE f.op='managed-sync-failure' AND f.fingerprint=$2) AS failure_at,
@@ -359,7 +369,6 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     // #7243: the newest pass (its row rides the source read) is evidence too: it pinned, and it read the level unless it stopped before.
     const pass = source.pass_value?.telemetry;
     const levelRead = pass && (pass.outcome === 'up_to_date' || Object.keys(pass.timings_ms ?? {}).length > 0) ? pass.started_at : null;
-    const iso = (value: Date | string | null | undefined) => value == null ? null : new Date(value).toISOString();
     const later = seen?.failure_at ? supersedingAttempt(failure.phase, iso(seen.failure_at)!, { commit: iso(seen.committed_at), admission: iso(seen.admitted_at), level_read: levelRead ?? null, pin: pass?.started_at ?? null }) : null;
     if (later) lastError.superseded = { ...later, age_seconds: Math.max(0, Math.round((Date.parse(iso(seen!.now_at)!) - Date.parse(iso(seen!.failure_at)!)) / 1000)) };
   }
@@ -414,7 +423,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const admission = await syncAdmissionStatus(engine, sourceId, source.incarnation,
     { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at });
   const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume, source.writeback_failed) : null;
-  return { source_id: sourceId, last_commit: source.last_commit, live: holder ? { ...holder, job_id: holderJob, stalled: holderStalled(holder) } : null, run_id: header?.runId ?? null,
+  return { source_id: sourceId, last_commit: source.last_commit, last_sync_at: iso(source.last_sync_at), last_committed_at: iso(committed?.last_committed_at), live: holder ? { ...holder, job_id: holderJob, stalled: holderStalled(holder) } : null, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob ?? holderJob, holds, identity_downgrades: await withIdentityRemedies(engine, await listIdentityDowngrades(engine, [sourceId])), last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     needs_human_from: !human ? null : 'path' in human && 'held_since' in human ? { kind: 'hold', path: human.path, slug: human.slug, code: human.code } : { kind: 'last_error', code: human.code },
