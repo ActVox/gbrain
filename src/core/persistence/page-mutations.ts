@@ -31,6 +31,7 @@ import { claimWorktree, getWorktreeBinding } from './ownership.ts';
 import { clientRequestIdOf, parseMutationPrecondition } from './preconditions.ts';
 import { assertPurgeParams } from './purge-params.ts';
 import type { Principal, WriteRequest } from './model.ts';
+import { withWriteApplied } from './write-applied.ts';
 import { normalizeSubagentPageInput, undeclaredPageTypeWarning, type PageTypeWarning } from './page-input.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { decideUnboundWrite, isUnboundSourcePage } from './unbound-source.ts';
@@ -198,6 +199,17 @@ export async function withLiveSearchable(ctx: OperationContext, response: Record
   return { ...settle(response), ...(receipt ? { write_request: settle(receipt) } : {}) };
 }
 
+/**
+ * #7190: the reply to a page write, with `applied` (write-applied.ts) in the reply and its `write_request`: whether the
+ * write is searchable yet and the gap. A pending write's error receipt carries it too. A failed read leaves it out.
+ */
+export async function answerPageWrite(ctx: OperationContext, row: WriteRequest, opts: { gateHold?: false } = {}): Promise<Record<string, unknown>> {
+  return withWriteApplied(ctx.engine, row, async () => {
+    const reply = pendingAwareResponse(ctx, row);
+    return withLiveSearchable(ctx, opts.gateHold === false ? reply : throwIfHeld(reply, false));
+  });
+}
+
 /** #6188 (D21): a write whose fence Tier 1 rewrote carries one `fence_normalized` coaching notice. */
 export function emitFenceNotice(ctx: Pick<OperationContext, 'emitNotice'>, response: Record<string, unknown>, slug?: string): void {
   const report = response.fences_normalized as FencesNormalized | undefined;
@@ -227,7 +239,7 @@ export async function submitPageMutation(ctx: OperationContext,
   // cache could explain drops it and prepares the write once more, uncached, so it ends as it would without it.
   const cached = await preadmitReads(ctx.engine);
   let prepared = await preparePageAdmission(cached ? { ...ctx, engine: cached } : ctx, { ...input, params });
-  if (prepared.prior) return withLiveSearchable(ctx, throwIfHeld(pendingAwareResponse(ctx, await waitForWrite(ctx.engine, prepared.prior, ctx.config, waitMs())), false));
+  if (prepared.prior) return answerPageWrite(ctx, await waitForWrite(ctx.engine, prepared.prior, ctx.config, waitMs()));
   const brainId = cached ? cachedPreadmitBrain(ctx.engine) : undefined;
   // Phase 4.4: the admission transaction runs on the warm single-write lane when it is free.
   const admit = (admission: WriteAdmission) => onPersistenceLane(ctx.engine, transaction => admitWrite(ctx.engine, admission, undefined, transaction),
@@ -238,10 +250,10 @@ export async function submitPageMutation(ctx: OperationContext,
     if (!cached || !preadmitRecheckFailed(error)) throw error;
     dropPreadmitCache(ctx.engine);
     prepared = await preparePageAdmission(ctx, { ...input, params: { ...params, request_id: prepared.admission.requestId } });
-    if (prepared.prior) return withLiveSearchable(ctx, throwIfHeld(pendingAwareResponse(ctx, await waitForWrite(ctx.engine, prepared.prior, ctx.config, waitMs())), false));
+    if (prepared.prior) return answerPageWrite(ctx, await waitForWrite(ctx.engine, prepared.prior, ctx.config, waitMs()));
     row = await admit(prepared.admission);
   }
-  const response = await withLiveSearchable(ctx, throwIfHeld(pendingAwareResponse(ctx, await waitForWrite(ctx.engine, row, ctx.config, waitMs())), false));
+  const response = await answerPageWrite(ctx, await waitForWrite(ctx.engine, row, ctx.config, waitMs()));
   emitFenceNotice(ctx, response, row.slug);
   return { ...response, ...(prepared.typeWarning ? { type_warning: prepared.typeWarning } : {}), ...(prepared.slugAdvisory ? { slug_advisory: prepared.slugAdvisory } : {}) };
 }

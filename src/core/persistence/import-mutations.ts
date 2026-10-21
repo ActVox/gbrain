@@ -8,8 +8,7 @@ import { opError, OperationError, type OperationContext } from '../ops/contract.
 import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
 import { getWorktreeBinding } from './ownership.ts';
-import { SCREENING_SHARED_READS, batchSharedReads, emitFenceNotice, initializeLocalPersistence, pendingAwareResponse, preparePageAdmission, requestPrincipalForContext, withBatchAdmission,
-  withLiveSearchable } from './page-mutations.ts';
+import { SCREENING_SHARED_READS, answerPageWrite, batchSharedReads, emitFenceNotice, initializeLocalPersistence, preparePageAdmission, requestPrincipalForContext, withBatchAdmission } from './page-mutations.ts';
 import { admitBatch } from './page-batch.ts';
 import { writeOutcomeUnknown } from './admission-retry.ts';
 import { assertPersistenceAccepting, waitForWrites } from './service.ts';
@@ -273,7 +272,7 @@ async function submitManagedImports(ctx: OperationContext, batch: string, params
   await Promise.all(rows.map(async (entry, position) => {
     try {
       // #7106: a new segmented page over 4 MiB replies at commit with `searchable: 'pending'`, read live here.
-      const response = await withLiveSearchable(ctx, pendingAwareResponse(ctx, done[position]!));
+      const response = await answerPageWrite(ctx, done[position]!, { gateHold: false });
       if (entry.admitted) emitFenceNotice(ctx, response, done[position]!.slug);
       settled[entry.index] = { status: 'fulfilled', value: { ...response, ...(entry.typeWarning ? { type_warning: entry.typeWarning } : {}),
         ...(entry.slugAdvisory ? { slug_advisory: entry.slugAdvisory } : {}) } };

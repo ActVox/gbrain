@@ -127,6 +127,7 @@ async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: W
     ...publicWriteReceipt(receiptFor(row, facts)),
     operation: row.operation, source_id: row.source_id, slug: row.slug,
     ...await liveSearchable(ctx, { request_id: row.request_id, state: row.state, source_id: row.source_id, slug: row.slug, searchable: row.outcome?.searchable }),
+    ...await (await import('../persistence/write-applied.ts')).readWriteApplied(ctx.engine, row).then(applied => ({ applied }), () => ({})),
     ...(mismatch ? { owner_build: mismatch } : {}),
     // #7112: the owner-side detail (an owner exception's class, errno, frame, redacted database error text and statement) for a trusted local reader only.
     ...(ctx.remote === false && row.error_detail ? { error_detail: row.error_detail } : {}),

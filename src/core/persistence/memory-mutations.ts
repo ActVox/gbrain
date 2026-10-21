@@ -1,4 +1,5 @@
 import { throwIfHeld } from '../trust/gate-outcomes.ts';
+import { withWriteApplied } from './write-applied.ts';
 import { guardRemoteForget, remoteForgetRaced, supersessionGuarded } from '../trust/supersede-handlers.ts';
 import { randomUUID } from 'node:crypto';
 import type { OperationContext } from '../ops/contract.ts';
@@ -159,7 +160,10 @@ async function inferRememberTarget(ctx: OperationContext, sourceId: string, sour
 export async function submitRememberMutation(ctx: OperationContext, params: Record<string, unknown>, waitMs?: number): Promise<Record<string, unknown>> {
   registerMutationPreparer('remember', prepareMemoryMutation);
   const sub = await submission(ctx, 'remember', params);
-  if (sub.prior) return throwIfHeld(writeResponse(await waitForWrite(ctx.engine, sub.prior, ctx.config, waitMs ?? ctx.writeWaitMs)));
+  if (sub.prior) {
+    const prior = await waitForWrite(ctx.engine, sub.prior, ctx.config, waitMs ?? ctx.writeWaitMs);
+    return withWriteApplied(ctx.engine, prior, () => throwIfHeld(writeResponse(prior)));
+  }
   const { p, sourceId, principal, callerIntent, requestId, clientRequestId } = sub;
   const [source] = await ctx.engine.executeRaw<RememberSource>(
     "SELECT incarnation,archived,local_path,config->>'kind' AS kind FROM sources WHERE id=$1", [sourceId]);
@@ -192,7 +196,8 @@ export async function submitRememberMutation(ctx: OperationContext, params: Reco
       ...(linked ? { entity_inferred: linked.via } : {}), ...(inference && 'warning' in inference ? { entity_warning: inference.warning } : {}),
       session_id: ctx.sessionId ?? null },
     authority, worktreeId: writeThrough ? binding?.worktree_id : null, topologyGeneration: writeThrough ? binding?.topology_generation : null });
-  const response = throwIfHeld(writeResponse(await waitForWrite(ctx.engine, row, ctx.config, waitMs ?? ctx.writeWaitMs)));
+  const settled = await waitForWrite(ctx.engine, row, ctx.config, waitMs ?? ctx.writeWaitMs);
+  const response = await withWriteApplied(ctx.engine, settled, () => throwIfHeld(writeResponse(settled)));
   emitFenceNotice(ctx, response, row.slug);
   return response;
 }

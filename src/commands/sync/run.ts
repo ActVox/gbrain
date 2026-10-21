@@ -609,7 +609,13 @@ async function runSyncAll(
   const okCount = perSourceResults.filter((r) => r.status === 'ok').length;
   const errCount = perSourceResults.filter((r) => r.status === 'error').length;
 
-  if (jsonOut) emitSyncAllEnvelope({ perSourceResults, embedBackfillBySource, effectiveParallel, okCount, errCount, costGate: embedPlan.costGate, resumeCommand });
+  if (jsonOut) {
+    // #7190: each synced source's applied-through watermark, read after the run.
+    const { readAppliedWatermark } = await import('../../core/persistence/applied-watermark.ts');
+    const watermarks = new Map(await Promise.all(perSourceResults.filter(r => r.status !== 'skipped_missing_path')
+      .map(async r => [r.sourceId, await readAppliedWatermark(engine, r.sourceId).catch(() => null)] as const)));
+    emitSyncAllEnvelope({ perSourceResults, embedBackfillBySource, effectiveParallel, okCount, errCount, costGate: embedPlan.costGate, resumeCommand, watermarks });
+  }
 
   // v0.42.7 (#1696): brain-wide extraction-lag nudge after the --all wave.
   // Best-effort, stderr-only; skipped on dry-run.
@@ -732,8 +738,9 @@ function emitSyncAllEnvelope(input: {
   errCount: number;
   costGate: Record<string, unknown> | undefined;
   resumeCommand: string;
+  watermarks: Map<string, unknown>;
 }): void {
-  const { perSourceResults, embedBackfillBySource, effectiveParallel, okCount, errCount, costGate, resumeCommand } = input;
+  const { perSourceResults, embedBackfillBySource, effectiveParallel, okCount, errCount, costGate, resumeCommand, watermarks } = input;
   // Sort by source_id at emit time so the envelope is deterministic
   // even though completion order is not (pMapAllSettled semantics).
   const sortedSources = perSourceResults
@@ -769,6 +776,7 @@ function emitSyncAllEnvelope(input: {
       ...(embedBackfillBySource.has(r.sourceId)
         ? { embed_backfill: embedBackfillBySource.get(r.sourceId) }
         : {}),
+      ...(watermarks.get(r.sourceId) ? { watermark: watermarks.get(r.sourceId) } : {}),
     }));
   emitJson(JSON.stringify({
     schema_version: 1,
@@ -979,7 +987,8 @@ async function runSingleSourceSync(
     const capacity = await syncCapacityNotices(engine, jsonOut, result);
     const convergence = jsonOut && result.status === 'dry_run' && !companyPolicy ? await readConvergence() : undefined;
     if (jsonOut) {
-      emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate), ...(convergence ? { convergence } : {}),
+      const watermark = await (await import('../../core/persistence/applied-watermark.ts')).readAppliedWatermark(engine, sourceId).catch(() => null);
+      emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate), ...(convergence ? { convergence } : {}), ...(watermark ? { watermark } : {}),
         ...(result.managedWrite ? { managed_write: result.managedWrite } : {}), ...drainJsonFields(result, resumeCommand, sourceId),
         ...(result.tail ? { tail: syncTailJsonFields(result).tail } : {}), ...capacity }));
     }
