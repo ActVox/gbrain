@@ -10,6 +10,34 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.354.0] - 2026-10-21
+
+**New `search_exact` (CLI `gbrain search --exact "<phrase>"`) is an unranked, exhaustive literal scan: it returns every page that contains the phrase, plus a `complete` flag that is true only when the whole scope was read (#7191).** Ranked search can miss a rare phrase, so agents fell back to grepping the brain checkout for exact lookups.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Finding every page that contains an exact phrase | ranked search, which can rank a rare phrase out of the results, or a grep of the checkout | `gbrain search --exact "<phrase>"` / MCP `search_exact`: the phrase's words in order with any whitespace between them, substring, case-insensitive unless `case_sensitive`; regex and LIKE metacharacters are literal; every matching page in page-id order with matching chunks and up to 3 snippets |
+| Knowing the scan saw everything | not possible | `complete: true` only when the whole scope was read; otherwise `incomplete_reasons`: `limit` (default 100 pages, max 1000) or `deadline` (default 30 s, max 120), both resumable with `after: resume_after`, and `unreadable_pages` counted by reason (`unchunked`, `projection_pending`, `unsealed`, `scan_timeout`) |
+| Scope | n/a | `source_id`, `types`, `slug_prefix`, plus the prefixes ranked search hides, echoed as `excluded_slug_prefixes` |
+| `gbrain search --exact` with a ranked-only flag | n/a | refused as an unknown flag instead of ignored |
+
+The scan uses ranked search's visibility rules: remote callers read safe chunks only and never see private, foreign-source or quarantined pages, so fenced facts and takes never match. On Postgres 16 with 50,000 pages and 328 MB of chunk text, a full scan for a rare phrase takes 2.1–2.7 s locally and 2.9 s remotely; a common phrase stops at the 100-page limit in 1.3 s.
+
+**Spend effect:** none. No model calls, no default or cap changes, no schema change. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- Quotes mean different things: in ranked search a quoted phrase is stemmed; `--exact` matches the characters you typed (punctuation, accents and quote styles are literal).
+- Pages with body text but no chunks yet (for example held pages) show up as `unreadable_pages` with reason `unchunked`, not as misses.
+
+### Itemized changes
+
+- New op `search_exact` (registered `filtered` with `retrieval` output redaction; covered by both privacy sweeps), scanned in keyset batches of 2,000 pages per statement with JIT off; a batch that hits the statement timeout is retried at half the size, down to one page.
+- `src/cli/command-route.ts` rewrites `search --exact` to `search-exact` before ranked-search flags parse.
+- Docs: `docs/guides/exact-search.md`, linked from the search-modes guide.
+
 ## [0.60.353.0] - 2026-10-21
 
 **Resolving held file-drift pages in bulk now shows progress and prints its preview within a minute.** `gbrain repair file-drift --held` used to prepare every selected held page before it printed anything. Each page reads the database a few dozen times, so a held set of a few thousand pages against a remote database printed nothing for over an hour: no preview, no hash, and nothing to apply. It also quietly stopped at the first 1,000 held pages. A held preview now covers one window of at most 200 pages, or 60 seconds of work, and reports each page on stderr as it goes. A partial window prints the next preview command with `--cursor <next_cursor>`, and walking the windows covers every held page.
