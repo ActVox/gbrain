@@ -127,6 +127,16 @@ describe('blocked_by', () => {
     expect(queueOf(b.id)).toMatchObject({ queue_position: 3, ahead: 2, active_jobs: [{ id: running.id, name: 'long-runner' }] });
   });
 
+  test('a legacy job with no authority names the review command as argv', async () => {
+    const job = await add('noop');
+    await engine.executeRaw('UPDATE minion_jobs SET submission_authority = NULL WHERE id = $1', [job.id]);
+    const [row] = await queue.getJobs({ status: 'waiting' }).then(rows => rows.filter(r => r.id === job.id));
+    const insight = await describeJobs(engine, [row]);
+    expect(insight.get(job.id)!.blocked_by![0]).toMatchObject({ kind: 'unreviewed_authority',
+      fix: { argv: ['gbrain', 'jobs', 'authorize-legacy', '--ids', String(job.id)], actor: 'user', consent: [] } });
+    expect(insight.get(job.id)!.submitted_by).toEqual({ kind: 'unreviewed' });
+  });
+
   test('waiting-children, delayed and paused jobs say why', async () => {
     const parent = await add('noop');
     const kid = await add('noop', {}, { parent_job_id: parent.id });

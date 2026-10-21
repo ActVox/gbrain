@@ -7,6 +7,7 @@ import { spendBasis } from '../../core/minions/spend-record.ts';
 import { jobGroupAmounts } from '../../core/minions/spend-authorization.ts';
 import { describeJobs, withInsight, type JobInsight } from '../../core/minions/job-insight.ts';
 import type { BrainEngine } from '../../core/engine.ts';
+import { shellQuote } from '../../core/agent-output.ts';
 
 export async function runJobsGet({ args, queue, engine }: JobsCommandContext): Promise<void> {
   const id = parseInt(args[1], 10);
@@ -62,7 +63,7 @@ function insightLines(doc: Partial<JobInsight>): string[] {
     else if (b.kind === 'waiting_children') lines.push(`  Blocked by: ${b.pending} unfinished children${b.child_ids.length ? ` (${b.child_ids.map(c => '#' + c).join(', ')})` : ''}`);
     else if (b.kind === 'delayed') lines.push(`  Blocked by: delayed until ${b.delay_until ?? '?'} (${b.reason})`);
     else if (b.kind === 'lock') lines.push(`  Blocked by: lock ${b.lock ?? ''} held${b.holder_job_id != null ? ` by job #${b.holder_job_id}` : b.holder ? ` by a ${b.holder.kind} holder` : ''}`);
-    else if (b.kind === 'unreviewed_authority') lines.push(`  Blocked by: unreviewed legacy authority (${b.fix})`);
+    else if (b.kind === 'unreviewed_authority') lines.push(`  Blocked by: unreviewed legacy authority (${shellQuote(b.fix.argv ?? [])})`);
     else lines.push(`  Blocked by: ${b.kind}`);
   }
   if (doc.lock_expires_in_ms != null) {

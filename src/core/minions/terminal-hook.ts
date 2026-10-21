@@ -11,7 +11,7 @@
  * user with that process's environment, is killed after timeout_ms (default 10 s), and a failure is logged
  * once and never retried, never changing the job.
  */
-import { spawn } from 'node:child_process';
+import { spawn } from '../spawn.ts';
 import { isAbsolute } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';

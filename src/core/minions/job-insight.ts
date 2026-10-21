@@ -9,6 +9,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import { parseGlobalFlags } from '../cli-options.ts';
+import type { Action } from '../agent-output.ts';
 import { currentSubmissionAuthority } from './submission-authority.ts';
 import { currentChatPhase } from '../ai/chat-usage.ts';
 import type { MinionJob } from './types.ts';
@@ -63,7 +64,7 @@ export type BlockedBy =
   | { kind: 'waiting_children'; pending: number; child_ids: number[] }
   | { kind: 'delayed'; delay_until: string | null; reason: DelayReason; detail?: string }
   | { kind: 'paused' }
-  | { kind: 'unreviewed_authority'; fix: string }
+  | { kind: 'unreviewed_authority'; fix: Action }
   | { kind: 'queue'; queue: string; queue_position: number; ahead: number; active: number; active_jobs: Array<{ id: number; name: string }>; private_queue?: true }
   | { kind: 'lock'; held: true; lock?: string; holder_job_id?: number; holder?: { kind: string; pid?: number; host?: string; acquired_at: string | null; ttl_expires_at: string | null } };
 
@@ -269,7 +270,9 @@ function blockedBy(job: MinionJob, c: BlockCtx): BlockedBy[] | null {
   } else if (job.status === 'paused') {
     reasons.push({ kind: 'paused' });
   } else if (job.status === 'waiting') {
-    if (!job.submission_authority) reasons.push({ kind: 'unreviewed_authority', fix: `gbrain jobs authorize-legacy --ids ${job.id}` });
+    if (!job.submission_authority) reasons.push({ kind: 'unreviewed_authority', fix: {
+      argv: ['gbrain', 'jobs', 'authorize-legacy', '--ids', String(job.id)], consent: [], actor: 'user', requires_exclusive: false,
+      why: 'This job was queued before submission authority existed; the host operator previews it here and then authorizes it to run.' } });
     const active = c.holders.get(job.queue) ?? [];
     const ahead = c.positions.get(job.id) ?? 0;
     reasons.push({ kind: 'queue', queue: job.queue, queue_position: ahead + 1, ahead, active: active.length,
