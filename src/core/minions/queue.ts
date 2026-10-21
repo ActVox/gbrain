@@ -20,7 +20,7 @@ export { WATCHDOG_SUSPECT_MARK } from './watchdog-attribution.ts';
 import { coalesceOnIdempotencyKey, decideCoalesce, insertOrCoalesce } from './idempotency-coalesce.ts';
 import { adoptSpendAuthorization, legacyDefaultClaimSetSql, legacyDefaultClaimParams, type SpendAuthorization } from './spend-authorization.ts';
 import { validateAttachment } from './attachments.ts';
-import { isProtectedJobName } from './protected-names.ts';
+import { isProtectedJobName, LEASE_BEACON_QUEUE } from './protected-names.ts';
 import { jsonbSafeJson } from '../text-safe.ts';
 import { assertEmbedBackfillQueueAdmission } from './embed-backfill-admission.ts';
 import { lockDelegatedSubmission, checkDelegatedCapacity, prepareDelegatedReplay, admitDelegatedRetry } from './delegated-admission.ts';
@@ -1526,7 +1526,7 @@ export class MinionQueue {
       // SKIP LOCKED subselect — see killJobs() for the shared tail.
       const candidates = await tx.executeRaw<{ id: number; parent_job_id: number | null }>(
         `SELECT id, parent_job_id FROM minion_jobs
-          WHERE status = 'active'
+          WHERE status = 'active' AND queue <> '${LEASE_BEACON_QUEUE}'
             AND timeout_at IS NOT NULL
             AND timeout_at < now()
             AND lock_until > now()`
@@ -1658,7 +1658,7 @@ export class MinionQueue {
       // handleTimeouts; shared tail in killJobs().
       const candidates = await tx.executeRaw<{ id: number; parent_job_id: number | null }>(
         `SELECT id, parent_job_id FROM minion_jobs
-          WHERE status = 'active'
+          WHERE status = 'active' AND queue <> '${LEASE_BEACON_QUEUE}'
             AND started_at IS NOT NULL
             AND EXTRACT(EPOCH FROM (now() - started_at)) * 1000 > ${WALL_CLOCK_THRESHOLD_MS_SQL}`,
         [lockDurationMs]
@@ -2147,7 +2147,7 @@ export class MinionQueue {
       const candidates = await tx.executeRaw<{ id: number; parent_job_id: number | null; stalled_counter: number; max_stalled: number }>(
         `SELECT id, parent_job_id, stalled_counter, max_stalled
            FROM minion_jobs
-          WHERE status = 'active'
+          WHERE status = 'active' AND queue <> '${LEASE_BEACON_QUEUE}'
             AND lock_until < now() - ($1::double precision * interval '1 millisecond')`,
         [graceMs]
       );
