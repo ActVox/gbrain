@@ -414,6 +414,7 @@ test/sync-exits-l4-6712.test.ts
 test/sync-freshness-6858.test.ts
 test/sync-frontmatter-recovery.test.ts
 test/sync-frontmatter-slug-conflict.test.ts
+test/sync-full-committed-progress-gbra133.test.ts
 test/sync-full-cursor-slices-6349.test.ts
 test/sync-full-untracked-import-5459.test.ts
 test/sync-group-member-order.test.ts
