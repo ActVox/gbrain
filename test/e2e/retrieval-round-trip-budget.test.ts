@@ -25,8 +25,8 @@ import { readSqlTrace } from '../helpers/statement-counter.ts';
 import { seedPage } from '../helpers/keyword-paging-fixture.ts';
 
 const CLI = join(import.meta.dir, '../../src/cli.ts');
-/** Measured on v0.60.328.0 with no provider keys (keyword search): search 100, get 25, recall 35. */
-const BUDGET: Record<string, number> = { search: 110, get: 28, recall: 39 };
+/** Measured on v0.60.333.0 (after #7169) with no provider keys (keyword search): search 59, get 17, recall 35. */
+const BUDGET: Record<string, number> = { search: 65, get: 19, recall: 38 };
 
 const run = process.env.DATABASE_URL ? describe : describe.skip;
 let home = '';
