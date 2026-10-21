@@ -404,6 +404,14 @@ completes in seconds on an 80K-page PGLite brain.
 runs `gbrain pages unsearchable --source <id> --json` (read-only) and follows
 each row's `fix`.
 
+`unsearchable` (the count doctor and `get_brain_health` report) leaves out
+`keyword_only` chunks, which keyword search reads but vector search cannot;
+`semantic_unsearchable` adds them, and the human headline leads with it.
+`awaiting_sync` counts files no state can see yet because sync holds them
+(`new_files` with no page, `stale_pages` whose newer file is held) and the
+source's sync freshness; `gbrain sync status --source <id> --json` says why.
+An unknown `--source` names the source it most likely meant.
+
 Every chunk, and every live page with no chunk row, is in exactly one state,
 derived from the rows against the active embedding column (no stored status):
 
