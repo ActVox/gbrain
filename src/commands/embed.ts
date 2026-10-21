@@ -2,7 +2,7 @@ import { jsonRequested } from '../core/cli-force-exit.ts';
 import { prepareProseChunks } from '../core/markdown-chunks.ts';
 import type { FenceChunkOverlay } from '../core/eligibility/fence-overlay.ts';
 import { prepareEmbeddingProjections, countArchivedEmbeddingWork, reportBlockedProjections } from '../core/embedding-readiness.ts';
-import { embedStaleFacts, type EmbedFactsResult } from '../core/embed-facts.ts';
+import { embedStaleFacts, refusedFactsLine, type EmbedFactsResult } from '../core/embed-facts.ts';
 import { embedTakesForStaleDrain, type EmbedTakesResult } from '../core/embed-takes.ts';
 import { parseFactEmbedArgs } from './embed-facts-delegate.ts';
 import { readProjectionSnapshot, installPageProjection, installPageEmbeddings, PageProjectionConflictError, retryProjectionConflict } from '../core/page-state/projections.ts';
@@ -896,6 +896,7 @@ export async function runEmbed(engine: BrainEngine, args: string[], selectedConf
   if (args.includes('--facts')) {
     const result = await embedStaleFacts(engine, parseFactEmbedArgs(args), selectedConfig);
     if (!jsonRequested(args)) console.log(JSON.stringify(result, null, 2));
+    if (result.refused_oversized) serr(refusedFactsLine(result)!);
     return result;
   }
   // Keyless clean refusal — see isKeylessStaleRefusal. Checked BEFORE the
@@ -1774,9 +1775,7 @@ async function embedAllStale(
   if (!dryRun && signature) {
     let drifted = false;
     try {
-      // One page-first EXISTS: a healthy brain answers it without reading content_chunks, and a
-      // drifted one is not counted before the probe, so a count over a large corpus can no longer
-      // time out into a silent "no drift" (#7117 follow-up).
+      // #7148: one page-first EXISTS, never a count over every chunk, so a timeout can no longer read as "no drift".
       drifted = await hasSignatureDrift(engine, { signature, ...(sourceId && { sourceId }), ...(includeNullSig && { includeNullSignature: true }) });
     } catch {
       // Pre-check is best-effort; fall through as "no drift" (no NULLing).

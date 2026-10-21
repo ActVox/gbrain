@@ -62,6 +62,7 @@ test/extract-endpoint-revision.serial.test.ts
 test/extract-entities-managed.test.ts
 test/extract-timeline-from-meetings-managed.test.ts
 test/extraction-watermark-atoms.test.ts
+test/fact-embedding-oversized-7211.test.ts
 test/fact-fence-adoption-exits.test.ts
 test/fact-purge-lookup-timeout-6511.test.ts
 test/facts-publication-large-fence-6898.test.ts

@@ -10,9 +10,9 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.332.0] - 2026-10-20
+## [0.60.333.0] - 2026-10-21
 
-**A model or dimension swap now finishes re-embedding on a large brain.** After a swap, `gbrain embed --stale`, the background backfill and `gbrain migrate embeddings` mark every chunk from the old model for re-embedding. That marking was one statement over the whole brain, so on a large brain the statement timeout cancelled it, nothing was marked, and the next run hit the same timeout. Separately, before probing the embedder, every embed run counted drifted chunks with two full joins over every chunk. On a large drifted brain those counts timed out too, and the timeout was read as "no drift", so the swap was silently skipped.
+**A model or dimension swap now finishes re-embedding on a large brain, and one overlong fact no longer stops the fact backfill.** After a swap, `gbrain embed --stale`, the background backfill and `gbrain migrate embeddings` mark every chunk from the old model for re-embedding. That marking was one statement over the whole brain, so on a large brain the statement timeout cancelled it, nothing was marked, and the next run hit the same timeout. Separately, before probing the embedder, every embed run counted drifted chunks with two full joins over every chunk. On a large drifted brain those counts timed out too, and the timeout was read as "no drift", so the swap was silently skipped.
 
 ### What changed
 
@@ -21,17 +21,21 @@ identifiers and attribution are available in the pre-removal Git revision
 | Marking old-model chunks after a model or width swap | one statement over every chunk; cancelled by the statement timeout on a large brain | one pair of statements per 1,000 pages, all committed together |
 | The drift check before the embedder probe | two `count(*)` joins over every chunk on every run; a timeout read as "no drift" | one page-first `EXISTS`; a healthy brain answers it without reading chunks |
 | The "probe failed, skipping invalidation" warning | named a chunk count | no count, since nothing is counted before the probe |
+| A fact longer than the embedding input limit during `gbrain embed --facts` | the whole batch failed with "A fact exceeds the embedding input limit; no batch was sent", and every later run stopped at the same fact | that fact is skipped, never truncated, and reported (`refused_oversized` with its id, doctor `fact_take_vectors`, `gbrain embed --held`); every other fact embeds |
 
 ### What to watch for after you upgrade
 
 - Nothing runs on upgrade. The next `gbrain embed --stale` or `gbrain migrate embeddings` after a swap marks the old vectors and re-embeds them as before.
+- A skipped fact stays stale with its text unchanged. Shorten or split it in its page's `## Facts` fence, or withdraw it with `gbrain forget <fact-id>`; the next `gbrain embed --facts` embeds it once it fits. Until then `gbrain migrate embeddings` counts it as remaining.
 
 ### Itemized changes
 
 - `invalidateStaleSignatureEmbeddingsGuarded` runs in page-id windows (`SIGNATURE_INVALIDATION_PAGE_BATCH`, 1000) inside one transaction.
 - New `hasSignatureDrift` replaces the drift pre-counts in `gbrain embed` and the embed backfill, and gates the NULL-signature (left-behind) warning's counts.
 
-Follow-up to #7117 (#7148).
+- `gbrain embed --facts` skips facts over the input limit (`readOversizedStaleFacts`) and reports `refused_oversized`, `refused_samples` and `refused_fix`; doctor `fact_take_vectors` adds `facts.oversized`, and `gbrain embed --held` lists them with `oversized_facts`.
+
+Follow-up to #7117 (#7148). Oversized facts reported by @dyana1lyons-ai (#7211).
 
 ## [0.60.330.0] - 2026-10-20
 
