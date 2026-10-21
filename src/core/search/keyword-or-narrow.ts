@@ -11,11 +11,14 @@
  * (rare, so cheap to match, or absent), then adds the tracked terms rarest
  * first while their estimated matches stay within OR_FALLBACK_MATCH_CAP, and
  * always the rarest tracked one, so a retry never rests on terms that may
- * match nothing. It still ranks with the full OR query, so a retained chunk
+ * match nothing. It still ranks with the full OR query (searchKeyword binds
+ * the rank query as its own parameter whenever it may relax), so a retained chunk
  * scores exactly as before; a chunk that holds only the dropped, most common
  * terms is no longer a candidate. Without statistics (never analyzed), or
  * when every term fits, the retry is unchanged.
  */
+
+import { orFallbackTokens } from './sql-ranking.ts';
 
 /** Estimated chunk matches the tracked terms of an OR retry may add: about 0.2 s of ts_rank on the 2M-chunk bench. */
 export const OR_FALLBACK_MATCH_CAP = 20_000;
@@ -65,4 +68,20 @@ export function narrowOrFallbackTokens(tokens: OrTokenShare[], rows: number, cap
   }
   if (kept.length === 0 || kept.length === words.length) return null;
   return kept;
+}
+
+/**
+ * The websearch text an OR retry of `query` should match, or null to match
+ * the full OR query. `read` runs one statement; a failed statistics read
+ * keeps every term.
+ */
+export async function narrowedOrFallbackQuery(
+  read: (sql: string, params: unknown[]) => Promise<Array<{ token: string; lexemes: number; share: number | null; rows: number; analyzed: boolean }>>,
+  query: string,
+  ftsLang: string,
+): Promise<string | null> {
+  const shares = await read(orTokenSharesSql(ftsLang), [orFallbackTokens(query)]).catch(() => []);
+  if (!shares[0]?.analyzed) return null;
+  const kept = narrowOrFallbackTokens(shares.map(r => ({ token: r.token, lexemes: Number(r.lexemes), share: r.share === null ? null : Number(r.share) })), Number(shares[0].rows));
+  return kept ? kept.join(' OR ') : null;
 }

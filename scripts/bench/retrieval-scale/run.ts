@@ -129,7 +129,7 @@ async function main() {
     const stageNames = new Set(ok.flatMap(x => Object.keys(x.stages ?? {})));
     if (stageNames.size) row.stages_p50_ms = Object.fromEntries([...stageNames].map(k => [k, r0(pct(ok.map(x => x.stages?.[k] ?? 0), 0.5))]));
     const worst = s.reduce((w, x, i) => (x.ok && x.ms > s[w]!.ms ? i : w), 0);
-    if (s[worst]) row.slowest = { i: worst, ms: r0(s[worst]!.ms), ...(s[worst]!.stages ? { stages: s[worst]!.stages } : {}) };
+    if (s[worst]) row.slowest = { i: worst, ms: r0(s[worst]!.ms), target: op === 'get' ? pk(worst).slug : q(worst + opBase(op)), ...(s[worst]!.stages ? { stages: s[worst]!.stages } : {}) };
     rows.push(row);
     if (s[worst]?.stages) log(op + ' [' + mode + '] slowest i=' + worst + ' ' + JSON.stringify(row.slowest));
     log(op + ' [' + mode + '] n=' + row.n + ' p50=' + row.p50_ms + ' p95=' + row.p95_ms + ' err=' + row.errors + (row.round_trips_p50 !== undefined ? ' trips=' + row.round_trips_p50 : '') + (row.startup_p50_ms !== undefined ? ' startup=' + row.startup_p50_ms + ' db=' + row.db_p50_ms + ' tail=' + row.tail_p50_ms : '') + (row.stages_p50_ms ? ' ' + JSON.stringify(row.stages_p50_ms) : ''));
