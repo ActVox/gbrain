@@ -265,6 +265,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "lines": {
         "type": "object",
+        "cliRange": [
+          "from",
+          "count"
+        ],
         "description": "Window: 1-based lines.",
         "properties": {
           "from": {
@@ -280,6 +284,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "bytes": {
         "type": "object",
+        "cliRange": [
+          "offset",
+          "length"
+        ],
         "description": "Window: UTF-8 bytes of size.total_bytes, not body_bytes (snapped to a line start).",
         "properties": {
           "offset": {

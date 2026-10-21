@@ -448,7 +448,7 @@ async function buildRetrievalResponseMeta(
   const readinessScope = { ...scope, excludePrivate, types: opts.types, excludeSlugPrefixes };
   // #6721: these reads depend on nothing but the inputs above, so they run at once: on a pooled Postgres
   // the wall time is the slowest read's round trips, not their sum. The answer-feedback write still runs last.
-  const [safeIndexPending, [readiness, pending], entityFacts, matchedFacts, held, sourceFreshness, embeddingHeld, filterNotice] = await Promise.all([
+  const [safeIndexPending, [readiness, pendingCount], entityFacts, matchedFacts, held, sourceFreshness, embeddingHeld, filterNotice] = await Promise.all([
     ctx.remote !== false && hasUnsealedPagesInScope(ctx, scope, excludePrivate, { types: opts.types, excludeSlugPrefixes }),
     probeProjectionReadiness(ctx.engine, readinessScope).then(async r =>
       [r, r.status === 'projection_pending' ? await countPendingProjections(ctx.engine, readinessScope, relevance) : null] as const),
@@ -462,6 +462,8 @@ async function buildRetrievalResponseMeta(
     opts.filterHintFor ? searchFilterHint(ctx, scope, excludePrivate, queryText, results as SearchResult[], opts.types, opts.filterHintFor) : null,
   ]);
   const heldFiles = held.coverage;
+  const topHitExact = pendingCount?.top_counted === false;
+  const pending = topHitExact ? { ...pendingCount!, could_affect: 0 } : pendingCount;
   if (filterNotice) ctx.emitNotice?.(filterNotice);
   const heldBySource = new Map(heldFiles.map(h => [h.source_id, h.missing + h.stale]));
   const freshness = sourceFreshness.map(f => ({ ...f, held_count: heldBySource.get(f.source_id) ?? 0 }));
@@ -478,6 +480,7 @@ async function buildRetrievalResponseMeta(
     could_affect: { ...(pending ? { pending_projection: pending.could_affect } : {}), ...(heldTotal && held.couldAffect !== null ? { held_files: held.couldAffect } : {}),
       ...(embedding ? { embedding_held: embedding.could_affect } : {}) },
     ...(pending?.capped || embedding?.capped ? { capped: true as const } : {}),
+    ...(topHitExact ? { top_hit_exact: true as const } : {}),
   } : undefined;
   const heldNotice = heldFilesNotice(held.couldAffect === 0 ? [] : heldFiles, ctx.remote !== false, held.couldAffect ?? undefined,
     embedding?.could_affect ? embedding : undefined);

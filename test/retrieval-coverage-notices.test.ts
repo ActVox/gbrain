@@ -140,6 +140,41 @@ describe('projection_pending is scoped to the query', () => {
     expect(c.meta.retrieval.degraded).toContainEqual({ stage: 'projection_pending' });
   }));
 
+  test('an exact top hit whose projection is current drops projection_pending from the human-facing line (top_hit_exact)', eachEngine(async () => {
+    await page('notes/acme-example-plan', 'note', 'Acme-example renewal plan', 'acme-example renewal plan draft');
+    await pending('notes/acme-example-plan');
+    // The exact-lookup tier runs on the hybrid path, which keyword-only search skips.
+    await engine.setConfig('search.mcp_keyword_only', 'false');
+    try {
+      const c = call('default');
+      const results = await search.handler(c.ctx, { query: 'companies/acme-example' }) as Array<{ slug: string; exact_lookup?: string }>;
+      expect(results[0]).toMatchObject({ slug: 'companies/acme-example', exact_lookup: 'slug' });
+      expect(c.meta.retrieval.coverage).toEqual({ pending_projection: 2, could_affect: { pending_projection: 0 }, top_hit_exact: true });
+      expect(c.meta.retrieval.degraded).toContainEqual({ stage: 'projection_pending' });
+      expect(String(c.meta.retrieval.hint ?? '')).not.toContain('projections are pending');
+      captureRetrievalMeta('retrieval', c.meta.retrieval);
+      try { expect(formatResult('search', results, {})).not.toContain('Retrieval incomplete'); } finally { resetRetrievalMetaForTests(); }
+    } finally {
+      await engine.executeRaw("UPDATE pages SET deleted_at = now() WHERE slug = 'notes/acme-example-plan'");
+      await engine.setConfig('search.mcp_keyword_only', 'true');
+    }
+  }));
+
+  test('an exact top hit that is itself pending keeps projection_pending counted', eachEngine(async () => {
+    await pending('companies/acme-example');
+    await engine.setConfig('search.mcp_keyword_only', 'false');
+    try {
+      const c = call('default');
+      const results = await search.handler(c.ctx, { query: 'companies/acme-example' }) as Array<{ slug: string }>;
+      expect(results[0]?.slug).toBe('companies/acme-example');
+      expect(c.meta.retrieval.coverage.top_hit_exact).toBeUndefined();
+      expect(c.meta.retrieval.coverage.could_affect.pending_projection).toBeGreaterThan(0);
+    } finally {
+      await engine.executeRaw("UPDATE pages SET text_projection_revision = knowledge_revision WHERE slug = 'companies/acme-example' AND source_id = 'default'");
+      await engine.setConfig('search.mcp_keyword_only', 'true');
+    }
+  }));
+
   test('the query --types scope counts pending pages of those types', eachEngine(async () => {
     const c = call('default');
     await search.handler(c.ctx, { query: QUERY, types: ['image', 'company'] });

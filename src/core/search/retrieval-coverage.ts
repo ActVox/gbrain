@@ -26,6 +26,8 @@ export interface CoverageRelevance {
   /** Lowercase LIKE patterns, one per query word. */
   patterns: string[];
   pageIds: number[];
+  /** The top result's page when it is an exact slug, title or alias match for the query, else null. */
+  exactTopPageId: number | null;
 }
 
 /** `_meta.retrieval.coverage`: counts in the read scope and how many of them could affect this query. */
@@ -35,13 +37,15 @@ export interface RetrievalCoverage {
   embedding_held?: number;
   could_affect: { pending_projection?: number; held_files?: number; embedding_held?: number };
   capped?: true;
+  /** The top result is the page the query named (exact slug, title or alias) and its projection is current: pending pages are not counted as able to affect this answer. */
+  top_hit_exact?: true;
 }
 
-export interface ScopedCount { total: number; could_affect: number; capped: boolean }
+export interface ScopedCount { total: number; could_affect: number; capped: boolean; /** With an exact top hit: whether that page is itself counted. */ top_counted?: boolean }
 
 /** What could make a pending or held item relevant to this query (see the module comment). */
 export function coverageRelevance(
-  results: ReadonlyArray<{ type?: unknown; page_id?: unknown }>,
+  results: ReadonlyArray<{ type?: unknown; page_id?: unknown; exact_lookup?: unknown; alias_hit?: unknown }>,
   queryText: string,
   queryTypes: readonly string[] | undefined,
   stopwords: ReadonlySet<string>,
@@ -53,6 +57,7 @@ export function coverageRelevance(
     types: [...new Set([...(queryTypes ?? []), ...results.flatMap(r => (typeof r.type === 'string' ? [r.type] : []))])],
     patterns: terms.map(t => `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%`),
     pageIds: [...new Set(results.flatMap(r => (typeof r.page_id === 'number' ? [r.page_id] : [])))],
+    exactTopPageId: results[0] && (results[0].exact_lookup || results[0].alias_hit === true) && typeof results[0].page_id === 'number' ? results[0].page_id : null,
   };
 }
 
@@ -82,10 +87,13 @@ async function countInScope(engine: Pick<BrainEngine, 'executeRaw'>, scope: Proj
   const filters = coverageScopeFilters(scope, params);
   params.push(relevance.all, relevance.types, relevance.patterns, relevance.pageIds);
   const n = params.length;
+  const top = relevance.exactTopPageId;
+  if (top !== null) params.push(top);
   try {
-    const [row] = await engine.executeRaw<{ total: number | string; could_affect: number | string }>(
+    const [row] = await engine.executeRaw<{ total: number | string; could_affect: number | string; top_counted?: boolean | null }>(
       `SELECT count(*)::int AS total,
-        count(*) FILTER (WHERE $${n - 3}::boolean OR x.type = ANY($${n - 2}::text[]) OR x.haystack LIKE ANY($${n - 1}::text[]) OR x.id = ANY($${n}::int[]))::int AS could_affect
+        count(*) FILTER (WHERE $${n - 3}::boolean OR x.type = ANY($${n - 2}::text[]) OR x.haystack LIKE ANY($${n - 1}::text[]) OR x.id = ANY($${n}::int[]))::int AS could_affect${top === null ? '' : `,
+        EXISTS (SELECT 1 FROM pages p JOIN sources s ON s.id = p.source_id ${join} WHERE p.id = $${n + 1}::int AND p.deleted_at IS NULL AND ${where}) AS top_counted`}
       FROM (SELECT p.id, p.type, lower(COALESCE(p.title, '') || ' ' || p.slug) AS haystack
         FROM pages p JOIN sources s ON s.id = p.source_id ${join}
         WHERE p.deleted_at IS NULL AND ${where} AND ${filters.join(' AND ')}
@@ -94,7 +102,7 @@ async function countInScope(engine: Pick<BrainEngine, 'executeRaw'>, scope: Proj
     );
     const total = Number(row?.total), couldAffect = Number(row?.could_affect);
     if (!Number.isFinite(total) || !Number.isFinite(couldAffect)) return null;
-    return { total, could_affect: couldAffect, capped: total >= COVERAGE_COUNT_CAP };
+    return { total, could_affect: couldAffect, capped: total >= COVERAGE_COUNT_CAP, ...(top === null ? {} : { top_counted: row?.top_counted === true }) };
   } catch {
     return null;
   }

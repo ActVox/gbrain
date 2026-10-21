@@ -155,7 +155,9 @@ headings above it. If no heading matches, the error lists the page's headings
 (plain text, not a pattern) plus `--context` paragraphs either side (default
 1, at most 5), with line numbers and `total_matches`. It returns at most 50
 matching paragraphs and 100,000 characters, and says `truncated` when it
-stops early. The line numbers are the ones a `--body window` read takes.
+stops early. The line numbers are the ones a `--body window` read takes:
+`gbrain get <slug> --body window --lines 100-140` reads lines 100 to 140
+(`--lines 100` reads one line, `--bytes 0-999` the first 1,000 bytes).
 Both read the same text a window does, so they show a remote caller nothing a
 window would not, and they work on segmented pages one segment at a time.
 Every `get_page` response carries `chars`, the characters of page text it
