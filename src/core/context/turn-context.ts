@@ -408,11 +408,13 @@ export async function assembleTurnContext(
       withheldFacts += hot?.suppressed?.withheld ?? 0;
       const all = Array.isArray(hot?.facts) ? [...hot.facts] : [];
       // Cross-turn dedupe, same contract as volunteered pages: a fact already
-      // injected this session is not repeated. Matched without the trailing
-      // confidence, which drifts as facts age.
+      // injected this session is not repeated. The key is the line render()
+      // emits (renderFactLine: attribution, label or data envelope included),
+      // without the trailing confidence, which drifts as facts age. Its
+      // unlabeled form still matches, so a fact injected before labels (or
+      // before its tier changed) stays injected.
       const prior = opts.priorContextText;
-      // The trust label is not part of the match: a fact injected before labels (or before its tier changed) stays injected.
-      return prior ? all.filter((f) => !prior.includes(renderFactLine({ ...f, trust_tier: undefined }).replace(/ \([0-9.]+\)$/, ' (').slice(2))) : all;
+      return prior ? all.filter((f) => !factDedupeKeys(f).some((k) => prior.includes(k))) : all;
     } catch {
       return [];
     }
@@ -505,13 +507,7 @@ function render(
       lines.push(`- **${v.display}** → \`${v.slug}\` (${v.confidence.toFixed(2)}, ${v.rationale})${syn}`);
     }
   }
-  if (facts.length) {
-    lines.push('', '## Hot memory (recent facts)');
-    for (const f of facts) {
-      const ent = f.entity_slug ? ` [${f.entity_slug}]` : '';
-      lines.push(`- ${f.trust_tier ? renderTrustedInline(neutralizeForPrompt(f.fact).text, labelOf(f)) : neutralizeForPrompt(f.fact).text}${ent} (${f.confidence.toFixed(2)})`);
-    }
-  }
+  if (facts.length) lines.push('', '## Hot memory (recent facts)', ...facts.map(renderFactLine));
   return lines.join('\n');
 }
 
@@ -918,6 +914,9 @@ export const renderThreadLine = (t: EntityOpenThread): string =>
   `- [${t.kind}] ${labeled(t, t.text)}${t.date ? ` (${t.date})` : ''}`;
 export const renderFactLine = (f: TurnContextFact): string =>
   `- ${f.attributed_to === 'assistant' ? '(assistant said) ' : ''}${labeled(f, neutralizeForPrompt(f.fact).text)}${f.entity_slug ? ` [${f.entity_slug}]` : ''} (${f.confidence.toFixed(2)})`;
+/** #7023: the substrings that mark a fact as already injected: its rendered line, then its unlabeled form, each without the "- " bullet and the confidence. */
+const factDedupeKeys = (f: TurnContextFact): string[] =>
+  [f, { ...f, trust_tier: undefined }].map((g) => renderFactLine(g).slice(2).replace(/ \([0-9.]+\)$/, ' ('));
 export const renderPageLine = (p: DeltaPage): string => `- **${labeled(p, p.title)}** → \`${p.slug}\` (${p.updated_at})`;
 
 /** One card's newer-mentions block: a line naming the entity and its page date, then one line per page. [] when there are none. */

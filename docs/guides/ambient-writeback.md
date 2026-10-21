@@ -373,8 +373,17 @@ accordingly). Nothing is deleted or mutated; the doctor's
 
 ## Privacy and visibility
 
+- **What the assistant said** is saved as its own fact, never as yours. The
+  lanes that read session transcripts (the compaction harvest and the
+  SessionEnd corpus sweep) keep a claim the assistant made (a recommendation,
+  answer, plan or research result) phrased "Assistant said …" with
+  `attributed_to: assistant`, so recall can answer what the assistant told
+  you. `gbrain facts relink` never attaches such a fact, or a named third
+  party's, to an entity page, core pages included (#7270). Speaker
+  attribution is on by default; `gbrain config set facts.attribution false`
+  turns it off.
 - **What is never saved:** greetings, acknowledgements, fact-free questions,
-  the assistant's own inferences/diagnoses/speculation, tool output, quoted
+  the assistant's plan narration, tool output, quoted
   third-party material, pasted/imported text (unless the user explicitly asks;
   see [Pasted content](#pasted-content)), gbrain's own claude-cli calls,
   raw transcripts, and — in every mode — secrets/credentials (banked turns are

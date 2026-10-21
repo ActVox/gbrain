@@ -10,6 +10,53 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Hot memory is injected once per session in Claude Code: assistant-attributed and external facts no longer come back on every prompt, and the first prompt no longer repeats the session-start block.** The per-prompt block wrote its own fact line, which dropped the `(assistant said)` prefix, so an assistant suggestion read as your own claim and never matched the dedupe key built from the shared line; an external fact's `<external-data>` wrapper broke the match the same way. Separately, Claude Code records `gbrain hook session-start` output as a SessionStart `hook_success` entry, which the user-prompt hook did not read, so every fact the session-start block showed came back on the first prompt. And `gbrain facts relink` attached the assistant's own report about a page, which the SessionEnd corpus sweep saves as an assistant-attributed fact, to that page as an entity fact on every run, core pages included.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An assistant-attributed hot fact in the per-prompt block | rendered without `(assistant said)`, and injected again on every prompt | rendered with `(assistant said)`, injected once per session |
+| An `external_untrusted` hot fact | injected again on every prompt | injected once per session |
+| The first prompt after session start in Claude Code | repeated every hot fact the session-start block showed | skips them; core memory printed before the gbrain envelope does not hide page pointers |
+| Another tool's SessionStart output | ignored | still ignored |
+| A fact the assistant or a third party said that names a page, at `gbrain facts relink` (plain or `--conversation`) | attached to that page as an entity fact, core pages included, on every run | left where it was saved and counted as `not_user_attributed`; recall still finds it |
+| Doctor `unlinked_facts` | counted those facts as waiting for a link | does not count them |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade. A session already open when you upgrade sees each assistant fact once more, because its earlier blocks were rendered without the prefix.
+- Assistant or third-party facts a relink already attached to a page stay attached. Remove one with `gbrain forget <fact-id>`.
+
+### Itemized changes
+
+- `render()` in `src/core/context/turn-context.ts` uses `renderFactLine`, and the cross-turn dedupe key is that rendered line (or its unlabeled form) without the confidence.
+- `entryToInjectedBlock` in `src/core/transcripts/claude-code-jsonl.ts` accepts a SessionStart `hook_success` attachment whose `content` holds the gbrain envelope, keeping the text from the envelope on.
+- `entityLinkable` / `ENTITY_LINKABLE_SQL` in `src/core/facts/attribution.ts` gate `gbrain facts relink` (new skip reason `not_user_attributed`), `gbrain facts relink --conversation` (page pick, plan and the locked update) and doctor `unlinked_facts`.
+
+### Duplicate facts
+
+**Recall stops returning the same fact many times, and conversation extraction stops saving it again.** A standing prompt or instruction repeated in every session was extracted and stored once per session, and recall, the entity card and search `saved_facts` returned every copy, so a few copies could fill the whole `limit` and push distinct facts out.
+
+#### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Recall, entity card, search `saved_facts` over stored copies of one claim | one row per copy; copies counted against `limit` | one row per claim (newest copy) with `collapsed_count`, and `entity_slugs` when the merged copies sit on several entities; collapsed before `limit` and after visibility filters |
+| Conversation extraction of a claim the source already holds | stored again for every page or session | skipped (`skipped N fact(s) an active fact of the source already states`); re-extracting a page still replaces its own facts |
+| Copies already stored | no way to retire them | `gbrain repair duplicate-facts` (explicit, preview-bound) supersedes every copy with the oldest row; cross-entity groups only with `--include-cross-entity` |
+| One source the backfill should leave alone | turn the whole phase off | `cycle.conversation_facts_backfill.exclude_sources` |
+
+#### What to watch for after you upgrade
+
+- Nothing runs on upgrade and nothing stored changes. Recall output adds two optional fields; every existing field keeps its meaning.
+- Preview with `gbrain repair duplicate-facts`, then run the printed `--apply --expect <hash> --yes` after you agree. Retired copies get `expired_at` and `superseded_by`; they are never deleted or withdrawn.
+- Near duplicates (different wording) are never merged or retired.
+
+Duplicate facts reported by @mikez93 (#7043). Hot-memory dedupe reported by @benswinney (#7023). Session-start re-injection reported by @benswinney (#7026). Assistant facts relinked onto core pages reported by @andrew-agents-bot (#7270).
+
 ## [0.60.347.0] - 2026-10-21
 
 **A model or dimension swap now finishes re-embedding on a large brain, and one overlong fact no longer stops the fact backfill.** After a swap, `gbrain embed --stale`, the background backfill and `gbrain migrate embeddings` mark every chunk from the old model for re-embedding. That marking was one statement over the whole brain, so on a large brain the statement timeout cancelled it, nothing was marked, and the next run hit the same timeout. Separately, before probing the embedder, every embed run counted drifted chunks with two full joins over every chunk. On a large drifted brain those counts timed out too, and the timeout was read as "no drift", so the swap was silently skipped.

@@ -374,6 +374,7 @@ test/purge-sync-tombstone-hold-7130.test.ts
 test/recall-collapse-duplicates-7043.test.ts
 test/recall-page-fill.test.ts
 test/receipt-compaction-newest-sync-gbra130.test.ts
+test/relink-attribution-7270.test.ts
 test/remediation-manual-only.test.ts
 test/repair-apply-pending-6543.test.ts
 test/repair-duplicate-facts-7043.test.ts
@@ -394,6 +395,7 @@ test/search/page-rank-cut.test.ts
 test/search/rerank-gate-hybrid.test.ts
 test/search/rerank-gate-telemetry.test.ts
 test/serve-head-watcher-managed.serial.test.ts
+test/session-start-hook-dedupe-7026.test.ts
 test/shared-content-freshness.test.ts
 test/shared-skills-catalog.test.ts
 test/shared-skills-retention-capacity.test.ts
@@ -452,6 +454,7 @@ test/trust-channel-writes.test.ts
 test/trust-guarded-supersession.test.ts
 test/trust-held-removals.test.ts
 test/trust-owner-actions.test.ts
+test/turn-context-dedupe-attribution-7023.test.ts
 test/unbound-source-6536.test.ts
 test/unindexed-files.test.ts
 test/vector-manifest-probe-bound.test.ts
