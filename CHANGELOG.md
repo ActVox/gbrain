@@ -55,6 +55,24 @@ identifiers and attribution are available in the pre-removal Git revision
 - Preview with `gbrain repair duplicate-facts`, then run the printed `--apply --expect <hash> --yes` after you agree. Retired copies get `expired_at` and `superseded_by`; they are never deleted or withdrawn.
 - Near duplicates (different wording) are never merged or retired.
 
+### Opt-in session-only hot memory and chronicle diagnostics
+
+**Two small fixes: hot memory can stay inside the current session, and a refused chronicle answer says which check failed (#7026, #7234).**
+
+#### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session with no facts of its own asks for hot memory (turn hook, session-start pack) | it gets the source's newest facts from the last 24 hours, which can come from other sessions | unchanged by default; with `gbrain config set context.hot_memory.session_only true` it gets none, and a session with facts of its own gets only those |
+| The chronicle phase refuses a judge answer as `malformed_proposal` | only the reason code, so nobody could tell which check failed without the proposal itself | one warning line and a `malformed` field on the outcome name a fixed code (`missing_field`, `wrong_type`, `when_unparseable`, ...), the schema field, the JSON type found and counts; never a value, the prompt or the raw response |
+
+**Spend effect:** none. No new model calls, no default or cap changes. Nothing is rewritten on upgrade.
+
+#### Itemized changes
+
+- New DB-plane key `context.hot_memory.session_only` (default false), read per request by the `turn_context` and `context_pack` IPC handlers and passed to both hot-fact reads; it is part of the hot-memory cache key, so the fallback and session-only answers never share an entry. MCP `_meta.brain_hot_memory` and the IPC wire format are unchanged. Guide: [ambient writeback](docs/guides/ambient-writeback.md#hot-memory-and-other-sessions). Reported by @benswinney in #7026.
+- Chronicle `malformed_proposal` refusals carry bounded diagnostics (`src/core/chronicle/proposal-diagnostics.ts`): at most 50 proposals, 50 `who` entries and 256 characters per string are inspected, nested values are typed and never walked, and a defect past those bounds reads `beyond_bounds`. Refusal, retry/backoff, writes and admission are unchanged. Reported by @Masashi-Ono0611 in #7234.
+
 Duplicate facts reported by @mikez93 (#7043). Hot-memory dedupe reported by @benswinney (#7023). Session-start re-injection reported by @benswinney (#7026). Assistant facts relinked onto core pages reported by @andrew-agents-bot (#7270).
 
 ## [0.60.349.0] - 2026-10-21

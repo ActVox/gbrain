@@ -35,6 +35,7 @@ test/capacity-bounded-read-6803.test.ts
 test/capture-consent-admission.test.ts
 test/capture-dispatch-provenance-6524.test.ts
 test/chronicle-backfill-max-usd.test.ts
+test/chronicle-malformed-diagnostics-7234.test.ts
 test/claim-fifo-foreground-waiting.test.ts
 test/claim-lease-holder-only-6712.test.ts
 test/claude-cli-output-cap.test.ts
@@ -86,6 +87,7 @@ test/grandfather-managed.test.ts
 test/harness-skills-epoch.test.ts
 test/held-read-signals.test.ts
 test/hold-action-chain-6712.test.ts
+test/hot-memory-session-only-7026.test.ts
 test/import-file-result-callback-gbra130.test.ts
 test/import-frontmatter-key-order-5158.test.ts
 test/import-inline-chunk-keep.test.ts
