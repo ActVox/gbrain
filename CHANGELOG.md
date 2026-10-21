@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [Unreleased]
+## [0.60.335.0] - 2026-10-21
 
 **A page of a source with no checkout of its own can no longer be written into another source's checkout through a second spelling of its path, and managed-root records keep their bound owner whichever spelling sorts first.** Both compared stored path strings where they needed filesystem identity. A symlink, a trailing slash, the macOS `/var` → `/private/var` alias or a case variant on a case-insensitive disk all name the same directory under a different spelling.
 
