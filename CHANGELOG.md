@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.341.0] - 2026-10-21
+## [0.60.342.0] - 2026-10-21
 
 **A page saved again while its search embedding is being prepared no longer leaves that embedding job retrying for nothing.** When a page changed between two steps of its embedding job, the job waited about a second and tried again for a version of the page that would never come back. It then gave up on the next attempt. Now the job sees that the page moved on and closes at once, the same way it already did when the newer version arrived earlier. The newer version gets its own embedding as before.
 
