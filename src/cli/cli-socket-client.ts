@@ -74,7 +74,7 @@ export function exchangeCliSocket(path: string, request: CliSocketRequest, total
         try { value = JSON.parse(text); } catch { finish({ reason: 'malformed_response' }); return; }
         if (!accepted) {
           if (!isHandshakeFrame(value)) { finish({ reason: 'malformed_response' }); return; }
-          if (!value.accepted) { finish({ reason: `refused (${value.reason})` }); return; }
+          if (!value.accepted) { finish({ reason: `refused (${value.reason})${value.mismatch ? `: ${value.mismatch}` : ''}` }); return; }
           accepted = true;
           arm(Number.POSITIVE_INFINITY, 'round_trip_timeout');
           continue;
@@ -240,7 +240,7 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
     const { writeCliNotices } = await import('../core/interop-notices.ts');
     const rendered = await buffered(async () => {
       if (frame.kind === 'error') { await recall.reportOneShotRecallError(reviveOperationError(frame.error), flags); return; }
-      recall.renderRecallVerbResult(flags, frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]);
+      await recall.renderRecallVerbResult(flags, frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]);
       if (frame.notices.length > 0) writeCliNotices(frame.notices);
     });
     if ('error' in rendered) return renderFailed(rendered.error);

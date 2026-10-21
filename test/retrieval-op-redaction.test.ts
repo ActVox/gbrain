@@ -142,6 +142,7 @@ const SWEEP: Record<string, Row> = {
   get_links: { args: { slug: 'notes/n1' } },
   get_backlinks: { args: { slug: 'people/alice-example' } },
   traverse_graph: { args: { slug: 'notes/n1', depth: 2 } },
+  rank_entities: { args: {} },
   get_timeline: { args: { slug: 'people/alice-example' } },
   advisor: { skip: 'aggregate advisory over the installed skill stack; advisor suites own it' },
   get_ingest_log: { args: { limit: 50 } },

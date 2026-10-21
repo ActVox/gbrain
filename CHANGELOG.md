@@ -10,6 +10,300 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.353.0] - 2026-10-21
+
+**Resolving held file-drift pages in bulk now shows progress and prints its preview within a minute.** `gbrain repair file-drift --held` used to prepare every selected held page before it printed anything. Each page reads the database a few dozen times, so a held set of a few thousand pages against a remote database printed nothing for over an hour: no preview, no hash, and nothing to apply. It also quietly stopped at the first 1,000 held pages. A held preview now covers one window of at most 200 pages, or 60 seconds of work, and reports each page on stderr as it goes. A partial window prints the next preview command with `--cursor <next_cursor>`, and walking the windows covers every held page.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Previewing a few thousand held pages against a remote database | No output for over an hour | One window of at most 200 pages or 60 s, with progress on stderr |
+| More than 1,000 held pages selected | The rest were silently left out | The windows walk every held page in held-path order |
+| What a preview's hash and apply command cover | The whole selection | That window only; the apply carries its `--cursor` |
+| Applying a preview of large pages | The artifact was parsed again for every page (seconds per page), with no output | Parsed once, with each page reported on stderr |
+
+With Git durability off, a preview that recreates or removes files now leads with "The next sync undoes this repair unless …" and the commit to run, and reports `undone_by_next_sync_unless_committed`. The apply also reports each page on stderr and reads the preview artifact once, instead of parsing it again for every page (with large pages that cost seconds per page). Nothing changes on upgrade, and nothing is rewritten.
+
+### Itemized changes
+
+- `src/core/repair/file-drift.ts`: `--held` selects holds in held-path order (`COLLATE "C"`), previews at most `HELD_WINDOW_PAGES` (200) after `--cursor`, and starts no page after `HELD_WINDOW_BUDGET_MS` (60 s) or the run's deadline. A partial window adds `after_window` (and `before_cursor`) to the residuals, a warning naming the next command, and `details.window` (`previewed`, `remaining`, `complete`, `next_cursor`, `next_command`). The selection digest binds the cursor, and a cursor no preview printed is refused (`invalid_params`).
+- `src/core/repair/file-drift.ts`: `readArtifact` keeps the parsed artifact while the file's identity (device, inode, size, mtime) is unchanged.
+- `src/commands/repair.ts`, `src/core/repair/core.ts`, `src/core/repair/registry.ts`: `--cursor <next_cursor>` for `file-drift --held`, carried into the printed apply command, plus a progress reporter for the CLI preview (`repair.file_drift.preview`) and apply (`repair.file-drift.apply`).
+- `docs/guides/repair.md`: how held windows work.
+- Tests: `test/repair-file-drift-held-window-gbra133.test.ts` (PGLite and Postgres).
+
+## [0.60.352.0] - 2026-10-21
+
+**Reading the timeline of a very large page uses less memory.** When gbrain rebuilds a page's timeline links, it keeps track of the timeline lines it has already seen, so it never writes one twice. On a page with tens of thousands of dated lines, that tracking took about 80 bytes per line, roughly a third of an 8 MiB page's own size. It now takes about 25 bytes per line, and the results are exactly the same.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Memory held while reading the timeline of an 8 MiB page with about 43,000 dated lines (PGLite) | 4.9–6.6 MiB | 1.7–3.4 MiB |
+| The same page on Postgres | about 5.3 MiB | 2.8–5.1 MiB |
+| A dense page with about 113,000 dated lines (PGLite / Postgres) | 5.6–6.5 / 6.3–7.3 MiB | 2.7–2.9 / 4.5–5.1 MiB |
+| Which timeline entries are kept or dropped | — | unchanged |
+
+Nothing changes on upgrade, and nothing is rewritten.
+
+### Itemized changes
+
+- `src/core/timeline-extract.ts`: `TimelineKeySet` stores its digests with open addressing over two flat number arrays (`firsts` and `values`, growing at 3/4 load) instead of a `Map<number, number>`. Collision handling (`AMBIGUOUS`), `mark` and `marked` behave as before.
+
+### For contributors
+
+- `test/large-pages/managed-links-timeline-heap.test.ts` now has margin under its unchanged bound (`held < page bytes`). The bound and the test are untouched.
+- Unit and serial shard weights are refreshed from a recent full run (`scripts/test-weights.json`, `scripts/serial-weights.json` and their metadata files).
+
+## [0.60.351.0] - 2026-10-21
+
+**Remote page reads now hide a page marked private only by a privacy alias, and `gbrain repair visibility` and doctor `derived_visibility` finish on a large brain: the preview plans one class at a time, world facts from a private page first, lists one bounded window and applies exactly that window with `--apply --expect <hash>`.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page with `access: private` (or `confidentiality: secret`, ...) and no `visibility`, read remotely | shown unless `visibility.honor_aliases` was set | hidden by default, like `visibility: private`; local CLI reads are unchanged; opt out with `gbrain config set visibility.honor_aliases false` |
+| `gbrain repair visibility` on a brain with tens of thousands of atoms and concepts | the plan ran a join that paired every concept with every atom (and every world fact with every page) and could time out before printing anything | set-based plans; one class at a time in the order remote callers are exposed (facts, remotely readable first; chronicle events; alias-only pages; atoms and concepts); only `--class lineage` reads concept-provenance links |
+| Preview size and apply | every row, then `--apply` applied them all | one window (1,000 items, `--limit` up to 10,000) with progress on stderr; `--apply --expect <hash>` applies exactly that window and resumes after its last item; preview again for the next window |
+| A plan class over its statement bound | the whole preview failed | that class is reported and skipped (120 s per statement); the others are listed |
+| Doctor `derived_visibility` | one long pass; the fact count came last | the fact count (what remote callers can read) runs first; derived-page counts that overrun the bound read as unknown |
+| A doctor rerun hint capped to fit an agent tool call | named only the capped `--budget-ms` | also names the uncapped budget to use in a terminal |
+
+On a synthetic brain of about 600k pages (40k atoms, 1k concepts, 20k facts), the default preview takes 0.5 s on Postgres and 0.7 s on PGLite, a lineage preview 0.5 s and 0.75 s, and doctor `derived_visibility` 1.3 s and 1.0 s.
+
+**Spend effect:** none. No model calls; repaired pages are re-embedded by their publication as before. Nothing is rewritten on upgrade: the repair is preview-first and only tightens.
+
+### What to watch for after you upgrade
+
+- Remote callers stop seeing alias-only private pages. Doctor `derived_visibility` counts them; `gbrain repair visibility --class aliases` stamps `visibility: private` on them after you agree.
+- Use the apply command a preview prints. A bare `gbrain repair visibility --apply` (and `--all`, the remediation plan) still applies every class at once.
+
+### Itemized changes
+
+- `visibility.honor_aliases` defaults to on; remote `get_page` and `list_pages` honor the aliases.
+- `gbrain repair visibility`: `--class facts|events|aliases|lineage`, a windowed preview bound to `--expect`, stderr progress, a per-statement bound, set-based fact and concept-lineage queries.
+- Doctor `derived_visibility`: facts first, bounded derived-page counts; the preview hint names the windowed apply.
+
+## [0.60.350.0] - 2026-10-21
+
+**The warm CLI socket now works when serve and the CLI connect through different pooler lanes.** A serve on a Supabase pooler's session lane (port 5432, prepared statements on, a larger pool) refused every CLI call made on the transaction lane (port 6543, `?prepare=false`), because the identity it compared included the port, the URL's query string and every `GBRAIN_*` value, pool sizes included. Each call then took the cold path, so with the socket on nothing got faster. The identity now leaves out what cannot change an answer, and a refusal says which part differed.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Serve on the session lane (5432), CLI on the transaction lane (6543) of the same Supavisor host, user and database | refused (`identity_mismatch`) | answered warm |
+| `GBRAIN_POOL_SIZE`, `GBRAIN_DIRECT_POOL_SIZE`, `GBRAIN_PREPARE` or the database URL variables differ | refused | answered warm |
+| Driver-only URL parameters (`prepare=`, `sslmode`, `application_name`, timeouts) differ | refused | answered warm |
+| Another port on plain Postgres, another host, user or database, or a different `options` parameter | refused | still refused |
+| A read-behavior setting (model, embeddings, search tuning, visibility, timeouts, schema pack, AI call log, contributor capture) differs | refused | still refused |
+| A refusal | `refused (identity_mismatch)` with no detail | names the part, never its value: `database port`, `env GBRAIN_MODEL`, `provider key VOYAGE_API_KEY`, `config contents`; the serve logs each distinct one once |
+
+### What to watch for after you upgrade
+
+- Restart the serve after upgrading. A serve and a CLI on different gbrain versions never match, so until the restart every CLI call takes its cold path (`refused (identity_mismatch): version`).
+- Nothing changes for a serve without `--cli-socket` or `serve.cli_socket`; the socket stays off by default.
+- With `GBRAIN_DEBUG=1`, a CLI call that still falls back prints the part that differed. Align that setting between the serve's environment and the CLI's, or restart the serve with it.
+
+### Itemized changes
+
+- `src/core/cli-socket/identity.ts`: the identity is now structured: brain, version, engine, config home, file and content, `databaseTarget` (host, port, database, user, `options`) and `behaviorEnv` (SHA-256 values of the explicit `READ_BEHAVIOR_ENV` list and the provider routing variables, plus the names of the provider keys that are set). `cliSocketIdentityMismatch` compares it part by part, and lets the port differ only on a `*.pooler.supabase.com` host.
+- The handshake refusal carries `mismatch`, and the CLI's debug line prints it. An older CLI sends the old token and is refused as `malformed_request`, so it takes its cold path.
+- `test/cli-socket.test.ts` classifies every `GBRAIN_*` name in `src` as read behavior or not, so a new setting can't skip the decision.
+
+## [0.60.349.0] - 2026-10-21
+
+**`gbrain entity` now finds a person by a nickname, an initial plus surname, a title, reversed order, a one-letter surname typo or a surname only one page has; search and query put pages that contain an exact identifier first; `recall <entity>` reads the same facts the recall op does; and a lookup that matches nothing can exit 12 for scripts (#7160, #7161, #7163, #4828, #7166, #7168, #7177).** An agent asking for a person, a thing it saved or an exact email, URL, phone number or code got a miss or a lower-ranked page even though the brain held it.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain entity "Bob Example"` when the page is "Robert Example" (or "R. Example", "Dr. Example", "Example, Robert", "Robert Exampel") | a miss | resolves **one unambiguous** variant across every readable source; `card.match {kind, via}` says which variant matched; an exact hit always wins and an ambiguous variant is a miss with `ambiguous: true` |
+| A person page with a title-prefixed twin (`people/mayor-x` next to `people/robert-x`) | no hint | the card lists `possible_duplicates`; new doctor check `person_title_duplicates` lists the pairs to review (preview-only, never merged) |
+| A name that only appears in page text, or a stub card with no backlinks or facts | an empty card | `text_mentions` lists pages whose text contains the name (verified containment, 1.5 s deadline, `unread` on a deadline or failed read) |
+| search / query on an email, URL, phone number, long number, hex id or code | ranked like ordinary words | pages containing it verbatim rank first (`exact_lookup: 'identifier'`); dates and ordinary words are unchanged |
+| Local `gbrain recall <entity>` | facts under the page slug only | the same slugs the recall op reads (identity siblings, title subject) plus the bare basename when no other page claims it |
+| `gbrain recall "<name> <topic words>"` | nothing matched | the leading or trailing 1–3 words resolve to an entity, its facts print with topic matches first, and a note names the equivalent `--entity` / `--question` command |
+| `gbrain recall --entity <x>` | rejected | accepted; an explicit entity is never split or widened |
+| A recall or entity lookup that matches nothing | exit 0 | still exit 0 by default; with `GBRAIN_FAIL_ON_EMPTY=1` it exits 12 (`NO_RESULTS_EXIT_CODE`) with one stderr line, and recall's list `--json` adds `status: "no_results"` |
+| Ranking entities by how connected they are | not possible | new read-only op `rank_entities` (CLI `gbrain rank-entities`); remote callers count only edges whose endpoints and origin page they can read, and see coverage as a state only |
+
+On a synthetic seeded fixture (318 pages, invented names), entity name variants went from 44.3% to 96.4% hit@1 and exact identifiers from 95% to 100% hit@1 in both search and query; LongMemEval-S retrieval and NamedThingBench are unchanged.
+
+**Spend effect:** none. No new model calls, no default or cap changes. Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- `gbrain entity` may now return a card for a name it used to miss; check `card.match` when you need an exact match, or turn variants off with `gbrain config set entity.name_variants false` (or `variants: false` on the op).
+- The entity miss line is now just `No entity found.`; timing and mention coverage print on their own lines.
+
+### Itemized changes
+
+- `src/core/entities/name-variants.ts` (pure matching) and `src/core/verbs/entity-variants.ts` (one trigram-indexed candidate read per source, capped at 200; a capped read resolves nothing).
+- Hyphenated surnames count as one name word in variant matching, title-stub pairing and the text-mention probe.
+- `rank_entities` checks each page once in a `readable` CTE (live, in the token's sources, not quarantined, not private when private pages are excluded, in a non-archived source); redirect folding needs every hop readable, in one source, at most 5 hops.
+- Documented in `docs/guides/graph-ranking.md` and the exit-code tables.
+
+## [0.60.348.0] - 2026-10-21
+
+**Job rows now say who submitted a job, why it isn't running, whether it is alive and what it cost; agents can wait on a job instead of polling; long jobs can't hold every worker slot; and the background doctor refresh no longer holds a one-job worker for up to two hours (#7241, #7242, #7263).** A large deployment found an empty submitter on every row, a sync job waiting most of an hour with no reason given, no way to learn a job finished except polling or a cron, and short facts-absorb jobs waiting days at p95 behind long cycles in a 2-slot queue.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain jobs get/list --json`, MCP `get_job` / `list_jobs` | no submitter, no reason a job waits, no liveness or cost | `submitted_by`, `blocked_by` (queue position, waiting children, delay reason, paused, unreviewed authority, the sync or cycle lock holder), `heartbeat_age_ms` / `lock_expires_in_ms` / `stalled`, `spend` (`cost_usd` from settled reservations, `null` when unpriced, never 0) and phase `progress` |
+| Waiting for a job to finish | poll `get_job` or run a cron | `gbrain jobs wait <id>` (exit 0 completed, 1 failed/dead/cancelled/missing, 124 still running at the timeout) and the read-only MCP op `wait_job` (at most 55 s per call, same owner fence as `get_job`) |
+| Learning which jobs finished | list everything and diff | `gbrain jobs list --finished-since <iso|cursor> --json` and `list_jobs {finished_since}` return terminal jobs in order with `next_cursor` |
+| Running a command when a job ends | not possible | opt-in `minions.terminal_hook` in local file config: an argv run without a shell, the job in fixed env vars and stdin JSON, 10 s timeout, never retried |
+| A worker at concurrency 2 or more | long jobs could hold every slot | one slot stays free of long jobs (autopilot-cycle, autopilot-global-maintenance, embed-backfill, connector-sync, extract, doctor-refresh); `minions.short_job_reserved_slots 0` restores the old claim |
+| The background `doctor-refresh` job | default priority, a 2 h timeout and 600 s per check, so a one-job worker held sync and the cycles behind it | priority 10 (behind sync, the cycles, global maintenance, embed backfill and loops extract), at most 10 minutes of measuring and then `completed` with what it finished, a 15 min timeout, and `doctor.background_refresh false` turns it off |
+| `gbrain jobs stats` | one row per per-run `dream-inline-*` queue | those queues fold into one `dream-inline` row (`get_job_stats.by_queue`) |
+
+On a synthetic 2-slot PGLite load (3 long jobs, 30 short ones, `scripts/bench/minions-lane-load.ts`), short-job queue wait went from p50 663 ms / p95 1246 ms to p50 51 ms / p95 98 ms. Long jobs now run one after another, so their own wait grows.
+
+**Spend effect:** none. No new model calls, no default or cap changes; the doctor refresh makes no model calls (the only one in doctor is the embedding probe, which needs `--probe`). Nothing is rewritten on upgrade.
+
+### What to watch for after you upgrade
+
+- An agent token without admin sees another principal only by kind: a foreign submitter, parent, slot holder or lock holder is never named, and another principal's children are left out of its spend.
+- Jobs queued before this release show `submitted_by: {kind: 'local'}` with no `via`.
+- If a long job now waits behind another long job on a 2-slot worker and you would rather have the old behavior, run `gbrain config set minions.short_job_reserved_slots 0`.
+
+### Itemized changes
+
+- `src/core/minions/job-insight.ts` (new): the computed fields and their owner fence. The submitter label is job data `__submitter`, set only by `MinionQueue.add` for application-authority submits (a caller-supplied one is dropped), excluded from the param hash and read only for application rows; `submission_authority` and the claim gate are unchanged.
+- `src/core/ops/jobs.ts`: the `wait_job` op and `list_jobs` `finished_since`; `src/core/minions/terminal-events.ts` (new) is the cursor.
+- `src/core/minions/terminal-hook.ts` (new), called from the worker's settle step.
+- `src/core/minions/lanes.ts` (new): the long-job reservation, passed to `MinionQueue.claim` as `excludeNames`.
+- `src/commands/doctor/last-known.ts`: the refresh's priority, overall budget (`--budget-ms`), timeout and off switch.
+- `src/core/cycle.ts`: `onPhaseStart` progress for sync, autopilot-cycle and global maintenance.
+- `docs/designs/minion-schedules.md`: schedules were evaluated and deferred (they need a migration, a cron parser and a trust review for unattended spend).
+
+### For contributors
+
+- `scripts/bench/minions-lane-load.ts`: the synthetic lane fixture, with `test/minions-lane-load.slow.test.ts`.
+- The tools-json, export-surface and cli dispatch-phase goldens are regenerated for `wait_job`, the new signatures and `jobs wait` thin-client routing.
+- Thanks to @andreineacsu for the report in #7263.
+
+## [0.60.347.0] - 2026-10-21
+
+**A model or dimension swap now finishes re-embedding on a large brain, and one overlong fact no longer stops the fact backfill.** After a swap, `gbrain embed --stale`, the background backfill and `gbrain migrate embeddings` mark every chunk from the old model for re-embedding. That marking was one statement over the whole brain, so on a large brain the statement timeout cancelled it, nothing was marked, and the next run hit the same timeout. Separately, before probing the embedder, every embed run counted drifted chunks with two full joins over every chunk. On a large drifted brain those counts timed out too, and the timeout was read as "no drift", so the swap was silently skipped.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Marking old-model chunks after a model or width swap | one statement over every chunk; cancelled by the statement timeout on a large brain | one pair of statements per 1,000 pages, all committed together |
+| The drift check before the embedder probe | two `count(*)` joins over every chunk on every run; a timeout read as "no drift" | one page-first `EXISTS`; a healthy brain answers it without reading chunks |
+| The "probe failed, skipping invalidation" warning | named a chunk count | no count, since nothing is counted before the probe |
+| A fact longer than the embedding input limit during `gbrain embed --facts` | the whole batch failed with "A fact exceeds the embedding input limit; no batch was sent", and every later run stopped at the same fact | that fact is skipped, never truncated, and reported (`refused_oversized` with its id, doctor `fact_take_vectors`, `gbrain embed --held`); every other fact embeds |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade. The next `gbrain embed --stale` or `gbrain migrate embeddings` after a swap marks the old vectors and re-embeds them as before.
+- A skipped fact stays stale with its text unchanged. Shorten or split it in its page's `## Facts` fence, or withdraw it with `gbrain forget <fact-id>`; the next `gbrain embed --facts` embeds it once it fits. Until then `gbrain migrate embeddings` counts it as remaining.
+
+### Itemized changes
+
+- `invalidateStaleSignatureEmbeddingsGuarded` runs in page-id windows (`SIGNATURE_INVALIDATION_PAGE_BATCH`, 1000) inside one transaction.
+- New `hasSignatureDrift` replaces the drift pre-counts in `gbrain embed` and the embed backfill, and gates the NULL-signature (left-behind) warning's counts.
+
+- `gbrain embed --facts` skips facts over the input limit (`readOversizedStaleFacts`) and reports `refused_oversized`, `refused_samples` and `refused_fix`; doctor `fact_take_vectors` adds `facts.oversized`, and `gbrain embed --held` lists them with `oversized_facts`.
+
+Follow-up to #7117 (#7148). Oversized facts reported by @dyana1lyons-ai (#7211).
+
+## [0.60.346.0] - 2026-10-21
+
+**A timeline entry no longer rewrites the passages it didn't change, and a big passage replacement can't time out the write that carries it (#7172).** A managed write replaced its page's passages inside its publication, under the publication's 5 s statement bound. A passage whose index moved (a long entry near the top of a descending timeline adds a passage above the others) was deleted and inserted again with its vector, and on a large index each inserted row can cost about half a second, so the write ended `write_interrupted` (SQLSTATE 57014) on every attempt. Separately, a page whose stored embedding signature was missing or in an older format had every passage re-embedded after each write, which looked the same from outside: every passage got a new embedding time.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An entry shifts unchanged passages to new indexes | each moved passage deleted and re-inserted (vector copied) | the row keeps its id and vector and changes index in place |
+| A managed put_page, edit_page, add_timeline_entry, tag write, import or sync whose passages need more than 5 vector-index writes (a passage that carries a vector, inserted or renumbered) | all of them in one statement inside the publication; on a slow index, 57014 on every attempt, then `write_interrupted` | the page commits first; its passages finish in post-commit transactions of at most 5 vector-index writes each, then the projection is sealed. Passages without a vector (new text, a new page) are still written in the publication, as before |
+| Search during those steps | n/a | the page's passages are hidden until the seal (as for any pending projection); the receipt says `searchable: "pending"` and turns `true` when sealed |
+| The embedding step after a write, page signature missing or older format | every passage re-embedded (paid) | passages whose recorded embedding input is current keep their vectors; the page signature is restamped |
+
+The bound of 5 is derived in `src/core/page-state/chunk-moves.ts` (`CHUNK_VECTOR_WRITE_BUDGET`): a row version that carries a vector adds an HNSW entry, a graph search over the whole index that nothing amortizes across rows, while one without a vector adds no HNSW entry and only cheap b-tree and GIN pending-list entries (measured on pgvector: 300 passages inserted in 2.2 s with vectors and 0.06 s without; 300 renumbered in about 1 s with vectors and 0.002 s without). The slowest reported rate on a large index is about 0.5 s per vector-carrying row, and half of the 5 s statement bound is left for the rest of the write. No timeout, retry or deadline is raised, and nothing is configurable.
+
+### What to watch for after you upgrade
+
+- A write that was blocked by repeated `write_interrupted` (57014) on a large page can be submitted again; it commits and finishes its passages right after.
+- If a page's receipt stays `searchable: "pending"` for more than a minute, no process is finishing it: run `gbrain projections drain`.
+- When a top entry changes the text of every passage below it (the chunker packs about 300 words with a 50-word overlap, so a short entry can shift every boundary), those passages are new text and are embedded again; this release does not change the chunker.
+
+### Itemized changes
+
+- `reuseStoredChunkVectors` matches a stored row by source and text at any index (its own index first), so a kept row can move.
+- New `src/core/page-state/chunk-moves.ts`: the vector-index write bound and the move planner (one UPDATE per wave; a cycle parks one row at a negative index).
+- `continueDeferredProjection` runs the bounded steps after commit, holding the page's queue row under a claim it renews each step (the lease a segmented projection claim uses); the projection drain resumes a page whose steps stopped (queue reason `chunk_replacement_deferred`). A group publication now runs its members' post-commit work, as a single publication does.
+- Writes that wrap a page publication in their own (takes, the facts fence, maintenance pages) still replace passages in one transaction.
+- `readEmbeddingEffectProjection` accepts a vector whose recorded input hash is one the current page accepts, whatever the page-level signature says, and restamps the page.
+
+## [0.60.345.0] - 2026-10-21
+
+**Background jobs stop burning retries on refusals that can never succeed, the dream synthesize phase stops cancelling every child over one bad transcript, and job sweeps stop tripping over the sync lease record.** A sync that runs on a host that doesn't own the checkout, or that needs `--no-pull`, used to fail the same way on every retry and was queued again every few minutes. One transcript with a character Postgres refuses in JSON failed the whole synthesize fan-out. A long sync's lease record made the stall and timeout sweeps fail, so nothing else stuck got reaped and synthesize reported a failure after its work finished.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A job fails with a deterministic refusal (a caller, consent or host-only error code) | retried until `max_attempts`, then requeued by autopilot every slot | ends `dead` after one attempt with `result.job_outcome: 'refused'` and the refusal's code, reason and fix; autopilot holds that source for its failure cooldown |
+| A transcript whose subagent job can't be queued | the synthesize phase failed and cancelled every child already queued | that transcript is skipped as `submit_failed (<code>)` and the rest run |
+| Job data with a lone UTF-16 surrogate or U+0000 | Postgres refused the insert (22P02 / 22P05) | the character becomes U+FFFD |
+| A sync holding its drain lease longer than two lock durations, or a dead lease holder | the stall / timeout / wall-clock sweeps hit `chk_attempts_order`: no stalled job was reaped, and the dream inline drain failed synthesize | the sweeps skip the lease record |
+| serve, the supervisor, workers and job children on different builds | nothing reported it | `/health` carries `build`, doctor `runtime_build_skew` warns and names the restart, and a job child records `job_build_skew:` (or refuses on a protocol mismatch) |
+
+**Spend effect:** synthesize children that were cancelled before they ran now run, inside the existing `dream.synthesize` budget, daily cap and breaker. No default or cap changes. Nothing is rewritten on upgrade.
+
+### Itemized changes
+
+- `src/core/minions/refusal.ts` (new): `jobRefusal` classifies a job error from its registry code. The worker and the dream inline drain end a refused job dead after one attempt. A refusal crosses the per-job child boundary as errorKind `refused`.
+- `src/core/persistence/sync-discovery.ts`: `owner_unavailable` carries a `reason` and is `retryable: false` unless a transfer or clone is in progress.
+- `src/commands/autopilot-dispatch.ts`: a refused sync job holds its source for the existing failure cooldown; a completed sync clears it.
+- `src/core/minions/queue.ts`: `add` passes job data through `jsonbSafeJson`; `failJob` takes an optional `result`; the three sweeps skip `LEASE_BEACON_QUEUE`.
+- `src/core/cycle/synthesize.ts`: a transcript that fails to submit is skipped with its fresh chunks rolled back.
+- `src/core/runtime-build.ts` (new) and doctor check `runtime_build_skew` (new error code): builds of serve, the supervisor, worker parents and recent job children.
+
+### For contributors
+
+- `scripts/bench-minions-load.ts`: a synthetic PGLite job-load fixture (`retry_burn`, `cancel_churn`) with no network and no model calls.
+- Doctor and export goldens are regenerated for the new check and error code. `/health`'s exact-shape test now includes `build`.
+- Thanks to @sameerbopardikar for the root-cause report in #7261.
+
+## [0.60.344.0] - 2026-10-21
+
+**A managed brain on remote Postgres syncs a no-op commit in about half the time, sync work no longer stalls searches running beside it, sync status grades a commit that is still waiting, and an aborted sync returns at once.** A no-op `gbrain sync` used to pay 70 to 90 dependent round trips, more on a bigger brain. It now pays about 32 at any brain size: at 57 ms RTT, p50 drops from 5.9 s to 3.3 s on a direct connection and from 6.1 s to 2.9 s behind PgBouncer. A single-file commit behind PgBouncer goes from 400 round trips to 282. On Postgres, no part of a sync holds a concurrent search past 100 ms anymore.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A transaction behind a transaction-mode pooler (PgBouncer, Supabase 6543, `prepare=false`) | one round trip per statement | the statements of one transaction are pipelined on the connection the pooler pins for it; autocommit statements never are, and nothing is sent after COMMIT. `GBRAIN_PG_TXN_PIPELINE=0` turns it off |
+| Postgres array-type lookup | a `pg_type` fetch on every connection of every pool | one per process (`GBRAIN_PG_TYPE_CACHE=0` turns it off) |
+| An idle sync tick | ran all six post-sync checks | skips each check whose pin found no work for it (`GBRAIN_SYNC_IDLE_FAST_PATH=0` turns the skips off) |
+| The ghost-page report | read every page batch on each sync | is answered from `op_checkpoints` and rescanned in the background at most every 5 minutes (`GBRAIN_SYNC_GHOST_INTERVAL_MS`) |
+| Link and timeline extraction at the end of a sync | two tree walks, and on PGLite every page in one event-loop turn | one walk, yielding after each page |
+| A first sync, a confirm round or a dirtiness probe on 10k pages | stretches of 0.9 to 1.4 s that held every concurrent search | the loops yield |
+| PGLite after a small sync | a full ANALYZE every time | ANALYZE only when the tables really grew |
+| Doctor `managed_sync_latency` with a commit still waiting | `ok` until the commit synced | grades the waiting commit, dated from the reflog, and reports keyword and embedding freshness separately |
+| `gbrain sources mirror-readonly` / `mirror-writable --dry-run` (#7086) | wrote the flag | prints the change under a dry-run banner and writes nothing |
+| A SIGTERM to stdio `gbrain serve` on Postgres | the commit-notifier lease stayed live for about 20 s | the next resident owns it in 0.5 s |
+| An aborted sync waiting on its accepted write | waited out the 5 s write wait | returns within 1.5 s; work accepted and committed is kept, and a write blocked by another owner stays queued |
+| A Postgres socket that died after an error while a statement was queued | the statement could wait on the replacement socket until the drain gave up (331 s seen) | every queued statement is rejected with `CONNECTION_CLOSED`, so the retry runs at once |
+
+### For contributors
+
+- `test/helpers/cpu-time.ts` measures loop lag in the thread's own CPU time, so a loaded CI VM no longer counts its run-queue waits as a held loop. The 100 ms bounds are unchanged.
+- `src/core/sync-idle-skips.ts` defines each idle-tick skip once, and a coverage test seeds a state that makes each skipped check run.
+- `test/postgres-driver-startup-death.test.ts` reproduces the stranded statement against a scripted server.
+
 ## [0.60.343.0] - 2026-10-21
 
 **An opt-in warm CLI socket lets `gbrain search`, `query`, `get` and `recall` skip most of a cold start's database round trips.** A cold CLI process connects, loads config and resolves its source before it can answer. Behind a transaction-mode pooler at 40 ms RTT, that cost a 305k-page brain about 3.4 s per search. With `gbrain serve --cli-socket` running, the same CLI call goes through a local Unix socket to the running serve and returns byte-identical output: 2.3 s for that search and 0.66 s for a get, against 1.19 s cold. It is off by default.
