@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 253412,
-    "stdoutSha256": "b9e70ca5be2a182ffcd38f87706591de3229831a3fe4222d0b7833caa495b027",
+    "stdoutBytes": 253415,
+    "stdoutSha256": "3e0e1e0f0e497886944151f27349e995ee3fd14df9526bc28e6f5f309e66bb2b",
     "toolNames": [
       "remember",
       "entity",
@@ -1716,7 +1716,7 @@
         "scope": "read"
       },
       {
-        "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.",
+        "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; adds fact rows. expand: one LLM call (expansion recovers synonyms; rarely helps). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper. Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -1784,7 +1784,7 @@
               "type": "string"
             },
             "expand": {
-              "description": "Default off; search.expansion overrides.",
+              "description": "Default off; one LLM call, rarely helps.",
               "type": "boolean"
             },
             "explain": {

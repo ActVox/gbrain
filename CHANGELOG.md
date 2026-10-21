@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.332.0] - 2026-10-21
+
+**`search` and `query` stop spending result slots on copies of one page, and `--explain` shows both retrieval arms again.** The same page in two sources, a merge stub beside its target, and the summary and transcript of one document each used to take their own slot in the top 10. They now fold into the best-ranked row, which lists what it absorbed in `collapsed`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The same slug in two sources with copied bodies | two rows | one row; the other copy is listed in `collapsed` (reason `twin`) |
+| A merge or redirect stub and its target | the stub could rank above the target | the target takes the slot; a stub whose target can't be returned stays, stamped `redirect_to` and ranked ×0.5 |
+| Summary, transcript and diarized copies of one document in one directory | one slot each | one row (reason `family`) |
+| An organization question that names no person | the founder's page could outrank the company | person pages ×0.85 |
+| An image page whose text covers half the query or less | ranked like a text page | ×0.6, stamped `image_page` |
+| An undated page on a "when" question | no penalty | ×0.85 |
+| `score` down the result list | could go up | follows rank; the previous value is `fused_score` |
+| A chunk row longer than 8,000 characters | returned whole | cut at 8,000 with a marker naming the read for the rest; `snippet_chars: 0` returns it whole |
+| `gbrain search/query --explain` on a hybrid brain | printed `arms: []` and `rrf: not_run` | shows both arms, with fusion and blend applied |
+| A keyword or vector arm that timed out, on the CLI | nothing said so | a `degraded_recall` notice on stderr, `--json` included |
+| The `query` tool description | implied expansion helps | says `expand` is one LLM call and rarely helps |
+
+Opt-outs: `search.collapse false` and `search.rank_priors false`. Nothing is rewritten on upgrade.
+
 ## [0.60.331.0] - 2026-10-20
 
 **Writing many facts at once no longer costs one guard call per row, new pages over 4 MiB reply as soon as they commit, and a remote `append_page` links what it mentions.** The facts purge refusal and withdrawal stamp ran once per row, so a 6,000-row publish spent most of its publication deadline in triggers (#7105). A managed import of a large new page waited for its whole search index to build before replying, which on a loaded host outlasted the deadline (#7106). A remote append added text with links that never became graph edges (#7122).
