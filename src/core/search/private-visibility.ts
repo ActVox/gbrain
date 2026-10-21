@@ -51,13 +51,14 @@ export function privatePagesFilterFragment(pageAlias: string): string {
 
 /**
  * `privatePagesFilterFragment` with a cheap first test: a page with no
- * `visibility`, `derived_from` or privacy-alias key whose type is not atom,
- * concept or event is visible by every rule above, so only the remaining pages run the full
- * check. For scans over thousands of candidate pages (an entity's referrers).
+ * `visibility` or `derived_from` key (nor, while `visibility.honor_aliases` is on, a
+ * privacy-alias key) whose type is not atom, concept or event is visible by every rule
+ * above, so only the remaining pages run the full check. For scans over thousands of
+ * candidate pages (an entity's referrers).
  */
 export function privatePagesFilterFragmentFast(pageAlias: string): string {
-  return `((${pageAlias}.frontmatter->'visibility' IS NULL AND ${pageAlias}.frontmatter->'derived_from' IS NULL
-      AND ${pageAlias}.frontmatter->'access' IS NULL AND ${pageAlias}.frontmatter->'confidentiality' IS NULL
+  return `((${pageAlias}.frontmatter->'visibility' IS NULL AND ${pageAlias}.frontmatter->'derived_from' IS NULL${honorAliasEngines.size > 0
+      ? `\n      AND ${pageAlias}.frontmatter->'access' IS NULL AND ${pageAlias}.frontmatter->'confidentiality' IS NULL` : ''}
       AND ${pageAlias}.type NOT IN ('atom', 'concept', 'event'))
     OR ${privatePagesFilterFragment(pageAlias)})`;
 }
@@ -93,8 +94,8 @@ function declaredLineagePrivateSql(p: string): string {
  */
 export function privateSnapshotFilterFragment(alias: string): string {
   return `(COALESCE(${alias}.frontmatter->>'visibility', CASE WHEN ${derivedPageSql(alias)} THEN 'private' ELSE 'world' END) <> 'private'
-    AND NOT COALESCE(${alias}.frontmatter ? 'pinned_question', false)
-    ${honorAliasEngines.size > 0 ? `AND NOT (${alias}.frontmatter->>'visibility' IS NULL AND ${privacyAliasSql(alias)})` : ''})`;
+    AND NOT COALESCE(${alias}.frontmatter ? 'pinned_question', false)${honorAliasEngines.size > 0
+      ? `\n    AND NOT (${alias}.frontmatter->>'visibility' IS NULL AND ${privacyAliasSql(alias)})` : ''})`;
 }
 
 /**
