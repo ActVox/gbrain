@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.337.0] - 2026-10-21
+## [0.60.338.0] - 2026-10-21
 
 **A model or dimension swap now finishes re-embedding on a large brain, and one overlong fact no longer stops the fact backfill.** After a swap, `gbrain embed --stale`, the background backfill and `gbrain migrate embeddings` mark every chunk from the old model for re-embedding. That marking was one statement over the whole brain, so on a large brain the statement timeout cancelled it, nothing was marked, and the next run hit the same timeout. Separately, before probing the embedder, every embed run counted drifted chunks with two full joins over every chunk. On a large drifted brain those counts timed out too, and the timeout was read as "no drift", so the swap was silently skipped.
 
@@ -36,6 +36,26 @@ identifiers and attribution are available in the pre-removal Git revision
 - `gbrain embed --facts` skips facts over the input limit (`readOversizedStaleFacts`) and reports `refused_oversized`, `refused_samples` and `refused_fix`; doctor `fact_take_vectors` adds `facts.oversized`, and `gbrain embed --held` lists them with `oversized_facts`.
 
 Follow-up to #7117 (#7148). Oversized facts reported by @dyana1lyons-ai (#7211).
+
+## [0.60.337.0] - 2026-10-21
+
+**Agents can ask gbrain what happened to a file instead of copying its path rules, and `gbrain sync status` no longer contradicts itself.** A landing check that rebuilt gbrain's path-to-slug rules in its own code reported pages as synced but unsearchable for days when nothing was wrong. `gbrain sources resolve-path` gives gbrain's own answer for each path, and sync status and doctor now flag the pages that really are committed but not yet searchable.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A harness checks whether a synced file landed | it had to copy gbrain's path-to-slug rules and drifted | `gbrain sources resolve-path <id> <path...> [--stdin] [--json]` (MCP `sources_resolve_path`, read scope, up to 200 paths) returns each path's slug, one of 14 states, `searchable: true \| 'keyword' \| false`, a reason and a fix |
+| Pages a managed sync committed are still not searchable | nothing said so | `gbrain sync status --detail` adds a `landing` block, and the doctor check `sync_landing_gaps` warns about pages committed longer ago than the freshness target that search still can't fully see |
+| A folder `index.md` or `README.md` below the source root with `type:` or `title:` frontmatter | skipped by sync, so it never became a page | imported as a page. Bare ones and every one at the root stay skipped. `gbrain config set sync.metafile_pages off` restores the old skip |
+| One file waits on a person while the rest of the source syncs | `sync status` said `blocked` | `synced` with reason `held_needs_human`. `blocked` now means only that the source can't advance |
+| A source falls behind its checkout | latency looked healthy, "no resident watcher" showed while a sync was running, and a fixed error still demanded a person | `freshness.behind` counts the commits not synced yet, `notifier.drain_holder` names the process syncing the source, an error the sync has since moved past is marked `superseded`, and `needs_human_from` says why a person is needed (#7189) |
+
+The first sync after upgrading imports existing typed nested metafiles once. Nothing else is rewritten or deleted.
+
+### For contributors
+
+- Harness authors: [docs/guides/resolve-paths.md](docs/guides/resolve-paths.md) lists the states and how a landing check should treat each one.
 
 ## [0.60.336.0] - 2026-10-21
 
