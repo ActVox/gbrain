@@ -240,7 +240,7 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
     const { writeCliNotices } = await import('../core/interop-notices.ts');
     const rendered = await buffered(async () => {
       if (frame.kind === 'error') { await recall.reportOneShotRecallError(reviveOperationError(frame.error), flags); return; }
-      recall.renderRecallVerbResult(flags, frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]);
+      await recall.renderRecallVerbResult(flags, frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]);
       if (frame.notices.length > 0) writeCliNotices(frame.notices);
     });
     if ('error' in rendered) return renderFailed(rendered.error);
