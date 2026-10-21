@@ -337,9 +337,11 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
       });
       try {
         await performSync(lanes, { sourceId: id, noPull: true, noEmbed: true, noExtract: true, drain: true, lanes: 2 });
-        await waitFor(async () => (await lanes.executeRaw<{ n: number }>(
-          "SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import' AND state<>'committed'", [id]))[0]!.n === 0,
-        { timeoutMs: 120_000, label: 'every lane page commits' });
+        await waitFor(async () => {
+          const [imports] = await lanes.executeRaw<{ pending: number; committed: number }>(`SELECT count(*) FILTER (WHERE state<>'committed')::int AS pending,
+            count(DISTINCT slug) FILTER (WHERE state='committed')::int AS committed FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'`, [id]);
+          return imports!.pending === 0 && imports!.committed === 8;
+        }, { timeoutMs: 120_000, label: 'all eight lane pages commit' });
       } finally { installFaultHook(undefined); }
       expect(overrun.size).toBe(1);
       const members = await lanes.executeRaw<{ slug: string; transient_interruptions: number }>(
