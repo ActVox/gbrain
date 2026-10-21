@@ -927,11 +927,11 @@
       },
       {
         "category": "brain",
-        "name": "fence_integrity"
+        "name": "person_title_duplicates"
       },
       {
         "category": "brain",
-        "name": "person_title_duplicates"
+        "name": "fence_integrity"
       },
       {
         "category": "ops",

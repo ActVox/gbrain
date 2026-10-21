@@ -172,6 +172,7 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   get_links: { slug: WORLD_PAGE_SLUG },
   get_backlinks: { slug: WORLD_PAGE_SLUG },
   traverse_graph: { slug: WORLD_PAGE_SLUG },
+  rank_entities: {},
   get_versions: { slug: WORLD_FENCE_SLUG, include_body: true },
   get_write_attribution: { slug: WORLD_FENCE_SLUG, versions: true },
   get_chunks: { slug: WORLD_FENCE_SLUG },
@@ -264,6 +265,7 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   resolve_slugs: 'data',
   get_backlinks: 'data',
   traverse_graph: 'data',
+  rank_entities: 'data',
   // reads that succeed without corpus-marker requirement
   get_tags: 'ok',
   get_links: 'ok',

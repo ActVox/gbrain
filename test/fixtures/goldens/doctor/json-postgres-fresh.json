@@ -3068,6 +3068,18 @@
         {
           "category": "brain",
           "details": {
+            "capped": false,
+            "pairs": [],
+            "scanned": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No title-prefixed person page pairs with an unprefixed page (0 titled page(s) examined).",
+          "name": "person_title_duplicates",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "docs": "docs/guides/write-refusals.md#invalid_fence",
             "model_repair": {
               "max_usd_per_day": 1,
@@ -3145,18 +3157,6 @@
           "elapsed_ms": "<volatile>",
           "message": "No malformed facts or takes fence is held, stored or waiting in a checkout (1 source(s) scanned).",
           "name": "fence_integrity",
-          "status": "ok"
-        },
-        {
-          "category": "brain",
-          "details": {
-            "capped": false,
-            "pairs": [],
-            "scanned": 0
-          },
-          "elapsed_ms": "<volatile>",
-          "message": "No title-prefixed person page pairs with an unprefixed page (0 titled page(s) examined).",
-          "name": "person_title_duplicates",
           "status": "ok"
         },
         {

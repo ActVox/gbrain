@@ -268,9 +268,9 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   syncConfigKeysEntry,
   // #6712 PR 4a: the read-only convergence shadow (deep tier: a full level read per source).
   managedSyncConvergenceEntry,
-  fenceIntegrityEntry,
   // #7160: title-prefixed person pages next to the unprefixed page (read-only, preview-first).
   personTitleDuplicatesEntry,
+  fenceIntegrityEntry,
   searchModeEntry,
 ];
 
