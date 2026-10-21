@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.353.0] - 2026-10-21
+
+**Resolving held file-drift pages in bulk now shows progress and prints its preview within a minute.** `gbrain repair file-drift --held` used to prepare every selected held page before it printed anything. Each page reads the database a few dozen times, so a held set of a few thousand pages against a remote database printed nothing for over an hour: no preview, no hash, and nothing to apply. It also quietly stopped at the first 1,000 held pages. A held preview now covers one window of at most 200 pages, or 60 seconds of work, and reports each page on stderr as it goes. A partial window prints the next preview command with `--cursor <next_cursor>`, and walking the windows covers every held page.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Previewing a few thousand held pages against a remote database | No output for over an hour | One window of at most 200 pages or 60 s, with progress on stderr |
+| More than 1,000 held pages selected | The rest were silently left out | The windows walk every held page in held-path order |
+| What a preview's hash and apply command cover | The whole selection | That window only; the apply carries its `--cursor` |
+| Applying a preview of large pages | The artifact was parsed again for every page (seconds per page), with no output | Parsed once, with each page reported on stderr |
+
+With Git durability off, a preview that recreates or removes files now leads with "The next sync undoes this repair unless …" and the commit to run, and reports `undone_by_next_sync_unless_committed`. The apply also reports each page on stderr and reads the preview artifact once, instead of parsing it again for every page (with large pages that cost seconds per page). Nothing changes on upgrade, and nothing is rewritten.
+
+### Itemized changes
+
+- `src/core/repair/file-drift.ts`: `--held` selects holds in held-path order (`COLLATE "C"`), previews at most `HELD_WINDOW_PAGES` (200) after `--cursor`, and starts no page after `HELD_WINDOW_BUDGET_MS` (60 s) or the run's deadline. A partial window adds `after_window` (and `before_cursor`) to the residuals, a warning naming the next command, and `details.window` (`previewed`, `remaining`, `complete`, `next_cursor`, `next_command`). The selection digest binds the cursor, and a cursor no preview printed is refused (`invalid_params`).
+- `src/core/repair/file-drift.ts`: `readArtifact` keeps the parsed artifact while the file's identity (device, inode, size, mtime) is unchanged.
+- `src/commands/repair.ts`, `src/core/repair/core.ts`, `src/core/repair/registry.ts`: `--cursor <next_cursor>` for `file-drift --held`, carried into the printed apply command, plus a progress reporter for the CLI preview (`repair.file_drift.preview`) and apply (`repair.file-drift.apply`).
+- `docs/guides/repair.md`: how held windows work.
+- Tests: `test/repair-file-drift-held-window-gbra133.test.ts` (PGLite and Postgres).
+
 ## [0.60.352.0] - 2026-10-21
 
 **Reading the timeline of a very large page uses less memory.** When gbrain rebuilds a page's timeline links, it keeps track of the timeline lines it has already seen, so it never writes one twice. On a page with tens of thousands of dated lines, that tracking took about 80 bytes per line, roughly a third of an 8 MiB page's own size. It now takes about 25 bytes per line, and the results are exactly the same.
