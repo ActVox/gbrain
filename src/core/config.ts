@@ -1727,6 +1727,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'orphans.exclude_slugs',
   'sync.cost_gate_min_usd',
   'sync.admission', // #6712 PR 4b: normal | imports_only | classify_only, what a managed pass admits (persistence/sync-admission.ts)
+  'sync.max_deletes', 'sync.max_delete_ratio', // #7130: absolute caps on one managed pass's deletes (sync-reconcile.ts); per source: <key>.source.<id>
+  'purge.retention_hours', // #7130: hours a soft-deleted page waits before the autopilot purge phase may purge it (default 72)
   'sync.federated_v2',
   'sync.include_working_tree',
   // #5984: managed Postgres sync publishes pages in bulk groups (on by default; each page keeps its own request).
@@ -1829,6 +1831,7 @@ export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'minions.',
   'pace.',              // pace.mode + PACE_MODE_CONFIG_KEYS (src/core/pace-mode.ts)
   'decide.',            // System One decide.* (validated by src/core/ai/decide/config.ts DECIDE_CONFIG_KEYS)
+  'sync.max_deletes.source.', 'sync.max_delete_ratio.source.', // #7130: per-source delete caps (sync-reconcile.ts readSyncDeleteCaps)
   'connectors.',        // chat-connectors: source_id, sync_floor_min, embed_kickoff_min_pages, doctor_stale_hours, <provider>.{auto_sync,last_sync_at,auth_error_at,watermark_iso} (no secrets — creds are file-plane)
 ];
 
