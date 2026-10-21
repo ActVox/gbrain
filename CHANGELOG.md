@@ -10,6 +10,25 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**Writes no longer wait out their lock bound behind a large page's background index build.** Since 0.60.331.0, a new page over 4 MiB replies when it commits and its search index is built afterwards. Each step of that build held the page's lock while it inserted up to 4 MiB of passages, which took 1.6–2 s on a loaded host. A write to that page waits at most 1 s for the lock, so it failed and prepared again, copying a large page's prior file to its recovery stage once per attempt. A managed sync import, checkpoint or purge anywhere on the same source waited the same way, and could finish only on the next pass.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A delete, edit or other write to a page while its background build runs | could wait past its 1 s lock bound, then prepare again (a second copy of a large prior file) | the build holds the page lock for at most 512 KiB of passages per transaction (about 0.1 s), and the waiting write takes it next |
+| A managed sync import, checkpoint or purge on the same source during such a build | waited behind each build step; a small file could be credited only on the next pass | waits at most one bounded step |
+| The build's removal of stale passages | up to 20,000 rows per lock transaction | 2,500 rows per lock transaction |
+
+No timeout or retry budget changes. The bounds and their derivation are in `src/core/page-body/limits.ts` (`PROJECTION_LOCK_HOLD_BYTES`, `PROJECTION_RETIRE_MAX_ROWS`).
+
+### For contributors
+
+- `test/large-pages/stuck-recovery-large.slow.test.ts` keeps its fault hook installed until the consumer is disposed, so a delete that outlasts the 5 s reply wait still meets the injected interruption.
+- New `test/large-pages/projection-lock-hold.test.ts` and the `segmented:projection_insert` fault point drive a write and a sync import during a build insert.
+
 ## [0.60.333.0] - 2026-10-21
 
 **`gbrain doctor` has a quick tier for agents on large brains, grades checks that ran out of budget honestly, and stops counting sync-failure ledger rows nothing can retry. One-shot CLI reads also start faster behind a pooler.** On a large brain a full doctor run used to blow its budget and report a wall of unknowns. Agents read those as failures and repeated the run. `gbrain doctor --tier quick` answers the questions an agent gates on within 10 seconds. Every other check comes from its last known result, with the result's age.
