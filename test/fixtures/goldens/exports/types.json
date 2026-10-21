@@ -1066,6 +1066,7 @@
           "allocateBodyOccurrenceIds: (count: number) => Promise<number[]>",
           "batchLoadEmotionalInputs: (slugs?: string[]) => Promise<EmotionalWeightInputRow[]>",
           "connect: (config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager; }) => Promise<void>",
+          "connectedDatabaseUrl: string | undefined",
           "connectionManager: ConnectionManager | null",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
           "countChunklessPagesWithContent: (opts?: { sourceId?: string; }) => Promise<number>",

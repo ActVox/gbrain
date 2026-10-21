@@ -228,6 +228,7 @@
         "batchRetry",
         "connRetry",
         "connect",
+        "connectedDatabaseUrl",
         "consolidateFact",
         "countChunklessPagesWithContent",
         "countKeywordPages",
