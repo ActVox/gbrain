@@ -404,8 +404,9 @@ export async function readEmbeddingEffectProjection(engine: BrainEngine, effect:
     const column = prepared.embeddingColumn;
     const completion = await tx.executeRaw<{ id: number; chunk_text: string; chunk_source: string | null; embedding_input_hash: string | null; embedded: boolean; stamped: boolean }>(`SELECT cc.id,
       cc.chunk_text, cc.chunk_source, cc.embedding_input_hash,
-      cc.${quoteIdentifier(column.name)} IS NOT NULL AND cc.embedded_at IS NOT NULL AND cc.embedded_text_hash=md5(cc.chunk_text) AS embedded,
-      p.embedding_signature=$2 AND cc.model IS NOT DISTINCT FROM $3 AS stamped
+      cc.${quoteIdentifier(column.name)} IS NOT NULL AND cc.embedded_at IS NOT NULL AND cc.embedded_text_hash=md5(cc.chunk_text)
+        AND cc.model IS NOT DISTINCT FROM $3 AS embedded,
+      p.embedding_signature=$2 AS stamped
       FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.id=$1 AND ${chunkGenerationFilter('p', 'cc', await chunkManifestReads(engine, tx))}`,
     [snapshot.page.id, signature, embeddingCompletionModel(column, signature, model)]);
     // #7172: a vector whose recorded input (#5553: column, model, dimensions, wrapper tier and exact input) is one the
