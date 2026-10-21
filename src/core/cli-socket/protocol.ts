@@ -73,7 +73,7 @@ export function isResultFrame(value: unknown): value is ResultFrame {
   switch (value.kind) {
     case 'result':
       return 'result' in value && (value.meta === null || record(value.meta))
-        && Array.isArray(value.notices) && value.notices.every(notice => record(notice) && typeof notice.code === 'string')
+        && Array.isArray(value.notices) && value.notices.every(notice => record(notice) && typeof notice.code === 'string' && typeof notice.kind === 'string' && typeof notice.why === 'string')
         && isAnswered(value);
     case 'error':
       return record(value.error) && typeof value.error.code === 'string' && typeof value.error.message === 'string' && isAnswered(value);

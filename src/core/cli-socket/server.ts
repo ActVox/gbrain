@@ -15,11 +15,11 @@ import { configDir, configPath } from '../config.ts';
 import { tryAcquireNativeLock } from '../persistence/native-lock.ts';
 import { VERSION } from '../../version.ts';
 import { executeCliSocketRequest, type ExecutedRequest } from './execute.ts';
-import { CliSocketUnsafeError, cliSocketDir, cliSocketPath, ensurePrivateDir, privateSocketProblem, socketPathFits, tightenBoundSocket } from './fs-guard.ts';
+import { CliSocketUnsafeError, cliSocketDir, cliSocketPath, ensurePrivateDir, privateSocketProblem, socketPathFits, verifyBoundSocket } from './fs-guard.ts';
 import { cliSocketIdentity } from './identity.ts';
 import { installOutputCapture } from './output-capture.ts';
 import { peerCredSupport, peerUid, type PeerCredSupport } from './peer-cred.ts';
-import { FrameReader, isCliSocketRequest, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, REQUEST_READ_TIMEOUT_MS,
+import { FrameReader, isCliSocketRequest, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_ROUND_TRIP_MS, REQUEST_READ_TIMEOUT_MS,
   type CliSocketRequest, type HandshakeFrame, type ResultFrame } from './protocol.ts';
 
 export const CLI_SOCKET_CONFIG_KEY = 'serve.cli_socket';
@@ -38,6 +38,8 @@ export interface CliSocketServerOptions {
   uid?: () => number | undefined;
   brainId?: () => string;
   execute?: (request: CliSocketRequest) => Promise<ExecutedRequest>;
+  /** After this long a request whose work has not settled is logged once (its slot is still held). */
+  stuckAfterMs?: number;
 }
 
 /** Whether this serve should open the socket: the flag, or the DB-plane config key set to a true value. */
@@ -173,6 +175,7 @@ export async function startCliSocketServer(opts: CliSocketServerOptions): Promis
         if (active >= MAX_ACTIVE_REQUESTS) { socket.end(frame({ v: 1, accepted: false, reason: 'busy' })); return; }
         // Active until the request's own work settles, not until it answered: a timed-out handler still holds its slot.
         active++;
+        const started = performance.now();
         let settled: Promise<unknown> = Promise.resolve();
         try {
           socket.write(frame({ v: 1, accepted: true }));
@@ -181,7 +184,12 @@ export async function startCliSocketServer(opts: CliSocketServerOptions): Promis
           catch { result = { v: 1, kind: 'fallback', reason: 'serve_error' }; }
           if (!socket.destroyed) socket.end(frame(result));
         } finally {
-          void settled.then(() => { active--; }, () => { active--; });
+          let done = false;
+          const stuck = setTimeout(() => {
+            if (!done) log(`a ${request.command} request is still running ${Math.round((performance.now() - started) / 1000)} s after it started; its slot stays held until it finishes (${active} of ${MAX_ACTIVE_REQUESTS} in use).`);
+          }, Math.max(0, (opts.stuckAfterMs ?? MAX_ROUND_TRIP_MS) - (performance.now() - started)));
+          stuck.unref();
+          void settled.then(() => { done = true; clearTimeout(stuck); active--; }, () => { done = true; clearTimeout(stuck); active--; });
         }
       })();
     });
@@ -189,12 +197,15 @@ export async function startCliSocketServer(opts: CliSocketServerOptions): Promis
 
   const bound = await new Promise<boolean>(resolve => {
     server.once('error', () => resolve(false));
-    server.listen(path, () => resolve(true));
+    // listen() binds synchronously; under umask 0177 the kernel creates the socket 0600, so nothing is chmod'ed afterwards.
+    const umask = process.umask(0o177);
+    try { server.listen(path, () => resolve(true)); }
+    finally { process.umask(umask); }
   });
   if (!bound) { await lock.release(); log(`not started: could not bind ${path}.`); return null; }
   server.on('error', () => {});
   let inode: number;
-  try { inode = tightenBoundSocket(path); }
+  try { inode = verifyBoundSocket(path); }
   catch (error) { server.close(); await lock.release(); log(`not started: ${path} did not become a private socket (${(error as Error).message}).`); return null; }
   const close = () => {
     if (closing) return;

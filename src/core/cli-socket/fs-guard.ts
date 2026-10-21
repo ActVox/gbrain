@@ -23,7 +23,7 @@ export interface FsGuardDeps {
 
 const realDeps: FsGuardDeps = { lstat: path => lstatSync(path), stat: path => statSync(path), uid: () => process.getuid?.() };
 
-export type UnsafeReason = 'missing' | 'symlink' | 'not_directory' | 'not_socket' | 'foreign_owner' | 'open_permissions' | 'no_uid' | 'replaced';
+export type UnsafeReason = 'missing' | 'symlink' | 'not_directory' | 'not_socket' | 'foreign_owner' | 'open_permissions' | 'no_uid';
 
 export function cliSocketDir(home: string = configDir()): string {
   return join(home, 'run');
@@ -97,20 +97,15 @@ export function connectProblem(path: string, dir: string, deps: FsGuardDeps = re
 }
 
 /**
- * Right after bind: the path must be a socket this uid owns (lstat, never
- * followed) before it is chmod 0600, and the same inode, private, after.
- * Returns that inode; throws when the path changed or is not ours.
+ * Right after bind (the serve binds under umask 0177, so the kernel creates
+ * the socket 0600): the path must already be a private socket this uid owns,
+ * read with lstat and never repaired. Nothing is chmod'ed through a path that
+ * could have been swapped. Returns its inode.
  */
-export function tightenBoundSocket(path: string, deps: FsGuardDeps = realDeps, chmod: (path: string) => void = target => chmodSync(target, 0o600)): number {
-  const uid = deps.uid();
-  const before = deps.lstat(path);
-  if (before.isSymbolicLink() || !before.isSocket()) throw new CliSocketUnsafeError(before.isSymbolicLink() ? 'symlink' : 'not_socket', path);
-  if (before.uid !== uid) throw new CliSocketUnsafeError('foreign_owner', path);
-  chmod(path);
+export function verifyBoundSocket(path: string, deps: FsGuardDeps = realDeps): number {
   const problem = privateSocketProblem(path, deps);
   if (problem) throw new CliSocketUnsafeError(problem, path);
-  if (deps.lstat(path).ino !== before.ino) throw new CliSocketUnsafeError('replaced', path);
-  return before.ino;
+  return deps.lstat(path).ino;
 }
 
 export class CliSocketUnsafeError extends Error {

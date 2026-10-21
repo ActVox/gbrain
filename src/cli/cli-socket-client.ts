@@ -8,6 +8,7 @@
  * stderr only with GBRAIN_DEBUG=1). GBRAIN_CLI_SOCKET=0 skips the socket.
  */
 import net from 'node:net';
+import { format } from 'node:util';
 import { loadConfig, configDir, configPath, isThinClient } from '../core/config.ts';
 import { getCliOptions } from '../core/cli-options.ts';
 import { resolveBrainId } from '../core/brain-resolver.ts';
@@ -90,9 +91,13 @@ export function cliSocketRoundTripMs(timeoutMs: number | null): number {
   return Math.min(MAX_ROUND_TRIP_MS, timeoutMs ?? DEFAULT_READ_WALLCLOCK_MS);
 }
 
-/** Restores what the cold process would have by now: the pinned fix source and the operation's own output. */
-async function replay(frame: { output: OutputChunk[]; source?: string | null }): Promise<void> {
+/** The source the serve resolved for this call, pinned in fix commands exactly as the cold process would have noted it (before anything renders). */
+async function noteSource(frame: { source?: string | null }): Promise<void> {
   if (frame.source) (await import('../core/fix-routing.ts')).noteResolvedSource(frame.source);
+}
+
+/** Prints the operation's own output, as the cold process would have by now. */
+async function replay(frame: { output: OutputChunk[] }): Promise<void> {
   for (const [stream, text] of frame.output) {
     if (stream === 'stdout') process.stdout.write(text);
     else process.stderr.write(text);
@@ -114,22 +119,72 @@ async function opRequest(command: string, args: string[]): Promise<{ op: import(
   return { op, params };
 }
 
-async function renderOp(command: string, op: import('../core/operations.ts').Operation, params: Record<string, unknown>, frame: Exclude<ResultFrame, { kind: 'fallback' }>): Promise<void> {
+type Buffered<T> = { value: T; flush: () => void } | { error: unknown };
+
+/**
+ * Runs a renderer with stdout, stderr and console held in memory, so a frame
+ * the renderer cannot handle throws before anything reaches the terminal and
+ * the caller can still take the cold path. `flush` writes what it printed.
+ */
+async function buffered<T>(render: () => T | Promise<T>): Promise<Buffered<T>> {
+  const chunks: Array<['stdout' | 'stderr', string]> = [];
+  const hold = (stream: 'stdout' | 'stderr') => (chunk: unknown, ...rest: unknown[]): boolean => {
+    chunks.push([stream, typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()]);
+    const callback = rest.find(arg => typeof arg === 'function') as (() => void) | undefined;
+    if (callback) queueMicrotask(callback);
+    return true;
+  };
+  const saved = { out: process.stdout.write, err: process.stderr.write, log: console.log, info: console.info, warn: console.warn, error: console.error, debug: console.debug };
+  process.stdout.write = hold('stdout') as typeof process.stdout.write;
+  process.stderr.write = hold('stderr') as typeof process.stderr.write;
+  for (const [method, stream] of [['log', 'stdout'], ['info', 'stdout'], ['debug', 'stdout'], ['warn', 'stderr'], ['error', 'stderr']] as const) {
+    console[method] = (...args: unknown[]) => { chunks.push([stream, format(...args) + '\n']); };
+  }
+  try {
+    const value = await render();
+    return { value, flush: () => { for (const [stream, text] of chunks) (stream === 'stdout' ? process.stdout : process.stderr).write(text); } };
+  } catch (error) {
+    return { error };
+  } finally {
+    Object.assign(process.stdout, { write: saved.out });
+    Object.assign(process.stderr, { write: saved.err });
+    Object.assign(console, { log: saved.log, info: saved.info, warn: saved.warn, error: saved.error, debug: saved.debug });
+  }
+}
+
+function renderFailed(error: unknown): false {
+  debug(`render_failed (${error instanceof Error ? error.message : String(error)})`);
+  return false;
+}
+
+/** Prints an answered op frame the way the cold path would; false (nothing printed) when the frame cannot be rendered. */
+export async function renderOp(command: string, op: import('../core/operations.ts').Operation, params: Record<string, unknown>, frame: Exclude<ResultFrame, { kind: 'fallback' }>): Promise<boolean> {
   const { formatResult, captureRetrievalMeta, maybePrintConceptNudge } = await import('./main.ts');
   const { applyCliOpNotices, captureOpNotice } = await import('./op-notices.ts');
   const { setCliExitVerdict, writeStdoutFinal } = await import('../core/cli-force-exit.ts');
-  await replay(frame);
+  await noteSource(frame);
   if (frame.kind === 'error') {
     const { writeCliError } = await import('./cli-error.ts');
-    const { reportPersistenceCliError } = await import('../commands/persistence-delegate.ts');
-    const e = reviveOperationError(frame.error);
-    if (!e.writeRequest || !await reportPersistenceCliError(e, params.json === true || !!e.writeRequest)) setCliExitVerdict(writeCliError(e, command));
-    return;
+    const rendered = await buffered(() => writeCliError(reviveOperationError(frame.error), command));
+    if ('error' in rendered) return renderFailed(rendered.error);
+    await replay(frame);
+    rendered.flush();
+    setCliExitVerdict(rendered.value);
+    return true;
   }
-  if (frame.meta) captureRetrievalMeta('retrieval', frame.meta);
-  for (const notice of frame.notices) captureOpNotice(notice);
-  const { result, stderr: noticeText } = applyCliOpNotices(frame.result, params.json === true);
-  const output = formatResult(op.name, result, params);
+  const rendered = await buffered(() => {
+    if (frame.meta) captureRetrievalMeta('retrieval', frame.meta);
+    for (const notice of frame.notices) captureOpNotice(notice);
+    const { result, stderr } = applyCliOpNotices(frame.result, params.json === true);
+    return { result, noticeText: stderr, output: formatResult(op.name, result, params) };
+  });
+  if ('error' in rendered) {
+    try { applyCliOpNotices(null, true); } catch { /* drains what the failed render captured */ }
+    return renderFailed(rendered.error);
+  }
+  const { result, noticeText, output } = rendered.value;
+  await replay(frame);
+  rendered.flush();
   if (output) await writeStdoutFinal(output);
   if (noticeText) process.stderr.write(noticeText);
   if (typeof result === 'object' && result !== null && !Array.isArray(result) && (result as { status?: unknown }).status === 'error') {
@@ -138,6 +193,7 @@ async function renderOp(command: string, op: import('../core/operations.ts').Ope
     setCliExitVerdict(1);
   }
   maybePrintConceptNudge(op.name, params);
+  return true;
 }
 
 /**
@@ -178,15 +234,18 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
     const outcome = await exchangeCliSocket(path, { ...base, kind: 'recall', args }, resultTimeoutMs);
     if ('reason' in outcome) { debug(outcome.reason); return false; }
     if (outcome.frame.kind === 'fallback') { debug(outcome.frame.reason); return false; }
-    await replay(outcome.frame);
-    if (outcome.frame.kind === 'result') {
-      recall.renderRecallVerbResult(flags, outcome.frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]);
-      if (outcome.frame.notices.length > 0) (await import('../core/interop-notices.ts')).writeCliNotices(outcome.frame.notices);
-      return true;
-    }
-    const error = reviveOperationError(outcome.frame.error);
-    if (recall.isOneShotRecall(flags)) await recall.reportOneShotRecallError(error, flags);
-    else throw error;
+    const frame = outcome.frame;
+    await noteSource(frame);
+    if (frame.kind === 'error' && !recall.isOneShotRecall(flags)) { await replay(frame); throw reviveOperationError(frame.error); }
+    const { writeCliNotices } = await import('../core/interop-notices.ts');
+    const rendered = await buffered(async () => {
+      if (frame.kind === 'error') { await recall.reportOneShotRecallError(reviveOperationError(frame.error), flags); return; }
+      recall.renderRecallVerbResult(flags, frame.result as Parameters<typeof recall.renderRecallVerbResult>[1]);
+      if (frame.notices.length > 0) writeCliNotices(frame.notices);
+    });
+    if ('error' in rendered) return renderFailed(rendered.error);
+    await replay(frame);
+    rendered.flush();
     return true;
   }
 
@@ -195,6 +254,5 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
   const outcome = await exchangeCliSocket(path, { ...base, kind: 'op', op: SOCKET_OPS[prepared.op.name]!, params: prepared.params }, resultTimeoutMs);
   if ('reason' in outcome) { debug(outcome.reason); return false; }
   if (outcome.frame.kind === 'fallback') { debug(outcome.frame.reason); return false; }
-  await renderOp(command, prepared.op, prepared.params, outcome.frame);
-  return true;
+  return renderOp(command, prepared.op, prepared.params, outcome.frame);
 }

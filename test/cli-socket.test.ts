@@ -27,11 +27,12 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { behaviorEnvDigest, canonicalDatabaseTarget, cliSocketIdentity } from '../src/core/cli-socket/identity.ts';
 import {
-  ancestorProblem, cliSocketPath, connectProblem, ensurePrivateDir, privateDirProblem, privateSocketProblem, tightenBoundSocket, trustedAncestorProblem, type FsGuardDeps,
+  ancestorProblem, cliSocketPath, connectProblem, ensurePrivateDir, privateDirProblem, privateSocketProblem, trustedAncestorProblem, verifyBoundSocket, type FsGuardDeps,
 } from '../src/core/cli-socket/fs-guard.ts';
 import { peerCredSupport } from '../src/core/cli-socket/peer-cred.ts';
 import { startCliSocketServer, type CliSocketBinding } from '../src/core/cli-socket/server.ts';
-import { cliSocketRoundTripMs, exchangeCliSocket } from '../src/cli/cli-socket-client.ts';
+import { cliSocketRoundTripMs, exchangeCliSocket, renderOp } from '../src/cli/cli-socket-client.ts';
+import { loadOperation } from '../src/core/operation-load.ts';
 import { isResultFrame, reviveOperationError, serializeOperationError, type CliSocketRequest, type ResultFrame } from '../src/core/cli-socket/protocol.ts';
 import { queueFirstFallbackHop, takeChatFallbackHopNotices, __resetChatFallbackHopNoticeForTests } from '../src/core/ai/fallback-hop-queue.ts';
 import { installOutputCapture, OutputCapture, withOutputCapture } from '../src/core/cli-socket/output-capture.ts';
@@ -105,6 +106,26 @@ describe('identity token', () => {
     expect(behaviorEnvDigest({ OPENAI_BASE_URL: 'http://localhost:1' })).not.toBe(behaviorEnvDigest({}));
     expect(JSON.stringify(behaviorEnvDigest({ VOYAGE_API_KEY: 'value-one' }))).not.toContain('value-one');
   });
+
+  test('provider routing values enter the digest (a local and a remote endpoint never match); credentials stay set-or-not', () => {
+    homeWithConfig('a');
+    const local = { GBRAIN_HOME: '/home/alice-example', OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1' };
+    const remote = { GBRAIN_HOME: '/home/alice-example', OPENAI_BASE_URL: 'https://api.openai.com/v1' };
+    expect(behaviorEnvDigest(local)).not.toBe(behaviorEnvDigest(remote));
+    expect(token({ env: local })).not.toBe(token({ env: remote }));
+    for (const name of ['OLLAMA_BASE_URL', 'LMSTUDIO_BASE_URL', 'LLAMA_SERVER_BASE_URL', 'LLAMA_SERVER_RERANKER_BASE_URL', 'LITELLM_BASE_URL', 'OPENROUTER_BASE_URL',
+      'ANTHROPIC_BASE_URL', 'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_DEPLOYMENT', 'AZURE_OPENAI_API_VERSION', 'OPENAI_ORG_ID', 'OPENAI_PROJECT', 'MINIMAX_GROUP_ID']) {
+      expect(behaviorEnvDigest({ [name]: 'value-one' }), name).not.toBe(behaviorEnvDigest({ [name]: 'value-two' }));
+    }
+    for (const name of ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'LLAMA_SERVER_API_KEY']) {
+      expect(behaviorEnvDigest({ [name]: 'value-one' }), name).toBe(behaviorEnvDigest({ [name]: 'value-two' }));
+    }
+  });
+
+  test('GBRAIN_SOURCE stays out of the digest: it travels with each request and is resolved per call', () => {
+    expect(behaviorEnvDigest({ GBRAIN_SOURCE: 'source-a' })).toBe(behaviorEnvDigest({}));
+    expect(behaviorEnvDigest({ GBRAIN_SOURCE: 'source-a' })).toBe(behaviorEnvDigest({ GBRAIN_SOURCE: 'source-b' }));
+  });
 });
 
 describe('run directory and socket checks', () => {
@@ -174,23 +195,22 @@ describe('run directory and socket checks', () => {
     expect(() => ensurePrivateDir(dir, foreignHome)).toThrow(/foreign_owner/);
   });
 
-  test('after bind the socket is chmod 0600 only while it is still our socket, and must keep its inode', async () => {
+  test('a bound socket is only verified, never chmod\'ed: an open, symlinked or foreign one is refused as found', async () => {
     const dir = runDir();
     const path = join(dir, 'cli.sock');
     const server = net.createServer();
-    await new Promise<void>(resolve => server.listen(path, resolve));
+    const umask = process.umask(0o022);
+    try { await new Promise<void>(resolve => server.listen(path, resolve)); } finally { process.umask(umask); }
     try {
       const real: FsGuardDeps = { lstat: p => lstatSync(p), uid: () => uid };
-      expect(tightenBoundSocket(path, real)).toBe(lstatSync(path).ino);
-      expect(lstatSync(path).mode & 0o777).toBe(0o600);
-      let chmods = 0;
-      const symlinked: FsGuardDeps = { ...real, lstat: p => ({ ...lstatSync(p), isSymbolicLink: () => true, isSocket: () => false }) as never };
-      expect(() => tightenBoundSocket(path, symlinked, () => { chmods++; })).toThrow(/symlink/);
-      expect(() => tightenBoundSocket(path, { ...real, uid: () => uid + 1 }, () => { chmods++; })).toThrow(/foreign_owner/);
-      expect(chmods).toBe(0);
-      let reads = 0;
-      const swapped: FsGuardDeps = { ...real, lstat: p => { const st = lstatSync(p); return reads++ < 2 ? st : ({ ...st, isSocket: () => true, isSymbolicLink: () => false, ino: st.ino + 1 }) as never; } };
-      expect(() => tightenBoundSocket(path, swapped, () => {})).toThrow(/replaced/);
+      const openMode = lstatSync(path).mode & 0o777;
+      expect(openMode & 0o077).not.toBe(0);
+      expect(() => verifyBoundSocket(path, real)).toThrow(/open_permissions/);
+      expect(lstatSync(path).mode & 0o777).toBe(openMode);
+      chmodSync(path, 0o600);
+      expect(verifyBoundSocket(path, real)).toBe(lstatSync(path).ino);
+      expect(() => verifyBoundSocket(path, { ...real, lstat: p => ({ ...lstatSync(p), isSymbolicLink: () => true, isSocket: () => false }) as never })).toThrow(/symlink/);
+      expect(() => verifyBoundSocket(path, { ...real, uid: () => uid + 1 })).toThrow(/foreign_owner/);
     } finally {
       server.close();
     }
@@ -217,8 +237,11 @@ describe('serve listener', () => {
     if (process.platform === 'linux' || process.platform === 'darwin') expect(peerCredSupport().ok).toBe(true);
   });
 
-  test('binds 0600 and answers a matching identity; refuses a mismatched one', async () => {
-    const { binding, path } = await start();
+  test('binds 0600 even under an open process umask (the kernel creates it so), restores the umask, and answers a matching identity; refuses a mismatched one', async () => {
+    const umask = process.umask(0o000);
+    let started: Awaited<ReturnType<typeof start>>;
+    try { started = await start(); expect(process.umask()).toBe(0o000); } finally { process.umask(umask); }
+    const { binding, path } = started;
     expect(binding).not.toBeNull();
     expect(lstatSync(path).mode & 0o777).toBe(0o600);
     expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toEqual({ frame: okFrame });
@@ -283,6 +306,22 @@ describe('serve listener', () => {
     expect(await exchangeCliSocket(path, request('token-a'), 5_000)).toHaveProperty('frame');
   });
 
+  test('a request whose work is still unsettled at the round-trip cap is logged once', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const { path, lines } = await start({ stuckAfterMs: 50, execute: async () => ({ frame: { v: 1, kind: 'fallback', reason: 'timeout' }, settled: pending }) });
+    await exchangeCliSocket(path, request('token-a'), 5_000);
+    await Bun.sleep(150);
+    expect(lines.filter(line => line.includes('is still running')).length).toBe(1);
+    expect(lines.join('\n')).toContain('a search request is still running');
+    release();
+    await Bun.sleep(20);
+    const { path: second, lines: quiet } = await start({ home: join(root, 'quiet', '.gbrain'), stuckAfterMs: 50 } as never);
+    await exchangeCliSocket(second, request('token-a'), 5_000);
+    await Bun.sleep(150);
+    expect(quiet.filter(line => line.includes('is still running'))).toEqual([]);
+  });
+
   test('without a peer-credential reader the CLI never connects', async () => {
     const { path } = await start();
     let connections = 0;
@@ -308,6 +347,7 @@ describe('serve listener', () => {
       { v: 1, kind: 'result', result: 1, meta: null, notices: [], output: [['stdout']] },
       { v: 1, kind: 'result', result: 1, meta: 'x', notices: [], output: [] },
       { v: 1, kind: 'result', result: 1, meta: null, notices: [{}], output: [] },
+      { v: 1, kind: 'result', result: 1, meta: null, notices: [{ code: 'x' }], output: [] },
       { v: 1, kind: 'error', output: [] },
       { v: 1, kind: 'error', error: { message: 'no code' }, output: [] },
       { v: 1, kind: 'timeout', label: 'l', ms: 1, output: [] },
@@ -369,6 +409,25 @@ describe('serve listener', () => {
       server.close();
     }
   });
+});
+
+test('a well-formed frame whose payload the renderer cannot handle prints nothing and sends the CLI to its cold path', async () => {
+  const op = (await loadOperation('search'))!;
+  const written: string[] = [];
+  const saved = { out: process.stdout.write, err: process.stderr.write };
+  const record = (chunk: unknown) => { written.push(String(chunk)); return true; };
+  process.stdout.write = record as typeof process.stdout.write;
+  process.stderr.write = record as typeof process.stderr.write;
+  let outcome: boolean | Error;
+  try {
+    outcome = await renderOp('search', op, { query: 'q' }, { v: 1, kind: 'result', result: 5, meta: null, notices: [], output: [['stdout', 'handler line\n']], source: null })
+      .catch((error: Error) => error);
+  } finally {
+    Object.assign(process.stdout, { write: saved.out });
+    Object.assign(process.stderr, { write: saved.err });
+  }
+  expect(outcome).toBe(false);
+  expect(written).toEqual([]);
 });
 
 test('each warm request has its own first chat-fallback hop queue; the process queue is untouched', async () => {

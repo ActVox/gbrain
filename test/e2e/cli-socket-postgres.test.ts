@@ -95,6 +95,12 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
         prepare: async prepared => { await withManagedFixtureWrite(isolated.engine, ['default'], tx => prepared.apply(tx)); return prepared.result; },
       });
     }
+    // A second source, so a CLI's GBRAIN_SOURCE visibly changes what a search answers.
+    await isolated.engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ('source-b', 'source-b', '{}'::jsonb)`);
+    await importFromContent(isolated.engine, 'notes/gamma-example', `---\ntitle: notes/gamma-example\ntype: note\n---\n\n${WORD} gamma page in source-b.\n`, {
+      sourceId: 'source-b', noEmbed: true,
+      prepare: async prepared => { await withManagedFixtureWrite(isolated.engine, ['source-b'], tx => prepared.apply(tx)); return prepared.result; },
+    });
     await isolated.engine.disconnect();
     mkdirSync(join(home, '.gbrain'));
     configFile = join(home, '.gbrain', 'config.json');
@@ -103,6 +109,8 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     env = keylessBrainEnv(process.env, home, {
       DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined, GBRAIN_ENGINE: undefined, GBRAIN_SOURCE: undefined,
       GBRAIN_SKIP_STARTUP_HOOKS: '1', GBRAIN_SWEEP: '0', GBRAIN_NO_RETRY_CONNECT: '1', GBRAIN_DEBUG: undefined,
+      // A provider endpoint no recipe here uses: the serve and every CLI share it, so a CLI pointing elsewhere must be refused.
+      LMSTUDIO_BASE_URL: 'http://127.0.0.1:9/v1',
     });
     // Two warm-up calls absorb one-time notices so the cold baseline is steady state.
     await cli(['search', 'warmup']);
@@ -199,13 +207,22 @@ describe.skipIf(!DATABASE_URL)('warm CLI socket (postgres)', () => {
     rmSync(otherHome, { recursive: true, force: true });
   }, 90_000);
 
-  test('a CLI whose behavior env differs from the serve\'s (GBRAIN_* settings, provider keys present) is refused and falls back', async () => {
-    const extras: Record<string, string>[] = [{ GBRAIN_CONTRIBUTOR_MODE: '1' }, { VOYAGE_API_KEY: 'synthetic-fixture-value' }];
+  test('a CLI whose behavior env differs from the serve\'s (GBRAIN_* settings, provider keys present, a provider endpoint value) is refused and falls back', async () => {
+    const extras: Record<string, string>[] = [{ GBRAIN_CONTRIBUTOR_MODE: '1' }, { VOYAGE_API_KEY: 'synthetic-fixture-value' }, { LMSTUDIO_BASE_URL: 'https://lmstudio.acme-example.test/v1' }];
     for (const extra of extras) {
       const run = await cli(READS.search!, { GBRAIN_DEBUG: '1', ...extra });
       expect(run.stderr).toContain('[cli-socket] cold path: refused (identity_mismatch)');
       expect(run.stdout).toBe(cold.get('search')!.stdout);
     }
+  }, 90_000);
+
+  test('a CLI with its own GBRAIN_SOURCE is answered warm, with that source applied', async () => {
+    const coldB = await cli(['search', WORD], { GBRAIN_CLI_SOCKET: '0', GBRAIN_SOURCE: 'source-b' });
+    expect(coldB.stdout).toContain('notes/gamma-example');
+    expect(coldB.stdout).not.toBe(cold.get('search')!.stdout);
+    const warmB = await cli(['search', WORD], { GBRAIN_DEBUG: '1', GBRAIN_SOURCE: 'source-b' });
+    expect(warmB.stderr).not.toContain('[cli-socket] cold path');
+    expect({ stdout: warmB.stdout, exitCode: warmB.exitCode }).toEqual({ stdout: coldB.stdout, exitCode: coldB.exitCode });
   }, 90_000);
 
   test('a killed serve leaves a stale socket that falls back silently', async () => {

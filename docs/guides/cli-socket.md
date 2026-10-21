@@ -65,15 +65,22 @@ The CLI falls back to its normal path, silently, when:
   that is shorter, the serve's own read deadline passes, or the serve dies in
   the middle of the request: the CLI then runs the call itself, once, with its
   usual timeout and exit codes (it can only be a read, so running it again is
-  safe);
-- the serve answers with a frame the CLI cannot fully read;
+  safe). A warm read that runs past 30 seconds therefore runs a second time
+  cold, so a slow LLM-backed query (`query`, `recall --question`) can cost
+  twice; pass a shorter `--timeout` or set `GBRAIN_CLI_SOCKET=0` for those;
+- the serve answers with a frame the CLI cannot fully read or render (nothing
+  is printed from it);
 - the serve was started for a different brain or environment: the CLI sends a
   token built from the brain (host or mount), the database target (without
   the password), the config home, the config file (path and content), the
-  gbrain version and a digest of the environment that changes answers (every
-  `GBRAIN_*` setting except `GBRAIN_CLI_SOCKET`, `GBRAIN_DEBUG` and
-  `GBRAIN_SQL_TRACE`, plus which provider API keys and endpoints are set,
-  never their values), and the serve answers only an identical one. Editing
+  gbrain version and a digest of the environment that changes answers or
+  where query text is sent (every `GBRAIN_*` setting except
+  `GBRAIN_CLI_SOCKET`, `GBRAIN_DEBUG`, `GBRAIN_SQL_TRACE` and
+  `GBRAIN_SOURCE`, which every request carries and the serve resolves for that
+  call; which provider API keys are set, never their values; and the values of
+  the provider routing settings: base URLs, endpoints, deployments, API
+  versions, org, project and group ids), and the serve answers only an
+  identical one. Editing
   `config.json`, changing those variables or upgrading gbrain while a serve
   runs sends CLI calls to the normal path until the serve restarts with the
   same settings;
@@ -91,9 +98,9 @@ socket entirely, for comparisons and benchmarks.
   connecting) refuse a symlink, a directory or socket owned by another uid, or
   open permissions. `GBRAIN_HOME` and `.gbrain` above it must be yours too and
   writable by no one else (a sticky directory excepted); the serve refuses
-  otherwise and never repairs them. Right after binding, the serve checks the
-  path is still its own socket before making it `0600`, and the same inode
-  after.
+  otherwise and never repairs them. The serve binds under umask `0177`, so the
+  kernel creates the socket `0600`; it then checks the path is its own private
+  socket and never changes permissions through it.
 - On every connection the serve reads the peer's uid from the kernel
   (`SO_PEERCRED` on Linux, `getpeereid` on macOS) and drops any other uid
   before reading the request. The CLI checks the serve's uid the same way.

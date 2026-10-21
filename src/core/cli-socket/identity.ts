@@ -11,8 +11,14 @@ import { readFileSync, realpathSync } from 'node:fs';
 import type { GBrainConfig } from '../config.ts';
 import { listRecipes } from '../ai/recipes/index.ts';
 
-/** GBRAIN_* switches that only steer the socket itself or diagnostics, never an operation's answer. */
-const NON_BEHAVIOR_GBRAIN_ENV = new Set(['GBRAIN_CLI_SOCKET', 'GBRAIN_DEBUG', 'GBRAIN_SQL_TRACE']);
+/**
+ * GBRAIN_* variables left out of the digest: the socket switch and diagnostics
+ * never change an answer, and GBRAIN_SOURCE travels in every request
+ * (`routing.source_env`) and is resolved per request, as the cold CLI does.
+ */
+const NON_BEHAVIOR_GBRAIN_ENV = new Set(['GBRAIN_CLI_SOCKET', 'GBRAIN_DEBUG', 'GBRAIN_SQL_TRACE', 'GBRAIN_SOURCE']);
+/** Provider credentials: only whether each is set enters the digest. Every other provider variable (endpoints, deployments, versions, org/project/group ids) enters with its value. */
+const SECRET_PROVIDER_ENV = /(_API_KEY|_TOKEN|_SECRET)$/;
 /** Provider env names read outside the recipe registry: the Google alias and the compatibility endpoints. */
 const EXTRA_PROVIDER_ENV = ['GEMINI_API_KEY', 'OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL'];
 
@@ -26,18 +32,21 @@ function providerEnv(): string[] {
 }
 
 /**
- * SHA-256 over the environment that changes what a read answers: every
- * GBRAIN_* name and value except the socket switch, debug and SQL trace, and
- * the names (never the values) of the provider credentials and endpoints that
- * are set to a non-empty value.
+ * SHA-256 over the environment that changes what a read answers or where its
+ * text goes: every GBRAIN_* name and value except NON_BEHAVIOR_GBRAIN_ENV, the
+ * names (never the values) of the provider credentials that are set, and the
+ * names and values of every other provider variable that is set (base URLs,
+ * endpoints, deployments, API versions, org/project/group ids).
  */
 export function behaviorEnvDigest(env: Record<string, string | undefined>): string {
   const gbrain = Object.keys(env)
     .filter(key => key.startsWith('GBRAIN_') && !NON_BEHAVIOR_GBRAIN_ENV.has(key) && env[key] !== undefined)
     .sort()
     .map(key => [key, env[key]]);
-  const providers = providerEnv().filter(name => env[name] !== undefined && env[name] !== '');
-  return createHash('sha256').update(JSON.stringify({ gbrain, providers })).digest('hex');
+  const set = providerEnv().filter(name => env[name] !== undefined && env[name] !== '');
+  const credentials = set.filter(name => SECRET_PROVIDER_ENV.test(name));
+  const routing = set.filter(name => !SECRET_PROVIDER_ENV.test(name)).map(name => [name, env[name]]);
+  return createHash('sha256').update(JSON.stringify({ gbrain, credentials, routing })).digest('hex');
 }
 
 /** Database URL without its password, with the host, port and query parameters in one canonical spelling. */
