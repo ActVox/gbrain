@@ -39,6 +39,22 @@ The bound of 5 is derived in `src/core/page-state/chunk-moves.ts` (`CHUNK_VECTOR
 - Writes that wrap a page publication in their own (takes, the facts fence, maintenance pages) still replace passages in one transaction.
 - `readEmbeddingEffectProjection` accepts a vector whose recorded input hash is one the current page accepts, whatever the page-level signature says, and restamps the page.
 
+## [0.60.339.0] - 2026-10-21
+
+**A managed source with thousands of pre-managed pages that no longer match their files advances again (#7189).** The first managed full round screened every legacy page before importing anything. A page whose body differs from its file is never recorded, so a pass stopped by its deadline kept nothing, and the next pass screened the same pages from the top. On a large brain every pass ran its full hour, ended partial with 0 changes, and the commits waiting behind the sweep never became searchable.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The first managed full round of a source with legacy pages | screened every legacy page before importing the round's changes | screens at most 500, then imports the round's changes in the same pass |
+| A pass stopped mid-sweep | the next pass screened the same pages again from the top | the next full round resumes at the last screened path (`obligations.legacy_sweep.cursor`) |
+| Legacy pages whose body differs from the file | the first full sweep never finished, so every pass was another first full round | the first sweep finishes once and records `first_full_at`; later sweeps rotate through the rest, 500 per pass |
+
+### For contributors
+
+- `test/sync-legacy-sweep-resume-7189.test.ts` (PGLite and Postgres) stops any pass past 500 screens and checks that the waiting commit imports and the next full round screens only the rest.
+
 ## [0.60.338.0] - 2026-10-21
 
 **Keyword search on a large Postgres brain no longer stalls on a common word, and agent guidance now says to search gbrain first.** At 300k pages, a keyword query whose words matched hundreds of thousands of chunks ranked every one of them and often hit the 8 s keyword statement timeout, so the keyword arm returned nothing. Ranking is now bounded, the OR retry matches only the words that fit, and the candidate pool keeps one chunk per page. On a 305k-page bench behind a transaction-mode pooler, warm search p95 fell from 8.4 s to 2.4 s, warm query from 8.6 s to 1.2 s and warm recall from 8.4 s to 1.0 s. Retrieval quality on the agent-retrieval shapes and the 70-question ranking-shapes set is unchanged.
