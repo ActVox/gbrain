@@ -129,9 +129,12 @@ const extract_facts: Operation = {
       typeof p.source_slug === 'string' && p.source_slug.trim().length > 0
         ? p.source_slug.trim()
         : undefined;
-    // A turn taken from a private page yields private facts, even when the caller asked for world.
+    // A turn taken from a private page yields private facts, even when the caller asked for world. The page is read
+    // as this caller may see it, so a remote caller cannot use the result to learn that a hidden page exists.
     if (visibility === 'world' && sourceSlug) {
-      const origin = await ctx.engine.readPageSnapshot(sourceSlug.replace(/\.md$/, ''), { sourceId });
+      const { resolveExcludePrivatePages } = await import('../search/private-visibility.ts');
+      const origin = await ctx.engine.readPageSnapshot(sourceSlug.replace(/\.md$/, ''),
+        { sourceId, excludePrivate: await resolveExcludePrivatePages(ctx.engine, ctx.remote) });
       visibility = tightenToPage(visibility, origin?.page);
     }
 
