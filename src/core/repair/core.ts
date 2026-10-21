@@ -322,6 +322,8 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
     spec?: Pick<RepairKindSpec, 'explicit_only' | 'consent' | 'spends'>; maxLlmUsd?: number; deadline?: number; now?: () => number;
     /** GBRA-133: the CLI's termination signal; the apply stops before the next item with a result instead of dying mid-run. */
     stop?: AbortSignal;
+    /** GBRA-133: the CLI's apply records a database refusal as a stop with a result; other callers (cycle, remediation) keep the rethrow. */
+    recordDatabaseStops?: boolean;
     /** Test seam: who publishes this run's admissions (default: this process's consumer, else a live full one on this host). */
     publicationOwner?: () => Promise<{ alive: boolean; owner: string }> }): Promise<RepairResult> {
   // #6696 (A5): an approved local repair is the operator's own write; a maintenance cycle's background scope still wins.
@@ -516,8 +518,8 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
       }
       // GBRA-133: a deadlock, a serialization failure or a lost database connection stops the run with what it applied and
       // the resume command in the result (the cursor stays before this item), instead of ending the command with no record.
-      const database = classifyItemFailure(error);
-      if (database.scope === 'run' && (database.code === 'database_contention' || database.code === 'connection_lost')) {
+      const database = opts.recordDatabaseStops ? classifyItemFailure(error) : null;
+      if (database && database.scope === 'run' && (database.code === 'database_contention' || database.code === 'connection_lost')) {
         const sqlstate = (error as { code?: unknown } | null)?.code;
         return stopAfterSettle({ reason: database.code, message: redactConnectionInfo(`Stopped at ${item.source_id}:${item.slug}: the database refused this item`
           + `${typeof sqlstate === 'string' ? ` (${sqlstate})` : ''}: ${database.message.slice(0, 300)}. The items before it stay applied `

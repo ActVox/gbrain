@@ -2,7 +2,8 @@
  * GBRA-133: a repair apply that the database refuses mid-run (a deadlock, a serialization failure, a lost connection) stops
  * with a result: what it applied, the stop reason with the SQLSTATE, and the resume command; the cursor stays before the
  * refused item, so the same command resumes there. Before, the error ended the command and an `--apply --json` run left
- * no record of what it had applied. A termination signal (the CLI's SIGTERM or SIGHUP) stops the apply the same way before
+ * no record of what it had applied. The CLI's apply opts in (`recordDatabaseStops`); the cycle and doctor remediation keep
+ * the rethrow, which their own run-scoped stops rely on (pinned by the default case below). A termination signal (the CLI's SIGTERM or SIGHUP) stops the apply the same way before
  * its next item. Real PGLite (and Postgres when DATABASE_URL is set) for the cursor; a stub kind.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -49,7 +50,7 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: a databas
     await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='repair'");
     const { handler, applied } = stub(new Map([[2, error]]));
     const scope = await resolveRepairScope(engine);
-    const first = await runRepair(ctx(), handler, scope, { apply: true, expect: 'stub-hash', explicit: true });
+    const first = await runRepair(ctx(), handler, scope, { apply: true, expect: 'stub-hash', explicit: true, recordDatabaseStops: true });
     expect(applied).toEqual([1]);
     expect(first.applied).toBe(1);
     expect(first.complete).toBe(false);
@@ -58,10 +59,16 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: a databas
     if (error.code !== 'CONNECTION_CLOSED') expect(first.stopped!.message).toContain(`(${error.code})`);
     expect(first.stopped!.message).toContain(`Rerun \`${first.apply_command}\` to resume from this item.`);
     expect(first.stopped!.fix?.argv).toEqual(['gbrain', 'repair', 'gbra133-stub', '--json']);
-    const second = await runRepair(ctx(), handler, scope, { apply: true, expect: 'stub-hash', explicit: true });
+    const second = await runRepair(ctx(), handler, scope, { apply: true, expect: 'stub-hash', explicit: true, recordDatabaseStops: true });
     expect(applied).toEqual([1, 2, 3]);
     expect(second).toMatchObject({ applied: 2, complete: true, resumed_from: { phase: 0, id: 1 } });
     expect(second.stopped).toBeUndefined();
+  }, 60_000);
+
+  test('without the CLI opt-in a run-scoped database error still rethrows (cycle and remediation callers)', async () => {
+    await engine.executeRaw("DELETE FROM op_checkpoints WHERE op='repair'");
+    const { handler } = stub(new Map([[2, Object.assign(new Error('deadlock detected'), { code: '40P01' })]]));
+    await expect(runRepair(ctx(), handler, await resolveRepairScope(engine), { apply: true, expect: 'stub-hash', explicit: true })).rejects.toThrow('deadlock detected');
   }, 60_000);
 
   test('a termination signal stops the apply before its next item with a result, and the same command resumes', async () => {
@@ -75,7 +82,7 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: a databas
     expect(applied).toEqual([1]);
     expect(first).toMatchObject({ applied: 1, complete: false, stopped: { reason: 'interrupted' } });
     expect(first.stopped!.message).toBe(`Stopped before default:notes/p2: this process received SIGTERM (2 item(s) still pending; the items before it stay applied). Rerun \`${first.apply_command}\` to resume.`);
-    const second = await runRepair(ctx(), handler, scope, { apply: true, expect: 'stub-hash', explicit: true });
+    const second = await runRepair(ctx(), handler, scope, { apply: true, expect: 'stub-hash', explicit: true, recordDatabaseStops: true });
     expect(applied).toEqual([1, 2, 3]);
     expect(second).toMatchObject({ applied: 2, complete: true });
   }, 60_000);

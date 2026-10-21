@@ -31,9 +31,9 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - `src/core/persistence/sync-origin-evidence.ts`: `readDeletionProvenance` reads HEAD's full history in bounded batches (a side branch's own deleting commit first; a merge only when its resolution dropped the file).
 - `src/core/repair/file-drift.ts`: per-page `provenance` and `details.provenance` counts; `--provenance` filter (`residuals.other_provenance`); the database-only keep (`managed_maintenance_file_drift_detach`, a database maintenance request whose preparer re-checks the page and its provenance and clears the hold).
-- `src/core/repair/core.ts`: database refusals and the CLI's termination signal stop an apply with a result; `src/commands/repair.ts` owns SIGTERM/SIGHUP during an apply.
+- `src/core/repair/core.ts`: database refusals (`recordDatabaseStops`, set by the CLI; the cycle and doctor remediation keep the rethrow their own stops rely on) and the CLI's termination signal stop an apply with a result; `src/commands/repair.ts` owns SIGTERM/SIGHUP during an apply.
 - `docs/guides/repair.md` (provenance), `docs/ENGINES.md#pool-sizing` (sync workers and a derived direct route in the pooler sum).
-- Tests: `test/repair-file-drift-provenance-gbra133.test.ts`, `test/repair-database-stop-gbra133.test.ts` (PGLite and Postgres); `test/repair-apply-continue-6459.test.ts` now pins the stop-with-result contract for a lost connection.
+- Tests: `test/repair-file-drift-provenance-gbra133.test.ts`, `test/repair-database-stop-gbra133.test.ts` (PGLite and Postgres).
 
 ## [0.60.355.0] - 2026-10-21
 
