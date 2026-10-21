@@ -670,7 +670,11 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
 
     // GBrain (#6543 A6): a socket that closed under statements is a recovery the next completed startup reports.
     ;(query || sent.length) && (recovering = recovering || 'closed')
-    !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+    // GBRA-133: a socket error rejects the statements in flight, but their rejection handlers run before 'close' and may
+    // issue more on this connection (a transaction's settings restore in its finally). Skipped on hadError, those stayed
+    // queued: the next socket's startup ReadyForQuery made one the current statement without ever sending it, so it hung
+    // until the in-flight watchdog (330 s) and the reservation waiting for that startup never got its connection.
+    ;(query || sent.length || deferredRetries.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
     // GBrain (#6543): the dead socket's ErrorResponse (a FATAL 57P01, a pooler's XX000) and its partial result belonged
     // to statements that just failed. Left in place, the replacement connection's startup ReadyForQuery handed that
     // error to its first statement, and a stale row count left holes at the start of the next result.
