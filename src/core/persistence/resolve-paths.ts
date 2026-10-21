@@ -63,7 +63,7 @@ export interface ResolvedPath {
   page: { id: number; slug: string; deleted: boolean; chunks: number; unembedded: number } | null;
   /**
    * The page's embedding budget hold (a large page held for approval or stopped at its cap, never an `embed_skip`), or
-   * null. A held page reads `pending_embedding` with `unembedded` its chunks with no vector: it waits for approval.
+   * null. A held page reads `pending_embedding`; it waits for approval. `page.unembedded` is always the visible chunks with no active-column vector.
    */
   embedding_hold: { state: 'held' | 'capped'; reason: string; updated_at: string } | null;
   /** A live page that owns this slug with another origin (a case-folded or hyphen-folded twin), or null. */
@@ -151,24 +151,28 @@ export async function resolveSourcePaths(engine: BrainEngine, sourceId: string, 
   const liveSlugs = [...new Set([...byOrigin.values()].filter(page => !page.deleted).map(page => page.slug))];
   const rows = liveSlugs.length ? await engine.listEmbeddingStateRows({ sourceIds: [sourceId], slugs: liveSlugs, states: PAGE_STATE_ORDER, limit: liveSlugs.length * PAGE_STATE_ORDER.length,
     purgeWindowHours: DELETED_PAGE_PURGE_WINDOW_HOURS }) : [];
+  const unembeddedBySlug = new Map<string, number>();
+  if (liveSlugs.length) {
+    const column = `cc.${quoteIdentifier((await embeddingWriteTarget(engine)).column.name)}`;
+    for (const row of await engine.executeRaw<{ slug: string; unembedded: number | string }>(
+      `SELECT p.slug, count(cc.id) AS unembedded FROM pages p JOIN content_chunks cc ON cc.page_id = p.id AND ${chunkGenerationFilter('p', 'cc')} AND ${column} IS NULL
+        WHERE p.source_id = $1 AND p.slug = ANY($2::text[]) AND p.deleted_at IS NULL GROUP BY p.slug`, [sourceId, liveSlugs])) unembeddedBySlug.set(row.slug, Number(row.unembedded));
+  }
   const embedding = new Map<string, { state: EmbeddingState; chunks: number; unembedded: number }>();
   for (const row of rows) {
     const prior = embedding.get(row.slug);
-    const chunks = (prior?.chunks ?? 0) + Number(row.chunks), unembedded = (prior?.unembedded ?? 0) + (row.state === 'pending' ? Number(row.chunks) : 0);
     const state = prior && PAGE_STATE_ORDER.indexOf(prior.state) < PAGE_STATE_ORDER.indexOf(row.state) ? prior.state : row.state;
-    embedding.set(row.slug, { state, chunks, unembedded });
+    embedding.set(row.slug, { state, chunks: (prior?.chunks ?? 0) + Number(row.chunks), unembedded: unembeddedBySlug.get(row.slug) ?? 0 });
   }
   const keywordOnly = [...embedding].filter(([, emb]) => emb.state === 'keyword_only').map(([slug]) => slug);
-  const budgetHolds = new Map<string, NonNullable<ResolvedPath['embedding_hold']> & { unembedded: number }>();
+  const budgetHolds = new Map<string, NonNullable<ResolvedPath['embedding_hold']>>();
   if (keywordOnly.length) {
-    const column = `cc.${quoteIdentifier((await embeddingWriteTarget(engine)).column.name)}`;
-    for (const row of await engine.executeRaw<{ slug: string; state: 'held' | 'capped'; reason: string; updated_at: Date | string; unembedded: number | string }>(
-      `SELECT p.slug, b.state, COALESCE(b.reason, 'awaiting_approval') AS reason, b.updated_at,
-         (SELECT count(*) FROM content_chunks cc WHERE cc.page_id = p.id AND ${chunkGenerationFilter('p', 'cc')} AND ${column} IS NULL) AS unembedded
+    for (const row of await engine.executeRaw<{ slug: string; state: 'held' | 'capped'; reason: string; updated_at: Date | string }>(
+      `SELECT p.slug, b.state, COALESCE(b.reason, 'awaiting_approval') AS reason, b.updated_at
        FROM pages p JOIN page_embedding_budget b ON b.page_id = p.id
       WHERE p.source_id = $1 AND p.slug = ANY($2::text[]) AND p.deleted_at IS NULL AND ${budgetRowAppliesFilter('b', 'p')}
         AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`, [sourceId, keywordOnly])) {
-      budgetHolds.set(row.slug, { state: row.state, reason: row.reason, updated_at: new Date(row.updated_at).toISOString(), unembedded: Number(row.unembedded) });
+      budgetHolds.set(row.slug, { state: row.state, reason: row.reason, updated_at: new Date(row.updated_at).toISOString() });
     }
   }
   const sync = ['gbrain', 'sync', '--source', sourceId, '--no-pull'];
@@ -229,10 +233,9 @@ export async function resolveSourcePaths(engine: BrainEngine, sourceId: string, 
     }
     const budget = budgetHolds.get(live.slug);
     if (budget) {
-      const { unembedded, ...embeddingHold } = budget;
-      push('pending_embedding', 'keyword', `Page ${live.slug} is searchable by keyword; its embedding budget is ${budget.state} (${budget.reason}), so ${unembedded} chunk(s) wait for a vector until the hold is approved.`,
+      push('pending_embedding', 'keyword', `Page ${live.slug} is searchable by keyword; its embedding budget is ${budget.state} (${budget.reason}), so ${base.page!.unembedded} chunk(s) wait for a vector until the hold is approved.`,
         readFix('Lists the held and capped large pages with the cost to finish and the approve command; read-only.', ['gbrain', 'embed', '--held', '--dry-run', '--source', sourceId], verify(p.input)),
-        { embedding_hold: embeddingHold, page: { ...base.page!, unembedded } });
+        { embedding_hold: budget });
       continue;
     }
     const state = emb ? PAGE_STATE[emb.state as Exclude<EmbeddingState, 'deleted_page_chunks'>] ?? 'searchable' : 'chunkless';
