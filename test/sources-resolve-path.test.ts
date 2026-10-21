@@ -155,3 +155,20 @@ test('the operation is read-scoped, takes paths relative to the source root, and
   await expect(s.resolve()).rejects.toMatchObject({ code: 'invalid_params' });
   await expect(s.resolve(...Array.from({ length: RESOLVE_PATHS_MAX + 1 }, (_, i) => `notes/${i}.md`))).rejects.toMatchObject({ code: 'invalid_params' });
 }), 240_000);
+
+test('a large page whose embedding budget is held reads pending_embedding with the hold, never keyword_only (which means embed_skip)', () => each(async engine => {
+  const { PAGE_INLINE_MAX_BYTES } = await import('../src/core/page-size-policy.ts');
+  const body = 'Weekly notes from acme-example with alice-example. '.repeat(Math.ceil((PAGE_INLINE_MAX_BYTES + 4096) / 51));
+  const s = await source(engine, { 'notes/large-example.md': `---\ntitle: Large\n---\n${body}\n`, 'notes/skip-example.md': '---\ntitle: Skip\nembed_skip:\n  reason: operator\n---\nSkipped by choice.\n' });
+  await s.sync();
+  const [page] = await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', [s.id, 'notes/large-example']);
+  await engine.executeRaw(`INSERT INTO page_embedding_budget (page_id, state, reason) VALUES ($1, 'held', 'upgrade_backfill')
+    ON CONFLICT (page_id) DO UPDATE SET state='held', reason='upgrade_backfill'`, [page!.id]);
+  const { paths: [held, skipped] } = await s.resolve('notes/large-example.md', 'notes/skip-example.md');
+  expect(held).toMatchObject({ state: 'pending_embedding', searchable: 'keyword', embedding_hold: { state: 'held', reason: 'upgrade_backfill' } });
+  expect(held!.page!.unembedded).toBe(held!.page!.chunks);
+  expect(held!.page!.chunks).toBeGreaterThan(0);
+  expect(held!.fix!.argv).toEqual(['gbrain', 'embed', '--held', '--dry-run', '--source', s.id]);
+  expect(skipped).toMatchObject({ state: 'keyword_only', searchable: 'keyword', embedding_hold: null });
+}), 240_000);
+

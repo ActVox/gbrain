@@ -25,7 +25,7 @@ are relative to the source root, or to the Git top level when they start with th
 and bounded lookups on existing indexes; nothing is scheduled or written.
 
 Each path returns the `slug` sync gives it, `in_synced_commit` / `at_head`, `skipped` (with `typed_frontmatter` for a metafile),
-`hold`, `page` (id, chunks, unembedded), `slug_owner` (a live page that owns the slug with another origin), `frontmatter_slug`
+`hold`, `page` (id, chunks, unembedded), `embedding_hold` (a large page's held or capped embedding budget), `slug_owner` (a live page that owns the slug with another origin), `frontmatter_slug`
 (a `slug:` line that differs from the path slug: sync holds that file), `searchable` (`true`, `"keyword"` or `false`), a `why`
 sentence and a `fix` (an existing command, never run here; null when nothing is owed).
 
@@ -34,7 +34,7 @@ sentence and a `fix` (an existing command, never run here; null when nothing is 
 | state | meaning | fix |
 |---|---|---|
 | `searchable` | live page, every chunk has a vector | none |
-| `pending_embedding` | found by keyword; some chunks still wait for a vector | `gbrain embed --stale --catch-up` (paid, asks first); none on a brain keyless by choice |
+| `pending_embedding` | found by keyword; some chunks still wait for a vector (with `embedding_hold` set: a large page's budget waits for approval) | `gbrain embed --stale --catch-up` (paid, asks first), or `gbrain embed --held --dry-run --source <id>` for a held page; none on a brain keyless by choice |
 | `chunkless` | page with body text and no chunk rows | `gbrain embed --stale --catch-up` |
 | `keyword_only` | an `embed_skip` page: keyword search only, by design | see `gbrain pages unsearchable` |
 | `quarantined` | hidden from search by the import gate | doctor `quarantined_pages` |

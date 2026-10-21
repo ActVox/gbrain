@@ -36,6 +36,10 @@ import { loadSyncEligibility, syncGit } from './sync-discovery.ts';
 import { readBlobContents } from './sync-blobs.ts';
 import { readGitHold } from './sync-holds.ts';
 import { persistenceEnabledForHealth } from './ownership.ts';
+import { budgetRowAppliesFilter } from '../page-size-policy.ts';
+import { chunkGenerationFilter } from '../search/safe-chunks.ts';
+import { quoteIdentifier } from '../search/embedding-column.ts';
+import { embeddingWriteTarget } from '../page-state/projections.ts';
 
 /** Paths one call resolves. */
 export const RESOLVE_PATHS_MAX = 200;
@@ -57,6 +61,11 @@ export interface ResolvedPath {
   skipped: { reason: SyncableReason; typed_frontmatter?: boolean } | null;
   hold: { code: string; message: string } | null;
   page: { id: number; slug: string; deleted: boolean; chunks: number; unembedded: number } | null;
+  /**
+   * The page's embedding budget hold (a large page held for approval or stopped at its cap, never an `embed_skip`), or
+   * null. A held page reads `pending_embedding` with `unembedded` its chunks with no vector: it waits for approval.
+   */
+  embedding_hold: { state: 'held' | 'capped'; reason: string; updated_at: string } | null;
   /** A live page that owns this slug with another origin (a case-folded or hyphen-folded twin), or null. */
   slug_owner: { slug: string; source_path: string | null } | null;
   /** A frontmatter `slug:` that differs from the path slug (sync holds such a file as SLUG_MISMATCH). */
@@ -149,6 +158,19 @@ export async function resolveSourcePaths(engine: BrainEngine, sourceId: string, 
     const state = prior && PAGE_STATE_ORDER.indexOf(prior.state) < PAGE_STATE_ORDER.indexOf(row.state) ? prior.state : row.state;
     embedding.set(row.slug, { state, chunks, unembedded });
   }
+  const keywordOnly = [...embedding].filter(([, emb]) => emb.state === 'keyword_only').map(([slug]) => slug);
+  const budgetHolds = new Map<string, NonNullable<ResolvedPath['embedding_hold']> & { unembedded: number }>();
+  if (keywordOnly.length) {
+    const column = `cc.${quoteIdentifier((await embeddingWriteTarget(engine)).column.name)}`;
+    for (const row of await engine.executeRaw<{ slug: string; state: 'held' | 'capped'; reason: string; updated_at: Date | string; unembedded: number | string }>(
+      `SELECT p.slug, b.state, COALESCE(b.reason, 'awaiting_approval') AS reason, b.updated_at,
+         (SELECT count(*) FROM content_chunks cc WHERE cc.page_id = p.id AND ${chunkGenerationFilter('p', 'cc')} AND ${column} IS NULL) AS unembedded
+       FROM pages p JOIN page_embedding_budget b ON b.page_id = p.id
+      WHERE p.source_id = $1 AND p.slug = ANY($2::text[]) AND p.deleted_at IS NULL AND ${budgetRowAppliesFilter('b', 'p')}
+        AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`, [sourceId, keywordOnly])) {
+      budgetHolds.set(row.slug, { state: row.state, reason: row.reason, updated_at: new Date(row.updated_at).toISOString(), unembedded: Number(row.unembedded) });
+    }
+  }
   const sync = ['gbrain', 'sync', '--source', sourceId, '--no-pull'];
   const syncStatus = ['gbrain', 'sync', 'status', '--source', sourceId, '--json'];
   const verify = (path: string) => ['gbrain', 'sources', 'resolve-path', sourceId, path, '--json'];
@@ -169,7 +191,7 @@ export async function resolveSourcePaths(engine: BrainEngine, sourceId: string, 
     const emb = live ? embedding.get(live.slug) : undefined;
     const base = { path: p.input, source_path: p.origin, slug, in_synced_commit: !!committed, at_head: atHead ? !!current : null, slug_owner: slugOwner, frontmatter_slug: declared,
       page: page ? { id: Number(page.id), slug: page.slug, deleted: page.deleted, chunks: emb?.chunks ?? 0, unembedded: emb?.unembedded ?? 0 } : null,
-      skipped: null as ResolvedPath['skipped'], hold: null as ResolvedPath['hold'] };
+      skipped: null as ResolvedPath['skipped'], hold: null as ResolvedPath['hold'], embedding_hold: null as ResolvedPath['embedding_hold'] };
     const push = (state: ResolvePathState, searchable: ResolvedPath['searchable'], why: string, fix: Action | null, extra: Partial<ResolvedPath> = {}) =>
       out.push({ ...base, state, searchable, why, fix, ...extra });
     const liveSearch: ResolvedPath['searchable'] = emb ? SEARCHABLE[emb.state] : false;
@@ -203,6 +225,14 @@ export async function resolveSourcePaths(engine: BrainEngine, sourceId: string, 
       push('missing', false, 'The file is committed and eligible, with no page, no hold and no skip. A re-screen imports it or records why it cannot.',
         { ...readFix('Schedules committed files that have no page and no hold for a re-screen, then names the follow-up sync.', ['gbrain', 'sources', 'retry-held', sourceId, '--unindexed'], verify(p.input)),
           then: readFix('Imports the scheduled files.', sync, verify(p.input)) });
+      continue;
+    }
+    const budget = budgetHolds.get(live.slug);
+    if (budget) {
+      const { unembedded, ...embeddingHold } = budget;
+      push('pending_embedding', 'keyword', `Page ${live.slug} is searchable by keyword; its embedding budget is ${budget.state} (${budget.reason}), so ${unembedded} chunk(s) wait for a vector until the hold is approved.`,
+        readFix('Lists the held and capped large pages with the cost to finish and the approve command; read-only.', ['gbrain', 'embed', '--held', '--dry-run', '--source', sourceId], verify(p.input)),
+        { embedding_hold: embeddingHold, page: { ...base.page!, unembedded } });
       continue;
     }
     const state = emb ? PAGE_STATE[emb.state as Exclude<EmbeddingState, 'deleted_page_chunks'>] ?? 'searchable' : 'chunkless';

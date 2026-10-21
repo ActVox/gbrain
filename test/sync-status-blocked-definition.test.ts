@@ -55,6 +55,7 @@ test('a file hold that waits on a person reads synced/held_needs_human, like the
   expect(status.holds.map(hold => [hold.path, hold.needs_human])).toEqual([['d.md', true]]);
   expect([status.state, status.reason]).toEqual(['synced', 'held_needs_human']);
   expect(status.needs_human).toBe(true);
+  expect(status.needs_human_from).toEqual({ kind: 'hold', path: 'd.md', slug: 'd', code: 'file_drift' });
   expect(status.next).toMatchObject({ argv: ['gbrain', 'repair', 'file-drift', '--source', id, '--slug', 'd', '--prefer', 'database'] });
   expect(status.next!.user_message).toContain('page d');
   expect(syncStatusHeadline(status)).toBe(`Source ${id} is synced except 1 held file(s), some waiting on a person (see NEEDS HUMAN below); the rest keeps syncing.`);
