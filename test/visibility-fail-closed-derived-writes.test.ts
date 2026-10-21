@@ -164,6 +164,21 @@ describe('facts extracted from a private page stay private', () => {
       expect(await remoteReadable(s.remote)).not.toContain(CLAIM);
     });
   }, 120_000);
+
+  test('remote extract_facts: a private or unseen source_slug writes private alike; a world source keeps world', async () => {
+    await onEachEngine(async engine => {
+      const s = await source(engine, true);
+      const extract = async (claim: string, source_slug: string) => {
+        stubExtraction(claim);
+        await operationsByName.extract_facts!.handler(s.remote, { turn_text: BODY, visibility: 'world', source_slug });
+        return (await factRows(engine, s.sourceId)).find(r => r.fact === claim)?.visibility;
+      };
+      expect(await extract(CLAIM, NOTE)).toBe('private');
+      expect(await extract('Alice Example joined the example board', 'notes/never-written-example')).toBe('private');
+      expect(await extract('Alice Example moved to the example city', PERSON)).toBe('world');
+      expect(await remoteReadable(s.remote)).not.toContain(CLAIM);
+    });
+  }, 120_000);
 });
 
 describe('remember without a visibility never widens', () => {
