@@ -1834,6 +1834,46 @@ take is not changed: if it holds the wrong statement, decide which one is
 current and `gbrain forget` the other. It writes the database only; no page is
 rewritten.
 
+<a id="duplicate-facts"></a>
+### Duplicate facts
+
+Before this release, the same claim could be stored many times: conversation
+fact extraction saved a standing prompt or instruction again for every session
+that repeated it, and recall returned every copy, so a few copies filled the
+`limit` and pushed distinct facts out (#7043, reported by @mikez93). Recall,
+the entity card and search `saved_facts` now collapse copies into one row
+(with `collapsed_count`), and extraction no longer stores a claim an active
+conversation fact of the same source already states. Copies stored before the
+upgrade stay in the database until `gbrain repair duplicate-facts` retires
+them. It is explicit-only and preview-bound, and it never runs on upgrade.
+
+**Say to your agent:** *"Preview the duplicate facts, then retire the copies
+after I agree."* The agent runs `gbrain repair duplicate-facts` and, after you
+agree, the printed apply command.
+
+```bash
+gbrain repair duplicate-facts                                   # preview: one line per group
+gbrain repair duplicate-facts --include-cross-entity            # also retire copies on other entities
+gbrain repair duplicate-facts --apply --expect <hash> --yes
+```
+
+A group is the active facts of one source, visibility and speaker whose text
+normalizes to the same fingerprint (the rule `forget` uses: case, punctuation
+and runs of whitespace do not matter). The oldest row is kept; every other copy gets
+`expired_at` and `superseded_by` pointing at it, so it leaves recall but is not
+deleted or withdrawn, and the claim can be saved again. Groups whose copies all
+sit on one entity are `same_entity`. Groups spread over several entities are
+`cross_entity`: they are listed, and retired only with `--include-cross-entity`
+(the kept row keeps its own entity). A copy that is a row of a page's Facts
+table is struck in that page as `superseded by #N` through a revision-bound
+page write when the kept row is in the same table; otherwise it is reported as
+`fence_kept_elsewhere` and kept. A copy in the Facts table of a segmented page
+is reported as `segmented_page` and kept, in the preview and in an apply that
+finds the page segmented since. Near duplicates (different wording) are never
+touched. A row that changed since the preview reports `changed_since_preview`
+and is kept. To keep the backfill from extracting one source at all, set
+`gbrain config set cycle.conversation_facts_backfill.exclude_sources '["source-a"]'`.
+
 <a id="failed-writes"></a>
 ### Failed writes
 

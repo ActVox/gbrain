@@ -44,6 +44,7 @@ test/company-brain-policy.test.ts
 test/company-brain-runtime.test.ts
 test/consolidate-same-instant-6023.test.ts
 test/conversation-facts-oversized-sidecar.test.ts
+test/conversation-facts-source-dedup-7043.test.ts
 test/cycle/synthesize-concepts-merge.test.ts
 test/db-lock-reconnect.test.ts
 test/decide/conflict-proposals-managed.test.ts
@@ -370,10 +371,12 @@ test/purge-global-marker.test.ts
 test/purge-missing-cache-6911.test.ts
 test/purge-read-surfaces.test.ts
 test/purge-sync-tombstone-hold-7130.test.ts
+test/recall-collapse-duplicates-7043.test.ts
 test/recall-page-fill.test.ts
 test/receipt-compaction-newest-sync-gbra130.test.ts
 test/remediation-manual-only.test.ts
 test/repair-apply-pending-6543.test.ts
+test/repair-duplicate-facts-7043.test.ts
 test/repair-embedding-effects.test.ts
 test/repair-failed-writes-conflict-6429.test.ts
 test/repair-failed-writes-drift-w411.test.ts

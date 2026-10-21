@@ -59,6 +59,7 @@ import { loopFactsRepair } from './loop-facts.ts';
 import { ontologyFactsRepair } from './ontology-facts.ts';
 import { factsRehomeRepair } from './facts-rehome.ts';
 import { consolidateTiesRepair } from './consolidate-ties.ts';
+import { duplicateFactsRepair } from './duplicate-facts.ts';
 import { orphanChildrenRepair } from './orphan-children.ts';
 import { failedWritesRepair } from './failed-writes.ts';
 import { frontmatterRepair } from './frontmatter.ts';
@@ -268,6 +269,22 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'validity. The preview lists each such fact with its tied partners and take. Preview-bound: --apply --expect <hash> sets exactly the previewed '
       + 'facts back to open validity and keeps their consolidation mark; a fact that was expired, edited or reopened reports changed_since_preview. '
       + 'Database-only; no page is rewritten.',
+  },
+  'duplicate-facts': {
+    handler: duplicateFactsRepair, embeds: 'effect', checks: [], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: 'Retire the previewed copies of duplicate facts, keeping the oldest row of each claim',
+      why: 'The preview listed each group of active facts that state one claim (same fingerprint, source and visibility) with the row it keeps; applying it supersedes exactly the listed copies.',
+      risk: 'Copies are expired with superseded_by pointing at the kept row, never deleted or withdrawn, so the claim stays in recall and can be saved again. '
+        + 'Fenced copies are struck in their page as "superseded by #N" through a revision-bound page write. A row that changed since the preview is kept.',
+      user_message: 'Retire the previewed duplicate fact copies? Each claim keeps its oldest row; the copies are marked superseded by it, not deleted.',
+    },
+    summary: 'Retire exact copies of one active fact (#7043): in each group of active facts of one source and visibility that share their fingerprint, the '
+      + 'oldest row is kept and every other row is superseded by it (expired_at set, superseded_by the kept row; never a withdrawal, so the claim stays '
+      + 'rememberable). Groups whose copies sit on other entities are listed as cross_entity and retired only with --include-cross-entity; the kept row keeps '
+      + 'its entity. Near duplicates are never touched. Fenced copies are struck in their page through a revision-bound put_page when the kept row is in the '
+      + 'same fence, listed as fence_kept_elsewhere otherwise, and kept as segmented_page on a segmented page. Preview-bound: --apply --expect <hash> --yes retires exactly the previewed set; a row that '
+      + 'changed since reports changed_since_preview. Runs only when named.',
   },
   'orphan-children': {
     handler: orphanChildrenRepair, embeds: 'none', checks: ['child_table_orphans'], explicit_only: true,
@@ -582,7 +599,7 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
      * `explicit`: the operator named `kind`; required for explicit-only kinds.
      * `maxLlmUsd`: what this run may spend on a paid chat model (`spends: 'llm'` kinds; undefined = no run cap).
      */
-    async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[];
+    async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; includeCrossEntity?: boolean; only?: string[]; skip?: string[];
       slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number;
       prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string; held?: boolean; side?: string; state?: string;
       keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean; afterPage?: number } = {}): Promise<RepairResult> {
@@ -592,7 +609,7 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
         embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: [...(opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : []),
           ...(run.olderThan ? ['--older-than', run.olderThan] : []), ...(run.includeFailures ? ['--include-failures'] : []), ...(run.force ? ['--force'] : []),
           ...(run.afterPage !== undefined ? ['--after', String(run.afterPage)] : [])],
-        explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous, only: run.only, skip: run.skip, slugs: run.slugs, noLlm: run.noLlm,
+        explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous, includeCrossEntity: run.includeCrossEntity, only: run.only, skip: run.skip, slugs: run.slugs, noLlm: run.noLlm,
         maxLlmUsd: run.maxLlmUsd, deadline: run.deadline, prefer: run.prefer, requests: run.requests, allDrifted: run.allDrifted, driftClass: run.driftClass, since: run.since,
         held: run.held, side: run.side, state: run.state, keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force, from: run.from, close: run.close, afterPage: run.afterPage });
     },
