@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 254763,
-    "stdoutSha256": "f6d6005ad68241f8e95fac4a2f61f62b074fd5a0a76206e8e410a02d425692df",
+    "stdoutBytes": 255004,
+    "stdoutSha256": "b796b0ea4dc65bf1f4e6dcb410d1712243e32a8f66da3357e40842f66dc01537",
     "toolNames": [
       "remember",
       "entity",
@@ -1469,11 +1469,16 @@
         "mutating": false,
         "name": "get_write_request",
         "parameters": {
+          "applied": "boolean?",
           "request_id": "string"
         },
         "required_scopes": [],
         "schema": {
           "properties": {
+            "applied": {
+              "description": "Also return applied (#7190): whether the write is searchable yet, the gap and the source write watermark. A few more reads.",
+              "type": "boolean"
+            },
             "request_id": {
               "description": "The id you sent, or the receipt's.",
               "type": "string"

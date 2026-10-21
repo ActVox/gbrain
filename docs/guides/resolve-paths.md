@@ -67,7 +67,7 @@ keeps syncing reads `synced` with reason `held_needs_human`; `needs_human` and `
 
 ## Is my write searchable yet?
 
-`gbrain write-request <request_id> --json` (MCP `get_write_request`) carries `applied`, read live each time. The write's own reply stays frozen, so a same-request-id replay returns it unchanged; read the receipt for the live answer:
+`gbrain write-request <request_id> --applied --json` (MCP `get_write_request` with `applied: true`) carries `applied`, read live each time. It is opt-in, so a plain receipt poll costs no extra reads. The write's own reply stays frozen, so a same-request-id replay returns it unchanged; read the receipt for the live answer:
 
 | Field | Meaning |
 |---|---|

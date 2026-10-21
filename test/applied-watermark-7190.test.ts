@@ -85,7 +85,8 @@ test('get_write_request says whether a put_page is searchable yet; the write rep
   const reply = await submitPageMutation(ctx, { operation: 'put_page', params: { slug: 'erin-example', source_id: id, content: note('Erin wrote this.') } });
   expect(reply.applied).toBeUndefined();
   const { operationsByName } = await import('../src/core/operations.ts');
-  const read = await operationsByName.get_write_request!.handler(ctx, { request_id: reply.request_id }) as { applied?: Awaited<ReturnType<typeof readWriteApplied>> };
+  const read = await operationsByName.get_write_request!.handler(ctx, { request_id: reply.request_id, applied: true }) as { applied?: Awaited<ReturnType<typeof readWriteApplied>> };
+  expect((await operationsByName.get_write_request!.handler(ctx, { request_id: reply.request_id }) as { applied?: unknown }).applied).toBeUndefined();
   const applied = read.applied!;
   expect(applied).toBeDefined();
   expect(applied.state).not.toBe('pending_write');
