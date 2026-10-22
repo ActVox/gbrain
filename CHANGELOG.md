@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.374.0] - 2026-10-22
+
+**`GBRAIN_DEBUG=1` now says whether a CLI read was answered by the warm serve socket.** Before, a missing socket and several early fallbacks were silent and a warm hit printed nothing, so a warm run and a cold run looked the same on stderr.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| No socket at `$GBRAIN_HOME/.gbrain/run/cli.sock` | silent | `[cli-socket] cold path: no socket at <path>; start the serve with gbrain serve --cli-socket or set serve.cli_socket true` |
+| Not a local Postgres brain, `--explain`, or the brain does not resolve | silent | one `[cli-socket] cold path: <reason>` line |
+| The serve answers the call | silent | `[cli-socket] warm: <command> answered by the serve socket at <path>` |
+
+Without `GBRAIN_DEBUG=1`, output is byte-identical to before.
+
+### Itemized changes
+
+- `src/cli/cli-socket-client.ts`: the debug lines.
+- `docs/guides/cli-socket.md`: both lines documented.
+- Tests: `test/e2e/cli-socket-postgres.test.ts`.
+
 ## [0.60.373.0] - 2026-10-22
 
 **A commit becomes searchable sooner on a managed source that still has pages without an import record.** After a brain switches to managed persistence, every sync pass checked each of those pages for uncommitted edits. It read and hashed every file and ran Git over all of them, again on every pass, until the bounded legacy sweep had recorded the page. On a 10k-page source that check took about 320 ms of each pass, and it grows with the source. A long-running `gbrain serve` or `gbrain sync --watch` now reuses a file's clean verdict while the file's lstat (size, mtime and ctime in nanoseconds, inode, mode) and its Git entry are unchanged. It follows the same rules as the working-tree stat cache: a file changed within 2 s of being read is checked again, and so is an edit that restores its mtime.
