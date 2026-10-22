@@ -4,8 +4,11 @@
  */
 import type { GenerationAdapter } from '../contract.ts';
 import { atomGenerationAdapter } from './atoms.ts';
+import { consolidationAdapter, factFenceAdapter } from './fact-rows.ts';
+import { takeFenceAdapter } from './take-rows.ts';
 
-const adapters = new Map<string, GenerationAdapter<unknown>>([[atomGenerationAdapter.kind, atomGenerationAdapter as GenerationAdapter<unknown>]]);
+const adapters = new Map<string, GenerationAdapter<unknown>>([atomGenerationAdapter, factFenceAdapter, takeFenceAdapter, consolidationAdapter]
+  .map(adapter => [adapter.kind, adapter as GenerationAdapter<unknown>]));
 
 export function generationAdapter(kind: string): GenerationAdapter<unknown> | undefined { return adapters.get(kind); }
 export function generationKinds(): string[] { return [...adapters.keys()]; }

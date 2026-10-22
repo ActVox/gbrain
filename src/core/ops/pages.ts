@@ -27,6 +27,7 @@ import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { getContentFlag } from '../quarantine.ts';
 import { fileHeldField, readHeldPages } from '../persistence/held-reads.ts';
+import { fenceHoldEntries } from '../generations/fence.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs } from '../search/private-visibility.ts';
 import { LIST_PAGES_DESCRIPTION, CAPTURE_DESCRIPTION } from '../operations-descriptions.ts';
@@ -226,7 +227,9 @@ const get_page: Operation = {
     // Read-only, over the same visibility-filtered body the reader gets.
     const lineGrammar = p.grammar_diagnostics !== true ? undefined : await (await import('../line-grammar-report.ts')).grammarDiagnosticsForPage(ctx.engine, page, visibleBody);
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true); // #6259
-    const fileHeld = held ? { file_held: fileHeldField(held, isUntrustedReader) } : {};
+    const fenceHolds = await fenceHoldEntries(ctx.engine, [page.source_id], { slug: page.slug }).catch(() => []);
+    const fileHeld = { ...(held ? { file_held: fileHeldField(held, isUntrustedReader) } : {}),
+      ...(fenceHolds.length ? { fence_held: fenceHolds.map(({ source_id: _source, slug: _slug, ...hold }) => hold) } : {}) };
     const segmented = isSegmentedPage(page);
     const pin = authorizedReadPin(ctx, page, snapshot!.bodyGeneration, p.min_trust, () => pageNotFoundError(ctx, slug, { includeDeleted, sourceIdParam }));
     const whole = bodyRequest.mode === 'full'

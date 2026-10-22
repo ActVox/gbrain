@@ -32,6 +32,7 @@ import { MaintenanceWriteWait } from './maintenance-wait.ts';
 import { auditConflictsCommand, FILE_DRIFT_MESSAGE, liveFileDrift } from './drift-conflicts.ts';
 import { declaredWriteTrust, lowerToDerivedTier, readDerivationDeclaration, recordTaintEdges, type DerivationDeclaration } from '../trust/taint.ts';
 import { sameInstantTies } from '../facts/claim-ties.ts';
+import { factPreimages, recordConsolidationGeneration } from '../generations/adapters/fact-rows.ts';
 
 export interface MaintenanceAuthority {
   writer: WriteAuthority;
@@ -592,12 +593,14 @@ async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, co
       if (!take) throw opError('storage_error', 'The consolidated take did not commit.',
         `Consolidation request ${row.request_id} on ${row.slug} in ${row.source_id} did not find its take inside the publication transaction, so the transaction rolled back. Read the receipt with gbrain write-request -- ${row.request_id} and check the owner with gbrain sources writer status --source ${row.source_id} --json before any new consolidation.`,
         { fix: receiptFix(row) });
+      const before = await factPreimages(tx, row.source_id, facts.map(f => f.id));
       for (const fact of facts) await tx.consolidateFact(fact.id, take.id);
       const chronological = [...facts].sort((a, b) => Date.parse(String(a.value.valid_from)) - Date.parse(String(b.value.valid_from)) || a.id - b.id);
       for (let i = 0; i < chronological.length - 1; i++) {
         await tx.executeRaw('UPDATE facts SET valid_until=$1::timestamptz WHERE source_id=$2 AND id=$3',
           [chronological[i + 1].value.valid_from, row.source_id, chronological[i].id]);
       }
+      await recordConsolidationGeneration(tx, row.source_id, row.slug, before);
       return { ...outcome, noop: false, facts_consolidated: facts.length, takes_written: existing ? 0 : 1, take_id: Number(take.id) };
     } };
 }
