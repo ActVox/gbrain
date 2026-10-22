@@ -79,7 +79,16 @@ each one. Teach your agent's upgrade skill to handle that refusal:
    (`gbrain autopilot --install`) and workers under
    `gbrain jobs supervisor start --detach` so later upgrades restart them on
    their own.
-3. Verify with `gbrain doctor --only runtime_build_skew --json`: it fails while
+3. A process that starts from another gbrain install (a second Bun global copy
+   the serve service points at, often pinned to a tag or commit) would come back
+   on the old build, so the upgrade replaces that copy first (`bun remove -g`,
+   then `bun add -g` the release tag, under the copy's own `BUN_INSTALL`; a
+   plain `bun add` or `bun update` keeps a pin) and refuses for any other kind
+   of install (a git clone) with its exact commands. If a process still comes
+   back on another build, `restart_unverified` names the install it runs from
+   and its `fix` is that replacement followed by `gbrain upgrade --restart-only`
+   (`ask_user`: relay `user_message`, run the chain after the user agrees).
+4. Verify with `gbrain doctor --only runtime_build_skew --json`: it fails while
    two builds run, and its fix (`gbrain upgrade --restart-only`, after the user
    agrees) restarts every process onto the installed build.
 

@@ -110,8 +110,11 @@ start, the upgrade exits non-zero and prints recovery: `bun upgrade`, then
 rolled back automatically, and the autopilot channel records that version as
 failed.
 
-Tag-pinned package installs (`github:garrytan/gbrain#v<x>`) stay pinned through
-`bun update`, so `gbrain upgrade` prints a reinstall instead. Every printed
+Tag- or commit-pinned package installs (`github:garrytan/gbrain#v<x>`, `#<sha>`)
+stay pinned through `bun update`, so `gbrain upgrade` replaces them itself when a
+newer release tag is published (`bun remove -g gbrain`, then `bun add -g` the tag,
+restoring the previous release if the add fails), and otherwise prints a
+reinstall. Every printed
 reinstall checks that the release tag exists before `bun remove -g gbrain`
 runs, and ends with the line that restores the previous version if the add
 fails. The target is the newest published release tag: master's `VERSION` is
@@ -241,6 +244,10 @@ process this brain runs on the host, or refuses before it installs anything:
    worker registry; a record whose pid `ps` does not show as gbrain is stale
    and ignored) and checks that each one can be restarted: serve and autopilot
    through their installed services when the service's own process runs them,
+   a process that starts from a separate Bun global copy (for example one the
+   serve service points at, pinned to a commit) has that copy replaced first
+   (`bun remove -g` then `bun add -g` the release tag under its `BUN_INSTALL`),
+   and one that starts from another kind of install refuses with its commands;
    the supervisor with `gbrain jobs supervisor stop` then `start --detach` with
    the queue, concurrency and PID file it was launched with (its worker, under
    tini or not, restarts with it). A serve or worker started by hand, an

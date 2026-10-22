@@ -22,10 +22,10 @@ import { resolveAutopilotJob } from '../core/autopilot-paths.ts';
 import { plistPath, systemdUnitPath } from './autopilot/jobs.ts';
 import { readSupervisorBuild, readSupervisorPid } from '../core/minions/supervisor-pid.ts';
 import { parseEtimeToMs, readWorkers } from '../core/minions/worker-registry.ts';
-import { installedVersion } from '../core/runtime-build.ts';
+import { installedVersion, runtimeInstallRoot } from '../core/runtime-build.ts';
 import { VERSION } from '../version.ts';
 import {
-  classifyGbrainCommand, collectHostProcesses, gbrainEntry, planRestart, runRestartSteps, verifyRestart,
+  classifyGbrainCommand, collectHostProcesses, copyFix, gbrainEntry, mismatchedBuilds, PENDING_BUILD, planRestart, runRestartSteps, verifyRestart,
   type HostProcess, type ProcessSources, type ProcessTableRow, type RestartPlan, type ServiceHandle, type WarmSocketState,
 } from '../core/upgrade-restart.ts';
 
@@ -33,8 +33,6 @@ const DOCS = 'docs/guides/upgrades-auto-update.md#restart';
 const DRY_RUN_VERIFY = ['gbrain', 'upgrade', '--restart-only', '--dry-run', '--json'];
 const VERIFY_TIMEOUT_MS = 180_000;
 const VERIFY_POLL_MS = 2_000;
-/** A pre-swap plan treats every process as stale: none can run the build that is not installed yet. */
-const PENDING_BUILD = 'pending';
 
 const brainHome = () => process.env.GBRAIN_HOME?.trim() || homedir();
 
@@ -64,20 +62,20 @@ function readProcessTable(uid: number | undefined, pids?: number[]): ProcessTabl
   });
 }
 
-/** The version the install a gbrain command line starts from holds now: the package.json above its entry point (null for a compiled binary). */
-function installVersionOf(command: string): string | null {
+/** The gbrain install a command line starts from: the package directory above its entry point and the version it holds now (null for a compiled binary). */
+function installOf(command: string): { root: string | null; version: string | null } {
   const entry = gbrainEntry(command)?.entry;
-  if (!entry) return null;
+  if (!entry) return { root: null, version: null };
   try {
     const found = entry.includes('/') ? entry : (process.env.PATH ?? '').split(delimiter).map(dir => join(dir, entry)).find(path => existsSync(path));
-    if (!found) return null;
+    if (!found) return { root: null, version: null };
     let dir = dirname(realpathSync(found));
     for (let i = 0; i < 4; i++, dir = dirname(dir)) {
       const version = installedVersion(dir);
-      if (version) return version;
+      if (version) return { root: dir, version };
     }
   } catch { /* unknown */ }
-  return null;
+  return { root: null, version: null };
 }
 
 /** The pid a service manager runs for a unit or label now; null when it is not running or cannot be read. */
@@ -133,7 +131,7 @@ async function hostSources(): Promise<{ sources: ProcessSources; notes: string[]
     },
     workers: () => { try { return readWorkers(() => null).map(w => ({ pid: w.pid, version: w.version ?? null })); } catch { return []; } },
     processTable: () => readProcessTable(uid),
-    installVersion: installVersionOf,
+    install: installOf,
     home: brainHome(),
     exclude: [process.pid, process.ppid],
   };
@@ -155,6 +153,7 @@ function describeSteps(plan: RestartPlan): string[] {
   const name = (pid: number) => byPid.has(pid) ? describe(byPid.get(pid)!) : `pid ${pid}`;
   return plan.steps.map(step => step.kind === 'service' ? `${step.pids.map(name).join(', ')}: \`${step.argv.join(' ')}\``
     : step.kind === 'supervisor' ? `${[step.pid, ...step.workers].map(name).join(', ')}: \`${step.stop.join(' ')}\`, then \`${step.start.join(' ')}\``
+    : step.kind === 'replace_copy' ? `${step.pids.map(name).join(', ')} run from the Bun global copy at ${step.root} (${step.from ? `v${step.from}` : 'version unknown'}): replace it with v${step.to} (BUN_INSTALL=${step.bun_install}: bun remove -g gbrain, then bun add -g the tag) before the restarts`
     : `${name(step.pid)}: stop it (reconnect gbrain in its harness afterwards)`);
 }
 
@@ -177,6 +176,30 @@ export function restartRefusal(plan: RestartPlan, rerunArgv: readonly string[], 
 
 export interface HostRestartOptions { stopMcp: boolean; json: boolean; rerunArgv: string[] }
 
+/** The package directory this process loaded its code from (realpath), the install the upgrade replaces. */
+function ownInstallRoot(): string | null {
+  const root = runtimeInstallRoot();
+  try { return root ? realpathSync(root) : null; } catch { return root; }
+}
+
+/**
+ * GBRA-175: the fix for a process that came back on another build: move the install it runs from onto the target
+ * (a Bun global copy is removed and re-added, since a pinned copy keeps its pin through `bun add`), then restart again.
+ */
+export function mismatchFix(p: HostProcess, expected: string): Action {
+  const restart: Action = { argv: ['gbrain', 'upgrade', '--restart-only'], consent: [], actor: 'agent', requires_exclusive: false, docs: DOCS,
+    why: 'Restarts every gbrain process onto the installed build and verifies it.', verify: { argv: DRY_RUN_VERIFY } };
+  if (!p.install_root) {
+    return { argv: DRY_RUN_VERIFY, consent: [], actor: 'agent', requires_exclusive: false, docs: DOCS, verify: { argv: DRY_RUN_VERIFY },
+      why: `${p.role} pid ${p.pid} runs another build from an install that could not be located (a compiled binary): reinstall that binary at v${expected} or start the process from this install, then run gbrain upgrade --restart-only.` };
+  }
+  const fix = copyFix(p.install_root, p.install_version ?? null, expected);
+  const envPrefix = Object.entries(fix.env).map(([k, v]) => `${k}=${v}`);
+  const chain = fix.argv.reduceRight<Action>((then, argv) => ({ argv: envPrefix.length ? ['env', ...envPrefix, ...argv] : argv, consent: [], actor: 'user', requires_exclusive: false, docs: DOCS,
+    why: `${p.role} pid ${p.pid} came back on another build because it runs from ${p.install_root}: ${fix.instruction}.`, then }), restart);
+  return { ...chain, ask_user: true, user_message: `${p.role} pid ${p.pid} still runs another gbrain build after the restart: it starts from ${p.install_root}, which holds ${p.install_version ? `v${p.install_version}` : 'an unknown version'}. May I ${fix.instruction}, then restart again?` };
+}
+
 /**
  * Before the swap: refuse (exit 3, nothing installed) when a running process could not be restarted afterwards.
  * Returns true when the upgrade may proceed.
@@ -185,7 +208,7 @@ export async function preflightHostRestart(opts: HostRestartOptions): Promise<bo
   const { sources, close } = await hostSources();
   try {
     const services = hostServices();
-    const plan = planRestart(await collectHostProcesses(sources), { expected: PENDING_BUILD, serveService: services.serve, autopilotService: services.autopilot, stopMcp: opts.stopMcp });
+    const plan = planRestart(await collectHostProcesses(sources), { expected: PENDING_BUILD, serveService: services.serve, autopilotService: services.autopilot, stopMcp: opts.stopMcp, ownInstallRoot: ownInstallRoot() });
     const refusal = restartRefusal(plan, opts.rerunArgv, false);
     if (!refusal) return true;
     setCliExitVerdict(writeCliError(refusal, 'upgrade', { json: opts.json }));
@@ -201,7 +224,7 @@ export async function runHostRestart(opts: HostRestartOptions & { dryRun: boolea
   try {
     const services = hostServices();
     const before = await collectHostProcesses(sources);
-    const plan = planRestart(before, { expected: VERSION, serveService: services.serve, autopilotService: services.autopilot, stopMcp: opts.stopMcp });
+    const plan = planRestart(before, { expected: VERSION, serveService: services.serve, autopilotService: services.autopilot, stopMcp: opts.stopMcp, ownInstallRoot: ownInstallRoot() });
     const { probeCliSocket } = await import('../core/cli-socket/probe.ts');
     const warmBefore = await probeCliSocket();
     const planDoc = { expected: VERSION, processes: before, steps: plan.steps, manual: plan.manual, warm_socket: warmBefore, notes };
@@ -215,8 +238,8 @@ export async function runHostRestart(opts: HostRestartOptions & { dryRun: boolea
     if (!opts.json) printPlan(plan, warmBefore, notes);
     const startedMs = Date.now();
     const results = await runRestartSteps(plan, {
-      run: argv => {
-        const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: 600_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      run: (argv, env) => {
+        const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: 600_000, stdio: ['ignore', 'pipe', 'pipe'], env: env ? { ...process.env, ...env } : process.env });
         return { status: r.error ? null : r.status, output: `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? r.error.message : ''}` };
       },
       terminate: terminateIfUnchanged,
@@ -231,10 +254,11 @@ export async function runHostRestart(opts: HostRestartOptions & { dryRun: boolea
     const doc = { status: verified.ok ? 'ok' : 'unverified', ...planDoc, results, verified: { processes: verified.processes, warm_socket: verified.warm_socket, problems: verified.problems, unverified: verified.unverified } };
     if (!verified.ok) {
       const failed = results.find(r => !r.ok);
+      const mismatch = mismatchedBuilds(plan, verified.processes)[0];
       setCliExitVerdict(writeCliError(opError('restart_unverified',
         `After the restart this host still runs more than one gbrain build, or a process did not come back: ${verified.problems.join(' ')}`,
-        `${failed ? `${failed.detail}. ` : ''}Restart what is listed with the command the plan printed, then run \`gbrain upgrade --restart-only\` again.`,
-        { docs: DOCS, fix: { argv: DRY_RUN_VERIFY, consent: [], actor: 'agent', requires_exclusive: false, docs: DOCS, why: 'Read-only: lists every gbrain process on this host with its build and the restart each one needs.', verify: { argv: ['gbrain', 'doctor', '--only', 'runtime_build_skew', '--json'] } } }),
+        `${failed ? `${failed.detail}. ` : ''}${mismatch ? 'Move each listed install onto this build as named' : 'Restart what is listed with the command the plan printed'}, then run \`gbrain upgrade --restart-only\` again.`,
+        { docs: DOCS, fix: mismatch ? mismatchFix(mismatch, VERSION) : { argv: DRY_RUN_VERIFY, consent: [], actor: 'agent', requires_exclusive: false, docs: DOCS, why: 'Read-only: lists every gbrain process on this host with its build and the restart each one needs.', verify: { argv: ['gbrain', 'doctor', '--only', 'runtime_build_skew', '--json'] } } }),
         'upgrade', { json: opts.json, extra: opts.json ? { restart: doc } : undefined }));
       return;
     }

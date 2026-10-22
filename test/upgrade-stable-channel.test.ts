@@ -63,7 +63,7 @@ describe('channel selection', () => {
 
 interface Run { home: string; exitCode: number; stdout: string; stderr: string; bunCalls: string[]; gbrainCalls: string[] }
 
-async function runStableUpgrade(args: string[], opts: { stableCommit?: string | null; config?: Record<string, unknown>; failAdd?: string } = {}): Promise<Run> {
+async function runStableUpgrade(args: string[], opts: { stableCommit?: string | null; config?: Record<string, unknown>; failAdd?: string; spec?: string } = {}): Promise<Run> {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-stable-'));
   const bin = join(home, 'bin');
   mkdirSync(bin);
@@ -82,7 +82,7 @@ async function runStableUpgrade(args: string[], opts: { stableCommit?: string | 
   const globalRoot = join(home, '.bun', 'install', 'global');
   const pkgDir = join(globalRoot, 'node_modules', 'gbrain');
   mkdirSync(pkgDir, { recursive: true });
-  writeFileSync(join(globalRoot, 'package.json'), JSON.stringify({ dependencies: { gbrain: 'github:garrytan/gbrain#latest-stable' } }));
+  writeFileSync(join(globalRoot, 'package.json'), JSON.stringify({ dependencies: { gbrain: opts.spec ?? 'github:garrytan/gbrain#latest-stable' } }));
   writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: 'gbrain', repository: 'github:garrytan/gbrain' }));
   const driver = join(pkgDir, 'driver.ts');
   writeFileSync(driver, `import { runUpgrade } from '${REPO}/src/commands/upgrade.ts';\nawait runUpgrade(${JSON.stringify(['--no-bun-floor-check', '--no-autopilot-install', ...args])});\n`);
@@ -149,6 +149,17 @@ describe('gbrain upgrade --channel stable', () => {
       expect(record).toMatchObject({ phase: 'stable-reinstall', from_version: VERSION, to_version: NEWER });
       expect(record.hint).toContain(`#v${NEWER}`);
       expect(r.exitCode).not.toBe(0);
+    } finally { rmSync(r.home, { recursive: true, force: true }); }
+  });
+
+  test('latest channel: a global install pinned to a commit is replaced (remove, then add the newest release tag), not left on its pin by bun update', async () => {
+    const r = await runStableUpgrade(['--swap-only'], { spec: 'github:garrytan/gbrain#0123456789abcdef0123456789abcdef01234567' });
+    try {
+      expect(r.stdout).toContain('pinned to github:garrytan/gbrain#0123456789abcdef0123456789abcdef01234567');
+      expect(r.bunCalls).toEqual(['remove -g gbrain', `add -g github:garrytan/gbrain#v${NEWEST}`]);
+      expect(r.bunCalls).not.toContain('update gbrain');
+      expect(r.stdout).toContain(`Now running: gbrain ${NEWEST}`);
+      expect(r.exitCode).toBe(0);
     } finally { rmSync(r.home, { recursive: true, force: true }); }
   });
 

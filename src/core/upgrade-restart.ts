@@ -50,6 +50,8 @@ export interface HostProcess {
   args?: string[];
   /** The version the install it was started from holds now; null when unknown (a compiled binary). */
   install_version?: string | null;
+  /** The package directory of the gbrain install it was started from (realpath); null when unknown (a compiled binary). */
+  install_root?: string | null;
 }
 
 export interface ProcessTableRow { pid: number; ppid: number; command: string; started_ms: number | null; gbrain_home: string | null | undefined }
@@ -61,8 +63,8 @@ export interface ProcessSources {
   workers: () => Array<{ pid: number; version: string | null }>;
   /** This user's processes, null when ps cannot run; `gbrain_home` is the GBRAIN_HOME (else HOME) from the process's environment, undefined when unreadable. */
   processTable: () => ProcessTableRow[] | null;
-  /** The version the install a command line starts from holds now; null when unknown. */
-  installVersion?: (command: string) => string | null;
+  /** The gbrain install a command line starts from: its package directory and the version it holds now (null when unknown). */
+  install?: (command: string) => { root: string | null; version: string | null };
   /** This brain's GBRAIN_HOME (else HOME), resolved. */
   home: string;
   /** Pids never listed: this process and its parents (the upgrade that spawned it). */
@@ -101,6 +103,8 @@ export function classifyGbrainCommand(command: string): ProcessRole | null {
   return null;
 }
 
+const installFields = (install: { root: string | null; version: string | null } | undefined) => ({ install_version: install?.version ?? null, install_root: install?.root ?? null });
+
 const HEARTBEAT_ROLES: Record<string, ProcessRole> = { serve: 'serve', jobs: 'worker', autopilot: 'autopilot', mcp: 'mcp', sync: 'sync' };
 
 /** Every gbrain process this brain runs on this host, one per pid. */
@@ -120,7 +124,7 @@ export async function collectHostProcesses(sources: ProcessSources): Promise<Hos
     const role = classifyGbrainCommand(row.command);
     if (!role) continue;
     byPid.set(row.pid, { pid: row.pid, ppid: null, role, version: null, started_ms: row.started_ms, ancestors: ancestry(row.ppid),
-      args: gbrainEntry(row.command)!.args, install_version: sources.installVersion?.(row.command) ?? null });
+      args: gbrainEntry(row.command)!.args, ...installFields(sources.install?.(row.command)) });
   }
   const merge = (pid: number, role: ProcessRole | null, version: string | null) => {
     if (excluded.has(pid)) return;
@@ -152,12 +156,38 @@ export interface RestartContext {
   autopilotService: ServiceHandle | null;
   /** Stop MCP stdio servers (their harness starts the new build on reconnect) instead of refusing. */
   stopMcp: boolean;
+  /** The package directory of the install this upgrade replaces (realpath); null when unknown (a compiled binary). */
+  ownInstallRoot?: string | null;
+}
+
+/** Before the swap the installed build is not known yet: every process is stale. */
+export const PENDING_BUILD = 'pending';
+
+/** A gbrain package directory inside a Bun global install (`<BUN_INSTALL>/install/global/node_modules/gbrain`): the BUN_INSTALL it belongs to. */
+export function bunGlobalCopyOf(pkgDir: string): { bun_install: string } | null {
+  const parts = pkgDir.replace(/\/+$/, '').split('/');
+  if (parts.length < 6 || parts.slice(-4).join('/') !== 'install/global/node_modules/gbrain') return null;
+  return { bun_install: parts.slice(0, -4).join('/') || '/' };
+}
+
+/** The steps that move another gbrain install onto the target build, as argv, plus the sentence that names them. */
+export function copyFix(root: string, holds: string | null, expected: string): { argv: string[][]; env: Record<string, string>; instruction: string } {
+  const release = expected === PENDING_BUILD ? 'the release being installed' : `v${expected}`;
+  const copy = bunGlobalCopyOf(root);
+  if (copy) {
+    const argv = [['bun', 'remove', '-g', 'gbrain'], ['bun', 'add', '-g', `github:garrytan/gbrain#v${expected}`]];
+    const shown = argv.map(a => `BUN_INSTALL=${copy.bun_install} ${a.join(' ')}`).join(' && ');
+    return { argv, env: { BUN_INSTALL: copy.bun_install }, instruction: `replace the Bun global copy at ${root} (${holds ? `v${holds}` : 'version unknown'}; a pinned copy keeps its pin through bun add alone, so remove it first): \`${shown}\`` };
+  }
+  const argv = [['git', '-C', root, 'fetch', '--tags', 'origin'], ['git', '-C', root, 'checkout', `v${expected}`], ['bun', 'install', '--cwd', root]];
+  return { argv, env: {}, instruction: `move the install at ${root} (${holds ? `v${holds}` : 'version unknown'}) to ${release}: for a git clone, \`${argv.map(a => a.join(' ')).join(' && ')}\`; otherwise start this process from the upgraded install instead` };
 }
 
 export type RestartStep =
   | { kind: 'service'; role: 'serve' | 'autopilot'; argv: string[]; pids: number[] }
   | { kind: 'supervisor'; pid: number; workers: number[]; stop: string[]; start: string[]; pid_file: string | null }
-  | { kind: 'stop'; role: 'mcp'; pid: number; started_ms: number | null };
+  | { kind: 'stop'; role: 'mcp'; pid: number; started_ms: number | null }
+  | { kind: 'replace_copy'; root: string; bun_install: string; from: string | null; to: string; pids: number[] };
 
 export interface ManualStep { role: ProcessRole; pid: number; version: string | null; argv: string[]; instruction: string }
 
@@ -197,8 +227,21 @@ export function planRestart(processes: readonly HostProcess[], ctx: RestartConte
   const runsUnder = (p: HostProcess, service: ServiceHandle | null) => !!service && service.pid !== null && (p.pid === service.pid || !!p.ancestors?.includes(service.pid));
   const kill = (p: HostProcess, instruction: string) => manual.push({ role: p.role, pid: p.pid, version: p.version, argv: ['kill', String(p.pid)], instruction });
 
+  const copies = new Map<string, Extract<RestartStep, { kind: 'replace_copy' }>>();
   for (const p of stale) {
     const parent = p.ppid === null ? undefined : byPid.get(p.ppid);
+    if (ctx.ownInstallRoot && p.install_root && p.install_root !== ctx.ownInstallRoot && p.install_version !== ctx.expected) {
+      const copy = bunGlobalCopyOf(p.install_root);
+      if (!copy) {
+        const fix = copyFix(p.install_root, p.install_version ?? null, ctx.expected);
+        manual.push({ role: p.role, pid: p.pid, version: p.version, argv: fix.argv[0]!,
+          instruction: `${label(p)} runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: ${fix.instruction}; then run the upgrade again.` });
+        continue;
+      }
+      const known = copies.get(p.install_root);
+      if (known) known.pids.push(p.pid);
+      else copies.set(p.install_root, { kind: 'replace_copy', root: p.install_root, bun_install: copy.bun_install, from: p.install_version ?? null, to: ctx.expected, pids: [p.pid] });
+    }
     switch (p.role) {
       case 'serve':
         if (runsUnder(p, ctx.serveService)) addService('serve', p.pid);
@@ -228,7 +271,7 @@ export function planRestart(processes: readonly HostProcess[], ctx: RestartConte
         break;
     }
   }
-  const steps: RestartStep[] = [];
+  const steps: RestartStep[] = [...copies.values()];
   const serve = services.get('serve');
   if (serve && ctx.serveService) steps.push({ kind: 'service', role: 'serve', argv: ctx.serveService.argv, pids: [...new Set(serve)] });
   const autopilot = services.get('autopilot');
@@ -239,7 +282,7 @@ export function planRestart(processes: readonly HostProcess[], ctx: RestartConte
 }
 
 export interface RestartExecutor {
-  run: (argv: string[]) => { status: number | null; output: string };
+  run: (argv: string[], env?: Record<string, string>) => { status: number | null; output: string };
   /** SIGTERM the MCP server at pid only if it is still the process the plan saw: 'changed' when the pid now names another process. */
   terminate: (pid: number, startedMs: number | null) => 'stopped' | 'gone' | 'changed';
   /** The live supervisor's pid now (read from its PID file, the default one when null), or null. */
@@ -255,7 +298,18 @@ const failed = (argv: string[], r: { status: number | null; output: string }) =>
 export async function runRestartSteps(plan: RestartPlan, exec: RestartExecutor): Promise<StepResult[]> {
   const results: StepResult[] = [];
   for (const step of plan.steps) {
-    if (step.kind === 'service') {
+    if (step.kind === 'replace_copy') {
+      const env = { BUN_INSTALL: step.bun_install };
+      const probe = ['git', 'ls-remote', '--exit-code', '--tags', 'https://github.com/garrytan/gbrain', `refs/tags/v${step.to}`];
+      const add = ['bun', 'add', '-g', `github:garrytan/gbrain#v${step.to}`];
+      const probed = exec.run(probe);
+      if (probed.status !== 0) { results.push({ step, ok: false, detail: `v${step.to} has no release tag, so the copy at ${step.root} was left as it is (${failed(probe, probed)})` }); continue; }
+      const removed = exec.run(['bun', 'remove', '-g', 'gbrain'], env);
+      const added = removed.status === 0 ? exec.run(add, env) : removed;
+      if (added.status === 0) { results.push({ step, ok: true, detail: `replaced the Bun global copy at ${step.root} with v${step.to}` }); continue; }
+      const restored = removed.status === 0 && step.from ? exec.run(['bun', 'add', '-g', `github:garrytan/gbrain#v${step.from}`], env).status === 0 : false;
+      results.push({ step, ok: false, detail: `could not replace the copy at ${step.root} (${failed(removed.status === 0 ? add : ['bun', 'remove', '-g', 'gbrain'], added)})${restored ? `; restored v${step.from}` : ''}` });
+    } else if (step.kind === 'service') {
       const r = exec.run(step.argv);
       results.push({ step, ok: r.status === 0, detail: r.status === 0 ? `ran \`${step.argv.join(' ')}\`` : failed(step.argv, r) });
     } else if (step.kind === 'supervisor') {
@@ -287,7 +341,13 @@ function refusesThisBuild(warm: WarmSocketState): boolean {
   return warm.state === 'refused' && !(warm.reason === 'identity_mismatch' && warm.mismatch && warm.mismatch !== 'version');
 }
 
-const restartedPids = (plan: RestartPlan) => new Set(plan.steps.flatMap(step => step.kind === 'service' ? step.pids : step.kind === 'supervisor' ? [step.pid, ...step.workers] : [step.pid]));
+const restartedPids = (plan: RestartPlan) => new Set(plan.steps.flatMap(step => step.kind === 'service' ? step.pids : step.kind === 'supervisor' ? [step.pid, ...step.workers] : step.kind === 'stop' ? [step.pid] : []));
+
+/** Processes that came back on a build other than the target, with the install each one runs from. */
+export function mismatchedBuilds(plan: RestartPlan, processes: readonly HostProcess[]): HostProcess[] {
+  const restarted = restartedPids(plan);
+  return processes.filter(p => !restarted.has(p.pid) && (p.version ? p.version !== plan.expected : !!p.install_version && p.install_version !== plan.expected));
+}
 
 /** What still stands between the host and one build after a restart; empty when it is done. */
 export function restartProblems(plan: RestartPlan, processes: readonly HostProcess[], restartStartedMs: number,
@@ -300,13 +360,15 @@ export function restartProblems(plan: RestartPlan, processes: readonly HostProce
     if (p) problems.push(`${label(p)} is still running after the restart.`);
   }
   const fresh = processes.filter(p => !restarted.has(p.pid));
+  const mismatched = new Set(mismatchedBuilds(plan, processes));
   for (const p of fresh) {
-    if (p.version && p.version !== plan.expected) problems.push(`${label(p)} runs a build other than v${plan.expected}.`);
-    else if (!p.version && p.install_version && p.install_version !== plan.expected) problems.push(`${label(p)} reports no build and was started from an install that holds v${p.install_version}.`);
+    const from = p.install_root ? `; it runs from ${p.install_root}, which holds ${p.install_version ? `v${p.install_version}` : 'an unknown version'}: ${copyFix(p.install_root, p.install_version ?? null, plan.expected).instruction}` : '';
+    if (mismatched.has(p) && p.version) problems.push(`${label(p)} runs a build other than v${plan.expected}${from}.`);
+    else if (mismatched.has(p)) problems.push(`${label(p)} reports no build and was started from an install that holds v${p.install_version}${from}.`);
     else if (!p.version && (p.started_ms === null || p.started_ms < restartStartedMs)) problems.push(`${label(p)} reports no build and started before the restart.`);
   }
   for (const step of plan.steps) {
-    if (step.kind === 'stop') continue;
+    if (step.kind === 'stop' || step.kind === 'replace_copy') continue;
     const role = step.kind === 'service' ? step.role : 'supervisor';
     if (!fresh.some(p => p.role === role)) {
       problems.push(`${role} did not come back after ${step.kind === 'service' ? `\`${step.argv.join(' ')}\`` : 'the supervisor restart'}.`);

@@ -12,8 +12,10 @@ import { forwardProgressPast, migrationLedgerSummary, wedgedLedgerHint } from '.
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { MIGRATIONS_RUNNING_EXIT_CODE, readMigrationLockHolder } from '../core/migration-orchestration-lock.ts';
 import { loadConfig } from '../core/config.ts';
-import { clearSnooze, clearUpdateCache, normalizeChannel, resolveReleaseChannel, writeJustUpgraded, writeSwapReceipt, type ReleaseChannel } from '../core/self-upgrade.ts';
+import { clearSnooze, clearUpdateCache, resolveReleaseChannel, writeJustUpgraded, writeSwapReceipt, type ReleaseChannel } from '../core/self-upgrade.ts';
 import { preflightHostRestart, runHostRestart } from './upgrade-restart.ts';
+import { parseChannelArg, resolveStableRelease, stableUnresolvedMessage } from '../core/stable-channel.ts';
+export { parseChannelArg, resolveStableRelease } from '../core/stable-channel.ts';
 import { MOVEMENT_SUPERVISOR_STEP } from './movement-step.ts';
 import {
   BUN_FLOOR_EXIT_CODE,
@@ -67,7 +69,6 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
     return;
   }
   const noRestart = args.includes('--no-restart');
-
   // Capture old version BEFORE upgrading (Codex finding: old binary runs this code)
   const oldVersion = VERSION;
   const method = detectInstallMethod();
@@ -77,7 +78,6 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   const stableTarget = channelTarget(args, oldVersion, json);
   if (stableTarget === 'stop') return;
   if (stableTarget) opts = { ...opts, targetVersion: stableTarget.version };
-
   if (!swapOnly && !noRestart && !await preflightHostRestart(restartOpts)) return;
 
   let upgraded = false;
@@ -117,6 +117,8 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
     case 'bun': {
       console.log('Upgrading via bun...');
       const bunGlobalRoot = resolveBunGlobalRoot();
+      const pinned = await replacePinnedInstall(bunGlobalRoot, opts.targetVersion ?? null, { oldVersion, upgradeEnv, checkBunFloor, recovery, phase: 'pinned-reinstall' });
+      if (pinned) { if (pinned === 'refused') return; upgraded = pinned === 'installed'; break; }
       if (checkBunFloor && refuseForBunFloor(await readPackageTarget(globalGbrainSpec(bunGlobalRoot)), opts.targetVersion)) return;
       try {
         execFileSync('bun', ['update', 'gbrain'], { cwd: bunGlobalRoot, env: upgradeEnv, stdio: 'inherit', timeout: 120_000 });
@@ -254,7 +256,7 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   // the newest PUBLISHED release tag only; with none newer the hint moves the
   // install off the pin, and the ledger row names no unpublished version.
   if (!target && method === 'bun' && unchanged) {
-    const pin = bunGlobalExactTagPin(resolveBunGlobalRoot());
+    const pin = bunGlobalExactTagPin(resolveBunGlobalRoot(), true);
     if (pin) {
       const plan = planPinnedReinstall(null, oldVersion);
       console.error(`Upgrade did not take effect: still running ${newVersion}, because the global install is pinned to ${pin} and \`bun update\` keeps a pinned tag.`);
@@ -346,14 +348,6 @@ export async function runUpgrade(args: string[], opts: { targetVersion?: string 
   console.log(`Next: ${MOVEMENT_SUPERVISOR_STEP}`);
 }
 
-/** GBRA-175: `--channel <name>` / `--channel=<name>`; null when absent, 'invalid' for anything but latest or stable. */
-export function parseChannelArg(args: readonly string[]): ReleaseChannel | 'invalid' | null {
-  const at = args.findIndex(a => a === '--channel' || a.startsWith('--channel='));
-  if (at === -1) return null;
-  const raw = args[at]!.includes('=') ? args[at]!.slice('--channel='.length) : args[at + 1];
-  return normalizeChannel(raw) ?? 'invalid';
-}
-
 /** GBRA-175: the new build restarts every process onto itself and verifies one build runs; returns the summary line. */
 function restartOntoNewBuild(stopMcp: boolean, newVersion: string): string {
   const restart = spawnSync('gbrain', ['upgrade', '--restart-only', ...(stopMcp ? ['--stop-mcp'] : [])], { stdio: cliChildStdio(), env: { ...process.env, GBRAIN_SKIP_STARTUP_HOOKS: '1' }, timeout: 900_000 });
@@ -388,37 +382,20 @@ function channelTarget(args: readonly string[], oldVersion: string, json: boolea
   return stable;
 }
 
-function stableUnresolvedMessage(error: 'unreadable' | 'no_stable' | 'no_release_tag'): string {
-  if (error === 'unreadable') return `The stable channel could not be read: \`git ls-remote --tags ${GBRAIN_GIT_URL}\` failed (offline, or no git).`;
-  if (error === 'no_stable') return 'No release has been promoted to the stable channel yet (the repository has no `stable` tag).';
-  return 'The `stable` tag does not point at a published release commit (no `v<version>` tag shares its commit).';
-}
-
 /**
- * GBRA-175: the release the stable channel names: the `v<version>` tag on the commit `refs/tags/stable` peels to
- * (the newest when several share it). promote-stable.yml moves `stable` only to a published release whose exact
- * tree passed the soak.
+ * GBRA-175: `bun update` keeps a pinned tag or commit, so a pinned global install is replaced with the newest published
+ * release (remove, then add the tag). null when the install is not pinned, or a requested version is not published (#6662
+ * then reports it after the no-op update).
  */
-export function resolveStableRelease(git: GitRunner = runGit): { version: string; commit: string } | { error: 'unreadable' | 'no_stable' | 'no_release_tag' } {
-  const { status, stdout } = git(['ls-remote', '--tags', GBRAIN_GIT_URL]);
-  if (status !== 0) return { error: 'unreadable' };
-  const refs = new Map<string, string>();
-  for (const line of stdout.split('\n')) {
-    const [sha, ref] = line.trim().split('\t');
-    if (sha && ref) refs.set(ref, sha);
-  }
-  const peel = (tag: string) => refs.get(`refs/tags/${tag}^{}`) ?? refs.get(`refs/tags/${tag}`);
-  const commit = peel('stable');
-  if (!commit) return { error: 'no_stable' };
-  let best: string | null = null;
-  for (const ref of refs.keys()) {
-    const v = /^refs\/tags\/v(\d+\.\d+\.\d+(?:\.\d+)?)$/.exec(ref)?.[1];
-    if (v && peel(`v${v}`) === commit && (!best || isNewerVersion(best, v))) best = v;
-  }
-  return best ? { version: best, commit } : { error: 'no_release_tag' };
+async function replacePinnedInstall(globalRoot: string, requested: string | null, ctx: StableInstallContext): Promise<'installed' | 'failed' | 'refused' | null> {
+  const pin = bunGlobalExactTagPin(globalRoot, true);
+  const plan = pin ? planPinnedReinstall(requested, ctx.oldVersion) : null;
+  if (!plan?.version || plan.unpublished) return null;
+  console.log(`The global install is pinned to ${pin}; replacing it with v${plan.version}.`);
+  return installStableRelease('bun', { version: plan.version, commit: '' }, ctx);
 }
 
-interface StableInstallContext { oldVersion: string; upgradeEnv: NodeJS.ProcessEnv; checkBunFloor: boolean; recovery: SmokeRecovery }
+interface StableInstallContext { oldVersion: string; upgradeEnv: NodeJS.ProcessEnv; checkBunFloor: boolean; recovery: SmokeRecovery; phase?: string }
 
 /**
  * GBRA-175: install exactly the stable release. bun: reinstall pinned to its tag (an in-place tag swap corrupts a
@@ -485,7 +462,7 @@ async function installStableRelease(method: string, target: { version: string; c
     console.error(`Installing ${spec} failed. Restoring gbrain ${ctx.oldVersion}...`);
     try { bun(['add', '-g', `github:${GBRAIN_GITHUB_REPO}#v${ctx.oldVersion}`]); console.error(`Restored gbrain ${ctx.oldVersion}.`); }
     catch { console.error(`Restore failed. Reinstall by hand: ${bunReinstallCommand(`#v${target.version}`)}`); }
-    recordUpgradeError({ phase: 'stable-reinstall', fromVersion: ctx.oldVersion, toVersion: target.version, error: `bun add -g ${spec} failed`, recover: bunReinstallCommand(`#v${target.version}`) });
+    recordUpgradeError({ phase: ctx.phase ?? 'stable-reinstall', fromVersion: ctx.oldVersion, toVersion: target.version, error: `bun add -g ${spec} failed`, recover: bunReinstallCommand(`#v${target.version}`) });
     setCliExitVerdict(1);
     return 'failed';
   }
@@ -716,14 +693,15 @@ function pinnedReinstallHint(plan: PinnedReinstallPlan): string {
 /**
  * #5311: the exact Git tag the bun global install pins gbrain to
  * (`github:garrytan/gbrain#v0.51.0`), or null for an unpinned or branch spec.
+ * With `commits`, a commit pin (`#<sha>`) counts too (GBRA-175).
  */
-export function bunGlobalExactTagPin(globalRoot: string): string | null {
+export function bunGlobalExactTagPin(globalRoot: string, commits = false): string | null {
   try {
     // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- globalRoot is resolveBunGlobalRoot(): Bun's own global install dir from BUN_INSTALL or HOME
     const pkg = JSON.parse(readFileSync(join(globalRoot, 'package.json'), 'utf-8')) as { dependencies?: Record<string, string> };
     const spec = pkg.dependencies?.gbrain;
     if (typeof spec !== 'string') return null;
-    return /#v?\d+\.\d+(\.\d+)*$/.test(spec.trim()) ? spec.trim() : null;
+    return /#v?\d+\.\d+(\.\d+)*$/.test(spec.trim()) || (commits && /#[0-9a-f]{7,40}$/.test(spec.trim())) ? spec.trim() : null;
   } catch {
     return null;
   }

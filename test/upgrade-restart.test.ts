@@ -7,10 +7,10 @@
  */
 import { describe, expect, test } from 'bun:test';
 import {
-  classifyGbrainCommand, collectHostProcesses, planRestart, restartProblems, runRestartSteps, supervisorRestartArgv, unverifiedBuilds, verifyRestart,
+  bunGlobalCopyOf, classifyGbrainCommand, collectHostProcesses, mismatchedBuilds, planRestart, restartProblems, runRestartSteps, supervisorRestartArgv, unverifiedBuilds, verifyRestart,
   type HostProcess, type ProcessSources, type RestartContext, type RestartExecutor, type WarmSocketState,
 } from '../src/core/upgrade-restart.ts';
-import { restartRefusal } from '../src/commands/upgrade-restart.ts';
+import { mismatchFix, restartRefusal } from '../src/commands/upgrade-restart.ts';
 import { exitCodeForCode } from '../src/core/error-catalogue.ts';
 
 const NEW = '0.60.400.0';
@@ -82,13 +82,13 @@ describe('collectHostProcesses', () => {
       heartbeats: async () => [{ pid: 10, kind: 'serve', version: OLD }, { pid: 40, kind: 'autopilot', version: NEW }, { pid: 50, kind: 'cli', version: NEW }],
       supervisor: () => ({ pid: 20, version: OLD }),
       workers: () => [{ pid: 21, version: OLD }],
-      installVersion: command => command.startsWith('/usr/local/bin/gbrain') ? NEW : null,
+      install: command => command.startsWith('/usr/local/bin/gbrain') ? { root: '/usr/local/lib/gbrain', version: NEW } : { root: null, version: null },
     }));
     expect(processes).toEqual([
-      { pid: 10, ppid: null, role: 'serve', version: OLD, started_ms: 500, ancestors: [SERVE_PID], args: ['serve', '--http'], install_version: null },
-      { pid: 20, ppid: null, role: 'supervisor', version: OLD, started_ms: 600, ancestors: [], args: ['jobs', 'supervisor', 'start', '--queue', 'ingest'], install_version: null },
-      { pid: 21, ppid: 20, role: 'worker', version: OLD, started_ms: 700, ancestors: [22, 20], args: ['jobs', 'work', '--queue', 'ingest'], install_version: NEW },
-      { pid: 30, ppid: null, role: 'mcp', version: null, started_ms: 800, ancestors: [99], args: ['serve'], install_version: null },
+      { pid: 10, ppid: null, role: 'serve', version: OLD, started_ms: 500, ancestors: [SERVE_PID], args: ['serve', '--http'], install_version: null, install_root: null },
+      { pid: 20, ppid: null, role: 'supervisor', version: OLD, started_ms: 600, ancestors: [], args: ['jobs', 'supervisor', 'start', '--queue', 'ingest'], install_version: null, install_root: null },
+      { pid: 21, ppid: 20, role: 'worker', version: OLD, started_ms: 700, ancestors: [22, 20], args: ['jobs', 'work', '--queue', 'ingest'], install_version: NEW, install_root: '/usr/local/lib/gbrain' },
+      { pid: 30, ppid: null, role: 'mcp', version: null, started_ms: 800, ancestors: [99], args: ['serve'], install_version: null, install_root: null },
     ]);
   });
 
@@ -301,5 +301,81 @@ describe('restartProblems and verifyRestart', () => {
     expect(stuck.ok).toBe(false);
     expect(stuck.problems[0]).toContain('serve pid 10');
     expect(clock).toBe(6_000);
+  });
+});
+
+describe('another install on the host (GBRA-175 production finding: serve ran from a separate pinned Bun global copy)', () => {
+  const OWN = '/home/alice-example/.bun/install/global/node_modules/gbrain';
+  const COPY = '/opt/gbrain-example/install/global/node_modules/gbrain';
+  const CLONE = '/srv/gbrain-clone-example';
+  const fromCopy = (pid: number, role: HostProcess['role'], root: string, holds: string | null, over: Partial<HostProcess> = {}) =>
+    proc(pid, role, OLD, { install_root: root, install_version: holds, ...over });
+
+  test('bunGlobalCopyOf names the BUN_INSTALL a Bun global package directory belongs to', () => {
+    expect(bunGlobalCopyOf(COPY)).toEqual({ bun_install: '/opt/gbrain-example' });
+    expect(bunGlobalCopyOf(OWN)).toEqual({ bun_install: '/home/alice-example/.bun' });
+    expect(bunGlobalCopyOf(CLONE)).toBeNull();
+    expect(bunGlobalCopyOf('/srv/app-example/node_modules/gbrain')).toBeNull();
+  });
+
+  test('a stale process from a separate Bun global copy replaces that copy (remove, then add the tag) before its restart', () => {
+    const plan = planRestart([fromCopy(10, 'serve', COPY, OLD), fromCopy(11, 'mcp', COPY, OLD), proc(20, 'supervisor', OLD, { install_root: OWN, install_version: NEW })],
+      ctx({ ownInstallRoot: OWN, stopMcp: true }));
+    expect(plan.manual).toEqual([]);
+    expect(plan.steps[0]).toEqual({ kind: 'replace_copy', root: COPY, bun_install: '/opt/gbrain-example', from: OLD, to: NEW, pids: [10, 11] });
+    expect(plan.steps.slice(1).map(s => s.kind)).toEqual(['service', 'supervisor', 'stop']);
+  });
+
+  test('a process from an install that is not a Bun global copy refuses before anything changes, naming the exact fix', () => {
+    const plan = planRestart([fromCopy(10, 'serve', CLONE, OLD)], ctx({ ownInstallRoot: OWN }));
+    expect(plan.steps).toEqual([]);
+    expect(plan.manual[0]!.argv).toEqual(['git', '-C', CLONE, 'fetch', '--tags', 'origin']);
+    expect(plan.manual[0]!.instruction).toContain(`git -C ${CLONE} checkout v${NEW}`);
+    expect(restartRefusal(plan, ['gbrain', 'upgrade'], false)?.code).toBe('restart_refused');
+    expect(planRestart([fromCopy(10, 'serve', OWN, OLD)], ctx({ ownInstallRoot: OWN })).manual).toEqual([]);
+  });
+
+  test('replacing a copy probes the tag, removes and re-adds under its BUN_INSTALL, and restores the old tag when the add fails', async () => {
+    const plan = planRestart([fromCopy(10, 'serve', COPY, OLD)], ctx({ ownInstallRoot: OWN }));
+    const run = (fail: string | null) => {
+      const calls: string[] = [];
+      const exec: RestartExecutor = {
+        run: (argv, env) => { calls.push(`${env?.BUN_INSTALL ? `BUN_INSTALL=${env.BUN_INSTALL} ` : ''}${argv.join(' ')}`); return { status: fail && argv.join(' ').includes(fail) ? 1 : 0, output: 'error: example' }; },
+        terminate: () => 'stopped', supervisorPid: () => null, sleep: async () => {},
+      };
+      return { calls, exec };
+    };
+    const ok = run(null);
+    expect((await runRestartSteps(plan, ok.exec))[0]).toMatchObject({ ok: true });
+    expect(ok.calls.slice(0, 3)).toEqual([
+      `git ls-remote --exit-code --tags https://github.com/garrytan/gbrain refs/tags/v${NEW}`,
+      'BUN_INSTALL=/opt/gbrain-example bun remove -g gbrain',
+      `BUN_INSTALL=/opt/gbrain-example bun add -g github:garrytan/gbrain#v${NEW}`,
+    ]);
+    const bad = run(`#v${NEW}`);
+    const [result] = await runRestartSteps(plan, bad.exec);
+    expect(result).toMatchObject({ ok: false });
+    expect(result!.detail).toContain(`restored v${OLD}`);
+    expect(bad.calls[3]).toBe(`BUN_INSTALL=/opt/gbrain-example bun add -g github:garrytan/gbrain#v${OLD}`);
+    const untagged = run('ls-remote');
+    expect((await runRestartSteps(plan, untagged.exec))[0]!.detail).toContain('has no release tag');
+    expect(untagged.calls.some(c => c.includes('bun remove'))).toBe(false);
+  });
+
+  test('after the restart, a process back on the old build from a pinned copy is caught with the exact fix: remove, add, restart', () => {
+    const plan = planRestart([fromCopy(10, 'serve', OWN, NEW, { version: OLD })], ctx({ ownInstallRoot: OWN }));
+    const back = fromCopy(110, 'serve', COPY, OLD, { started_ms: 5_000 });
+    expect(mismatchedBuilds(plan, [back])).toEqual([back]);
+    const [problem] = restartProblems(plan, [back], 4_000, { before: { state: 'absent' }, after: { state: 'absent' } });
+    expect(problem).toContain(`serve pid 110 (v${OLD}) runs a build other than v${NEW}; it runs from ${COPY}, which holds v${OLD}`);
+    expect(problem).toContain(`BUN_INSTALL=/opt/gbrain-example bun remove -g gbrain && BUN_INSTALL=/opt/gbrain-example bun add -g github:garrytan/gbrain#v${NEW}`);
+    const fix = mismatchFix(back, NEW);
+    expect(fix).toMatchObject({ ask_user: true, actor: 'user', argv: ['env', 'BUN_INSTALL=/opt/gbrain-example', 'bun', 'remove', '-g', 'gbrain'] });
+    expect(fix.then?.argv).toEqual(['env', 'BUN_INSTALL=/opt/gbrain-example', 'bun', 'add', '-g', `github:garrytan/gbrain#v${NEW}`]);
+    expect(fix.then?.then?.argv).toEqual(['gbrain', 'upgrade', '--restart-only']);
+    expect(fix.user_message).toContain(COPY);
+    const reportsNone = fromCopy(111, 'serve', COPY, OLD, { version: null, started_ms: 5_000 });
+    expect(mismatchedBuilds(plan, [reportsNone])).toEqual([reportsNone]);
+    expect(mismatchedBuilds(plan, [fromCopy(112, 'serve', OWN, NEW, { version: NEW, started_ms: 5_000 })])).toEqual([]);
   });
 });
