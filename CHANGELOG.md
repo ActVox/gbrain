@@ -10,6 +10,27 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.373.0] - 2026-10-22
+
+**A commit becomes searchable sooner on a managed source that still has pages without an import record.** After a brain switches to managed persistence, every sync pass checked each of those pages for uncommitted edits. It read and hashed every file and ran Git over all of them, again on every pass, until the bounded legacy sweep had recorded the page. On a 10k-page source that check took about 320 ms of each pass, and it grows with the source. A long-running `gbrain serve` or `gbrain sync --watch` now reuses a file's clean verdict while the file's lstat (size, mtime and ctime in nanoseconds, inode, mode) and its Git entry are unchanged. It follows the same rules as the working-tree stat cache: a file changed within 2 s of being read is checked again, and so is an edit that restores its mtime.
+
+### What changed
+
+| Freshness gate cell (10k pages, managed, serve-watch) | Before | Now |
+|---|---|---|
+| Postgres managed p50 | 848 ms | 482 ms (limit 565) |
+| Uncommitted-edit check, per round, local | ~320 ms | ~30–50 ms |
+
+### What to watch for after you upgrade
+
+- Nothing to do. No data is rewritten, and no setting changes.
+- The PGLite managed cell of the nightly freshness gate is still above its limit; that follow-up is tracked on #7338.
+
+### Itemized changes
+
+- `src/core/persistence/sync-git-stream.ts`: `probeDirtiness` in committed mode reuses a vouched `clean` probe per root, bounded like the working stat cache (100k entries, 64 roots).
+- Test: `test/sync-probe-clean-reuse-7338.test.ts`.
+
 ## [0.60.372.0] - 2026-10-22
 
 **Whole-brain listings now come in bounded pages, and `gbrain serve` keeps its log file from growing without limit.** On a large brain, `gbrain orphans`, `find_anomalies` and `gbrain sources status --json` printed every matching row in one response, so the output could run to megabytes, exceed an agent wrapper's output buffer and fail. The service log behind `gbrain mcp expose` grew forever and repeated the same line thousands of times.
