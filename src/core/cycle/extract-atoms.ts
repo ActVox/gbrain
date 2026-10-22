@@ -80,6 +80,8 @@ import { classifyRunStop, providerHaltReason, upsertExtractRollup } from '../ext
 import { abortableSleep } from '../retry.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { createHash } from 'crypto';
+import { existsSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { slugifySegment } from '../sync.ts';
 import { resolveAlias, resolveTierDefault } from '../model-config.ts';
 import { isMissingSchemaObject, warnOncePerProcess } from '../utils.ts';
@@ -87,14 +89,15 @@ import { utcDate } from './cycle-date.ts';
 import { atomSourceDate } from './atom-source-date.ts';
 import { normalizeForGrounding } from './synthesize-verify.ts';
 import type { TranscriptPageIndex } from '../transcripts/discover.ts';
-import { managedAtomSession, readAtomOrigin, resumeManagedAtoms, publishManagedAtoms, MANAGED_ATOM_DISCOVERY_SQL, type AtomOrigin } from '../persistence/atom-maintenance.ts';
+import { atomOriginPin, managedAtomSession, readAtomOrigin, resumeManagedAtoms, publishManagedAtoms, publishManagedAtomGeneration, resumeManagedGenerationMembers,
+  MANAGED_ATOM_DISCOVERY_SQL, type AtomOrigin } from '../persistence/atom-maintenance.ts';
 import { effectiveVisibility } from '../search/private-visibility.ts';
 import { OperationError } from '../ops/contract.ts';
 import { isOpPageSlug } from '../ops/context.ts';
 import type { WriteReceipt } from '../persistence/types.ts';
 import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
 import { AtomPageStateError, MAX_DETERMINISTIC_FAILURES, readAtomPageIdentity, writeAtomPageState, type AtomPageInput } from './extract-atoms-page-state.ts';
-import { ATOM_KIND, atomGenerationAdapter, atomOwnerKey, atomPagePin, type AtomGenerationContext } from '../generations/adapters/atoms.ts';
+import { ATOM_KIND, atomGenerationAdapter, atomOwnerKey, atomPagePin, TRANSCRIPT_KEY_PREFIX, type AtomGenerationContext } from '../generations/adapters/atoms.ts';
 import { markdownItem } from '../generations/adapters/page.ts';
 import type { GenerationKey } from '../generations/contract.ts';
 import { heldForInput, publishGeneration } from '../generations/publish.ts';
@@ -207,7 +210,7 @@ export interface ExtractAtomsOpts {
    */
   _loadConfig?: () => GBrainConfig | Promise<GBrainConfig | null> | null;
   /** Test seam: skip transcript discovery; use these transcripts directly. */
-  _transcripts?: Array<{ filePath: string; content: string; contentHash: string }>;
+  _transcripts?: Array<{ filePath: string; content: string; contentHash: string; root?: { path: string; label: string } }>;
   /**
    * Test seam (v0.41.2.1): skip page discovery; use these pages directly.
    * Mirrors _transcripts shape. `undefined` triggers discovery; `[]`
@@ -697,6 +700,7 @@ export async function runPhaseExtractAtoms(
   const sourceId = opts.sourceId ?? 'default';
   const chat = opts._chat ?? gatewayChat;
   const managed = await managedAtomSession(engine, sourceId, opts._managedRetry, opts.attempt?.writeWait);
+  if (managed && !opts.dryRun) await resumeManagedGenerationMembers(engine, managed); // GBRA-161 PR 1b: finish what a crash after an activation left
   const atomFiles = await derivedWriteThrough(engine, 'extract_atoms', sourceId, { managed: managed !== null, dryRun: opts.dryRun ?? false });
   const writeRequests: WriteReceipt[] = [];
   const pageAtomTitles = new Map<string, Map<string, string[]>>();
@@ -704,7 +708,7 @@ export async function runPhaseExtractAtoms(
   // 1a. Get transcripts (test seam OR production discovery).
   //     v0.41.2.1: config loader switched to loadConfigWithEngine() so the
   //     dream.* DB-plane merge from Phase 1 reaches this phase.
-  let transcripts: Array<{ filePath: string; content: string; contentHash: string }> = opts._transcripts ?? [];
+  let transcripts: Array<{ filePath: string; content: string; contentHash: string; root?: { path: string; label: string } }> = opts._transcripts ?? [];
   // Configured transcript corpus paths are brain-global, so only default discovers them.
   if (
     sourceId === 'default'
@@ -732,7 +736,7 @@ export async function runPhaseExtractAtoms(
         transcripts = discovered.map((d) => ({
           filePath: d.filePath,
           content: d.content,
-          contentHash: d.contentHash,
+          contentHash: d.contentHash, root: transcriptRoot(d.filePath, corpusDir, meetingDir),
         }));
       }
     } catch {
@@ -765,6 +769,7 @@ export async function runPhaseExtractAtoms(
   // 2. Apply transcript-side source-hash idempotency in ONE batch query
   //    instead of N per-hash round trips. Page-side idempotency lives in
   //    the discovery SQL's NOT EXISTS subquery (already batched).
+  const transcriptKeys = await resolveTranscriptKeys(engine, sourceId, transcripts, opts.dryRun === true);
   const transcriptsLive: typeof transcripts = [];
   let duplicatesSkipped = 0;
   const allHashes16 = transcripts.map(t => t.contentHash.slice(0, 16));
@@ -816,7 +821,7 @@ export async function runPhaseExtractAtoms(
   //    the cap — `--drain` can no longer report the same backlog number
   //    forever while atoms keep getting extracted from transcripts.
   type WorkItem =
-    | { kind: 'transcript'; filePath: string; content: string; contentHash: string }
+    | { kind: 'transcript'; filePath: string; content: string; contentHash: string; transcriptKey?: string }
     | ({ kind: 'page' } & AtomPageInput);
 
   const seenHashes = new Set<string>();
@@ -824,7 +829,7 @@ export async function runPhaseExtractAtoms(
   for (const t of transcriptsLive) {
     if (seenHashes.has(t.contentHash)) { duplicatesSkipped++; continue; }
     seenHashes.add(t.contentHash);
-    transcriptItems.push({ kind: 'transcript', ...t });
+    transcriptItems.push({ kind: 'transcript', filePath: t.filePath, content: t.content, contentHash: t.contentHash, transcriptKey: transcriptKeys.get(t.filePath) });
   }
   const pageItems: WorkItem[] = [];
   for (const p of pages) {
@@ -1099,7 +1104,7 @@ export async function runPhaseExtractAtoms(
       if (resumed === 'done') { duplicatesSkipped++; continue; }
       if (resumed === 'held') { heldFailed++; continue; } // #6325: settled after repeated failures; doctor lists it
       // GBRA-161: a complete read whose result for this same input and policy is already held is not computed again.
-      if (!opts.dryRun && !managed && !truncated && await heldForInput(engine, atomGenerationOrigin(sourceId, item).key, atomInputPin(item))) { duplicatesSkipped++; continue; }
+      if (!opts.dryRun && !truncated && await heldForInput(engine, atomGenerationOrigin(sourceId, item).key, origin ? atomOriginPin(origin) : atomInputPin(item))) { duplicatesSkipped++; continue; }
       const cutLine = truncated ? inputTruncatedLine(originLabel, input, maxInputChars) : null; // A7: a complete appended-tail read prints nothing
       if (cutLine) { inputTruncated++; console.error(cutLine); } // counted only for a model call
 
@@ -1188,7 +1193,7 @@ export async function runPhaseExtractAtoms(
           const slug =
             item.kind === 'page'
               ? await resolvePageAtomSlug(engine, atom.title, item.slug, sourceId, undatedDate, pageAtomTitles)
-              : atomSlug(atom.title, srcRef, undefined, undatedDate);
+              : await resolveTranscriptAtomSlug(engine, sourceId, atom.title, item, undatedDate);
           const originFrontmatter =
             item.kind === 'transcript'
               ? { source_path: item.filePath }
@@ -1289,7 +1294,9 @@ export async function runPhaseExtractAtoms(
         if (managed && origin) {
           for (const atom of managedAtoms) atom.links = provenanceLinks.filter(link => link.to_slug === atom.slug);
           throwIfAborted(opts.signal, 'extract_atoms');
-          const published = await publishManagedAtoms(engine, managed, origin, managedAtoms);
+          const generation = await publishManagedAtomGeneration(engine, managed, origin, managedAtoms, { ...atomGenerationOrigin(sourceId, item), content: item.content, runId });
+          if (generation.state === 'held') { console.error(heldLine(originLabel, atomGenerationOrigin(sourceId, item).key, generation.reason)); continue; }
+          const published = generation.receipts;
           writeRequests.push(...published);
           if (published.some(receipt => receipt.state !== 'committed')) writesPending++;
           totalAtomsExtracted += managedAtoms.length;
@@ -1461,17 +1468,15 @@ export async function runPhaseExtractAtoms(
  */
 async function publishUnmanagedAtoms(engine: BrainEngine, sourceId: string, item: ExtractAtomsItem, atoms: ReadonlyArray<{ slug: string; content: string }>,
   links: LinkBatchInput[], opts: { partial: boolean; runId: string; originLabel: string }) {
-  const { key, context } = atomGenerationOrigin(sourceId, item);
+  const { key, context, locator } = atomGenerationOrigin(sourceId, item);
   context.links = links;
   context.embed = isAvailable('embedding');
   const outcome = await publishGeneration(engine, atomGenerationAdapter, { key, items: atoms.map(atom => markdownItem(atom.slug, atom.content)),
-    input: { pin: atomInputPin(item), size: Buffer.byteLength(item.content) }, partial: opts.partial, context, runId: opts.runId });
+    input: { pin: atomInputPin(item), size: Buffer.byteLength(item.content) }, partial: opts.partial, context, runId: opts.runId, locator });
   for (const complete of context.postCommit ?? []) {
     await complete().catch(error => console.error(`[extract_atoms] ${opts.originLabel}: post-commit embedding failed (the embedding backfill retries it): ${error instanceof Error ? error.message : String(error)}`));
   }
-  if (outcome.state === 'held') {
-    console.error(`[extract_atoms] ${opts.originLabel}: result held (${outcome.reason}); the previous atoms stay live. Preview: gbrain repair generations --kind ${ATOM_KIND} --mode release-held --key ${key.ownerKey} --source ${sourceId}`);
-  }
+  if (outcome.state === 'held') console.error(heldLine(opts.originLabel, key, outcome.reason));
   return outcome;
 }
 
@@ -1480,11 +1485,66 @@ function atomInputPin(item: ExtractAtomsItem): string {
   return item.kind === 'page' ? atomPagePin(item.contentHash, item.identity) : item.contentHash;
 }
 
-/** GBRA-161: the generation key of one unmanaged item and the context its adapter reads (a transcript's input is not in the database). */
-function atomGenerationOrigin(sourceId: string, item: ExtractAtomsItem): { key: GenerationKey; context: AtomGenerationContext } {
-  const ownerKey = atomOwnerKey(item.kind === 'page' ? { kind: 'page', slug: item.slug } : { kind: 'transcript', filePath: item.filePath });
-  return { key: { kind: ATOM_KIND, sourceId, ownerKey },
-    context: { postCommit: [], ...(item.kind === 'transcript' ? { transcriptInput: { pin: item.contentHash, size: Buffer.byteLength(item.content) } } : {}) } };
+/**
+ * GBRA-161: the generation key of one item and the context its adapter reads (a transcript's input is not in the
+ * database). A transcript's key is its root label and root-relative path (resolveTranscriptKeys), or its path when the
+ * caller named no root.
+ */
+function atomGenerationOrigin(sourceId: string, item: ExtractAtomsItem): { key: GenerationKey; context: AtomGenerationContext; locator?: string } {
+  if (item.kind === 'page') return { key: { kind: ATOM_KIND, sourceId, ownerKey: atomOwnerKey({ kind: 'page', slug: item.slug }) }, context: { postCommit: [] } };
+  return { key: { kind: ATOM_KIND, sourceId, ownerKey: atomOwnerKey({ kind: 'transcript', transcriptKey: item.transcriptKey ?? item.filePath }) }, locator: item.filePath,
+    context: { postCommit: [], locator: item.filePath, transcriptInput: { pin: item.contentHash, size: Buffer.byteLength(item.content) } } };
+}
+
+const heldLine = (originLabel: string, key: GenerationKey, reason: string) =>
+  `[extract_atoms] ${originLabel}: result held (${reason}); the previous atoms stay live. Preview: gbrain repair generations --kind ${ATOM_KIND} --mode release-held --key ${key.ownerKey} --source ${key.sourceId}`;
+
+/** GBRA-161 PR 1b: the corpus root a discovered transcript lies under, with the label its key carries. */
+function transcriptRoot(filePath: string, corpusDir: string, meetingDir: string | undefined): { path: string; label: string } {
+  const inside = (dir: string) => { const rel = relative(resolve(dir), resolve(filePath)); return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel); };
+  return meetingDir && inside(meetingDir) && !(inside(corpusDir) && resolve(corpusDir).length > resolve(meetingDir).length)
+    ? { path: meetingDir, label: 'meetings' } : { path: corpusDir, label: 'corpus' };
+}
+
+/**
+ * GBRA-161 PR 1b (Eng r3 F1): each transcript's generation key: its root label and path relative to that root, never its
+ * basename or content hash, so two files of one name in two folders never share a key. A file whose key has no live
+ * generation but whose content equals the input of a live transcript generation whose file is gone was moved: it keeps
+ * that key, and the generation's locator follows it (recorded even when the unchanged file is not extracted again).
+ */
+async function resolveTranscriptKeys(engine: BrainEngine, sourceId: string, transcripts: ReadonlyArray<{ filePath: string; contentHash: string; root?: { path: string; label: string } }>,
+  dryRun: boolean): Promise<Map<string, string>> {
+  const own = new Map(transcripts.map(t => [t.filePath, t.root ? `${t.root.label}/${relative(resolve(t.root.path), resolve(t.filePath)).split(sep).join('/')}` : t.filePath]));
+  if (!transcripts.length) return own;
+  const live = await engine.executeRaw<{ id: number; owner_key: string; locator: string | null; input_pin: string | null }>(
+    `SELECT id, owner_key, locator, input_pin FROM derived_generations WHERE source_id=$1 AND kind=$2 AND state='live' AND owner_key LIKE $3`,
+    [sourceId, ATOM_KIND, `${TRANSCRIPT_KEY_PREFIX}%`]);
+  const claimed = new Set([...own.values()].map(key => `${TRANSCRIPT_KEY_PREFIX}${key}`).filter(key => live.some(row => row.owner_key === key)));
+  for (const t of transcripts) {
+    if (claimed.has(`${TRANSCRIPT_KEY_PREFIX}${own.get(t.filePath)}`)) continue;
+    const moved = live.find(row => !claimed.has(row.owner_key) && row.input_pin === t.contentHash && row.locator && row.locator !== t.filePath && !existsSync(row.locator));
+    if (!moved) continue;
+    claimed.add(moved.owner_key);
+    own.set(t.filePath, moved.owner_key.slice(TRANSCRIPT_KEY_PREFIX.length));
+    if (!dryRun) await engine.executeRaw('UPDATE derived_generations SET locator=$2, updated_at=now() WHERE id=$1', [moved.id, t.filePath]);
+  }
+  return own;
+}
+
+/**
+ * GBRA-161 PR 1b: a transcript atom's slug. The title-and-date slug, unless a live atom of another transcript already
+ * holds it (two files of one name in two folders extract the same title): then the slug folds in the transcript's key.
+ */
+async function resolveTranscriptAtomSlug(engine: BrainEngine, sourceId: string, title: string, item: { filePath: string; transcriptKey?: string },
+  undatedDate: string): Promise<string> {
+  const legacy = atomSlug(title, item.filePath, undefined, undatedDate);
+  const [held] = await engine.executeRaw<{ source_path: string | null }>(
+    `SELECT frontmatter->>'source_path' AS source_path FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL`, [sourceId, legacy]);
+  if (!held || held.source_path === item.filePath || !held.source_path) return legacy;
+  const [mine] = await engine.executeRaw<{ locator: string | null }>(
+    `SELECT locator FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='live'`,
+    [sourceId, ATOM_KIND, atomOwnerKey({ kind: 'transcript', transcriptKey: item.transcriptKey ?? item.filePath })]);
+  return mine?.locator === held.source_path ? legacy : atomSlug(title, item.filePath, item.transcriptKey ?? item.filePath, undatedDate);
 }
 
 /**
