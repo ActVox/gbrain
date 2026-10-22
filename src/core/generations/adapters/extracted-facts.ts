@@ -121,6 +121,8 @@ export const extractedFactsAdapter: GenerationAdapter<{ input: InputState }> = {
 /**
  * GBRA-60 entry point: publishes one page's extracted facts as a generation of `writer` on that page. Call it
  * with the whole result of one extraction and the page input it read; `coverage` says whether that was the whole page.
+ * `facts` are the rows the write gate already let through (`decideFactWrite`, as conversation-publication.ts and
+ * backstop.ts decide today); this publishes them and records no gate receipt.
  */
 export async function publishExtractedFacts(engine: BrainEngine, request: ExtractedFactsRequest): Promise<ExtractedFactsOutcome> {
   const { rows, detached } = placeFacts(request);

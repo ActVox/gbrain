@@ -83,10 +83,10 @@ import { writeReceipt } from '../extract/receipt-writer.ts';
 import { fenceUnfencedFacts, planUnfencedFacts } from '../facts/unfenced-facts.ts';
 import { classifyRunStop, upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { factsFenceView } from '../facts-fence.ts';
-import { publishFenceGeneration, readFenceBlocks, FACT_FENCE_KIND, type FenceRead } from '../generations/fence.ts';
+import { fenceReadOf, publishFenceGeneration, readFenceBlocks, FACT_FENCE_KIND, type FenceRead } from '../generations/fence.ts';
 import type { BodyStorage } from '../page-body/types.ts';
 import { factFenceItems, factPreimages, factRetireItem } from '../generations/adapters/fact-rows.ts';
-import { segmentedBodyMatchesFile, segmentedFactsFenceView } from '../page-body/segment-facts.ts';
+import { segmentedBodyMatchesFile, segmentedFactsFence } from '../page-body/segment-facts.ts';
 import {
   duplicateActiveFenceRows,
   extractFactsFromFenceText,
@@ -396,7 +396,8 @@ interface FenceReconcilePlan {
  * fence in each section of the page (#6686: a split fence) preserves the page's existing index.
  */
 async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: string, sourceId: string, warnings: string[]): Promise<FenceReconcilePlan | null> {
-  const view = isSegmentedPage(page) ? await segmentedFactsFenceView(db, page) : factsFenceView(page);
+  const segmented = isSegmentedPage(page) ? await segmentedFactsFence(db, page) : null;
+  const view = segmented?.view ?? factsFenceView(page);
   // #6686: a lone fence below the timeline sentinel that parses cleanly is the page's fence, read where the writers
   // edit it; one that does not parse keeps the #3625 guard below.
   const below = !view.sections.body && view.sections.timeline ? view.timeline : null;
@@ -463,7 +464,7 @@ async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: s
       return resolveSupersession(f, byRow, chain, slug).superseded_by === (stored == null ? null : Number(stored));
     });
   }
-  const read: FenceRead = isSegmentedPage(page) ? { state: 'segmented' } : readFenceBlocks(page, 'facts');
+  const read: FenceRead = segmented ? fenceReadOf(segmented.blocks) : readFenceBlocks(page, 'facts');
   return { fenceRows: parsed.facts.length, read, extracted, matched, stale, updates, toInsert, chain, inSync };
 }
 

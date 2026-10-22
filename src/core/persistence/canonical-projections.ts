@@ -673,14 +673,16 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
       }
       // GBRA-161 PR 2: the fact and take generations decide first. A held one (its fence absent from this body) retires and
       // overwrites nothing, so its rows stay as they are; every row a published one retires is recorded with its before-state.
-      const factsHeld = (await step('fact_generation', () => projectFactFenceGeneration(tx, { sourceId, slug, read: fenceReads.facts, incoming, rows: factRows,
-        writer: 'projection' }))).state === 'held';
+      const factGeneration = await step('fact_generation', () => projectFactFenceGeneration(tx, { sourceId, slug, read: fenceReads.facts, incoming, rows: factRows,
+        writer: 'projection' }));
+      const factsHeld = factGeneration.state === 'held';
       const takesHeld = (await step('take_generation', () => projectTakeFenceGeneration(tx, { sourceId, slug, pageId: id, read: fenceReads.takes,
         takes: projectedTakes, gone: takeRowsGone.filter(n => !heldRowNums.has(n)), writer: 'projection' }))).state === 'held';
       // #5575: rows more trusted than the writer are never expired by it, and new rows pass the write gate (trust/fence-guard.ts).
-      // The timeline rows are independent of the fact and take rows, so they ride in the first pipeline.
+      // The timeline rows are independent of the fact and take rows, so they ride in the first pipeline. The expire uses the
+      // generation's retire predicate under the page lock, so it runs only when that generation found rows to retire.
       const guard = factsHeld ? { rows: [] as typeof factRows, finish: async () => [] as string[] } : await step('timeline', () => guardFenceRows(tx, { sourceId, slug, incoming, rows: factRows, cfg: loadWriteGateConfig },
-        () => pipelined(tx, [expireFacts, ...timelineRows])));
+        () => pipelined(tx, factGeneration.retiring ? [expireFacts, ...timelineRows] : timelineRows)));
       if (factsHeld) await step('timeline', () => pipelined(tx, timelineRows));
       if (guard.rows.length) await step('facts', () => tx.insertFacts(guard.rows, { source_id: sourceId })); // gbrain-allow-direct-insert: canonical fence projection shares the journal publication transaction
       const contested = await step('fact_trust', () => guard.finish(tx));

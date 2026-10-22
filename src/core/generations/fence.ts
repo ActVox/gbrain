@@ -48,9 +48,11 @@ export function readFenceBlocks(page: { compiled_truth: string | null; timeline?
     const { beginIdx, endIdx } = locateOutsideCode(text ?? '', begin, end);
     return beginIdx !== -1 && endIdx > beginIdx ? text!.slice(beginIdx, endIdx + end.length) : null;
   };
-  const blocks = { body: block(page.compiled_truth), timeline: block(page.timeline) };
-  return blocks.body === null && blocks.timeline === null ? { state: 'absent' } : { state: 'parsed', blocks };
+  return fenceReadOf({ body: block(page.compiled_truth), timeline: block(page.timeline) });
 }
+
+/** The read of a fence whose blocks were read whole (each from its begin to its end marker): `absent` when neither section holds one. */
+export const fenceReadOf = (blocks: FenceBlocks): FenceRead => blocks.body === null && blocks.timeline === null ? { state: 'absent' } : { state: 'parsed', blocks };
 
 /** A row's identity: what makes it the same canonical row (number and claim; visibility for facts, kind and holder for takes). */
 export const factRowIdentity = (row: { row_num: number; fact: string; visibility: string }) =>

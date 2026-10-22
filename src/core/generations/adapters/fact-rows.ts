@@ -61,7 +61,7 @@ export async function factPreimages(db: BrainEngine, sourceId: string, ids: read
  * extractor rows only when a fence row claims their number, #5731). Held: the caller expires nothing.
  */
 export async function projectFactFenceGeneration(tx: BrainEngine, input: { sourceId: string; slug: string; read: FenceRead; incoming: string;
-  rows: ReadonlyArray<{ row_num: number; fact: string; visibility?: string | null }>; writer: string }): Promise<FenceGenerationOutcome> {
+  rows: ReadonlyArray<{ row_num: number; fact: string; visibility?: string | null }>; writer: string }): Promise<FenceGenerationOutcome & { retiring: number }> {
   const retire = (await tx.executeRaw<{ preimage: FactPreimage }>(`SELECT ${FACT_PREIMAGE_SQL} AS preimage FROM facts f
       WHERE f.source_id=$1 AND f.source_markdown_slug=$2 AND f.row_num IS NOT NULL
         AND (COALESCE(f.source,'') NOT LIKE 'cli:extract-conversation-facts%'
@@ -69,8 +69,9 @@ export async function projectFactFenceGeneration(tx: BrainEngine, input: { sourc
         AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset($3::text::jsonb) AS n(row_num integer,fact text,visibility text)
           WHERE n.row_num=f.row_num AND n.fact=f.fact AND n.visibility=f.visibility)
       ORDER BY f.row_num, f.id`, [input.sourceId, input.slug, input.incoming])).map(row => factRetireItem(row.preimage));
-  return publishFenceGeneration(tx, { kind: FACT_FENCE_KIND, sourceId: input.sourceId, slug: input.slug, read: input.read,
+  const outcome = await publishFenceGeneration(tx, { kind: FACT_FENCE_KIND, sourceId: input.sourceId, slug: input.slug, read: input.read,
     items: factFenceItems(input.rows), retire, writer: input.writer });
+  return { ...outcome, retiring: retire.length };
 }
 
 /**
