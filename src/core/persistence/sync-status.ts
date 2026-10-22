@@ -289,9 +289,10 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const failures = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
   const selected = await cursorHeader(engine, sourceId, source.incarnation, failures[0]?.cursor_key ?? null);
   const header = selected?.header ?? null;
-  // #7010: the push-hold probe rides this statement, so a source with no held Git effect costs no extra round trip.
-  const [committed] = await engine.executeRaw<{ n: number | string; git_push_held: boolean }>(`SELECT count(*) AS n, EXISTS (SELECT 1 FROM persistence_effects e
-      WHERE e.source_id=$1 AND e.kind='git' AND e.state IN ('queued','running','failed') AND e.error_code IN ('targets_parked', ${GIT_PUSH_CODES.map(code => `'${code}'`).join(',')})) AS git_push_held
+  // #7010: the push-hold probe rides this statement, so a source with no held Git effect costs no extra round trip (GBRA-161 PR 2: so does the fence-hold probe).
+  const [committed] = await engine.executeRaw<{ n: number | string; git_push_held: boolean; fence_held: boolean }>(`SELECT count(*) AS n, EXISTS (SELECT 1 FROM persistence_effects e
+      WHERE e.source_id=$1 AND e.kind='git' AND e.state IN ('queued','running','failed') AND e.error_code IN ('targets_parked', ${GIT_PUSH_CODES.map(code => `'${code}'`).join(',')})) AS git_push_held,
+      EXISTS (SELECT 1 FROM derived_generations g WHERE g.source_id=$1 AND g.kind IN ('fact_fence','take_fence') AND g.state='held') AS fence_held
     FROM persistence_requests WHERE source_id=$1 AND state='committed'
     AND intent->>'kind' IN ('managed_sync_import','managed_sync_delete') AND completed_at > now() - interval '10 minutes'`, [sourceId]);
   const records = await observeDirtyEditors(engine, sourceId, source.incarnation,
@@ -372,7 +373,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     : { status: 'unknown' as const, reason: 'not_read: run sync status with --detail', recovery_next: recovery.status === 'ok' && recovery.first ? recoveryAction(sourceId, recovery.first) : undefined };
   const connectorLastError = await (await import('./connector-status.ts')).readConnectorLastError(engine, sourceId);
   const gitPushHolds = committed?.git_push_held ? await readGitPushHolds(engine, [sourceId]) : [];
-  const fenceHolds = await (await import('../generations/fence.ts')).fenceHoldEntries(engine, [sourceId]);
+  const fenceHolds = committed?.fence_held ? await (await import('../generations/fence.ts')).fenceHoldEntries(engine, [sourceId]) : [];
   const [state, stateReason] = statusState({ human: !!(liveError?.needs_human), heldForHuman: holds.some(hold => hold.needs_human), oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!liveError, actionable: actionable.length > 0, holds: holds.length > 0, pass: passState });
   const admission = await syncAdmissionStatus(engine, sourceId, source.incarnation,
     { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at });
