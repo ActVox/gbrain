@@ -10,6 +10,254 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.366.0] - 2026-10-22
+
+**Background maintenance that could never finish, and kept paying for model calls each time it tried, now finishes or stops spending.** Several maintenance steps failed the same way on every pass. A pinned question whose answer was longer than a fixed 2,000-token cap failed every refresh and was reported as a provider error. The nightly transcript step re-sent transcripts it had already judged to the paid decision service. The 72-hour purge refused a deleted duplicate page forever because another page shared its file. Some phase failures stopped every later maintenance job at the same place, so brain-wide maintenance never recorded a finished pass. Each of these now ends: the work completes, is skipped with a clear reason, or waits for a change that could make it succeed.
+
+### What changed
+
+| Stuck step | Before | Now |
+|---|---|---|
+| Pinned question with a long answer | `refresh_failed:provider_error` on every cooldown, paid each time | `refresh_failed:answer_too_long:<cap>` after one call; skipped until you raise `cycle.standing_questions.max_output_tokens` (default 2000) |
+| Transcript triage with System One triage on | Re-sent already-judged and borderline transcripts every pass | Asks only about transcripts today's triage has not judged; borderline answers cached 24 hours |
+| Retention purge of a deleted duplicate sharing a file | Refused every run, parked after 5 failures | Purged database-only; the file and the surviving page stay |
+| Purge park | Waited for `--retry-parked` forever | Retried once by each new gbrain version |
+| Phase failing with a missing table, permission or quota error | Stopped every later job at that phase | Counts as that phase's failure streak; later phases run and the pass is stamped |
+| New slug with a hyphen run (three hyphens in a row) | Accepted, then forked a second page on the next file import | Refused with `invalid_params` naming the folded slug |
+
+Other repeat spenders stop paying for the same answer: fence and content repair stop re-sending input a provider refused, concept synthesis checks a page it cannot republish before the model call, and the calibration profile skips the model when the scorecard has not changed. Takes grading reads oldest takes first, so takes past the first 50 get graded.
+
+**Spend effect:** less. Nothing pays again for a result it already has. **Defaults:** unchanged. No schema migration, and nothing rewrites data on upgrade.
+
+New doctor check `slug_path_mismatch` counts pages whose slug their file path does not produce, and names the read-only `gbrain repair frontmatter --source <id>` preview.
+
+Reported by @andrew-agents-bot (#7306, #7307), @TBWMT (#7311) and @liuwenyong1985 (#7305).
+
+### Itemized changes
+
+- Pinned questions: `cycle.standing_questions.max_output_tokens`, the `answer_too_long` receipt and phase skip.
+- Dream synthesize and `gbrain dream retriage`: today's-verdict reuse, 24-hour margin-hold cache, backoff respected, shadow mode asks only about newly judged transcripts, `over_budget_alone` skip, retriage follows `dream.synthesize.conversation_pages`.
+- Brain-wide maintenance: run-scoped phase failures count as a streak, budget-skipped phases run first in the next job, a non-shrinking triage deferral stops withholding `autopilot.last_global_at`.
+- Purge: shared-origin tombstones purged database-only; purge parks record the gbrain version; doctor `purge_parked_pages` counts the running version's parks. `gbrain delete --purge` on such a page still refuses.
+- Slugs: `put_page` and `capture` refuse hyphen runs and segment-final hyphens (`slug_hyphen_run`); existing pages still update with `slug_advisory`.
+- Repair lanes (`llm_refused`), `synthesize_concepts` (`publication_held`), `calibration_profile` (`unchanged_scorecard`), `grade_takes` (oldest-first window).
+
+## [0.60.365.0] - 2026-10-22
+
+**Behind a split pooler route, a one-shot CLI command no longer opens direct database connections, and a short-lived command opens one instead of three.** Every gbrain process that saw a split route (a Supabase pooler URL or `GBRAIN_DIRECT_DATABASE_URL`) opened a direct (session) pool of up to 3 connections, whatever it ran. A host running many short commands beside `gbrain serve` and the jobs worker spent its session-mode connection budget on processes that ran one statement and exited. The direct pool now follows the command.
+
+### What changed
+
+| Process | Before | Now |
+|---|---|---|
+| `serve`, `jobs`, `autopilot`, `sync --watch` | up to 3 direct connections | up to 3 (unchanged) |
+| `sync`, `put`, `import`, `dream`, `cycle`, `sources`, `mcp`, `migrate-graduation`, `doctor`, `engine` | up to 3 | 1 |
+| Any other command | up to 3 | none; statements run on the ordinary pool |
+| A one-shot command applying pending schema migrations | up to 3 | 1, for the DDL only (advisory lock and 30-minute statement timeout kept) |
+| A one-shot command that takes a `gbrain_cycle_locks` lease | up to 3 | 1, so the lease heartbeat keeps its own connection |
+
+`gbrain engine status --probe` reports the profile as `mode.direct_profile`, and `single (one-shot command)` where the route is configured but unused.
+
+**Spend effect:** none. No model calls. **Overrides:** `GBRAIN_DIRECT_POOL_SIZE` still sets the size wherever a direct pool opens, `GBRAIN_DISABLE_DIRECT_POOL=1` still wins, and `GBRAIN_DIRECT_POOL_BY_COMMAND=0` restores the earlier behavior for every command. Embedders and tests keep the resident profile, so library behavior is unchanged.
+
+### Itemized changes
+
+- `src/core/direct-pool-profile.ts`: the process profile (resident, short-lived, one-shot); `src/cli/main.ts` sets it once per dispatched command.
+- `src/core/connection-manager.ts`: sizes the direct pool by profile, keeps `ddl()` on the direct route, adds `direct_profile` to `describeMode()`.
+- `src/core/db-lock.ts`: a lease promotes a one-shot process to short-lived.
+- `src/core/persistence/claim-phase.ts`: exports `OWNER_COMMANDS`.
+- `docs/ENGINES.md#direct-pool-by-command`.
+- Tests: `test/direct-pool-profile.test.ts` (pure resolution, PGLite and real Postgres), `test/cli-socket.test.ts`.
+
+## [0.60.364.0] - 2026-10-22
+
+**A deletion-provenance preview over a long history no longer stalls or answers `unknown` for whole batches, and the database-only keep no longer re-reads the history for every page.** The read behind `gbrain repair file-drift --held --side deleted --state file_gone` walked the history once per 500 files with a pathspec. On a history of about 20,000 commits each walk ran past its 120 s limit and labelled its whole batch `unknown`, so a preview of about 2,000 held files sat silent for many minutes and returned round thousands of `unknown`. The `--provenance never_committed --prefer database` apply then spent about 11 s per page re-reading the history. Sync's check of whether a missing file was ever committed (#7130) had the same walk, so on a long history committed deletions were held instead of applied.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Provenance of about 1,800 held files, 20,000-commit history | 16 minutes, every file `unknown` | 1.7 s, every file named |
+| `--provenance never_committed --prefer database --apply` | the history re-read for every page | one walk, cached per commit and extended by later commits |
+| A long preview | silent until it answered | reports the commits read on stderr |
+| `details.provenance` | absent kinds omitted | every kind listed, zeros included |
+| A file HEAD holds again after an older commit deleted it | named that old commit | `deletion_uncommitted` |
+| A managed sync checking whether a missing file was committed, long history | timed out and held the file | reads the same walk; a committed deletion applies |
+
+**Spend effect:** none. No model calls and no default changes. Nothing is rewritten on upgrade, and a walk that fails still answers `unknown` (sync holds the file, never deletes it).
+
+### Itemized changes
+
+- `src/core/persistence/sync-origin-evidence.ts`: `historyIndex` streams one `git log --full-history --no-renames --diff-merges=first-parent --name-status -z` walk per commit (cached, two per Git top level, extended past a cached ancestor); `readOriginEvidence` and `readDeletionProvenance` read it.
+- `src/core/repair/file-drift.ts`: the `repair.file_drift.provenance` progress phase; `details.provenance` lists every kind.
+- `docs/guides/repair.md#file-drift-provenance`.
+- Tests: `test/deletion-provenance-scale-gbra133.test.ts` (real Git, a 20,000-commit history from `git fast-import`), `test/repair-file-drift-provenance-gbra133.test.ts`.
+
+## [0.60.363.0] - 2026-10-22
+
+**Facts on an unmanaged Google contact page no longer expire when the connector re-renders the page (#7292).** On a brain without managed persistence, a Google connector re-render replaced the page with the bare provider render. The `## Facts` and `## Takes` fences that loop extraction or `remember` had added left the file and the database, and the next `extract_facts` expired those facts. A page whose database copy held the facts fence while its checkout file did not was also held `file_database_drift` on every re-render, and after three it froze with no command that could unfreeze it.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An unmanaged Google re-render of a page with brain-added fences | the fences were dropped from the file and the database; the next `extract_facts` expired the facts | the re-render carries the stored `## Facts` and `## Takes` fences, as the managed connector already did |
+| A database copy holding a facts fence its checkout file lacks | held `file_database_drift`, then frozen after three attempts | the file holds no edit the database lacks, so the re-render replaces it and writes the fence back |
+| A page already held that way | stayed held | imports on its next attempt (a new upstream change, or `gbrain sources retry-held <id>`) |
+| A file with a real edit | held | still held |
+
+**Spend effect:** none. No model calls and no default changes. Nothing is rewritten on upgrade.
+
+### Itemized changes
+
+- `src/core/google/sweep-shared.ts`: the unmanaged re-render carries the stored fences (`carryStoredFences`, `withStoredFactsFence`); a stored fence the render cannot carry verbatim refuses `connector_fence_below_timeline`.
+- `src/core/facts/file-body-guard.ts`: a file that lacks only gbrain's own facts fence is replaceable.
+- `src/commands/repair.ts`: `repair --help` lists `--provenance` and `--cursor` for `file-drift --held`.
+- Tests: `test/google-connector-facts-fence-7292.test.ts` (PGLite and Postgres, the real Google importer, a fake People API).
+
+Contributed report: @h6y3.
+
+## [0.60.362.0] - 2026-10-22
+
+**Remote searches no longer stall on the vector deadline when the nearest chunks crowd into a few long pages, and each search read pays one round trip less.** On a 50k-page brain behind a transaction-mode pooler at about 65 ms RTT, warm MCP search p95 dropped from 11.1 s to 3.1 s.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote search whose nearest chunks come from a few long pages | the index walk came back with too few pages, and the joined pool statement planned the private-page rule as a page filter rescanned per candidate (2-3 s per attempt at 50k pages), so the vector stage hit its 8 s deadline and returned `vector_candidates_incomplete` | the walk widens its window x4, at most twice (`INDEX_WALK_ESCALATIONS`), before the pool; stale-heavy windows still escalate in the pool as before |
+| A top-level search transaction applies its settings | it waited for the `set_config` answer before sending the read | the read is sent right behind it, so both share one round trip; a refused settings statement is still the error raised |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and results are the same set the joined statement returns whenever the widened walk fills its window.
+
+### Itemized changes
+
+- `src/core/search/vector-pool.ts`: `searchIndexWalk` widens a full window whose fresh chunks could fill the limit but whose pages fall short.
+- `src/core/postgres-engine/search-settings.ts`: `withSearchSettings` sends a top-level read behind its settings statement.
+- Tests: `test/e2e/vector-plan-real-column-postgres.test.ts`, `test/search/vector-pool.test.ts`, `test/search-settings-one-statement.test.ts`.
+
+## [0.60.361.0] - 2026-10-22
+
+**Agents can ask whether a write is searchable yet, and every source now reports how far its writes have been applied (#7190).** Most agent status checks ask one of two questions: "did my write land?" or "is sync caught up?". Before this release, answering either one took several reads and some guessing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An agent wants to know whether search can find its write | `get_write_request` said the write committed, not whether search could find it | `get_write_request` with `applied: true` (`gbrain write-request <id> --applied --json`) returns `applied`, read live: `searchable_yet`, `searchable` and `state` (resolve-path vocabulary plus `pending_write`, `not_written` and `deleted`), the gap (`requests_ahead`, `unembedded_chunks`), the request `sequence` and the source's write watermark |
+| An agent wants to know whether a source is caught up | it had to combine sync status, freshness and doctor | `gbrain sources status --json`, MCP `sources_status` and `gbrain sync --json` add a `watermark` per source: `indexed_through` (moved only by a finished sync pass), `embedded_through`, `committed_through_request`, `pending` (requests, commits and files behind HEAD, held files, withheld deletes) and `writer_heartbeat`. The human `gbrain sources status` prints one watermark line per source |
+| A write reply is still pending | the hint said to poll `get_write_request` | the hint also names the `applied` read |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade.
+- A write's own reply (`put_page`, `remember`, `capture` and the rest) is unchanged, so a same-request-id replay still returns the first reply exactly. Live state is only on the opt-in receipt read, which keeps a plain receipt poll within its statement budget.
+- The MCP `applied` parameter is on the full tool surface only, not the starter tool list.
+
+### Itemized changes
+
+- `src/core/persistence/applied-watermark.ts`: the per-source watermark (`readAppliedWatermark`), the cheap write watermark (`readWriteWatermark`) and its one-line rendering.
+- `src/core/persistence/write-applied.ts`: `applied` for one write request.
+- `src/core/page-searchability.ts`: the page-state fold that `gbrain sources resolve-path` used inline, now shared with the receipts.
+- `src/core/ops/persistence.ts`, `src/core/ops/sources.ts`, `src/commands/sources.ts`, `src/commands/sync/run.ts`: the `applied` parameter and the `watermark` blocks.
+- `src/core/persistence/health.ts`: the pending-write hint names the `applied` read.
+- [docs/guides/resolve-paths.md](docs/guides/resolve-paths.md): "Is my write searchable yet?" and "The source watermark".
+
+## [0.60.360.0] - 2026-10-22
+
+**Search and query notices now describe the query you ran instead of repeating brain-wide state on every call, startup prints one upgrade line, and `gbrain get` can return a single section, the paragraphs matching a term, or a line or byte range.** Before this release, every search on a brain with pending projections or held files carried the same brain-wide notice whether or not those items could affect the answer, two banners printed the same upgrade line, and an agent reading part of a large page had to fetch it whole and cut it down itself.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Search or query while projections are pending | a brain-wide `projection_pending` notice on every call | `_meta.retrieval.coverage` with a `could_affect` count; the notice only appears when pending items could match this query ("N of M pending page(s) could match this query") |
+| The top hit is the exact page the query named and its projection is current | the readiness hint and `Retrieval incomplete:` line still showed | `could_affect.pending_projection` is 0, with `coverage.top_hit_exact: true`; `degraded` still records it |
+| The same coverage notice on repeated calls | shown on every call | at most once per 30 minutes, again at once when coverage gets materially worse; the structured fields are always present |
+| Pages held by their embedding budget | not named by the held-files notice | counted in `embedding_held` and named; when they are the only cause the fix is `gbrain embed --held --dry-run` |
+| An upgrade is available | two banners with the same line | one line per version pair per window: `UPGRADE_AVAILABLE <cur> <latest>` when stderr is not a TTY, the sentence on a TTY |
+| Reading one part of a large page | fetch the page and cut it down | `gbrain get <slug> --section "<heading>"`, `--grep <term> [--context N]`, `--lines 100-140` / `--lines 100`, `--bytes 0-999` |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade.
+- Scripts that matched the human upgrade sentence on a non-TTY stderr see the `UPGRADE_AVAILABLE <cur> <latest>` token instead.
+- Every `get_page` response now carries `chars`, including `content_only`.
+
+### Itemized changes
+
+- `src/core/search/retrieval-coverage.ts`: query-scoped `coverage` (`pending_projection`, `held_files`, `embedding_held`, each with `could_affect`, capped at 1,000) and the exact-top-hit suppression; `src/core/notice-ledger.ts` throttles the coverage notice per window, per HTTP session or through `GBRAIN_HOME/notices/coverage.json` for one-shot CLI calls.
+- `src/cli/main.ts`, `src/cli/op-notices.ts`: one upgrade line per version pair per window, and the retrieval-incomplete line moves to the op-notices module.
+- `src/core/ops/get-page-slice.ts`: `get_page` `section`, `grep` and `context` (cut from the read projection after authorization; a segmented page streams one segment at a time), with `--section` / `--grep` / `--context` on the CLI and `section`, `grep`, `context` on the full MCP surface.
+- `ParamDef.cliRange`: `--lines N-M` / `--lines N` / `--bytes N-M` range forms on the CLI; JSON still works.
+
+Tests: `test/retrieval-coverage-notices.test.ts`, `test/get-page-slices.test.ts`, `test/cli-range-param.test.ts`, `test/e2e/self-upgrade-marker.test.ts`.
+
+## [0.60.359.0] - 2026-10-22
+
+**Held deleted files now show who deleted them, so each group can be resolved on its own.** A held `file_gone` file can be a page no commit ever held (the database copy is the only one), a file a commit deleted on purpose, or a deletion only the worktree lost. A held preview showed them all the same way, so a single `--prefer` either brought back pages that were culled on purpose or deleted the only copy of others. Each previewed page now names its provenance, and `--provenance` selects one group at a time.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Previewing held `file_gone` files | Every file looked the same | Each page names the commit that deleted it (sha, author, date, subject, read with `--full-history`), `never_committed`, or `deletion_uncommitted`, and the preview counts each kind |
+| Keeping pages no commit ever held | `--prefer database` recreated a file nobody committed | `--provenance never_committed --prefer database` keeps each page database-only: no file is written, the page forgets its path, and the hold clears for good |
+| `--provenance never_committed --prefer file` | n/a | Refused: each of those pages holds the only copy |
+| Accepting deliberate deletions | Mixed in with the rest | `--provenance deleted_by_commit --prefer file` |
+| A repair apply the database refuses mid-run (40P01, 40001, lost connection) | The command ended with an error, and `--json` printed nothing | The run stops with `stopped.reason` `database_contention` / `connection_lost`, what it applied, and the resume command |
+| A repair apply killed by SIGTERM or SIGHUP (an outer timeout) | Died with no record | Stops before its next item with `stopped.reason: interrupted` and the same result; a second signal exits at once |
+
+**Spend effect:** none. No model calls and no default changes. Nothing is rewritten on upgrade.
+
+### Itemized changes
+
+- `src/core/persistence/sync-origin-evidence.ts`: `readDeletionProvenance` reads HEAD's full history in bounded batches (a side branch's own deleting commit first; a merge only when its resolution dropped the file).
+- `src/core/repair/file-drift.ts`: per-page `provenance` and `details.provenance` counts; `--provenance` filter (`residuals.other_provenance`); the database-only keep (`managed_maintenance_file_drift_detach`, a database maintenance request whose preparer re-checks the page and its provenance and clears the hold).
+- `src/core/repair/core.ts`: database refusals (`recordDatabaseStops`, set by the CLI; the cycle and doctor remediation keep the rethrow their own stops rely on) and the CLI's termination signal stop an apply with a result; `src/commands/repair.ts` owns SIGTERM/SIGHUP during an apply.
+- `docs/guides/repair.md` (provenance), `docs/ENGINES.md#pool-sizing` (sync workers and a derived direct route in the pooler sum).
+- Tests: `test/repair-file-drift-provenance-gbra133.test.ts`, `test/repair-database-stop-gbra133.test.ts` (PGLite and Postgres).
+
+## [0.60.358.0] - 2026-10-21
+
+**On large brains the scan for committed files with no page now finishes, `sync --dry-run` no longer waits on the writer, pages held or skipped for size get chunks and become keyword-searchable, and the new `gbrain pages status` says why a page is or isn't searchable.** Before this release, the unindexed-file scan started over whenever a commit landed, so a source with hundreds of thousands of files and steady commits never finished it. Pages marked `embed_skip` never got chunks, so keyword search couldn't find them either.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Unindexed-file scan on a large source with frequent commits | started over on each new commit and never finished | resumes from its cursor and rechecks files changed behind it from the commit diff (up to 5,000 paths) |
+| Several sources due for that scan | the first source could use the whole pass | the least recently scanned source goes first, each with its own budget: 60 s per started 100k pages, at most 5 min |
+| A committed symlink | listed as an unindexed file | named `symlink` in the scan |
+| `gbrain sync --dry-run` on a managed source with open writes | waited for the writer to drain | returns at once and reports `writer: {open_requests, oldest_open_age_seconds, next}` |
+| A page marked `embed_skip` with no chunks | stayed chunkless and keyword search missed it; reported `keyword_only` | the chunk safety net chunks it without vectors; reported `chunkless_healable` until then |
+| An oversized-page rewrite that fails | the page's embedding-budget row was lost | the row is restored (or removed, if the page had none) |
+| Doctor `oversized_pages` and the budget-held finding | one count | `details {marked, chunkless}`, plus `waiting_over_day` and `oldest_updated_at` for holds that have waited more than a day |
+
+### New: `gbrain pages status <slug...> [--source <id>] [--json]`
+
+For each page it reports the state, `searchable` (`true`, `'keyword'` or `false`), the sync hold and embedding hold with their reasons, the chunk count, and the number of visible chunks with no vector. It is CLI-only and reads nothing outside the named pages.
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade. The next maintenance chunk pass chunks `embed_skip` pages without embedding them, so it costs no embedding spend.
+- On a very large source, the first unindexed-file scan after upgrade can take several maintenance passes. Each pass now keeps its progress.
+
+### Itemized changes
+
+- `src/core/persistence/unindexed-files.ts`, `src/core/cycle/unindexed-files.ts`: the scan cursor survives commits, changed paths behind it are revisited through `git diff-tree`, sources are ordered least recently scanned first with a per-source budget, scheduled re-screens drain in the level pass, and committed symlinks (mode 120000) are named.
+- `src/core/persistence/sync-dry-run-writer.ts`, `src/core/persistence/sync-pass-run.ts`, `src/commands/sync/perform.ts`: a managed dry run reports the writer instead of draining it.
+- `src/core/engine-sql/chunks.ts`: `chunklessPagesWhere` no longer excludes `embed_skip` pages, and `chunklessPageState` reports them as `chunkless_healable`.
+- `src/core/oversized-backfill.ts`: a failed rewrite restores the page's budget row. `src/core/page-embedding-budget.ts`: `listBudgetLimitedPages` excludes `embed_skip` pages.
+- `src/core/held-embedding.ts`, `src/commands/doctor/checks/content-quality.ts`: the hold age and the split `oversized_pages` details.
+- `src/commands/pages-status.ts`: the new command. `listEmbeddingStateRows` accepts a `slugs` filter.
+
+### For contributors
+
+- New tests, each failing before the fix: `test/unindexed-files-convergence-7149.test.ts`, `test/origin-twin-sequence-7150.test.ts`, `test/sync-dry-run-drain-7167.test.ts`, `test/held-embedding-visibility-7174.test.ts`, `test/oversized-backfill-failed-rewrite-7185.serial.test.ts` and `test/pages-status-7179.test.ts` (Postgres arm).
+
 ## [0.60.357.0] - 2026-10-21
 
 **The warm CLI socket now matches a serve that exports `GBRAIN_HOME` with a CLI that doesn't.** After v0.60.350.0, a serve started with `GBRAIN_HOME=$HOME` still refused every CLI that relied on `HOME` alone, with `refused (identity_mismatch): env GBRAIN_HOME`. Both sides resolved to the same home, but the identity compared whether the variable was set. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID` now count by the config home and brain they resolve to, which the identity already compares.

@@ -1251,7 +1251,7 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
   // #6317 (B4): whether managed sync data moves, beside sync_running (a live lock is not progress); the writer-status command rides along.
   const movementView = await import('../core/persistence/sync-movement.ts');
   const movement = new Map((await movementView.readSourceMovement(engine, { sourceIds: sources.map(source => source.id) }).catch(() => [])).map(m => [m.source_id, m]));
-  const upstreamView = await import('../core/sync-upstream-rewrite.ts'), upstream = new Map((await upstreamView.readUpstreamDivergences(engine, sources.map(source => source.id))).map(u => [u.source_id, upstreamView.renderUpstreamDivergence(u)]));
+  const upstreamView = await import('../core/sync-upstream-rewrite.ts'), upstream = new Map((await upstreamView.readUpstreamDivergences(engine, sources.map(source => source.id))).map(u => [u.source_id, upstreamView.renderUpstreamDivergence(u)])); const watermarkView = await import('../core/persistence/applied-watermark.ts'), watermarks = new Map(await Promise.all(sources.map(async source => [source.id, await watermarkView.readAppliedWatermark(engine, source.id).catch(() => null)] as const)));
   if (json) {
     const enriched = metrics.map((m) => ({
       ...m,
@@ -1264,7 +1264,7 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
         movement_state: movement.get(m.source_id)!.movement_state, movement: movement.get(m.source_id) } : {}),
       ...(gitHolds.get(m.source_id) ? { git_holds: gitHolds.get(m.source_id) } : {}), ...(upstream.get(m.source_id) ? { upstream: upstream.get(m.source_id) } : {}),
       ...(sharedSkills.get(m.source_id) ? { shared_skills: sharedSkills.get(m.source_id) } : {}),
-      ...(uncommitted.get(m.source_id) ? { fence_repairs_uncommitted: uncommitted.get(m.source_id) } : {}),
+      ...(uncommitted.get(m.source_id) ? { fence_repairs_uncommitted: uncommitted.get(m.source_id) } : {}), ...(watermarks.get(m.source_id) ? { watermark: watermarks.get(m.source_id) } : {}),
     }));
     console.log(JSON.stringify({ schema_version: 1, sources: enriched }, null, 2));
     return;
@@ -1305,7 +1305,7 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
   for (const [sourceId, status] of connectors) for (const line of statusView.connectorStatusLines(sourceId, status)) console.log(line);
   for (const [sourceId, status] of gitHolds) for (const line of statusView.gitHoldStatusLines(sourceId, status)) console.log(line);
   for (const b of backlog.values()) console.log(`  ${drainMod.formatManagedSyncBacklog(b)}`);
-  for (const m of movement.values()) { const line = movementView.formatSourceMovement(m); if (line) console.log(`  ${line}`); }
+  for (const m of movement.values()) { const line = movementView.formatSourceMovement(m); if (line) console.log(`  ${line}`); } for (const w of watermarks.values()) if (w) console.log(`  ${watermarkView.formatAppliedWatermark(w)}`);
   for (const [sourceId, notices] of uncommitted) for (const line of uncommittedView.uncommittedFenceRepairLines(sourceId, notices)) console.log(line);
   for (const view of sharedSkills.values()) if (view && (only || view.configured === false || view.parked)) for (const line of sharedSkillsView.sharedSkillsStatusLines(view)) console.log(`  ${line}`);
   for (const m of metrics) {

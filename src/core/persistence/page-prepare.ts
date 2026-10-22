@@ -453,15 +453,17 @@ export const sharedOriginReceipt = (sourceId: string, survivor: string | null) =
  * same live pages must still record it; otherwise the delete refuses and the file is never removed as a fallback.
  * [R9]: the receipt names a surviving slug only to the trusted local owner, or to a remote writer whose grant and visibility cover it.
  */
-async function validateSharedOrigin(tx: BrainEngine, row: WriteRequest, shared: SharedOrigin): Promise<string> {
+async function validateSharedOrigin(tx: BrainEngine, row: WriteRequest, shared: SharedOrigin, retentionPurge: boolean): Promise<string> {
+  const changed = retentionPurge ? sharedTombstoneChanged : sharedOriginChanged;
   let canonicalPath: string;
   try { canonicalPath = realpathSync(shared.target.path); }
-  catch { throw sharedOriginChanged(row, 'the shared file was moved or removed'); }
+  catch { throw changed(row, 'the shared file was moved or removed'); }
   const claimants = await findLiveFileClaimants(tx, { ...shared.target, canonicalPath });
-  if (claimants.map(page => page.id).join(',') !== shared.claimants.map(page => page.id).join(',')) throw sharedOriginChanged(row, 'the pages recording the shared file changed');
+  if (claimants.map(page => page.id).join(',') !== shared.claimants.map(page => page.id).join(',')) throw changed(row, 'the pages recording the shared file changed');
   const named: string[] = [];
   for (const page of claimants) if (await slugDisclosable(tx, row.authority, page.slug)) named.push(page.slug);
   const who = named.length ? `Another page of this source records the same file: ${named.join(', ')}.` : 'Another page of this source records the same file.';
+  if (retentionPurge) return `${who} The expired tombstone was removed database-only: the file and the surviving page are untouched, and no content tombstone was written.`;
   return `${who} ${sharedOriginReceipt(row.source_id, named.length === 1 ? named[0]! : null)}`;
 }
 function sharedOriginChanged(row: WriteRequest, what: string): OperationError {
@@ -469,6 +471,15 @@ function sharedOriginChanged(row: WriteRequest, what: string): OperationError {
     `Page ${row.slug}'s file in source ${row.source_id} was recorded by another live page when this delete was prepared.`, pageFix(row.source_id, row.slug));
   error.detail = 'shared_origin';
   return error;
+}
+/**
+ * #7311: the retention purge of a shared-origin tombstone whose census moved defers (a revision race to the purge, which
+ * retries it next run): the next preparation reads the claimants again, so a tombstone that now owns the file alone
+ * takes the normal purge path and its file is compared and removed, never left behind.
+ */
+function sharedTombstoneChanged(row: WriteRequest, what: string): OperationError {
+  return pageRefusal('revision_conflict', `The shared canonical file changed while the purge was prepared: ${what} before it published, so nothing was purged and the file was not removed. The next purge run reads the file's claimants again.`, row,
+    `Page ${row.slug}'s file in source ${row.source_id} was recorded by another live page when this retention purge was prepared.`, pageFix(row.source_id, row.slug));
 }
 
 async function assertStillSyncExcluded(tx: BrainEngine, row: WriteRequest, excludedPath: string): Promise<void> {
@@ -494,10 +505,14 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
   // removal before the guarded hard-delete and receipt commit; failure rolls
   // back to the prior row, and replay survives the eventual absence of that row.
   const { file, excludedPath, shared } = await prepareDeleteFileTarget(engine, row, snapshot, purge, { allowMissing: purge || options.allowMissingFile, deleting: true, activePack: options.activePack, remote: row.authority.remote });
-  // #6517: a purge tombstones content hashes source-wide, so a page whose file another live page records is only soft-deleted.
-  if (shared && purge) {
-    const error = pageRefusal('source_changed', 'The page\'s canonical file is shared with another live page, so a purge (which tombstones its content source-wide) was refused and nothing was removed, tombstoned or redacted. '
-      + `Soft-delete it instead (gbrain delete ${row.slug} --source-id ${row.source_id} --expected-revision <rev>): the page is hidden, the file and the surviving page remain, and nothing is erased.`, row,
+  // #6517: an owner purge tombstones content hashes source-wide, so a page whose file another live page records is only
+  // soft-deleted. #7311: the retention purge of such a tombstone tombstones nothing, so it removes the row database-only.
+  const sharedRetention = shared !== null && purge && p.retention === true && snapshot.page.deleted_at != null;
+  if (shared && purge && !sharedRetention) {
+    const next = snapshot.page.deleted_at != null
+      ? 'The page is already soft-deleted (hidden; the file and the surviving page remain): the retention purge removes it database-only once it is older than the recovery window, with no content tombstone (gbrain pages purge-deleted --older-than 72h --yes, or the autopilot purge phase).'
+      : `Soft-delete it instead (gbrain delete ${row.slug} --source-id ${row.source_id} --expected-revision <rev>): the page is hidden, the file and the surviving page remain, and nothing is erased.`;
+    const error = pageRefusal('source_changed', `The page's canonical file is shared with another live page, so a purge (which tombstones its content source-wide) was refused and nothing was removed, tombstoned or redacted. ${next}`, row,
       `Another live page of source ${row.source_id} records the file of ${row.slug}.`, pageFix(row.source_id, row.slug));
     error.detail = 'shared_origin';
     throw error;
@@ -520,9 +535,11 @@ async function prepareDeletePageMutation(engine: BrainEngine, row: WriteRequest,
     ...(preparedPurge && !preparedPurge.retention ? { afterCommit: async () => { appendPurgeCommitted(row.id); } } : {}),
     ...(preparedPurge?.derivedSlugs.length ? { additionalPageKeys: preparedPurge.derivedSlugs.map(slug => ({ sourceId: row.source_id, slug })) } : {}),
     ...(excludedPath !== null ? { databaseOnlyReason: 'sync_excluded' as const } : {}), ...(shared ? { databaseOnlyReason: 'shared_origin' as const } : {}),
-    ...(shared ? { validate: async (tx: BrainEngine) => { prepared.databaseOnlyWarning = await validateSharedOrigin(tx, row, shared); } } : {}),
+    ...(shared ? { validate: async (tx: BrainEngine) => { prepared.databaseOnlyWarning = await validateSharedOrigin(tx, row, shared, sharedRetention); } } : {}),
     apply: async tx => {
       if (purge && excludedPath !== null) await assertStillSyncExcluded(tx, row, excludedPath);
+      // #7311: the tombstone forgets the survivor's file, as an origin_twin page has, so its purge writes no deletion marker for it.
+      if (preparedPurge && sharedRetention) return purgePageInTransaction(tx, row, { ...snapshot, page: { ...snapshot.page, source_path: null, source_uri: null } }, preparedPurge);
       if (preparedPurge) return purgePageInTransaction(tx, row, snapshot, preparedPurge);
       if (!noop) { await tx.createVersion(row.slug, source); await tx.softDeletePage(row.slug, source); }
       return { status: 'soft_deleted', slug: row.slug, source_id: row.source_id, noop,

@@ -4047,15 +4047,18 @@
           "limit?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "offset?: number | undefined",
+          "oldestFirst?: boolean | undefined",
           "page_id?: number | undefined",
           "page_slug?: string | undefined",
           "requireSafeChunks?: boolean | undefined",
           "resolved?: boolean | undefined",
+          "sinceOnOrBefore?: string | undefined",
           "sortBy?: \"weight\" | \"since_date\" | \"created_at\" | undefined",
           "sourceId?: string | undefined",
           "sourceIds?: string[] | undefined",
           "suppressFlagged?: boolean | undefined",
-          "takesHoldersAllowList?: string[] | undefined"
+          "takesHoldersAllowList?: string[] | undefined",
+          "ungradedFirst?: { promptVersion: string; judgeModelId: string; } | undefined"
         ],
         "name": "TakesListOpts"
       },
@@ -6502,6 +6505,7 @@
         "kind": "interface",
         "members": [
           "cliKeyValue?: boolean | undefined",
+          "cliRange?: readonly [string, string] | undefined",
           "default?: unknown",
           "description?: string | undefined",
           "enum?: string[] | undefined",
