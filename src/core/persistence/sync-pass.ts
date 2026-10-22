@@ -464,17 +464,24 @@ async function readAttestations(exec: Exec, kind: 'postgres' | 'pglite', sourceI
   for (let i = 0; i < rows.length; i += size) {
     const chunk = rows.slice(i, i + size);
     statements++;
-    const found = await exec.executeRaw<{ page_id: number; arm1: boolean; attested_hash: string | null }>(`SELECT x.page_id,
+    const found = await readRevisionAttestations(exec, sourceId, incarnation, chunk.map(row => ({ pageId: Number(pages.id[row]), requestId: pages.requestId[row] ?? null,
+      revision: pages.revision[row]!, sourcePath: pages.sourcePath[row] ?? null })));
+    for (const hit of found) pages.attested.set(byId.get(Number(hit.page_id))!, { arm1: hit.arm1, hash: hit.attested_hash });
+  }
+  return statements;
+}
+
+/** `A` for one statement's pages, by the request that wrote each page's current revision (see `readAttestations`); a page with no committed request has no row. */
+export async function readRevisionAttestations(exec: Exec, sourceId: string, incarnation: string,
+  rows: ReadonlyArray<{ pageId: number; requestId: string | null; revision: string; sourcePath: string | null }>): Promise<Array<{ page_id: number; arm1: boolean; attested_hash: string | null }>> {
+  return exec.executeRaw<{ page_id: number; arm1: boolean; attested_hash: string | null }>(`SELECT x.page_id,
         (r.intent->>'kind' = ANY($3::text[]) AND r.source_incarnation::text=$2 AND (r.page_id IS NULL OR r.page_id=x.page_id)) AS arm1,
         COALESCE((SELECT e.data->>'expected_hash' FROM persistence_effects e WHERE e.request_id=r.id AND e.kind='git' AND e.revision=x.revision
           AND e.data->>'expected_hash' IS NOT NULL AND (e.data->>'relative_path'=x.source_path OR right(e.data->>'relative_path', length(x.source_path)+1)='/'||x.source_path) LIMIT 1),
           CASE WHEN r.intent->>'kind'='managed_file_import' AND r.intent->>'sourcePath'=x.source_path AND r.intent->>'inputHash'=r.intent->>'targetHash' THEN r.intent->>'targetHash' END) AS attested_hash
       FROM unnest($4::int[], $5::uuid[], $6::uuid[], $7::text[]) AS x(page_id, request_id, revision, source_path)
       JOIN persistence_requests r ON r.id=x.request_id AND r.state='committed' AND r.source_id=$1`,
-      [sourceId, incarnation, SYNC_WRITE_KINDS, chunk.map(row => Number(pages.id[row])), chunk.map(row => pages.requestId[row]), chunk.map(row => pages.revision[row]), chunk.map(row => pages.sourcePath[row])]);
-    for (const hit of found) pages.attested.set(byId.get(Number(hit.page_id))!, { arm1: hit.arm1, hash: hit.attested_hash });
-  }
-  return statements;
+      [sourceId, incarnation, SYNC_WRITE_KINDS, rows.map(row => row.pageId), rows.map(row => row.requestId), rows.map(row => row.revision), rows.map(row => row.sourcePath)]);
 }
 
 /** `U_db`: open requests of the worktree (the `persistence_requests_pending` index) and pending Git effects of the source. */
