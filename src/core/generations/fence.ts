@@ -201,7 +201,7 @@ export function emptyFenceBlock(fence: 'facts' | 'takes'): string {
 /**
  * The owner's decision a held fence waits for (`ask_user`). For an absent fence: whether the section was removed on
  * purpose. Restoring the fence keeps the rows; writing the empty fence retires them. Neither is the default and nothing
- * runs without the user. A database-only page (no file to edit) changes through `put_page` or `edit_page`.
+ * runs without the user. A database-only page (no file to edit) changes through `put_page` (`edit_page` refuses fence markers).
  */
 export function fenceAbsentFix(hold: Pick<FenceHold, 'source_id' | 'kind' | 'slug' | 'rows' | 'read' | 'reason'>, opts: { databaseOnly: boolean }): Action {
   const fence = fenceName(hold.kind);
@@ -216,9 +216,9 @@ export function fenceAbsentFix(hold: Pick<FenceHold, 'source_id' | 'kind' | 'slu
   }
   const block = emptyFenceBlock(fence);
   const write = opts.databaseOnly
-    ? ' This page has no file, so either change is a page write: read it with get_page (include_content: true), then put_page with expected_revision and the full '
-      + 'content (restored section, or the empty block appended), or edit_page with expected_revision and edits: [{ old_text: <the page\'s last line>, new_text: <that line, a blank line, then the block> }].'
-    : ' Edit the page\'s file and sync it, or write the page with put_page or edit_page and its expected_revision.';
+    ? ' This page has no file, so either change is a put_page: read it with get_page (include_content: true), then put_page with that revision as expected_revision and the full '
+      + 'content with the section restored or the empty block appended (edit_page refuses to write fence markers).'
+    : ' Edit the page\'s file and sync it, or read it with get_page (include_content: true) and put_page the full content with that revision as expected_revision.';
   return { consent: [], actor: 'user', requires_exclusive: false, ask_user: true,
     why: `Page ${hold.slug} (source ${hold.source_id}) was written without its ${section} section, so gbrain kept its ${what} live instead of retiring them; `
       + `nothing was retired. The user may have deleted the whole ${section} section on purpose, or an edit may have lost it: ask which. `

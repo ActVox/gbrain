@@ -49,7 +49,7 @@ async function seed(engine: BrainEngine, fact: string, at: string, claim?: { met
 }
 
 const facts = (engine: BrainEngine) => engine.executeRaw<{ id: number; valid_until: string | null; consolidated: boolean; into: number | null }>(
-  'SELECT id, valid_until::text AS valid_until, consolidated_at IS NOT NULL AS consolidated, consolidated_into AS "into" FROM facts ORDER BY id');
+  'SELECT id::int AS id, valid_until::text AS valid_until, consolidated_at IS NOT NULL AS consolidated, consolidated_into::int AS "into" FROM facts ORDER BY id');
 
 async function repair(engine: BrainEngine, selection: GenerationsSelection, expectHash?: string): Promise<RepairResult> {
   const scope = await resolveRepairScope(engine, 'default');
