@@ -40,6 +40,7 @@ import { currentRunDeadline, lastForwardProgressAt, noteForwardProgress } from '
 import { faultPoint } from './fault-points.ts';
 import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
 import { VERSION } from '../../version.ts';
+import { LEASE_BEACON_QUEUE } from '../minions/protected-names.ts';
 
 export const DRAIN_LEASE_TTL_MINUTES = 2;
 export const DRAIN_LEASE_REFRESH_MS = 20_000;
@@ -49,7 +50,7 @@ export const LEASE_RETRY_AFTER_MS = 60_000;
 /** A follower stops this long before its watchdog would (or half its window, when the window is shorter). */
 const FOLLOW_MARGIN_MS = 30_000;
 /** The minion queue of the holder records (also the beacon older binaries' `liveSyncJob` sees); no worker serves it. */
-export const LEASE_BEACON_QUEUE = 'gbrain-drain-lease';
+export { LEASE_BEACON_QUEUE };
 /** A holder with no commit and no cursor save for this long is wedged (the in-pass governor's no-progress window). */
 export const HOLDER_STALL_MS = 5 * 60_000;
 /** How often a following run prints the holder's progress: on a terminal, and otherwise. */
