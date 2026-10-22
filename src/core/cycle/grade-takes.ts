@@ -618,11 +618,19 @@ class GradeTakesPhase extends BaseCyclePhase {
     // streak; auth/billing halt on the first hit.
     const llmHalt = createGlobalLlmHaltTracker();
 
-    // Load unresolved active takes, oldest-first.
+    // Load unresolved active takes, oldest-first. Takes too recent to grade
+    // are left out in SQL so they cannot fill the window, and takes with no
+    // verdict for this prompt and judge come first, so graded takes (which stay
+    // unresolved while auto-resolve is off) leave room for the ones behind them.
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - minAgeMonths);
     const takes = await engine.listTakes({
       resolved: false,
       active: true,
       sortBy: 'since_date',
+      oldestFirst: true,
+      sinceOnOrBefore: cutoff.toISOString().slice(0, 10),
+      ungradedFirst: { promptVersion, judgeModelId },
       limit: takeLimit,
     });
 
