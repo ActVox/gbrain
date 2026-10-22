@@ -1,6 +1,0 @@
-# Key files: Core Search (connection budget)
-
-[Subsystem index](../KEY_FILES.md) · [Core Search (1/2)](core-search-1.md). Read only the entries relevant to your change.
-Current behavior and load-bearing invariants; history belongs in Git and CHANGELOG.
-
-- `src/core/search/connection-budget.ts` — per-op pooled-connection budget for `search` and `query`. `SEARCH_CONNECTION_LIMIT` (4) is the most connections one op holds at once. `withSearchConnectionBudget` opens the scope; the ops' `metered` wrapper in `src/core/ops/search.ts` and `dispatchToolCall` (`src/mcp/dispatch.ts`, so pre-op reads and the response-meta hook count too) both enter it, and a nested call shares the enclosing budget. `holdSearchConnection` is called at the engine's two connection seams, `PostgresEngine#transactionOn` (a top-level transaction, held until its COMMIT settles even when a read transaction answers early) and `runUnsafe` (one statement). Work inside a held slot runs outside the scope, so statements on a transaction's own connection never wait on a second slot. Outside a scope, and on PGLite, nothing waits. These reads use the ordinary read pool (the transaction pooler behind a split route), never the direct/session lane. Pinned on Postgres at the wire by `test/e2e/search-connection-budget-postgres.test.ts`.
