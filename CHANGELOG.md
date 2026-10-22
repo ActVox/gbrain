@@ -10,31 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.372.0] - 2026-10-22
+## [0.60.371.0] - 2026-10-22
 
-**Whole-brain listings now come in bounded pages, and `gbrain serve` keeps its log file from growing without limit.** On a large brain, `gbrain orphans`, `find_anomalies` and `gbrain sources status --json` printed every matching row in one response, so the output could run to megabytes, exceed an agent wrapper's output buffer and fail. The service log behind `gbrain mcp expose` grew forever and repeated the same line thousands of times.
+**Edits to pages imported before managed persistence become searchable again, and a managed PGLite brain no longer locks the Git checkout it sits in.** After a brain switches to managed persistence, its older pages have no import record until the bounded legacy sweep reaches them. Until then, a Git edit to one of those pages was held as `file_drift` and never imported. Separately, a managed PGLite brain whose database directory sat inside another Git checkout marked that whole checkout managed, which refused every other write in it.
 
 ### What changed
 
-| Surface | Before | Now |
+| Situation | Before | Now |
 |---|---|---|
-| `gbrain orphans` / MCP `find_orphans` | every orphan in one response | at most 100 per page, with totals and per-domain counts first; `--cursor <next_cursor>` gives the next page, `--limit <n>` sets the size, `--all` prints everything in the earlier shape; MCP adds `cursor`, `complete` and `next_cursor` |
-| MCP `find_anomalies` / `gbrain anomalies --json` | every slug of every anomalous cohort | at most 20 slugs per cohort; `count` still covers the cohort and `page_slugs_complete: false` marks a cut row; `--all` lists every slug on a local brain |
-| `gbrain sources status --json` | every held file of the source | `git_holds` carries `count`, `by_code` (one example per hold code) and the first 10 items with `items_complete: false` and an `items_command`; `--holds` lists every held file, `--limit <n> [--cursor <c>]` pages them by path |
-| `gbrain serve` writing to a regular file | the file grows forever and repeats lines | rotates at 10 MiB keeping 5 copies, and writes a line repeated within 10 minutes once plus a "repeated N more time(s)" line |
+| A Git edit to a page with no import record whose database copy still matches the file at the managed baseline | held `file_drift` (side unknown) until someone repaired it | imports |
+| The same, but the database copy changed since the baseline | held `file_drift` | held `file_drift` (unchanged) |
+| A commit's pass while legacy pages are still unrecorded | screened up to 500 legacy pages before importing the commit | imports the commit first, then sweeps |
+| A managed PGLite database directory inside another Git checkout | wrote `gbrain-managed.json` into that checkout's `.git`, refusing every write in it | marks only the database directory |
 
 ### What to watch for after you upgrade
 
 - Nothing is rewritten on upgrade, and there is no schema migration.
-- A script that read the whole orphan list from `gbrain orphans --json` on a large brain should follow `next_cursor` or pass `--all`. A listing that fits in one page prints as before.
-- `GBRAIN_SERVE_LOG_MAX_BYTES` (0 turns rotation off), `GBRAIN_SERVE_LOG_MAX_FILES` and `GBRAIN_SERVE_LOG_DEDUPE_SECONDS` (0 turns dedupe off) change the serve log behavior.
+- Edits already held this way import after `gbrain sources retry-held <source>` and the next sync.
+- A `gbrain-managed.json` an older gbrain already wrote into an unrelated checkout's `.git` directory stays until you remove it by hand.
 
 ### Itemized changes
 
-- `src/core/bounded-listing.ts`, `src/core/bounded-listing-cli.ts`: shared keyset-cursor paging for the bounded listings.
-- `src/core/serve-log.ts`: serve log rotation and repeated-line dedupe.
-- `src/core/persistence/connector-status.ts`: `gitHoldStatusJson` bounds `git_holds` in `sources status --json`.
-- Tests: `test/orphans-bounded-7246.test.ts`, `test/anomalies-bounded-7246.test.ts`, `test/bounded-listing-7246.test.ts`, `test/serve-log-7246.test.ts`, `test/sources-status-holds-bounded-7326.test.ts`, and a #7326 case in `test/sync-hold-surfaces.test.ts`.
+- `src/core/persistence/sync-pass-run.ts`, `src/core/persistence/sync-screen.ts`: an `unknown`-side drift entry carries its baseline blob, and the freeze imports it when the page still holds that file. A round with imports runs the legacy sweep after its batches.
+- `src/core/persistence/sync-pass-apply.ts`: `sweepLegacy` is exported, deferred in rounds with work, and records `first_full_at` itself.
+- `src/core/persistence/root-registry.ts`, `src/core/persistence/filesystem-guard.ts`: the datastore root is marked in its own directory.
+- Tests: `test/sync-legacy-edit-import-7338.test.ts` (PGLite and Postgres), `test/managed-datastore-marker-7338.test.ts`.
 
 ## [0.60.370.0] - 2026-10-22
 
