@@ -367,6 +367,10 @@ async function main() {
   command = routed.command;
   const subArgs = routed.subArgs;
   dispatchedCommand = command;
+  {
+    const { directPoolProfileForCommand, setDirectPoolProfile } = await import('../core/direct-pool-profile.ts');
+    setDirectPoolProfile(directPoolProfileForCommand(command, subArgs));
+  }
 
   // Local patch 2026-06-11 — mark one-shot CLI processes so the facts
   // backstop routes absorb work to the durable jobs worker instead of the
