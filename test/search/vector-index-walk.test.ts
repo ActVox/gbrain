@@ -158,7 +158,9 @@ describe('vector index walk (PGLite)', () => {
         const materialized = await planAndRows(stmt.sql, params, { ...settings, enable_material: 'on' });
         expect(materializedPages(materialized.nodes)).not.toEqual([]);
         expect(shape(rows)).toHaveLength(20);
-        expect(shape(rows)).toEqual(shape(materialized.rows));
+        // Judged under exact evaluation (header): the materialized plan walks HNSW, whose
+        // approximate window depends on the randomly levelled graph, so it is not the reference.
+        expect(shape(rows)).toEqual(shape(await exactRows(stmt.sql, params)));
       }
     }
   });
