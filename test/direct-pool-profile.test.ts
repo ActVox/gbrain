@@ -1,5 +1,5 @@
 /**
- * The direct (session) pool follows the command (Garry, 2026-10-21). Daemons keep the 3-connection pool; a short-lived
+ * The direct (session) pool follows the command (maintainer-approved, 2026-10-21). Daemons keep the 3-connection pool; a short-lived
  * command that owns a consumer or takes a lease gets one connection; a one-shot command that takes no lease routes
  * nothing through it until it takes a lease, while schema DDL keeps the direct route for its session advisory lock and
  * 30-minute statement timeout. `GBRAIN_DIRECT_POOL_BY_COMMAND=0` restores the earlier behavior. Pure resolution, then
