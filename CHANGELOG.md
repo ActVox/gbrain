@@ -30,7 +30,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - Backup restore: `extractPgliteDump` no longer fsyncs each file; `syncRestoredTree` still flushes every restored file and directory before the ready receipt.
 - `scripts/ci-dependency-audit.sh`: advisories require bun's advisory report; registry and network errors retry within `AUDIT_DEADLINE_S` (420 s) and report `audit_registry_unavailable`.
 - `scripts/ci-reuse.ts` `attemptJobs` (shared by the release gate): a 5xx that outlasts the client's retries restarts the listing at 30 per page.
-- Tests: the sync-entry-faults Postgres suite clones one migrated template per file (58 s to 32 s locally); the loop-lag clock probe blocks with `Atomics.wait` instead of a spawned child; the write-gate perf check judges a round quiet where its p95 can see load.
+- Tests: the sync-entry-faults Postgres suite clones one migrated template per file (58 s to 32 s locally); the loop-lag clock probe blocks with `Atomics.wait` instead of a spawned child, after a full collection so collector work the engine owes the thread cannot land in the reading; the write-gate perf check judges a round quiet where its p95 can see load.
 
 ## [0.60.366.0] - 2026-10-22
 

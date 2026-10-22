@@ -7,13 +7,20 @@
  *
  * Forced probe (deterministic): the thread blocks 150 ms with a timer due, as it does behind a spawned Git that has not
  * reached exec. The wall clock reads it as 150 ms of lag; the thread's CPU clock, read on both sides of the block, does
- * not move (nothing else can run on the thread during a synchronous block, so work left over from an earlier test file in
- * the same process cannot land in the reading). The CPU clock still sees a stretch of work, and two stretches in one turn,
- * the regression the bounds exist to catch.
+ * not move. The CPU clock still sees a stretch of work, and two stretches in one turn, the regression the bounds exist to
+ * catch.
  *
  * The block is an Atomics.wait, not a synchronous child: a spawn's own setup runs on the thread (1-4 ms, about 20 ms for a
  * process's first spawn), and on a VM that charges host steal to the running thread those few ms read 30 ms once against
  * the 25 ms bound (#7231, full-suite). That is the spawn's work, not the off-CPU time this test is about.
+ *
+ * The block settles the engine's heap first. A wait hands the heap over, and JavaScriptCore runs collector work it owes
+ * the thread at that handoff: the last marking phase of a collection in flight (the thread wakes the marker threads and
+ * waits on them before it parks) and, on waking, the finalize phase that returns emptied blocks with madvise. A shard
+ * process carries the heap of every earlier test file, so a collection can end just before the block: 37 ms read once
+ * against the 25 ms bound (#7304, full-suite), and under strace one such block made 14,488 system calls after its
+ * timeout, nearly all madvise. With a 6M-object heap and 1.5M objects dropped before each of 40 blocks, 3-6 blocks per run read 26-56 ms;
+ * a full collection and a 1 ms block before the reading leave at most 2.6 ms (4 runs each).
  */
 import { expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -23,10 +30,13 @@ import { threadCpuNow } from './helpers/cpu-time.ts';
 /** The bound the loop-lag tests hold. */
 const MAX_LAG_MS = 100;
 const turn = () => new Promise<void>(resolve => setTimeout(resolve, 20));
+const block = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 /** Blocks the thread off the CPU for `ms`; returns the thread CPU the block cost. */
 const offCpu = (ms: number) => {
+  Bun.gc(true);
+  block(1);
   const start = threadCpuNow();
-  expect(Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)).toBe('timed-out');
+  expect(block(ms)).toBe('timed-out');
   return threadCpuNow() - start;
 };
 
