@@ -618,3 +618,4 @@ src/core/generations/adapters/page.ts	pageVersionEvidence	sql	INLINE	legacy-adop
 src/core/generations/adapters/atoms.ts	atomGenerationAdapter	sql	META	input size only: body_bytes for a segmented page, octet_length of an inline page columns (pages leave body_bytes NULL inline)
 src/core/generations/repair.ts	releaseManaged	field	INLINE	assertInlineBody refuses a segmented origin page before the managed release reads its body to bind the origin
 src/core/search/exact-scan.ts	buildExactBatchStatement	sql	META	#7191: octet_length of the body columns (stored size, never the body) decides an unreadable page
+src/core/cycle/synthesize-generations.ts	pages	sql	INLINE	reads the synthesis outputs of one re-synthesized transcript for the predecessor coverage match (generations/synthesis-coverage.ts); segmented pages are excluded in SQL, so a segmented earlier output is never compared and stays live as an unreadable unmatched predecessor
