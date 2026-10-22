@@ -25,6 +25,7 @@ export interface PlanInput {
   input: InputState | null;
   config: GenerationsConfig;
   modelProduced: boolean;
+  strictOrder?: boolean;
   /** A partial result (input cut short): writes its items, retires nothing. */
   additive: boolean;
   evidence: ReadonlySet<string>;
@@ -59,6 +60,11 @@ export function planGeneration(input: PlanInput): Plan {
 
   const touched = [...puts.map(item => item.key), ...retires];
   if (touched.some(key => rows.get(key)?.segmented)) return held('segmented_unsupported');
+  if (input.strictOrder) {
+    const orders = proposal.map(item => item.order);
+    const tied = orders.filter((order, index) => order === undefined || orders.indexOf(order) !== index);
+    if (tied.length) return held('tie', { tied: tied.length });
+  }
   if (!proposal.length && retires.length && !input.proofHolds) return held('no_proof');
   if (Math.max(puts.length, retires.length) > config.maxItems) return held('oversize', { max_items: config.maxItems });
   const shrinkReleased = input.release === 'shrunk' || input.release === 'attempts_exhausted';

@@ -8,7 +8,7 @@
  *   are versioned and retired (`retired_by: generation-restore`). A key with an item edited since the generation, or one
  *   with no stored preimage, is refused whole and the apply exits incomplete; nothing of that key changes.
  * - release-held: publishes a held result once (shrunk, valve, attempts_exhausted; oversize after the operator raised
- *   `generations.max_items`). no_proof, fence_absent and segmented_unsupported are refused: releasing them would
+ *   `generations.max_items`). no_proof, fence_absent, tie and segmented_unsupported are refused: releasing them would
  *   manufacture the proof they lack.
  * - cleanup: the synthesis unmatched-predecessor retire (PR 4); no kind in this release has it.
  *

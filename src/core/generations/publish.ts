@@ -9,7 +9,7 @@
  * their coordinator path until PR 1b.
  */
 import type { BrainEngine } from '../engine.ts';
-import { opError } from '../ops/contract.ts';
+import { opError, OperationError } from '../ops/contract.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { digest, jsonBytes } from '../persistence/digest.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
@@ -95,6 +95,7 @@ export async function activateGeneration(tx: BrainEngine, key: GenerationKey, li
       [id, item.key, item.identityHash, item.action, item.preimage?.json ? JSON.stringify(item.preimage.json) : null, item.preimage?.bytes ?? null]);
   }
   await tx.executeRaw(`DELETE FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='held'`, [key.sourceId, key.kind, key.ownerKey]);
+  await tx.executeRaw('DELETE FROM derived_generation_attempts WHERE source_id=$1 AND kind=$2 AND owner_key=$3', [key.sourceId, key.kind, key.ownerKey]);
   return { id, generation };
 }
 
@@ -109,9 +110,17 @@ export async function assertItemsLive(tx: BrainEngine, adapter: GenerationAdapte
   }
 }
 
+/** A held result's identity: key, input pin, policy, item set and reason. The attempts counter and `heldForInput` share it. */
+function holdIdFor(key: GenerationKey, pin: string | null, config: GenerationsConfig, setHash: string, reason: HeldReason): string {
+  return digest(['generation-hold-v1', key, pin, policyHash(config), setHash, reason]).slice(0, 32);
+}
+
+/** Terminal failures of one hold identity before its result is held `attempts_exhausted` (plan D2, CEO r3 F4). */
+export const MAX_GENERATION_ATTEMPTS = 3;
+
 async function recordHeld(tx: BrainEngine, key: GenerationKey, config: GenerationsConfig, request: PublishRequest<unknown>, setHash: string,
   reason: HeldReason, context: Record<string, unknown>): Promise<PublishOutcome> {
-  const holdId = digest(['generation-hold-v1', key, request.input?.pin ?? null, policyHash(config), setHash, reason]).slice(0, 32);
+  const holdId = holdIdFor(key, request.input?.pin ?? null, config, setHash, reason);
   const [existing] = await tx.executeRaw<{ id: number; hold_id: string }>(
     `SELECT id, hold_id FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='held'`, [key.sourceId, key.kind, key.ownerKey]);
   if (existing?.hold_id === holdId) {
@@ -136,8 +145,28 @@ export async function heldForInput(engine: BrainEngine, key: GenerationKey, pin:
   const rows = await engine.executeRaw<{ hold_id: string; item_set_hash: string; held_reason: string }>(
     `SELECT hold_id, item_set_hash, held_reason FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='held' AND input_pin=$4`,
     [key.sourceId, key.kind, key.ownerKey, pin]);
-  return rows.some(row => row.hold_id === digest(['generation-hold-v1', key, pin, policyHash(config), row.item_set_hash, row.held_reason]).slice(0, 32));
+  return rows.some(row => row.hold_id === holdIdFor(key, pin, config, row.item_set_hash, row.held_reason as HeldReason));
 }
+
+/**
+ * Counts one terminal failure of this hold identity (a fenced producer is not a failure of the result, so it is not
+ * counted); the third holds the result `attempts_exhausted` with the last three error codes. Only codes are stored.
+ */
+async function recordAttempt(engine: BrainEngine, key: GenerationKey, config: GenerationsConfig, request: PublishRequest<unknown>, setHash: string, code: string): Promise<void> {
+  const holdId = holdIdFor(key, request.input?.pin ?? null, config, setHash, 'attempts_exhausted');
+  await maintenanceTransaction(engine, async tx => {
+    const [row] = await tx.executeRaw<{ attempts: number; codes: string[] }>(
+      `INSERT INTO derived_generation_attempts (hold_id, source_id, kind, owner_key, attempts, codes) VALUES ($1,$2,$3,$4,1,jsonb_build_array($5::text))
+       ON CONFLICT (hold_id) DO UPDATE SET attempts=derived_generation_attempts.attempts+1, codes=derived_generation_attempts.codes || jsonb_build_array($5::text), updated_at=now()
+       RETURNING attempts, codes`, [holdId, key.sourceId, key.kind, key.ownerKey, code]);
+    if (Number(row!.attempts) < MAX_GENERATION_ATTEMPTS) return;
+    await tx.executeRaw('DELETE FROM derived_generation_attempts WHERE hold_id=$1', [holdId]);
+    await recordHeld(tx, key, config, request, setHash, 'attempts_exhausted', { attempts: Number(row!.attempts), codes: row!.codes.slice(-MAX_GENERATION_ATTEMPTS) });
+  });
+}
+
+const failureCode = (error: unknown): string => error instanceof OperationError ? error.code
+  : typeof (error as { code?: unknown })?.code === 'string' ? String((error as { code: string }).code) : 'error';
 
 function logFailure(key: GenerationKey, operationId: string, mode: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
@@ -151,6 +180,12 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
   const operationId = digest(['generation-publish-v1', key, request.expectedGeneration ?? null, request.input?.pin ?? null, setHash,
     request.partial === true, request.release?.holdId ?? null]);
   const itemKeys = request.items.map(item => item.key);
+  if (!request.release) {
+    const exhausted = holdIdFor(key, request.input?.pin ?? null, config, setHash, 'attempts_exhausted');
+    const [stopped] = await engine.executeRaw<{ held_context: Record<string, unknown> | null }>(
+      `SELECT held_context FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='held' AND hold_id=$4`, [key.sourceId, key.kind, key.ownerKey, exhausted]);
+    if (stopped) return { state: 'held', reason: 'attempts_exhausted', holdId: exhausted, context: stopped.held_context ?? {} };
+  }
   try {
     const outcome = await maintenanceTransaction(engine, async tx => {
       await lockGeneration(tx, adapter as GenerationAdapter<unknown>, key, itemKeys);
@@ -166,7 +201,7 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
       const unrecorded = [...rows.values()].filter(row => row.owned && row.live && !live?.items.has(row.key) && !itemKeys.includes(row.key));
       const evidence = unrecorded.length ? await adapter.legacyEvidence(tx, key, unrecorded) : new Set<string>();
       const valve = await readValve(tx, key, request.runId);
-      const plan = planGeneration({ live, rows, proposal: request.items, input, config, modelProduced: adapter.modelProduced, additive: request.partial === true,
+      const plan = planGeneration({ live, rows, proposal: request.items, input, config, modelProduced: adapter.modelProduced, strictOrder: adapter.strictOrder, additive: request.partial === true,
         proofHolds: request.proof ? proofHolds(request.proof, input, live?.inputPin) : false, evidence, valve, release: request.release?.reason });
       if (plan.kind === 'held') return recordHeld(tx, key, config, request, setHash, plan.reason, plan.context);
       if (plan.kind === 'unchanged') {
@@ -198,6 +233,11 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
     return outcome;
   } catch (error) {
     logFailure(key, operationId, 'publish', error);
+    const code = failureCode(error);
+    if (code !== 'generation_fenced') {
+      await recordAttempt(engine, key, config, request as PublishRequest<unknown>, setHash, code)
+        .catch(counted => logFailure(key, operationId, 'attempt count', counted));
+    }
     throw error;
   }
 }

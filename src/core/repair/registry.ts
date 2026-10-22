@@ -513,7 +513,7 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     },
     summary: 'Undo or release a derived generation (GBRA-161): --kind <kind> names the ledger kind, --mode restore (default) republishes the item set the '
       + 'selected live generation replaced from its ledger preimages and retires what it added, --mode release-held publishes a held result once '
-      + '(shrunk, valve, attempts_exhausted; oversize after raising generations.max_items; no_proof, fence_absent and segmented_unsupported are refused). '
+      + '(shrunk, valve, attempts_exhausted; oversize after raising generations.max_items; no_proof, fence_absent, tie and segmented_unsupported are refused). '
       + 'One selector bounds the set: --run <id>, --since <ISO-8601|7d>, --key <owner>, --generation <id>, or --held (release-held). The preview lists each key '
       + 'and saves the set under its hash; --apply --expect <hash> --yes applies exactly that set, refusing a key edited since or with no stored preimage. '
       + 'Runs only when named; never on upgrade.',

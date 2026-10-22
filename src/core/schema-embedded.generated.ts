@@ -1963,7 +1963,7 @@ CREATE TABLE IF NOT EXISTS derived_generations (
   input_size BIGINT,
   completeness JSONB NOT NULL DEFAULT '{}',
   item_set_hash TEXT NOT NULL,
-  held_reason TEXT CHECK (held_reason IS NULL OR held_reason IN ('shrunk','oversize','valve','no_proof','fence_absent','attempts_exhausted','segmented_unsupported')),
+  held_reason TEXT CHECK (held_reason IS NULL OR held_reason IN ('shrunk','oversize','valve','no_proof','fence_absent','attempts_exhausted','segmented_unsupported','tie')),
   held_context JSONB,
   proposal JSONB,
   proposal_bytes INTEGER,
@@ -1995,6 +1995,16 @@ CREATE TABLE IF NOT EXISTS derived_generation_valve (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, kind, window_key)
 );
+CREATE TABLE IF NOT EXISTS derived_generation_attempts (
+  hold_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  owner_key TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  codes JSONB NOT NULL DEFAULT '[]',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS derived_generation_attempts_key ON derived_generation_attempts (source_id, kind, owner_key);
 -- (migration v246) Per-page embedding spend ledger for large pages
 -- (page-embedding-budget.ts): held pages wait for approval, capped pages are
 -- partially embedded up to embed.max_usd_per_page.

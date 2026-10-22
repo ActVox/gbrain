@@ -10,14 +10,15 @@ import type { DerivedRetiredBy } from '../persistence/derived-retirement-hold.ts
 /** One derived set: the items of one kind a single input owns in one source. */
 export interface GenerationKey { kind: string; sourceId: string; ownerKey: string }
 
-export const HELD_REASONS = ['shrunk', 'oversize', 'valve', 'no_proof', 'fence_absent', 'attempts_exhausted', 'segmented_unsupported'] as const;
+export const HELD_REASONS = ['shrunk', 'oversize', 'valve', 'no_proof', 'fence_absent', 'attempts_exhausted', 'segmented_unsupported', 'tie'] as const;
 export type HeldReason = typeof HELD_REASONS[number];
 
 /** A held result the operator may publish once with `gbrain repair generations --mode release-held`. */
 export const RELEASABLE_HELD_REASONS: ReadonlySet<HeldReason> = new Set(['shrunk', 'valve', 'attempts_exhausted', 'oversize']);
 
 /** One item of a proposed generation: its key, the content the adapter writes, and its identity hash. */
-export interface ProposedItem { key: string; content: string; identityHash: string }
+/** `order`: the item's rank in a strict-order result (adapters with `strictOrder`); two items sharing one is a tie. */
+export interface ProposedItem { key: string; content: string; identityHash: string; order?: number }
 
 /** A bounded copy of an item's stored state, kept on the ledger so a restore can bring it back (null: too large or segmented). */
 export interface Preimage { json: Record<string, unknown> | null; bytes: number }
@@ -34,6 +35,8 @@ export interface GenerationAdapter<C = unknown> {
   retiredBy: DerivedRetiredBy;
   /** Model-produced kinds take the input-relative shrink floor; canonical projections do not. */
   modelProduced: boolean;
+  /** The result is a ranked cut: every item carries a distinct `order`, and a tie (or a missing rank) holds the result (`tie`). */
+  strictOrder?: boolean;
   /** Page keys locked before the ledger row, in slug order with the input guard (D7). */
   lockKeys(key: GenerationKey, itemKeys: readonly string[]): Array<{ sourceId: string; slug: string }>;
   /** The input as stored now, or null when it is gone. `context` carries an input the database does not hold (a transcript). */

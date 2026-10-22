@@ -35,8 +35,12 @@ export const syntheticAdapter: GenerationAdapter<undefined> = {
 };
 registerGenerationAdapter(syntheticAdapter as GenerationAdapter<unknown>);
 
+/** The same kind as a ranked cut (`strictOrder`): a tie in the result holds it (#6023 shape). */
+export const strictSyntheticAdapter: GenerationAdapter<undefined> = { ...syntheticAdapter, strictOrder: true };
+
 /** One proposed synthetic item: a note page owned by `ownerKey` with this body. */
-export function syntheticItem(ownerKey: string, slug: string, body: string): ProposedItem {
+export function syntheticItem(ownerKey: string, slug: string, body: string, order?: number): ProposedItem {
+  if (order !== undefined) return { ...syntheticItem(ownerKey, slug, body), order };
   return markdownItem(slug, serializeMarkdown({ synthetic_owner: ownerKey, synthetic_producer: 'synthetic' }, body, '', { type: 'note', title: slug.split('/').pop()!, tags: [] }));
 }
 
