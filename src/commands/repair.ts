@@ -73,7 +73,8 @@ export const REPAIR_HELP = `Usage: gbrain repair [<kind>] [--apply] [--source <i
        gbrain repair receipt-compaction [--older-than <72h|30d>] [--include-failures] [--force]
                                         [--apply --expect <preview-hash> --yes] [--limit <n>] [--json]
        gbrain repair file-drift --source <id> (--slug <slug>... | --request <id>... | --all-drifted [--class <name>] [--since <ISO-8601|7d>]
-                                | --held [--side both|unknown|deleted [--state tombstone_edited|purged_differs|file_gone]])
+                                | --held [--side both|unknown|deleted [--state tombstone_edited|purged_differs|file_gone
+                                         [--provenance never_committed|deleted_by_commit|deletion_uncommitted]]] [--cursor <next_cursor>])
                                 [--only <glob>]... [--skip <glob>]... --prefer file|database [--apply --expect <preview-hash>] [--json]
        gbrain repair stuck-recovery [--source <id>] [--request-id <uuid>]
                                     [--keep prior|disk|withdrawn --apply --expect <preview-hash> --yes] [--json]
