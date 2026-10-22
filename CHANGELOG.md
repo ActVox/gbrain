@@ -10,37 +10,82 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.383.0] - 2026-10-22
+## [0.60.382.0] - 2026-10-22
 
-**A brain checkout that several agents, crons and hooks commit into no longer loses or brings back work.** A change the remote already took and then reverted is no longer put back by the next push. gbrain's own page commits never commit without the checkout's lock, and a refused commit leaves nothing staged for another writer to sweep up. Reported in #7381.
+**A one-shot command that writes now runs its persistence consumer on the direct database route when one is configured, and a write that database contention keeps refusing reads as retryable.** Before, `gbrain repair <kind> --apply` and other one-shot write commands claimed and scanned through a transaction-mode pooler even with `GBRAIN_DIRECT_DATABASE_URL` set.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| A local commit whose patch the remote already has (cherry-picked or rebased there), and the remote reverted it | the next `commit-push` or `--pull` silently put the change back | the commit is left out of the merge, the revert stands, and the merge message names it |
-| The same, but the remote edited those lines since | `integrate_conflict` on every push from then on | publishes cleanly with the remote's lines |
-| A page write (`put_page`, facts fences, takes, timeline, `lint --fix`) while another writer holds the commit lock past 2 s | committed without the lock | the file is written and noted in a pending ledger; the next locked page write or `gbrain git commit-push --pending` commits it |
-| git refuses a commit (hook, missing identity) | the paths stayed staged, and the next commit without paths by any writer published them | the exact earlier staging is restored |
-| `commit-push -- <dir>` while another writer has files staged under `<dir>` | they were committed too | refused (`commit_prestaged_paths`); name a file to claim it |
-| A brain folder inside a larger repository | commits and pushes could carry files outside it | `gbrain sources harden` records `gbrain.sourceRoot`; commit-push refuses to commit or publish files outside it (`commit_outside_source_root`) until the user agrees |
-| `scripts/brain-commit-push.sh` on a machine without gbrain | held the commit lock through the push | releases it first and pushes under `brain-publish.lock` |
-
-New and opt-in: `gbrain git guard --install` adds a `prepare-commit-msg` hook that refuses commits made around gbrain in that checkout, `--no-verify` included. `git config gbrain.quarantine true` turns a content conflict into a published merge that takes the remote's version and keeps this machine's under `refs/gbrain/quarantine/`. `gbrain doctor` adds `checkout_lagging`, `dirty_age`, `commits_outside_source_root` and `quarantined_changes`.
+| A one-shot write command (`repair --apply`, `cli` writes) with `GBRAIN_DIRECT_DATABASE_URL` set and a transaction-mode pooler as the main URL | the consumer printed `reason=transaction_pooler … no direct route` and ran its claims, renewals and scans on the pooler, where a stalled round trip cannot be ended | starting the consumer gives the process one direct connection, as taking a lease already did; read-only one-shot commands still open none |
+| A write admission that deadlocks, serialization failures, lock or statement timeouts kept refusing for its whole retry budget | `storage_error` with `retryable: false`, and a repair apply recorded it as an item failure | `storage_error` with `reason: database_contention`, which reads retryable (no receipt was confirmed, so the same request_id is safe); a repair apply stops with what it applied and the command that resumes it |
 
 ### What to watch for after you upgrade
 
-- Rerun `gbrain sources harden <source>` on a brain checkout to record its source root and refresh the committed helper script.
-- A doctor `dirty_age` warning means page writes are waiting for a commit; its fix is `gbrain git commit-push --pending`.
-- Nothing is rewritten on upgrade, and there is no schema migration. The guard and quarantine stay off until you turn them on.
+- A one-shot write command now opens one connection to the direct (or session-mode) URL. Commands that only read are unchanged.
+- Nothing is rewritten on upgrade, and there is no schema migration.
 
 ### Itemized changes
 
-- `src/core/git/commit-push.ts`: patch-equivalent replay in `integrate`, locked-only write-through with the pending ledger, index restore, staged-sweep and source-root refusals, `--pending`, opt-in quarantine (`test/git-writer-safety-7381.serial.test.ts`).
-- `src/core/git/commit-guard.ts`, `src/commands/git.ts`: `gbrain git guard`.
-- `src/core/brain-repo-durability.ts`: helper fallback lock release, `recordSourceRoot`.
-- `src/commands/doctor/checks/git-writer.ts`: the four doctor checks (`test/doctor-git-writer-7381.test.ts`).
-- `docs/guides/shared-checkout-git.md`: source roots, pending page writes, quarantine, guard.
+- `src/core/persistence/service.ts`, `src/core/direct-pool-profile.ts`: starting a persistence consumer makes the process short-lived.
+- `src/core/item-failure.ts`, `src/core/persistence/admission-retry.ts`, `src/core/error-registry.ts`, `docs/guides/error-codes.md`: admission contention is classified and reported as retryable contention.
+- Test: `test/oneshot-consumer-direct-route.test.ts` (PGLite and Postgres).
+
+## [0.60.381.0] - 2026-10-22
+
+**A repair no longer soft-deletes a page whose content moved on in the database after its file was deleted.** `gbrain repair file-drift --held --side deleted --state file_gone --prefer file` (for example with `--provenance deleted_by_commit`) and `gbrain repair ghost-pages` took the commit that deleted a page's file as the deletion of the page. A page written in the database after that file was soft-deleted with content no commit holds, which a restore could recover only until the 72-hour purge.
+
+### What changed
+
+| Page whose file is gone | Before | Now |
+|---|---|---|
+| Revision is the one sync last imported from the file, or a committed sync or Git-published write produced it | soft-deleted | soft-deleted |
+| Revision written in the database after the file's last import | soft-deleted | listed apart as `database_ahead_of_file`; the apply refuses it |
+| No import record, written after the commit that deleted the file | soft-deleted | listed apart as `database_ahead_of_file`; the apply refuses it |
+| No import record, written before that commit | soft-deleted | soft-deleted |
+
+### What to watch for after you upgrade
+
+- Preview again before applying an approval you saved on an earlier release. The apply re-checks each page, but a fresh preview shows which pages are now listed apart.
+- To keep a listed-apart page file-backed, recreate its file from the page: `gbrain repair file-drift --source <id> --slug <slug> --prefer database`. Otherwise leave it as it is.
+- If a page was soft-deleted this way on an earlier release, `gbrain restore <slug> --force` brings back its newest content until the 72-hour purge.
+
+### Itemized changes
+
+- `src/core/repair/ghost-pages.ts`: `ghostFileBacked` decides whether a gone file's page is file-backed. The ghost-pages preview lists the rest apart (`residuals.database_ahead`), and the soft-delete refuses them.
+- `src/core/repair/file-drift.ts`: the `--prefer file` resolution of a gone file skips a page that is not file-backed, as `database_ahead_of_file`.
+- `src/core/persistence/sync-pass.ts`: `readRevisionAttestations` exposes the attestation sync's own deletion proof reads.
+- Test: `test/repair-ghost-database-ahead-gbra133.test.ts` (PGLite and Postgres).
+
+## [0.60.380.0] - 2026-10-22
+
+**Slow whole-brain reads now say what they are doing, say whether their result is whole, and say so when a harness cuts them off, and `gbrain diag --json` returns one bounded diagnostic bundle.** Before, `sync status`, `doctor` or `orphans` on a large brain could run for minutes with nothing on stdout, so a call cut off by a timeout looked like an empty result. `gbrain extract --stale` also no longer stops on a page with an over-long line.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A slow read (`sync status`, `sources status`, `doctor`, `orphans`, `anomalies`, `status`, `diag`) while it runs | silent until the result | one stderr line at the start and one every 10 s; stdout still carries only the result, and `--quiet` turns the lines off |
+| Their `--json` documents | no timing, completeness implied | `elapsed_ms` and `complete`; when a budget or bound left something out, `incomplete` names each field and why |
+| SIGTERM, SIGINT or SIGHUP before the result | `command_failed` fallback, or nothing | one stderr line (`Interrupted by <signal> after N s while reading <what>`) and, under `--json`, `{error: "interrupted", ...}`, written before cleanup so a follow-up SIGKILL does not lose it |
+| One bundle for a support question | five separate commands | `gbrain diag --json`: version and build skew, per-source freshness and HEAD lag, holds by code, database connections, and one search's stage timing, each with its own `elapsed_ms` and status, under a 30 s budget |
+| `gbrain extract --stale` with a page holding a line or fence longer than the block bound | exited 1; the unmanaged sweep stopped at that page | reports the page by code (`page_body_segmented`), leaves it stale and finishes every other page |
+
+### What to watch for after you upgrade
+
+- Scripts that read only the first stderr line of a slow read now see the heartbeat line first; error codes follow it.
+- `complete: false` means part of the answer was not read. Treat the named fields as unknown, not empty.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/read-heartbeat.ts`, `src/cli/slow-read.ts`, `src/cli/command-table.ts` (`slowRead`), `src/cli/main.ts`: heartbeat, read meta and the interrupt note.
+- `src/core/process-cleanup.ts`, `src/core/cli-force-exit.ts`: the interrupt note before cleanup; `interrupted` fallback for exits 129, 130 and 143.
+- `src/commands/diag.ts`, `src/cli/commands/diag.ts`, `src/cli/help/diag.ts`: `gbrain diag`.
+- `src/commands/extract.ts`, `src/core/mentions/pass.ts`, `src/core/mentions/stale.ts`: over-bound pages in `extract --stale` (#7357).
+- `docs/protocol/AGENT_OPERATOR_v1.md`: slow reads and the `interrupted` fallback.
+- Tests: `test/read-heartbeat-cli.test.ts` (fake harness timeouts on a real spawned CLI), `test/read-meta-diag.test.ts`, `test/extract-stale-over-bound-page-7357.test.ts`.
 
 ## [0.60.379.0] - 2026-10-22
 
