@@ -64,7 +64,7 @@ import {
   pgliteCloseTimeoutMs,
   SINK_DRAIN_TIMEOUT_MS,
 } from './background-work.ts';
-import { POOL_END_TIMEOUT_SECONDS } from './db.ts';
+import { POOL_END_TIMEOUT_SECONDS } from './pool-end-timeout.ts';
 import { parseGlobalFlags } from './cli-options.ts';
 import { setInterruptedDocumentWriter, slowReadElapsedMs, withReadMeta } from './read-heartbeat.ts';
 
