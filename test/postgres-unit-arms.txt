@@ -72,6 +72,7 @@ test/fence-repair-receipts.test.ts
 test/forecast-journal.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
 test/get-chunks-paging.test.ts
+test/google-connector-facts-fence-7292.test.ts
 test/grade-takes-window.test.ts
 test/graduation-copy.test.ts
 test/graduation-digest.test.ts
