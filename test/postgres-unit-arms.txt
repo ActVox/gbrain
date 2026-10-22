@@ -49,6 +49,7 @@ test/db-lock-reconnect.test.ts
 test/decide/conflict-proposals-managed.test.ts
 test/declared-lineage-visibility.test.ts
 test/derived-link-reconciliation.test.ts
+test/direct-pool-profile.test.ts
 test/doctor-frontmatter-holds.test.ts
 test/doctor-image-embedding-coverage.test.ts
 test/doctor-keyword-plan-6495.test.ts
@@ -72,6 +73,8 @@ test/fence-repair-receipts.test.ts
 test/forecast-journal.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
 test/get-chunks-paging.test.ts
+test/google-connector-facts-fence-7292.test.ts
+test/grade-takes-window.test.ts
 test/graduation-copy.test.ts
 test/graduation-digest.test.ts
 test/graduation-drain.test.ts
