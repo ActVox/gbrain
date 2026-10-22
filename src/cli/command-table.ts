@@ -318,8 +318,7 @@ export const CLI_COMMANDS: readonly CliCommandRecord[] = [  // Pre-connect: disp
   // selfHelp: v0.37 fix wave (Lane D.4 + CDX2-12): sync's --no-embed flag was unreachable via help
   // because the dispatcher's generic CLI-only short-circuit fired before runSync could print its own
   // usage block. Adding `sync` here routes `gbrain sync --help` into runSync.
-  { name: 'sync', phase: 'post-connect', thinClient: 'refuse', selfHelp: true, json: 'document', routes_source: true,
-    slowRead: args => args.includes('status') ? `sync status for ${sourceArg(args) ? `source ${sourceArg(args)}` : 'the selected source'}` : null, load: () => import('./commands/sync.ts') },
+  { name: 'sync', phase: 'post-connect', thinClient: 'refuse', selfHelp: true, json: 'document', routes_source: true, slowRead: args => args.includes('status') ? `sync status for ${sourceArg(args) ? `source ${sourceArg(args)}` : 'the selected source'}` : null, load: () => import('./commands/sync.ts') },
   // selfHelp: #3834: extract ships detailed help for its mode-specific flags. Keep the generic
   // CLI-only stub from hiding that contract.
   { name: 'extract', phase: 'post-connect', thinClient: 'refuse', selfHelp: true, routes_source: '--source-id', load: () => import('./commands/extract.ts') },
