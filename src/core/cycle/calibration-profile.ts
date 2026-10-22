@@ -289,20 +289,21 @@ class CalibrationProfilePhase extends BaseCyclePhase {
       };
     }
 
-    // The profile is a function of the scorecard, the model and the prompt: when
-    // none changed since the latest stored profile, there is nothing to buy.
-    // REAL columns are compared against the scorecard rounded the same way.
+    // The profile is a function of the scorecard and the model: when neither
+    // changed since the latest stored profile, there is nothing to buy (a new
+    // prompt takes effect at the next scorecard change). REAL columns are
+    // compared against the scorecard rounded the same way.
     const sourceId = scope.sourceId ?? 'default';
     const [latest] = await engine.executeRaw<{ unchanged: boolean }>(
       `SELECT COALESCE(total_resolved = $3 AND brier IS NOT DISTINCT FROM $4::real AND accuracy IS NOT DISTINCT FROM $5::real
-                AND partial_rate IS NOT DISTINCT FROM $6::real AND model_id = $7 AND prompt_version = $8, false) AS unchanged
+                AND partial_rate IS NOT DISTINCT FROM $6::real AND model_id = $7, false) AS unchanged
          FROM calibration_profiles WHERE source_id = $1 AND holder = $2
         ORDER BY generated_at DESC, id DESC LIMIT 1`,
-      [sourceId, holder, scorecard.resolved, scorecard.brier, scorecard.accuracy, scorecard.partial_rate, modelId, promptVersion],
+      [sourceId, holder, scorecard.resolved, scorecard.brier, scorecard.accuracy, scorecard.partial_rate, modelId],
     );
     if (latest?.unchanged) {
       return {
-        summary: `calibration_profile: holder=${holder} unchanged since the latest profile (${scorecard.resolved} resolved, same scorecard, model and prompt); no model call`,
+        summary: `calibration_profile: holder=${holder} unchanged since the latest profile (${scorecard.resolved} resolved, same scorecard and model); no model call`,
         details: { ...result, skipped: 'unchanged_scorecard' },
         status: 'ok',
       };
@@ -404,12 +405,12 @@ class CalibrationProfilePhase extends BaseCyclePhase {
          total_resolved, brier, accuracy, partial_rate, grade_completion,
          domain_scorecards, pattern_statements,
          voice_gate_passed, voice_gate_attempts,
-         active_bias_tags, model_id, cost_usd, judge_model_agreement, prompt_version
+         active_bias_tags, model_id, cost_usd, judge_model_agreement
        ) VALUES ($1, $2, now(), false,
                  $3, $4, $5, $6, $7,
                  $8::text::jsonb, $9::text[],
                  $10, $11,
-                 $12::text[], $13, NULL, NULL, $14)`,
+                 $12::text[], $13, NULL, NULL)`,
       [
         sourceId,
         holder,
@@ -427,7 +428,6 @@ class CalibrationProfilePhase extends BaseCyclePhase {
         result.voice_gate_attempts,
         result.active_bias_tags,
         modelId,
-        promptVersion,
       ],
     );
     result.profile_written = true;

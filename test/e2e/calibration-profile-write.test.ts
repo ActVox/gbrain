@@ -70,7 +70,7 @@ async function seedResolvedTakes(engine: BrainEngine, slug: string): Promise<voi
   }
 }
 
-async function runPhase(engine: BrainEngine, extra: { model?: string; promptVersion?: string } = {}) {
+async function runPhase(engine: BrainEngine, extra: { model?: string } = {}) {
   return runPhaseCalibrationProfile(buildCtx(engine), {
     holder: HOLDER,
     patternsGenerator,
@@ -82,9 +82,8 @@ async function runPhase(engine: BrainEngine, extra: { model?: string; promptVers
 
 /**
  * GBRA-177: a pass on an unchanged scorecard (resolved count, Brier, accuracy,
- * partial rate, model and prompt version all equal the latest stored
- * profile's) makes no model call and writes no row; a change to any of them
- * regenerates. Runs after the lane's first profile is written.
+ * partial rate and model all equal the latest stored profile's) makes no model
+ * call and writes no row; a change to any of them regenerates. Runs after the lane's first profile is written.
  */
 async function expectUnchangedSkip(engine: BrainEngine, slug: string): Promise<void> {
   const rows = async () => Number((await engine.executeRaw<{ n: number }>('SELECT COUNT(*)::int AS n FROM calibration_profiles WHERE holder = $1', [HOLDER]))[0]!.n);
@@ -96,14 +95,13 @@ async function expectUnchangedSkip(engine: BrainEngine, slug: string): Promise<v
   expect(generatorCalls).toBe(0);
   expect(await rows()).toBe(before);
   expect(((await runPhase(engine, { model: 'anthropic:claude-opus-4-7' })).details as Record<string, unknown>).profile_written).toBe(true);
-  expect(((await runPhase(engine, { model: 'anthropic:claude-opus-4-7', promptVersion: 'v-next' })).details as Record<string, unknown>).profile_written).toBe(true);
-  expect(((await runPhase(engine, { model: 'anthropic:claude-opus-4-7', promptVersion: 'v-next' })).details as Record<string, unknown>).profile_written).toBe(false);
+  expect(((await runPhase(engine, { model: 'anthropic:claude-opus-4-7' })).details as Record<string, unknown>).profile_written).toBe(false);
   const page = await engine.getPage(slug);
   await engine.addTakesBatch([{ page_id: page!.id, row_num: 6, claim: 'Seed claim 6', kind: 'bet' as const, holder: HOLDER, weight: 0.6 }]);
   await engine.resolveTake(page!.id, 6, { quality: 'correct', resolvedBy: 'test' });
-  expect(((await runPhase(engine, { model: 'anthropic:claude-opus-4-7', promptVersion: 'v-next' })).details as Record<string, unknown>).profile_written).toBe(true);
-  expect(generatorCalls).toBe(3);
-  expect(await rows()).toBe(before + 3);
+  expect(((await runPhase(engine, { model: 'anthropic:claude-opus-4-7' })).details as Record<string, unknown>).profile_written).toBe(true);
+  expect(generatorCalls).toBe(2);
+  expect(await rows()).toBe(before + 2);
 }
 
 // ─── PGLite lane (always runs) ──────────────────────────────────────

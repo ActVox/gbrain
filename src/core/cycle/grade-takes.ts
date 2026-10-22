@@ -50,6 +50,7 @@ import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { parseTakesFence } from '../takes-fence.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
+import { utcDate } from './cycle-date.ts';
 
 /**
  * Bump when the judge prompt or the JSON output shape changes. Old verdicts
@@ -500,7 +501,7 @@ function listGradeWindow(engine: BrainEngine, opts: { minAgeMonths: number; prom
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - opts.minAgeMonths);
   return engine.listTakes({
-    resolved: false, active: true, sortBy: 'since_date', oldestFirst: true, sinceOnOrBefore: cutoff.toISOString().slice(0, 10),
+    resolved: false, active: true, sortBy: 'since_date', oldestFirst: true, sinceOnOrBefore: utcDate(cutoff),
     ungradedFirst: { promptVersion: opts.promptVersion, judgeModelId: opts.judgeModelId }, limit: opts.limit,
   });
 }
