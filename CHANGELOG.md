@@ -10,6 +10,82 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.369.0] - 2026-10-22
+
+**Writes behind a transaction-mode pooler no longer wait a round trip for BEGIN before their first statement.** Every persistence transaction opens with a transaction-local declaration (the protocol fence and brain id). That declaration now travels with BEGIN, so put and remember pay one round trip less per journal, effect, receipt and consumer transaction. On a local Postgres + PgBouncer rig at 40 ms RTT, no measured transaction waits on BEGIN any more, and remember drops from 212 to 205 round trips.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A persistence transaction's declaration | sent after BEGIN's answer | sent right behind BEGIN; every later statement still waits for the answer, in order |
+| BEGIN refused | the declaration was never sent | the waiting statements are rejected without being sent, even when the body catches the rejection |
+| Reserved connections on pools that do not pipeline (#6930) | waited for BEGIN | the same single exception, covering tagged, `unsafe`, savepoint, `file()`, `describe`, `cursor` and `forEach` statements |
+
+Lock order, the publication deadline, durability and the per-transaction fence are unchanged. Group and lane publication still wait for BEGIN's answer.
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- Vendored postgres.js: `sql.begin({ first })` (`patches/postgres@3.4.9.patch`, `vendor/postgres/*`, types).
+- `src/core/postgres-engine/reserved-transactions.ts`: the same exception on reserved connections.
+- `src/core/persistence/protocol.ts`: `isPersistenceDeclaration`; journal, effect-journal, effects, receipt true-up, consumer lane and single publication pass `pipelineFirst`.
+- Tests: `test/persistence-pipeline-first.test.ts`, `test/e2e/pgbouncer-transaction-pipeline-6930.test.ts`.
+
+## [0.60.368.0] - 2026-10-22
+
+**Warm search against a remote pooled Postgres is under 2 seconds, and one search can no longer take the whole connection pool.** On a 50k-page brain behind a transaction-mode pooler at 66 ms RTT, with a 200 ms embedder and a 300 ms reranker, warm MCP search went from 2.5 s to 1.6 s at p50 and from 3.0 s to 2.0 s at p95. The CLI over a running `gbrain serve` socket went from 2.4 s to 1.8 s at p50 and from 2.8 s to 2.1 s at p95. Results, ranking, privacy filters and trust behavior are unchanged.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Post-fusion stage | backlinks, salience, dates, graph adjacency, alias and supersede reads ran one after another | all start at stage entry; each stage still applies in order, and a failed read skips only its own stage |
+| Each MCP tool call | source resolution and config took five round trips before the op | one round trip; the hot-memory hook runs beside a read op instead of after it |
+| A search read transaction | its caller waited for COMMIT's round trip | the rows come back when the read returns; the connection stays reserved until COMMIT settles |
+| Vector statements | paid a Describe round trip per call on a pooler | the query vector binds as text, so the statement description is reused |
+| After the reranker | generated-page, alias-hop, fan-out, trust and saved-fact reads waited behind earlier stages | they overlap the stages they do not depend on; the saved-fact probe and scan are one statement |
+| Connections one search or query holds | up to the whole read pool (10 by default) | at most 4 (`SEARCH_CONNECTION_LIMIT`), on the read pool, never the direct lane |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and there is no schema migration. Defaults are unchanged.
+
+### Itemized changes
+
+- `src/core/search/hybrid.ts`, `src/core/search/hybrid/*`: post-fusion reads start at entry; generated-page and alias-hop reads start early.
+- `src/mcp/server.ts`, `src/mcp/dispatch.ts`, `src/core/source-resolver.ts`: one-read request config snapshot; the meta hook overlaps read ops.
+- `src/core/postgres-engine.ts`: read transactions answer before COMMIT; per-search connection slots at the transaction and statement seams (`src/core/search/connection-budget.ts`).
+- `src/core/search/embedding-column.ts`, `src/core/engine-sql/chunks.ts`: `$1::text::vector` binds.
+- `src/core/ops/search.ts`, `src/core/search/alias-fanout.ts`, `src/core/eligibility/stamp.ts`, `src/core/facts/meta-hook.ts`: fan-out, trust and saved-fact reads overlap.
+- `scripts/bench/retrieval-scale/run.ts`: `--modes socket`.
+- Tests: `test/e2e/search-connection-budget-postgres.test.ts`, `test/e2e/vector-statement-describe-postgres.test.ts`, `test/read-transaction-early-result.test.ts`, `test/search-post-rerank-concurrency.test.ts`, `test/search/post-fusion-concurrent-reads.test.ts`, `test/serve-request-round-trips.test.ts`.
+
+## [0.60.367.0] - 2026-10-22
+
+**Restoring a backup on Windows is faster, and four CI failures that were not about the change under test no longer fail runs.** Restore flushed every database file to disk twice: once as it unpacked the file and again before it marked the restore ready. On a Windows arm64 runner the first flush cost 11-22 seconds per restore. Restore now flushes each file once, before the ready receipt, so the durability guarantee is unchanged.
+
+### What changed
+
+| Area | Before | Now |
+|---|---|---|
+| `gbrain` backup restore | Each restored database file flushed while unpacking and again before ready | Flushed once, before the ready receipt |
+| Dependency audit in CI | A registry outage (for example a 503 from the advisories endpoint) was reported as "found advisories" | Retried with backoff, then reported as `audit_registry_unavailable`; any other failure is `audit_incomplete`; both still block a blocking run |
+| Release gate | A job listing GitHub answered with 502 at 100 per page failed the release | Read again at 30 per page after the existing retries |
+| Test suites | Four timing tests could fail on a loaded CI runner without a product change | Each measures only what it bounds; no bound was raised |
+
+**Spend effect:** none. **Defaults:** unchanged. No schema migration, and nothing rewrites data on upgrade.
+
+### Itemized changes
+
+- Backup restore: `extractPgliteDump` no longer fsyncs each file; `syncRestoredTree` still flushes every restored file and directory before the ready receipt.
+- `scripts/ci-dependency-audit.sh`: advisories require bun's advisory report; registry and network errors retry within `AUDIT_DEADLINE_S` (420 s) and report `audit_registry_unavailable`.
+- `scripts/ci-reuse.ts` `attemptJobs` (shared by the release gate): a 5xx that outlasts the client's retries restarts the listing at 30 per page.
+- Tests: the sync-entry-faults Postgres suite clones one migrated template per file (58 s to 32 s locally); the loop-lag clock probe blocks with `Bun.sleepSync` instead of a spawned child (spawn setup ran on the thread) or `Atomics.wait` (the allocator purges freed pages on the waiting thread); the write-gate perf check judges a round quiet where its p95 can see load.
+
 ## [0.60.366.0] - 2026-10-22
 
 **Background maintenance that could never finish, and kept paying for model calls each time it tried, now finishes or stops spending.** Several maintenance steps failed the same way on every pass. A pinned question whose answer was longer than a fixed 2,000-token cap failed every refresh and was reported as a provider error. The nightly transcript step re-sent transcripts it had already judged to the paid decision service. The 72-hour purge refused a deleted duplicate page forever because another page shared its file. Some phase failures stopped every later maintenance job at the same place, so brain-wide maintenance never recorded a finished pass. Each of these now ends: the work completes, is skipped with a clear reason, or waits for a change that could make it succeed.
