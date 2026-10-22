@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.367.0] - 2026-10-22
+
+**Restoring a backup on Windows is faster, and four CI failures that were not about the change under test no longer fail runs.** Restore flushed every database file to disk twice: once as it unpacked the file and again before it marked the restore ready. On a Windows arm64 runner the first flush cost 11-22 seconds per restore. Restore now flushes each file once, before the ready receipt, so the durability guarantee is unchanged.
+
+### What changed
+
+| Area | Before | Now |
+|---|---|---|
+| `gbrain` backup restore | Each restored database file flushed while unpacking and again before ready | Flushed once, before the ready receipt |
+| Dependency audit in CI | A registry outage (for example a 503 from the advisories endpoint) was reported as "found advisories" | Retried with backoff, then reported as `audit_registry_unavailable`; any other failure is `audit_incomplete`; both still block a blocking run |
+| Release gate | A job listing GitHub answered with 502 at 100 per page failed the release | Read again at 30 per page after the existing retries |
+| Test suites | Four timing tests could fail on a loaded CI runner without a product change | Each measures only what it bounds; no bound was raised |
+
+**Spend effect:** none. **Defaults:** unchanged. No schema migration, and nothing rewrites data on upgrade.
+
+### Itemized changes
+
+- Backup restore: `extractPgliteDump` no longer fsyncs each file; `syncRestoredTree` still flushes every restored file and directory before the ready receipt.
+- `scripts/ci-dependency-audit.sh`: advisories require bun's advisory report; registry and network errors retry within `AUDIT_DEADLINE_S` (420 s) and report `audit_registry_unavailable`.
+- `scripts/ci-reuse.ts` `attemptJobs` (shared by the release gate): a 5xx that outlasts the client's retries restarts the listing at 30 per page.
+- Tests: the sync-entry-faults Postgres suite clones one migrated template per file (58 s to 32 s locally); the loop-lag clock probe blocks with `Atomics.wait` instead of a spawned child; the write-gate perf check judges a round quiet where its p95 can see load.
+
 ## [0.60.366.0] - 2026-10-22
 
 **Background maintenance that could never finish, and kept paying for model calls each time it tried, now finishes or stops spending.** Several maintenance steps failed the same way on every pass. A pinned question whose answer was longer than a fixed 2,000-token cap failed every refresh and was reported as a provider error. The nightly transcript step re-sent transcripts it had already judged to the paid decision service. The 72-hour purge refused a deleted duplicate page forever because another page shared its file. Some phase failures stopped every later maintenance job at the same place, so brain-wide maintenance never recorded a finished pass. Each of these now ends: the work completes, is skipped with a clear reason, or waits for a change that could make it succeed.
