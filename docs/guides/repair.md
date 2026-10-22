@@ -1518,8 +1518,8 @@ once to an instant the preview and apply carry), `--key <owner>`
   and nothing of that key changes.
 - `--mode release-held` publishes a held result once: `shrunk`, `valve` and
   `attempts_exhausted` always, `oversize` after `generations.max_items` was
-  raised. `no_proof`, `fence_absent` and `segmented_unsupported` are refused,
-  because releasing them would supply the proof they lack.
+  raised. `no_proof`, `fence_absent`, `segmented_unsupported` and `tie` are
+  refused, because releasing them would supply the proof they lack.
 
 The preview saves the set under its hash; `--apply --expect <hash> --yes`
 applies exactly that set and rechecks each key under its locks

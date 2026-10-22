@@ -61,7 +61,9 @@ export const atomGenerationAdapter: GenerationAdapter<AtomGenerationContext> = {
     const origin = originOf(key);
     if (origin.field === 'source_path') return context?.transcriptInput ?? null;
     const [row] = await engine.executeRaw<{ id: number; content_hash: string | null; revision: string | null; body_bytes: number | null }>(
-      'SELECT id, content_hash, knowledge_revision::text AS revision, body_bytes FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [key.sourceId, origin.value]);
+      `SELECT id, content_hash, knowledge_revision::text AS revision,
+        COALESCE(body_bytes, octet_length(COALESCE(compiled_truth, '')) + octet_length(COALESCE(timeline, ''))) AS body_bytes
+       FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL`, [key.sourceId, origin.value]);
     return row?.content_hash ? { pin: atomPagePin(row.content_hash, row.revision ? { pageId: Number(row.id), revision: row.revision } : undefined), size: Number(row.body_bytes ?? 0) } : null;
   },
   async readItems(engine, key, itemKeys) {

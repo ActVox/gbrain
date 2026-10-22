@@ -4207,8 +4207,8 @@
         "idempotent": true,
         "name": "derived_generations",
         "sql": {
-          "length": 2337,
-          "sha256": "2a5b53563f732d056acc660cf3e91bc1a1c72fd1f5bbb1f68960f6e66c7f1800"
+          "length": 2832,
+          "sha256": "8f07eb75b6de03f1be543c4236cb47d50bb85bbd5e8d9e47c9f776e0cb514872"
         },
         "sqlFor": "absent",
         "transaction": "absent",

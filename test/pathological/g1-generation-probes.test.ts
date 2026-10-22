@@ -101,7 +101,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect(await publish(engine, FOUR, 'pin-1', { expectedGeneration: 0 })).toMatchObject({ state: 'published', generation: 1 });
         const stale = await publish(engine, { a: 'Alpha claim.', b: 'Beta claim.', c: 'Gamma claim.', e: 'Epsilon claim.' }, 'pin-1', { expectedGeneration: 0 }).catch(error => error);
         expect(codeOf(stale)).toBe('generation_fenced');
-        expect((stale as OperationError).details?.reason ?? (stale as { reason?: string }).reason).toBe('stale_generation');
+        expect((stale as OperationError).reason).toBe('stale_generation');
         expect(await publish(engine, FOUR, 'pin-1', { expectedGeneration: 0 })).toMatchObject({ state: 'unchanged', generation: 1 });
         const next = await publish(engine, { a: 'Alpha claim.', b: 'Beta claim.', c: 'Gamma claim.', e: 'Epsilon claim.' }, 'pin-1', { expectedGeneration: 1 });
         expect(next).toMatchObject({ state: 'published', generation: 2, retired: [slug('d')] });

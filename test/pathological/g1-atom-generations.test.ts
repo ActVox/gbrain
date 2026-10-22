@@ -4,7 +4,9 @@
  * Protects: (a) a failed publication (here the provenance edges) writes no atom at all, provisional or final, and the
  * retry publishes the atoms, their edges and the completion stamp together; (b) a re-extraction that keeps one of four
  * atoms is held `shrunk` and the four stay live (pre-fix: three were retired on a model's say-so); (c) an atom naming
- * the origin with no retained extractor evidence (a hand-written or hand-edited one) is protected, not retired.
+ * the origin with no retained extractor evidence (a hand-written or hand-edited one) is protected, not retired; (d) a page
+ * whose body halves and whose re-extraction returns half the atoms clears the input-relative floor: the result publishes
+ * and the stale atoms retire.
  * Fails when: the atom loop writes outside the generation transaction, or retirement ignores the floor or ownership.
  * Seams: the extract_atoms phase's `_pages` / `_transcripts` / `_chat` inputs (no paid call). PGLite always,
  * Postgres when DATABASE_URL is set.
@@ -87,6 +89,31 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
         expect(lines.some(line => line.includes('result held (shrunk)') && line.includes('gbrain repair generations --kind atom --mode release-held'))).toBe(true);
         const [held] = await engine.executeRaw<{ held_reason: string }>("SELECT held_reason FROM derived_generations WHERE state='held'");
         expect(held?.held_reason).toBe('shrunk');
+      });
+    }, 120_000);
+
+    test('a page whose body halves and whose re-extraction keeps half the atoms publishes and retires the stale ones', async () => {
+      await withBrain(databaseUrl, async engine => {
+        const source = 'meetings/2026-09-07-source-a';
+        const extractPage = async (content: string, titles: string[]) => {
+          await engine.putPage(source, { type: 'meeting', title: 'Source A', compiled_truth: content, timeline: '' });
+          const [stored] = await engine.executeRaw<{ content_hash: string }>('SELECT content_hash FROM pages WHERE slug=$1', [source]);
+          return runPhaseExtractAtoms(engine, { _transcripts: [], _pages: [{ slug: source, content, contentHash: stored!.content_hash }], _chat: chat(titles) });
+        };
+        const paragraph = (claim: string) => `${claim} ${'Context for the claim, kept the same length on purpose. '.repeat(8)}
+
+`;
+        const full = ['Ship smaller', 'Measure first', 'Hire slowly', 'Write it down'];
+        expect((await extractPage(full.map(paragraph).join(''), full)).status).toBe('ok');
+        const before = await liveAtoms(engine);
+        expect(before).toHaveLength(4);
+        expect((await extractPage(full.slice(0, 2).map(paragraph).join(''), full.slice(0, 2))).status).toBe('ok');
+        const after = await liveAtoms(engine);
+        expect(after).toHaveLength(2);
+        expect(before.filter(atom => !after.includes(atom))).toHaveLength(2);
+        expect(await engine.executeRaw("SELECT 1 FROM derived_generations WHERE state='held'")).toEqual([]);
+        const [stamped] = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM pages WHERE type='atom' AND deleted_at IS NOT NULL");
+        expect(Number(stamped!.n)).toBe(2);
       });
     }, 120_000);
 
