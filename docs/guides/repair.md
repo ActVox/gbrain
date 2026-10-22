@@ -1260,6 +1260,12 @@ the same in one transaction):
    database 72 h later without refusing it as a page whose file another page
    records.
 
+A twin soft-deleted by hand while the legacy page records the file (receipt
+`write_through.skipped: shared_origin`) keeps its recorded file, and the
+retention purge removes it database-only too: the file and the legacy page stay
+and no content tombstone is written. A tombstone an older release parked after
+refusing it is purged once by `gbrain pages purge-deleted --retry-parked --yes`.
+
 The legacy page keeps its slug: that is also the slug sync gives a never-forked
 file whose legacy page it takes over (#6727), and the folded slug resolves to it
 through the alias. The twin's import-owned tags, chunks, versions and the facts and takes its
