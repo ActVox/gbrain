@@ -10,6 +10,36 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.360.0] - 2026-10-22
+
+**Search and query notices now describe the query you ran instead of repeating brain-wide state on every call, startup prints one upgrade line, and `gbrain get` can return a single section, the paragraphs matching a term, or a line or byte range.** Before this release, every search on a brain with pending projections or held files carried the same brain-wide notice whether or not those items could affect the answer, two banners printed the same upgrade line, and an agent reading part of a large page had to fetch it whole and cut it down itself.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Search or query while projections are pending | a brain-wide `projection_pending` notice on every call | `_meta.retrieval.coverage` with a `could_affect` count; the notice only appears when pending items could match this query ("N of M pending page(s) could match this query") |
+| The top hit is the exact page the query named and its projection is current | the readiness hint and `Retrieval incomplete:` line still showed | `could_affect.pending_projection` is 0, with `coverage.top_hit_exact: true`; `degraded` still records it |
+| The same coverage notice on repeated calls | shown on every call | at most once per 30 minutes, again at once when coverage gets materially worse; the structured fields are always present |
+| Pages held by their embedding budget | not named by the held-files notice | counted in `embedding_held` and named; when they are the only cause the fix is `gbrain embed --held --dry-run` |
+| An upgrade is available | two banners with the same line | one line per version pair per window: `UPGRADE_AVAILABLE <cur> <latest>` when stderr is not a TTY, the sentence on a TTY |
+| Reading one part of a large page | fetch the page and cut it down | `gbrain get <slug> --section "<heading>"`, `--grep <term> [--context N]`, `--lines 100-140` / `--lines 100`, `--bytes 0-999` |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade.
+- Scripts that matched the human upgrade sentence on a non-TTY stderr see the `UPGRADE_AVAILABLE <cur> <latest>` token instead.
+- Every `get_page` response now carries `chars`, including `content_only`.
+
+### Itemized changes
+
+- `src/core/search/retrieval-coverage.ts`: query-scoped `coverage` (`pending_projection`, `held_files`, `embedding_held`, each with `could_affect`, capped at 1,000) and the exact-top-hit suppression; `src/core/notice-ledger.ts` throttles the coverage notice per window, per HTTP session or through `GBRAIN_HOME/notices/coverage.json` for one-shot CLI calls.
+- `src/cli/main.ts`, `src/cli/op-notices.ts`: one upgrade line per version pair per window, and the retrieval-incomplete line moves to the op-notices module.
+- `src/core/ops/get-page-slice.ts`: `get_page` `section`, `grep` and `context` (cut from the read projection after authorization; a segmented page streams one segment at a time), with `--section` / `--grep` / `--context` on the CLI and `section`, `grep`, `context` on the full MCP surface.
+- `ParamDef.cliRange`: `--lines N-M` / `--lines N` / `--bytes N-M` range forms on the CLI; JSON still works.
+
+Tests: `test/retrieval-coverage-notices.test.ts`, `test/get-page-slices.test.ts`, `test/cli-range-param.test.ts`, `test/e2e/self-upgrade-marker.test.ts`.
+
 ## [0.60.359.0] - 2026-10-22
 
 **Held deleted files now show who deleted them, so each group can be resolved on its own.** A held `file_gone` file can be a page no commit ever held (the database copy is the only one), a file a commit deleted on purpose, or a deletion only the worktree lost. A held preview showed them all the same way, so a single `--prefer` either brought back pages that were culled on purpose or deleted the only copy of others. Each previewed page now names its provenance, and `--provenance` selects one group at a time.
