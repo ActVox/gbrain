@@ -1528,6 +1528,42 @@ held result waits, with the read-only release preview as its fix;
 `generation_retirements` reports what is restorable. Show the user the preview
 before running the apply. Managed brains keep their coordinator path for now.
 
+Facts and takes fences, consolidation chains and extracted facts publish the
+same way (`--kind fact_fence`, `take_fence`, `consolidation`,
+`extracted_facts`; key `page:<slug>` for a fence). A fence restore writes the
+earlier fence block into the page as it is now, through a guarded page write
+that leaves the rest of the page alone; it works on managed brains too, and a
+fence edited since is refused. A consolidation restore reopens the chain's
+`valid_until` and consolidation marks.
+
+#### Fence absent
+
+A page written without its `## Facts` (or takes) section keeps its rows: the
+fact or take generation is held `fence_absent` and nothing is retired. Doctor
+`generation_held`, `gbrain sync status` (`fence_holds`) and `get_page`
+(`fence_held`) list the page with an ask-the-user fix. The user may have deleted
+the whole section on purpose, or an edit may have lost it: ask which.
+
+- To keep the rows, restore the section (from the page's history or the
+  previous version of its file).
+- To retire them, write the empty fence the fix prints into the page; the next
+  write retires every row on it. For facts it is:
+
+```markdown
+## Facts
+
+<!--- gbrain:facts:begin -->
+
+| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |
+|---|-------|------|------------|------------|------------|------------|-------------|--------|---------|
+<!--- gbrain:facts:end -->
+```
+
+A page with no file changes through `get_page` (`include_content: true`) and
+`put_page` with that revision as `expected_revision`; `edit_page` refuses to
+write fence markers. Neither outcome is a default, and nothing changes until the
+user chooses.
+
 ### Extractor facts
 
 A managed write by a gbrain older than v0.60.11.0 to a conversation page

@@ -15,6 +15,7 @@ import type { Action } from '../agent-output.ts';
 import type { BrainEngine } from '../engine.ts';
 import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, renderFactsTable } from '../facts-fence.ts';
 import { locateOutsideCode } from '../fence-scan.ts';
+import type { BodyStorage } from '../page-body/types.ts';
 import { digest } from '../persistence/digest.ts';
 import { renderTakesFence, TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../takes-fence.ts';
 import { readGenerationsConfig } from './config.ts';
@@ -39,8 +40,9 @@ export const fenceName = (kind: FenceGenerationKind) => kind === FACT_FENCE_KIND
 export interface FenceBlocks { body: string | null; timeline: string | null }
 export type FenceRead = { state: 'parsed'; blocks: FenceBlocks } | { state: 'absent' | 'unread' | 'segmented' };
 
-/** The page's `fence` blocks outside markdown code, or `absent` when neither section holds one. */
-export function readFenceBlocks(page: { compiled_truth: string | null; timeline?: string | null }, fence: 'facts' | 'takes'): FenceRead {
+/** The page's `fence` blocks outside markdown code, or `absent` when neither section holds one; a segmented page is never read whole. */
+export function readFenceBlocks(page: { compiled_truth: string | null; timeline?: string | null; body_storage?: BodyStorage | null }, fence: 'facts' | 'takes'): FenceRead {
+  if (page.body_storage === 'segmented') return { state: 'segmented' };
   const [begin, end] = fence === 'facts' ? [FACTS_FENCE_BEGIN, FACTS_FENCE_END] : [TAKES_FENCE_BEGIN, TAKES_FENCE_END];
   const block = (text: string | null | undefined) => {
     const { beginIdx, endIdx } = locateOutsideCode(text ?? '', begin, end);
@@ -71,7 +73,10 @@ export interface FenceGenerationRequest {
   retire: readonly FenceItem[];
   /** Stored rows the writer overwrites in place with a different identity (a take replaced at its row number). */
   overwrite?: readonly FenceItem[];
-  /** The page is deleted: its rows retire on `originGone`, rechecked here. */
+  /**
+   * The page is deleted: its rows retire on `originGone`, rechecked here: the page is gone under the caller's key, and the
+   * rows were derived from a fence (a live generation, or `read` of the deleted page's stored body parses one).
+   */
   originGone?: boolean;
   /** Which writer published (projection, extract_facts, extract_takes, deleted_page, restore). */
   writer: string;
@@ -131,7 +136,7 @@ export async function publishFenceGeneration(tx: BrainEngine, request: FenceGene
   let proof: string | null = null;
   if (request.retire.length) {
     if (request.originGone) {
-      if (!await originGoneNow(tx, request.sourceId, request.slug)) return hold('no_proof');
+      if (!await originGoneNow(tx, request.sourceId, request.slug) || (!live && request.read.state !== 'parsed')) return hold('no_proof');
       proof = 'originGone';
     } else if (request.read.state !== 'parsed') {
       return hold('fence_absent');

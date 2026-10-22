@@ -613,3 +613,9 @@ src/core/generations/adapters/page.ts	preimageMarkdown	field	NONE	reads the body
 src/core/generations/adapters/page.ts	pageVersionEvidence	sql	INLINE	legacy-adoption evidence: hashes retained page_versions copies of derived atom pages and compares identity hashes only; segmented versions (compiled_truth NULL) are skipped
 src/core/generations/adapters/atoms.ts	atomGenerationAdapter	sql	META	input size only: body_bytes for a segmented page, octet_length of an inline page columns (pages leave body_bytes NULL inline)
 src/core/generations/repair.ts	releaseManaged	field	INLINE	assertInlineBody refuses a segmented origin page before the managed release reads its body to bind the origin
+src/core/cycle/extract-facts.ts	expireDeletedPageFacts	sql	INLINE	reads the deleted page's stored fence through readFenceBlocks, which reads a segmented page as segmented: no fence proof, so its rows expire only when a live generation recorded them (GBRA-161 PR 2)
+src/core/generations/fence-restore.ts	planFenceRestore	call:serializePageToMarkdown	INLINE	a segmented page is refused segmented_unsupported before the page is serialized for the guarded restore write
+src/core/generations/fence-restore.ts	planFenceRestore	field	INLINE	a segmented page is refused segmented_unsupported before its fence blocks are read
+src/core/generations/fence.ts	readFenceBlocks	field	INLINE	a segmented page reads segmented (held fence_absent) before any body field is read
+src/core/generations/fence.ts	fenceInput	field	NONE	reads the fence block strings of a FenceRead (already parsed), never a stored page body
+src/core/generations/fence.ts	storedBlocks	field	NONE	reads the fence block strings of a FenceRead (already parsed), never a stored page body

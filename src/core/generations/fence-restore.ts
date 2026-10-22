@@ -33,6 +33,7 @@ export async function planFenceRestore(db: BrainEngine, key: GenerationKey, live
   const slug = fenceSlugOf(key.ownerKey);
   const snapshot = slug ? await db.readPageSnapshot(slug, { sourceId: key.sourceId }) : null;
   if (!snapshot || snapshot.page.deleted_at) return refuse('page_gone');
+  if (snapshot.page.body_storage === 'segmented') return refuse('segmented_unsupported');
   const read = readFenceBlocks(snapshot.page, fenceName(key.kind as FenceGenerationKind));
   if (read.state !== 'parsed' || read.blocks.body !== recorded.body || read.blocks.timeline !== recorded.timeline) return refuse('edited_since');
   let content = serializePageToMarkdown(snapshot.page, await db.getTags(slug!, { sourceId: key.sourceId }));

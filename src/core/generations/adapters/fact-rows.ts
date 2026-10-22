@@ -25,10 +25,10 @@ export const CONSOLIDATION_KIND = 'consolidation';
 /** The columns a fact's before-state keeps. */
 const FACT_PREIMAGE_SQL = `jsonb_build_object('id', f.id, 'row_num', f.row_num, 'fact', f.fact, 'visibility', f.visibility, 'kind', f.kind,
   'entity_slug', f.entity_slug, 'source', f.source, 'expired_at', f.expired_at, 'valid_from', f.valid_from, 'valid_until', f.valid_until,
-  'superseded_by', f.superseded_by, 'consolidated_at', f.consolidated_at, 'consolidated_into', f.consolidated_into)`;
+  'superseded_by', f.superseded_by, 'consolidated_at', f.consolidated_at, 'consolidated_into', f.consolidated_into, 'attributed_to', f.attributed_to)`;
 
 export type FactPreimage = { id: number; row_num: number | null; fact: string; visibility: string; expired_at: string | null; valid_until: string | null;
-  superseded_by: number | null; consolidated_at: string | null; consolidated_into: number | null };
+  superseded_by: number | null; consolidated_at: string | null; consolidated_into: number | null; entity_slug: string | null; attributed_to: string | null };
 
 /** The fence rows of the new generation (one per row number; a duplicate number keeps its first row, as the reconcile does). */
 export function factFenceItems(rows: ReadonlyArray<{ row_num: number; fact: string; visibility?: string | null }>): FenceItem[] {

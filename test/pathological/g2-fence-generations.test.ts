@@ -15,6 +15,7 @@ import { operationsByName } from '../../src/core/operations.ts';
 import { resolveRepairScope, type RepairResult } from '../../src/core/repair/core.ts';
 import { repairRunner } from '../../src/core/repair/registry.ts';
 import type { GenerationsSelection } from '../../src/core/generations/repair.ts';
+import { runExtractFacts } from '../../src/core/cycle/extract-facts.ts';
 
 async function repair(engine: BrainEngine, sourceId: string, selection: GenerationsSelection, expectHash?: string): Promise<RepairResult> {
   const scope = await resolveRepairScope(engine, sourceId);
@@ -131,6 +132,29 @@ describe('GBRA-161 PR 2 fence generations', () => {
         expect(await liveCounts(engine, sourceId, SLUG)).toEqual({ facts: 3, takes: 2 });
         const edited = await repair(engine, sourceId, selection);
         expect(edited.listing?.[0]?.class).not.toBe('refused');
+      });
+    }, 180_000);
+
+    test(`[${backend}] a deleted page expires its facts only on originGone, recording each before-state; rows no fence derived are held no_proof`, async () => {
+      const fenceless = 'people/fenceless-example';
+      await managedSource(databaseUrl, async ({ engine, sourceId, put }) => {
+        await put(SLUG, PERSON('Alice Example', FACTS(2)));
+        await put(fenceless, PERSON('Fenceless Example', 'No facts section on this page.\n'));
+        await engine.insertFacts( // gbrain-allow-direct-insert: a fence-positioned row no generation recorded (legacy shape)
+          [{ fact: 'Legacy positioned claim', kind: 'fact', source: 'chat', row_num: 1, source_markdown_slug: fenceless, visibility: 'world' }], { source_id: sourceId });
+        for (const slug of [SLUG, fenceless]) await engine.softDeletePage(slug, { sourceId });
+      }, async ({ engine, sourceId }) => {
+        await runExtractFacts(engine, { sourceId });
+        expect(await liveCounts(engine, sourceId, SLUG)).toEqual({ facts: 0, takes: 0 });
+        const [gone] = await engine.executeRaw<{ proof: string; retired: number; preimages: number }>(`SELECT g.completeness->>'proof' AS proof,
+            (SELECT count(*)::int FROM derived_generation_items i WHERE i.generation_id=g.id AND i.action='retired') AS retired,
+            (SELECT count(*)::int FROM derived_generation_items i WHERE i.generation_id=g.id AND i.action='retired' AND i.preimage IS NOT NULL) AS preimages
+          FROM derived_generations g WHERE g.source_id=$1 AND g.kind='fact_fence' AND g.owner_key=$2 AND g.state='live'`, [sourceId, `page:${SLUG}`]);
+        expect(gone).toEqual({ proof: 'originGone', retired: 2, preimages: 2 });
+        expect(await liveCounts(engine, sourceId, fenceless)).toEqual({ facts: 1, takes: 0 });
+        expect(await ledger(engine, sourceId, fenceless)).toEqual([{ kind: 'fact_fence', state: 'held', retired: 0, preimages: 0 }]);
+        const [held] = await engine.executeRaw<{ held_reason: string }>("SELECT held_reason FROM derived_generations WHERE owner_key=$1 AND state='held'", [`page:${fenceless}`]);
+        expect(held?.held_reason).toBe('no_proof');
       });
     }, 180_000);
   }

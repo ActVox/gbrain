@@ -84,6 +84,7 @@ import { fenceUnfencedFacts, planUnfencedFacts } from '../facts/unfenced-facts.t
 import { classifyRunStop, upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { factsFenceView } from '../facts-fence.ts';
 import { publishFenceGeneration, readFenceBlocks, FACT_FENCE_KIND, type FenceRead } from '../generations/fence.ts';
+import type { BodyStorage } from '../page-body/types.ts';
 import { factFenceItems, factPreimages, factRetireItem } from '../generations/adapters/fact-rows.ts';
 import { segmentedBodyMatchesFile, segmentedFactsFenceView } from '../page-body/segment-facts.ts';
 import {
@@ -649,7 +650,9 @@ async function expireDeletedPageFacts(tx: BrainEngine, sourceId: string, slug: s
         AND EXISTS (SELECT 1 FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND ($3::integer IS NULL OR p.id = $3::integer) AND p.deleted_at IS NOT NULL)`,
     [sourceId, slug, pageId])).map(r => Number(r.id));
   if (!ids.length) return [];
-  const generation = await publishFenceGeneration(tx, { kind: FACT_FENCE_KIND, sourceId, slug, read: { state: 'absent' }, items: [], originGone: true,
+  const [stored] = await tx.executeRaw<{ compiled_truth: string | null; timeline: string | null; body_storage: BodyStorage | null }>(
+    'SELECT compiled_truth, timeline, body_storage FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 1', [sourceId, slug]);
+  const generation = await publishFenceGeneration(tx, { kind: FACT_FENCE_KIND, sourceId, slug, read: stored ? readFenceBlocks(stored, 'facts') : { state: 'absent' }, items: [], originGone: true,
     retire: (await factPreimages(tx, sourceId, ids)).map(factRetireItem), writer: 'deleted_page' });
   if (generation.state !== 'published') return [];
   return (await tx.executeRaw<{ id: number }>('UPDATE facts SET expired_at = now() WHERE source_id = $1 AND id = ANY($2::bigint[]) AND expired_at IS NULL RETURNING id',

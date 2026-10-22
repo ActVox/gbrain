@@ -270,14 +270,8 @@ export async function runPhaseConsolidate(
       for (const cluster of clusters) {
         if (cluster.length < 2) continue;
         const tie = clusterTie(cluster, claims);
-        if (tie) {
-          clustersHeldSameInstant += 1;
-          if (sameInstantClusters.length < SAME_INSTANT_SAMPLES) sameInstantClusters.push(heldCluster(b, tie));
-          if (recordsTies) await engine.transaction(tx => holdConsolidationTie(tx, b.source_id, b.entity_slug, cluster.map(f => f.id),
-            { entity_slug: b.entity_slug, tied: tie.ids, valid_from: new Date(tie.at).toISOString(), metric: tie.metric }));
-          continue;
-        }
-        if (await consolidationRestored(engine, b.source_id, b.entity_slug, cluster.map(f => f.id))) continue;
+        if (tie) { clustersHeldSameInstant += 1; if (sameInstantClusters.length < SAME_INSTANT_SAMPLES) sameInstantClusters.push(heldCluster(b, tie)); if (recordsTies) await recordTie(engine, b, cluster, tie); continue; }
+        if (await consolidationRestored(engine, b.source_id, b.entity_slug, cluster.map(f => f.id))) continue; // the operator reopened this chain
         // Take selection: pick the highest-confidence fact's text as the
         // take claim (v0.31 deterministic). v0.32 will swap to a Sonnet
         // synthesis pass.
@@ -390,10 +384,7 @@ export async function runPhaseConsolidate(
             if (gate) await recordFlaggedRow(tx, gate, { table: 'takes', id: takeId, sourceId: b.source_id });
           }
 
-          const before = await factPreimages(tx, b.source_id, cluster.map(f => f.id));
-          for (const f of cluster) await tx.consolidateFact(f.id, takeId);
-          await writeValidUntilChain(tx, cluster);
-          await recordConsolidationGeneration(tx, b.source_id, b.entity_slug, before);
+          await closeCluster(tx, b, cluster, takeId);
           return { result: { created, takeId }, rows: [{ table: 'takes' as const, id: Number(takeId), sourceId: b.source_id }] };
         });
         if (written?.created) nextRowNum += 1;
@@ -478,6 +469,23 @@ const SAME_INSTANT_SAMPLES = 20;
 function clusterTie(cluster: FactRow[], claims: Map<number, ClaimShape>): SameInstantTie | undefined {
   return sameInstantTies(cluster.map(f => ({ id: f.id, at: f.valid_from.getTime(), metric: claims.get(f.id)?.metric ?? null,
     unit: claims.get(f.id)?.unit ?? null, period: claims.get(f.id)?.period ?? null })))[0];
+}
+
+/**
+ * Marks the cluster consolidated into `takeId` and closes its chain, recording each member's before-state as the cluster's
+ * consolidation generation first (GBRA-161 PR 2), so `gbrain repair generations --kind consolidation` can reopen it.
+ */
+async function closeCluster(tx: BrainEngine, bucket: { source_id: string; entity_slug: string }, cluster: FactRow[], takeId: number): Promise<void> {
+  const before = await factPreimages(tx, bucket.source_id, cluster.map(f => f.id));
+  for (const f of cluster) await tx.consolidateFact(f.id, takeId);
+  await writeValidUntilChain(tx, cluster);
+  await recordConsolidationGeneration(tx, bucket.source_id, bucket.entity_slug, before);
+}
+
+/** #6023 (GBRA-161 PR 2): records a tied cluster as a held consolidation generation (`tie`); nothing is written to its facts. */
+async function recordTie(engine: BrainEngine, bucket: { source_id: string; entity_slug: string }, cluster: FactRow[], tie: SameInstantTie): Promise<void> {
+  await engine.transaction(tx => holdConsolidationTie(tx, bucket.source_id, bucket.entity_slug, cluster.map(f => f.id),
+    { entity_slug: bucket.entity_slug, tied: tie.ids, valid_from: new Date(tie.at).toISOString(), metric: tie.metric }));
 }
 
 function heldCluster(bucket: { source_id: string; entity_slug: string }, tie: SameInstantTie): SameInstantCluster {
