@@ -135,7 +135,9 @@ const hasFence = (text: string | null | undefined) => [FACTS_FENCE_BEGIN, TAKES_
  * `connector_fence_below_timeline` instead of expiring its rows.
  */
 async function carryStoredFences(sourceId: string, slug: string, relPath: string, existing: Page | null, markdown: string): Promise<string> {
-  if (!existing || !(hasFence(existing.compiled_truth) || hasFence(existing.timeline))) return markdown;
+  if (!existing) return markdown;
+  assertInlineBody(existing, 'Google connector fence carry');
+  if (!(hasFence(existing.compiled_truth) || hasFence(existing.timeline))) return markdown;
   const parsed = parseMarkdown(markdown, relPath);
   if (hasFence(parsed.compiled_truth)) return markdown;
   const hold = conceptPreservationHold(existing);
@@ -146,6 +148,7 @@ async function carryStoredFences(sourceId: string, slug: string, relPath: string
 
 /** GBRA-133 (#7292): the checkout file with the live page's `## Facts` fence put back, for `replaceableFile`; null when it has a fence of its own. */
 function withStoredFactsFence(existing: Page): (fileBytes: string) => string | null {
+  assertInlineBody(existing, 'Google connector file comparison');
   const body = existing.compiled_truth ?? '';
   const start = body.indexOf(FACTS_FENCE_BEGIN);
   const stop = start === -1 ? -1 : body.indexOf(FACTS_FENCE_END, start + FACTS_FENCE_BEGIN.length);
