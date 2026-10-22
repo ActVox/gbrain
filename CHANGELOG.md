@@ -10,6 +10,84 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.362.0] - 2026-10-22
+
+**Remote searches no longer stall on the vector deadline when the nearest chunks crowd into a few long pages, and each search read pays one round trip less.** On a 50k-page brain behind a transaction-mode pooler at about 65 ms RTT, warm MCP search p95 dropped from 11.1 s to 3.1 s.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A remote search whose nearest chunks come from a few long pages | the index walk came back with too few pages, and the joined pool statement planned the private-page rule as a page filter rescanned per candidate (2-3 s per attempt at 50k pages), so the vector stage hit its 8 s deadline and returned `vector_candidates_incomplete` | the walk widens its window x4, at most twice (`INDEX_WALK_ESCALATIONS`), before the pool; stale-heavy windows still escalate in the pool as before |
+| A top-level search transaction applies its settings | it waited for the `set_config` answer before sending the read | the read is sent right behind it, so both share one round trip; a refused settings statement is still the error raised |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and results are the same set the joined statement returns whenever the widened walk fills its window.
+
+### Itemized changes
+
+- `src/core/search/vector-pool.ts`: `searchIndexWalk` widens a full window whose fresh chunks could fill the limit but whose pages fall short.
+- `src/core/postgres-engine/search-settings.ts`: `withSearchSettings` sends a top-level read behind its settings statement.
+- Tests: `test/e2e/vector-plan-real-column-postgres.test.ts`, `test/search/vector-pool.test.ts`, `test/search-settings-one-statement.test.ts`.
+
+## [0.60.361.0] - 2026-10-22
+
+**Agents can ask whether a write is searchable yet, and every source now reports how far its writes have been applied (#7190).** Most agent status checks ask one of two questions: "did my write land?" or "is sync caught up?". Before this release, answering either one took several reads and some guessing.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An agent wants to know whether search can find its write | `get_write_request` said the write committed, not whether search could find it | `get_write_request` with `applied: true` (`gbrain write-request <id> --applied --json`) returns `applied`, read live: `searchable_yet`, `searchable` and `state` (resolve-path vocabulary plus `pending_write`, `not_written` and `deleted`), the gap (`requests_ahead`, `unembedded_chunks`), the request `sequence` and the source's write watermark |
+| An agent wants to know whether a source is caught up | it had to combine sync status, freshness and doctor | `gbrain sources status --json`, MCP `sources_status` and `gbrain sync --json` add a `watermark` per source: `indexed_through` (moved only by a finished sync pass), `embedded_through`, `committed_through_request`, `pending` (requests, commits and files behind HEAD, held files, withheld deletes) and `writer_heartbeat`. The human `gbrain sources status` prints one watermark line per source |
+| A write reply is still pending | the hint said to poll `get_write_request` | the hint also names the `applied` read |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade.
+- A write's own reply (`put_page`, `remember`, `capture` and the rest) is unchanged, so a same-request-id replay still returns the first reply exactly. Live state is only on the opt-in receipt read, which keeps a plain receipt poll within its statement budget.
+- The MCP `applied` parameter is on the full tool surface only, not the starter tool list.
+
+### Itemized changes
+
+- `src/core/persistence/applied-watermark.ts`: the per-source watermark (`readAppliedWatermark`), the cheap write watermark (`readWriteWatermark`) and its one-line rendering.
+- `src/core/persistence/write-applied.ts`: `applied` for one write request.
+- `src/core/page-searchability.ts`: the page-state fold that `gbrain sources resolve-path` used inline, now shared with the receipts.
+- `src/core/ops/persistence.ts`, `src/core/ops/sources.ts`, `src/commands/sources.ts`, `src/commands/sync/run.ts`: the `applied` parameter and the `watermark` blocks.
+- `src/core/persistence/health.ts`: the pending-write hint names the `applied` read.
+- [docs/guides/resolve-paths.md](docs/guides/resolve-paths.md): "Is my write searchable yet?" and "The source watermark".
+
+## [0.60.360.0] - 2026-10-22
+
+**Search and query notices now describe the query you ran instead of repeating brain-wide state on every call, startup prints one upgrade line, and `gbrain get` can return a single section, the paragraphs matching a term, or a line or byte range.** Before this release, every search on a brain with pending projections or held files carried the same brain-wide notice whether or not those items could affect the answer, two banners printed the same upgrade line, and an agent reading part of a large page had to fetch it whole and cut it down itself.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Search or query while projections are pending | a brain-wide `projection_pending` notice on every call | `_meta.retrieval.coverage` with a `could_affect` count; the notice only appears when pending items could match this query ("N of M pending page(s) could match this query") |
+| The top hit is the exact page the query named and its projection is current | the readiness hint and `Retrieval incomplete:` line still showed | `could_affect.pending_projection` is 0, with `coverage.top_hit_exact: true`; `degraded` still records it |
+| The same coverage notice on repeated calls | shown on every call | at most once per 30 minutes, again at once when coverage gets materially worse; the structured fields are always present |
+| Pages held by their embedding budget | not named by the held-files notice | counted in `embedding_held` and named; when they are the only cause the fix is `gbrain embed --held --dry-run` |
+| An upgrade is available | two banners with the same line | one line per version pair per window: `UPGRADE_AVAILABLE <cur> <latest>` when stderr is not a TTY, the sentence on a TTY |
+| Reading one part of a large page | fetch the page and cut it down | `gbrain get <slug> --section "<heading>"`, `--grep <term> [--context N]`, `--lines 100-140` / `--lines 100`, `--bytes 0-999` |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade.
+- Scripts that matched the human upgrade sentence on a non-TTY stderr see the `UPGRADE_AVAILABLE <cur> <latest>` token instead.
+- Every `get_page` response now carries `chars`, including `content_only`.
+
+### Itemized changes
+
+- `src/core/search/retrieval-coverage.ts`: query-scoped `coverage` (`pending_projection`, `held_files`, `embedding_held`, each with `could_affect`, capped at 1,000) and the exact-top-hit suppression; `src/core/notice-ledger.ts` throttles the coverage notice per window, per HTTP session or through `GBRAIN_HOME/notices/coverage.json` for one-shot CLI calls.
+- `src/cli/main.ts`, `src/cli/op-notices.ts`: one upgrade line per version pair per window, and the retrieval-incomplete line moves to the op-notices module.
+- `src/core/ops/get-page-slice.ts`: `get_page` `section`, `grep` and `context` (cut from the read projection after authorization; a segmented page streams one segment at a time), with `--section` / `--grep` / `--context` on the CLI and `section`, `grep`, `context` on the full MCP surface.
+- `ParamDef.cliRange`: `--lines N-M` / `--lines N` / `--bytes N-M` range forms on the CLI; JSON still works.
+
+Tests: `test/retrieval-coverage-notices.test.ts`, `test/get-page-slices.test.ts`, `test/cli-range-param.test.ts`, `test/e2e/self-upgrade-marker.test.ts`.
+
 ## [0.60.359.0] - 2026-10-22
 
 **Held deleted files now show who deleted them, so each group can be resolved on its own.** A held `file_gone` file can be a page no commit ever held (the database copy is the only one), a file a commit deleted on purpose, or a deletion only the worktree lost. A held preview showed them all the same way, so a single `--prefer` either brought back pages that were culled on purpose or deleted the only copy of others. Each previewed page now names its provenance, and `--provenance` selects one group at a time.
