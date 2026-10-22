@@ -1360,6 +1360,24 @@ origin; `CREATE UNIQUE INDEX CONCURRENTLY` on Postgres) only when the brain has 
 changes nothing and succeeds, and doctor's `origin_twins` check reports "Index pending". Once the last group is
 resolved, the repair's apply builds the index.
 
+### Slug path mismatch
+
+Doctor's `slug_path_mismatch` check (#7305) counts live pages whose slug their recorded file path does not derive. The
+usual case is a hyphen run or a segment-final hyphen: `notes/x-1900---2000-ab.md` imports as `notes/x-1900-2000-ab`,
+because the path rule folds every hyphen run to one hyphen. Import and sync keep such a page on its own slug only
+through the `slug:` line every render stamps into its file (#5966). A file without that line, such as one an
+older gbrain rendered or another tool rewrote, imports as the folded slug and forks a duplicate-origin twin, which sync
+holds [`origin_conflict`](write-refusals.md#origin_conflict).
+
+The check is read-only. It reads at most 20,000 candidate pages and 200 recorded files per run, and reports `Unknown`
+when either bound stops it. It warns only when a file read on this host lacks the stamp, naming
+`gbrain repair frontmatter --source <id>`, whose preview proposes the stamp as a safe repair. A twin that already forked
+is reported by `origin_twins` and resolved with [`gbrain repair origin-twins`](#origin-twins).
+
+`put_page` and `capture` refuse a new slug with a hyphen run or a segment-final hyphen (`invalid_params`, detail
+`slug_hyphen_run`) and name the folded slug. A page that already holds such a slug keeps updating under it, and its
+response carries `slug_advisory`. To move it, put its content under the folded slug, then delete the old page.
+
 ### Rename identity
 
 When sync cannot confirm an inexact Git rename (#6729), it imports the pair as a
