@@ -10,6 +10,35 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.368.0] - 2026-10-22
+
+**Warm search against a remote pooled Postgres is under 2 seconds, and one search can no longer take the whole connection pool.** On a 50k-page brain behind a transaction-mode pooler at 66 ms RTT, with a 200 ms embedder and a 300 ms reranker, warm MCP search went from 2.5 s to 1.6 s at p50 and from 3.0 s to 2.0 s at p95. The CLI over a running `gbrain serve` socket went from 2.4 s to 1.8 s at p50 and from 2.8 s to 2.1 s at p95. Results, ranking, privacy filters and trust behavior are unchanged.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Post-fusion stage | backlinks, salience, dates, graph adjacency, alias and supersede reads ran one after another | all start at stage entry; each stage still applies in order, and a failed read skips only its own stage |
+| Each MCP tool call | source resolution and config took five round trips before the op | one round trip; the hot-memory hook runs beside a read op instead of after it |
+| A search read transaction | its caller waited for COMMIT's round trip | the rows come back when the read returns; the connection stays reserved until COMMIT settles |
+| Vector statements | paid a Describe round trip per call on a pooler | the query vector binds as text, so the statement description is reused |
+| After the reranker | generated-page, alias-hop, fan-out, trust and saved-fact reads waited behind earlier stages | they overlap the stages they do not depend on; the saved-fact probe and scan are one statement |
+| Connections one search or query holds | up to the whole read pool (10 by default) | at most 4 (`SEARCH_CONNECTION_LIMIT`), on the read pool, never the direct lane |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and there is no schema migration. Defaults are unchanged.
+
+### Itemized changes
+
+- `src/core/search/hybrid.ts`, `src/core/search/hybrid/*`: post-fusion reads start at entry; generated-page and alias-hop reads start early.
+- `src/mcp/server.ts`, `src/mcp/dispatch.ts`, `src/core/source-resolver.ts`: one-read request config snapshot; the meta hook overlaps read ops.
+- `src/core/postgres-engine.ts`: read transactions answer before COMMIT; per-search connection slots at the transaction and statement seams (`src/core/search/connection-budget.ts`).
+- `src/core/search/embedding-column.ts`, `src/core/engine-sql/chunks.ts`: `$1::text::vector` binds.
+- `src/core/ops/search.ts`, `src/core/search/alias-fanout.ts`, `src/core/eligibility/stamp.ts`, `src/core/facts/meta-hook.ts`: fan-out, trust and saved-fact reads overlap.
+- `scripts/bench/retrieval-scale/run.ts`: `--modes socket`.
+- Tests: `test/e2e/search-connection-budget-postgres.test.ts`, `test/e2e/vector-statement-describe-postgres.test.ts`, `test/read-transaction-early-result.test.ts`, `test/search-post-rerank-concurrency.test.ts`, `test/search/post-fusion-concurrent-reads.test.ts`, `test/serve-request-round-trips.test.ts`.
+
 ## [0.60.367.0] - 2026-10-22
 
 **Restoring a backup on Windows is faster, and four CI failures that were not about the change under test no longer fail runs.** Restore flushed every database file to disk twice: once as it unpacked the file and again before it marked the restore ready. On a Windows arm64 runner the first flush cost 11-22 seconds per restore. Restore now flushes each file once, before the ready receipt, so the durability guarantee is unchanged.

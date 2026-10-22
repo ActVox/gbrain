@@ -1214,6 +1214,7 @@
           "private poisonedDiscards",
           "private poolHealth",
           "private poolIncidents",
+          "private readTransaction",
           "private resolveFactsEmbeddingCast",
           "private rlsScopeBindingEnabled",
           "private runUnsafe",
