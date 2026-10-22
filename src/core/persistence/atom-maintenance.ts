@@ -23,7 +23,7 @@ import { MAX_DETERMINISTIC_FAILURES, writeAtomPageState } from '../cycle/extract
 import { effectiveVisibility } from '../search/private-visibility.ts';
 import { declareDerivation, deriveTrust, lowerToDerivedTier, recordTaintEdges } from '../trust/taint.ts';
 import type { DerivedRetiredBy } from './derived-retirement-hold.ts';
-import type { GenerationKey } from '../generations/contract.ts';
+import type { GenerationKey, HeldReason } from '../generations/contract.ts';
 import { atomGenerationAdapter, atomPagePin, type AtomGenerationContext } from '../generations/adapters/atoms.ts';
 import { markdownItem } from '../generations/adapters/page.ts';
 import { assertMemberPending, GENERATION_ACTIVATE_SLUG, listPendingMembers, memberRequestId, planManagedGeneration,
@@ -312,6 +312,8 @@ export interface ManagedAtomGeneration {
   locator?: string | null;
   /** A previewed operator retirement (gbrain repair stale-atoms): retires exactly these atoms; no extraction is completed. */
   approved?: { retire: string[]; retiredBy: DerivedRetiredBy; expect?: Record<string, string> };
+  /** An operator release of the held row this result matches (gbrain repair generations --mode release-held). */
+  release?: { holdId: string; reason: HeldReason };
 }
 
 export type ManagedAtomPublication =
@@ -331,7 +333,7 @@ export async function publishManagedAtomGeneration(engine: BrainEngine, session:
   const claim = atomClaim(session, origin);
   const plan = await planManagedGeneration(engine, atomGenerationAdapter, { key: generation.key, items: atoms.map(atom => markdownItem(atom.slug, atom.content)),
     input: generation.approved ? undefined : originInput(origin, generation.content), partial: Boolean(origin.partialInputChars), context, runId: generation.runId,
-    approved: generation.approved }, { retiredBy: ATOM_RETIRED_BY_REEXTRACT, scope: generation.approved ? null : claim.runKey, locator: generation.locator ?? (origin.kind === 'transcript' ? origin.locator : null) });
+    approved: generation.approved, release: generation.release }, { retiredBy: ATOM_RETIRED_BY_REEXTRACT, scope: generation.approved ? null : claim.runKey, locator: generation.locator ?? (origin.kind === 'transcript' ? origin.locator : null) });
   if (plan.kind === 'held') return { state: 'held', reason: plan.outcome.reason, holdId: plan.outcome.holdId, receipts: [] };
   if (plan.kind === 'unchanged') return { state: 'unchanged', receipts: generation.approved ? [] : await publishManagedAtoms(engine, session, origin, []) };
   const runKey = generation.approved ? digest(['managed-atoms-approved', plan.intent.activationId]) : claim.runKey;

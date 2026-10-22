@@ -504,7 +504,7 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'Runs only when named; never on upgrade.',
   },
   'generations': {
-    handler: generationsRepair, embeds: 'effect', checks: ['generation_retirements', 'generation_held'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    handler: generationsRepair, embeds: 'effect', checks: ['generation_retirements', 'generation_held', 'generation_pending'], explicit_only: true, preview_bound: true, consent: 'destructive',
     consentText: {
       what: 'Apply the previewed generations repair: restore each listed key to the generation it replaced, or publish each listed held result once',
       why: 'The preview listed each key with what it revives, retires or publishes; the apply changes exactly that set and refuses a key that changed since.',
@@ -513,7 +513,9 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     },
     summary: 'Undo or release a derived generation (GBRA-161): --kind <kind> names the ledger kind, --mode restore (default) republishes the item set the '
       + 'selected live generation replaced from its ledger preimages and retires what it added, --mode release-held publishes a held result once '
-      + '(shrunk, valve, attempts_exhausted; oversize after raising generations.max_items; no_proof, fence_absent, tie and segmented_unsupported are refused). '
+      + '(shrunk, valve, attempts_exhausted; oversize after raising generations.max_items; no_proof, fence_absent, tie and segmented_unsupported are refused; '
+      + 'a managed source releases atom page keys through its writer and restores retired atoms with atoms-restore), --mode cleanup lists, read-only, the members '
+      + 'an activated managed generation still waits on and the orphan candidates an activation that never happened left, each with its activation id. '
       + 'One selector bounds the set: --run <id>, --since <ISO-8601|7d>, --key <owner>, --generation <id>, or --held (release-held). The preview lists each key '
       + 'and saves the set under its hash; --apply --expect <hash> --yes applies exactly that set, refusing a key edited since or with no stored preimage. '
       + 'Runs only when named; never on upgrade.',

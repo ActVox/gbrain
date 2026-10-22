@@ -15,7 +15,7 @@
  * digest(activation id, member slug, action). The activation row (`derived_generation_activations`) is written with the batch, before any member runs:
  * a crash after activation resumes the pending members on the next run (`listPendingMembers`); members created by an
  * activation that never happened are orphan candidates (`listOrphanCandidates`), listed and never retired automatically.
- * Doctor counts both (`generation_retirements`); `gbrain repair generations --mode pending` lists and resumes them.
+ * Doctor counts both (`generation_pending`) and `gbrain repair generations --mode cleanup` lists them, read-only.
  */
 import type { BrainEngine } from '../engine.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
@@ -26,7 +26,7 @@ import { readFix } from '../ops/op-fix.ts';
 import { digest } from '../persistence/digest.ts';
 import { faultPoint } from '../persistence/fault-points.ts';
 import { generationAdapter } from './adapters/index.ts';
-import { readGenerationsConfig } from './config.ts';
+import { readGenerationsConfig, restoreDaysHint } from './config.ts';
 import type { GenerationAdapter, GenerationKey, InputState, ProposedItem } from './contract.ts';
 import { proofHolds, type EmptySourceProof } from './proofs.ts';
 import { activateGeneration, bumpValve, exhaustedHold, generationKeyLock, generationFenced, liveConflict, planPublication, publishOperationId,
@@ -122,7 +122,7 @@ export async function recordActivation(tx: BrainEngine, intent: ActivationPlanIn
 }
 
 const memberFix = (sourceId: string, kind: string) => readFix('Lists pending generation members and orphan candidates, read-only.',
-  { argv: ['gbrain', 'repair', 'generations', '--kind', kind, '--mode', 'pending', '--source', sourceId, '--json'] });
+  { argv: ['gbrain', 'repair', 'generations', '--kind', kind, '--mode', 'cleanup', '--source', sourceId, '--since', `${restoreDaysHint()}d`, '--json'] });
 
 /** Preparer of `managed_generation_activate` (trusted local only): the ledger flip and the retire_pending marks; it writes no page or file. */
 export async function prepareGenerationActivation(engine: BrainEngine, row: WriteRequest): Promise<PreparedMutation> {
