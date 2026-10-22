@@ -7,7 +7,7 @@
  *
  * Every gate starts in "record" mode: it is computed and printed, and never
  * fails a run. Moving a gate to "block" is a reviewed edit of GATES, decided
- * by the release owner after several nightly runs show the threshold is
+ * by the release owner after two consecutive clean weekly soaks show the threshold is
  * stable.
  */
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';

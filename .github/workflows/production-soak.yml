@@ -10,11 +10,13 @@ name: Production soak
 # external writer, put/remember, extract/embed --stale) for N hours.
 # Writes a JSON scoreboard per cell. Every gate is record-only: this workflow
 # never fails on a gate; it fails only when the harness itself breaks.
-# Nightly and on dispatch; never in the PR tier.
+# Weekly (Monday 06:17 UTC, ahead of stable promotion) and on dispatch; never in
+# the PR tier. A gate flips to blocking only after #7355 closes and two
+# consecutive soaks are clean on it, as its own reviewed PR.
 
 on:
   schedule:
-    - cron: '17 6 * * *'
+    - cron: '17 6 * * 1'
   workflow_dispatch:
     inputs:
       pages:

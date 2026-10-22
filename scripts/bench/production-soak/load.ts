@@ -3,7 +3,7 @@
  * Production-shaped scale soak, step 2: load a fixture.ts brain into Postgres
  * the way production got there (GBRA-174). Opt-in bench code, never run in CI.
  *
- *   bun scripts/bench/production-soak/load.ts --fixture <dir> --work <dir> [--db soak_brain] [--skip-embed] [--extract-budget-s 1200]
+ *   bun scripts/bench/production-soak/load.ts --fixture <dir> --work <dir> [--db soak_brain] [--skip-embed] [--extract-budget-s 1200] [--managed-passes 20]
  *
  * 1. Starts the topology (lib.ts): Postgres, the session and transaction
  *    PgBouncers and toxiproxy (no latency while loading).
@@ -40,7 +40,7 @@ const WORK = resolve(flag('work') ?? '');
 const DB = flag('db', 'soak_brain')!;
 const CLI = join(resolve(flag('gbrain-root', REPO)!), 'src', 'cli.ts');
 const log = (m: string) => baseLog('soak-load', m);
-if (!flag('fixture') || !flag('work') || !/^[a-z0-9_]+$/.test(DB)) { console.error('usage: load.ts --fixture <dir> --work <dir> [--db name] [--skip-embed] [--extract-budget-s 1200]'); process.exit(2); }
+if (!flag('fixture') || !flag('work') || !/^[a-z0-9_]+$/.test(DB)) { console.error('usage: load.ts --fixture <dir> --work <dir> [--db name] [--skip-embed] [--extract-budget-s 1200] [--managed-passes 20]'); process.exit(2); }
 
 interface SourceRow { id: string; repo: string; head: string; import_base: string; live_pages: number }
 const manifest = JSON.parse(readFileSync(join(FIXTURE, 'manifest.json'), 'utf8'));
@@ -120,7 +120,7 @@ async function main() {
   if (a.json?.enabled !== true) throw new Error('activation did not enable managed persistence: ' + a.stdout.slice(-1500));
   ready.activate_ms = Math.round(now() - t2);
   for (const s of sources) {
-    ready['first_managed_sync_' + s.id] = await syncUntilSettled(CLI, home, env, s.id, 'first managed sync ' + s.id, 20);
+    ready['first_managed_sync_' + s.id] = await syncUntilSettled(CLI, home, env, s.id, 'first managed sync ' + s.id, Number(flag('managed-passes', '20')));
     const st = await gb(CLI, home, env, ['sync', 'status', '--source', s.id, '--json'], { allowFail: true });
     ready['after_activation_' + s.id] = { state: st.json?.state ?? null, reason: st.json?.reason ?? null, holds: Array.isArray(st.json?.holds) ? st.json.holds.length : null, legacy_swept: st.json?.convergence?.counts?.legacy_swept ?? null, legacy_recorded: st.json?.convergence?.counts?.legacy_recorded ?? null };
   }

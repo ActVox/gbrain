@@ -4,7 +4,7 @@ Opt-in harness that runs gbrain the way a large personal brain runs in
 production, for hours, and writes a pass/fail scoreboard. It exists because
 50k-300k clean synthetic pages never show the bugs a brain with years of
 history, connectors, private pages, held items and concurrent writers shows.
-Nightly in `.github/workflows/production-soak.yml`; never in the PR tier.
+Weekly (and on dispatch) in `.github/workflows/production-soak.yml`; never in the PR tier.
 
 ## Pieces
 
@@ -30,7 +30,7 @@ private page's canary or search token.
 
 Every gate is `record` mode: computed, printed, never failing a run. Moving a
 gate to `block` is a reviewed edit of `GATES` in `scoreboard.ts` after the
-release owner has seen several nightly runs.
+captain has seen two consecutive clean weekly soaks on that gate.
 
 ## Run it
 
