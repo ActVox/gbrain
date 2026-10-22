@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.364.0] - 2026-10-22
+
+**A deletion-provenance preview over a long history no longer stalls or answers `unknown` for whole batches, and the database-only keep no longer re-reads the history for every page.** The read behind `gbrain repair file-drift --held --side deleted --state file_gone` walked the history once per 500 files with a pathspec. On a history of about 20,000 commits each walk ran past its 120 s limit and labelled its whole batch `unknown`, so a preview of about 2,000 held files sat silent for many minutes and returned round thousands of `unknown`. The `--provenance never_committed --prefer database` apply then spent about 11 s per page re-reading the history. Sync's check of whether a missing file was ever committed (#7130) had the same walk, so on a long history committed deletions were held instead of applied.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Provenance of about 1,800 held files, 20,000-commit history | 16 minutes, every file `unknown` | 1.7 s, every file named |
+| `--provenance never_committed --prefer database --apply` | the history re-read for every page | one walk, cached per commit and extended by later commits |
+| A long preview | silent until it answered | reports the commits read on stderr |
+| `details.provenance` | absent kinds omitted | every kind listed, zeros included |
+| A file HEAD holds again after an older commit deleted it | named that old commit | `deletion_uncommitted` |
+| A managed sync checking whether a missing file was committed, long history | timed out and held the file | reads the same walk; a committed deletion applies |
+
+**Spend effect:** none. No model calls and no default changes. Nothing is rewritten on upgrade, and a walk that fails still answers `unknown` (sync holds the file, never deletes it).
+
+### Itemized changes
+
+- `src/core/persistence/sync-origin-evidence.ts`: `historyIndex` streams one `git log --full-history --no-renames --diff-merges=first-parent --name-status -z` walk per commit (cached, two per Git top level, extended past a cached ancestor); `readOriginEvidence` and `readDeletionProvenance` read it.
+- `src/core/repair/file-drift.ts`: the `repair.file_drift.provenance` progress phase; `details.provenance` lists every kind.
+- `docs/guides/repair.md#file-drift-provenance`.
+- Tests: `test/deletion-provenance-scale-gbra133.test.ts` (real Git, a 20,000-commit history from `git fast-import`), `test/repair-file-drift-provenance-gbra133.test.ts`.
+
 ## [0.60.363.0] - 2026-10-22
 
 **Facts on an unmanaged Google contact page no longer expire when the connector re-renders the page (#7292).** On a brain without managed persistence, a Google connector re-render replaced the page with the bare provider render. The `## Facts` and `## Takes` fences that loop extraction or `remember` had added left the file and the database, and the next `extract_facts` expired those facts. A page whose database copy held the facts fence while its checkout file did not was also held `file_database_drift` on every re-render, and after three it froze with no command that could unfreeze it.
