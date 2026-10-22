@@ -32,8 +32,8 @@ export const CONCEPT_PRESERVATION_CODE = 'concept_preservation_hold';
 export const CONCEPT_DEFERRAL_CODES = new Set(['revision_conflict', 'page_identity_changed']);
 /** Error code for a concept whose database row published but whose file write failed. */
 export const CONCEPT_WRITE_THROUGH_FAILED_CODE = 'concept_write_through_failed';
-/** Codes that hold a concept until an operator imports or repairs its page. */
-export const CONCEPT_HOLD_CODES = new Set(['source_changed', CONCEPT_PRESERVATION_CODE, CONCEPT_WRITE_THROUGH_FAILED_CODE]);
+/** Codes that hold a concept until an operator imports or repairs its page (`page_body_segmented`: its body moved to segments during synthesis). */
+export const CONCEPT_HOLD_CODES = new Set(['source_changed', CONCEPT_PRESERVATION_CODE, CONCEPT_WRITE_THROUGH_FAILED_CODE, 'page_body_segmented']);
 
 function conceptHoldError(message: string): Error { return Object.assign(new Error(message), { code: CONCEPT_PRESERVATION_CODE }); }
 
