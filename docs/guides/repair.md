@@ -319,10 +319,12 @@ the schema. If the brain schema is newer than this gbrain client, upgrade
 gbrain first; the repair refuses rather than build an older table shape.
 
 Purges that failed on the missing cache before this fix may have been parked
-after five failures, and the nightly purge skips parked pages. After the
-upgrade, preview them with `gbrain pages purge-deleted --retry-parked
---dry-run` and run it without `--dry-run` after the user agrees; doctor
-`purge_parked_pages` lists them.
+after five failures. A park records the gbrain version that wrote it, and the
+first purge run after an upgrade tries a park an older version wrote once more,
+so these clear by themselves. One that fails again is parked under the new
+version: doctor `purge_parked_pages` lists it; preview
+`gbrain pages purge-deleted --retry-parked --dry-run` and run it without
+`--dry-run` after the user agrees.
 
 A missing table that holds user data is listed under `user_data_tables`; this
 repair never recreates it, because an empty table would hide that its rows are
@@ -1259,6 +1261,13 @@ the same in one transaction):
    tombstone forgets the file, so the autopilot purge removes it from the
    database 72 h later without refusing it as a page whose file another page
    records.
+
+A twin soft-deleted by hand while the legacy page records the file (receipt
+`write_through.skipped: shared_origin`) keeps its recorded file, and the
+retention purge removes it database-only too: the file and the legacy page stay
+and no content tombstone is written. A tombstone an older release parked after
+refusing it gets one automatic attempt from the first purge run after the
+upgrade (a park another gbrain version wrote is retried once) and is purged then.
 
 The legacy page keeps its slug: that is also the slug sync gives a never-forked
 file whose legacy page it takes over (#6727), and the folded slug resolves to it
