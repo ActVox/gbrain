@@ -131,7 +131,7 @@ async function main() {
   for (const s of sources) {
     const ts = now();
     for (let i = 0; i < 30; i++) {
-      const left = extractBudgetMs - (now() - ts);
+      const left = Math.floor(extractBudgetMs - (now() - ts));
       if (left <= 0) break;
       const r = await gb(CLI, home, env, ['extract', '--stale', '--catch-up', '--source-id', s.id, '--brain', 'host'], { allowFail: true, timeoutMs: left });
       if (r.code !== 0 || !/Actionable: [1-9]\d* page\(s\) still need|[1-9]\d* page\(s\) due for the mention pass/.test(r.stdout + r.stderr)) break;
