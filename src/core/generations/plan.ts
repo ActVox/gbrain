@@ -34,6 +34,8 @@ export interface PlanInput {
   release?: HeldReason;
   /** An operator-approved retirement (a previewed repair): retire exactly these live owned keys, keep the rest; no floor or valve. */
   approvedRetire?: readonly string[];
+  /** The identity each approved key had when the operator previewed it; a key edited since is not retired. */
+  approvedExpect?: Readonly<Record<string, string>>;
 }
 
 export type Plan =
@@ -43,7 +45,7 @@ export type Plan =
 
 export function planGeneration(input: PlanInput): Plan {
   const { live, rows, proposal, config } = input;
-  if (input.approvedRetire) return planApprovedRetirement(input, input.approvedRetire);
+  if (input.approvedRetire) return planApprovedRetirement(input, input.approvedRetire, input.approvedExpect);
   const proposed = new Map(proposal.map(item => [item.key, item]));
   const recorded = new Set([...(live?.items.keys() ?? [])].filter(key => rows.get(key)?.live));
   const unrecorded = [...rows.values()].filter(row => row.owned && row.live && !recorded.has(row.key));
@@ -85,9 +87,10 @@ export function planGeneration(input: PlanInput): Plan {
 }
 
 /** A previewed operator retirement: the approved keys still live and owned retire, every other live item is kept. */
-function planApprovedRetirement(input: PlanInput, approved: readonly string[]): Plan {
+function planApprovedRetirement(input: PlanInput, approved: readonly string[], expect?: Readonly<Record<string, string>>): Plan {
   const recorded = [...(input.live?.items.keys() ?? [])].filter(key => input.rows.get(key)?.live);
-  const retires = [...new Set(approved)].filter(key => input.rows.get(key)?.live && (input.rows.get(key)?.owned || recorded.includes(key))).sort();
+  const retires = [...new Set(approved)].filter(key => { const row = input.rows.get(key);
+    return row?.live && (row.owned || recorded.includes(key)) && (!expect || expect[key] === row.identityHash); }).sort();
   const protectedKeys = [...input.rows.values()].filter(row => row.owned && row.live && !recorded.includes(row.key) && !retires.includes(row.key)).map(row => row.key).sort();
   if (retires.some(key => input.rows.get(key)?.segmented)) return { kind: 'held', reason: 'segmented_unsupported', context: { retires: retires.length } };
   if (!retires.length) return { kind: 'unchanged', protectedKeys };

@@ -311,7 +311,7 @@ export interface ManagedAtomGeneration {
   /** A transcript key's current file. */
   locator?: string | null;
   /** A previewed operator retirement (gbrain repair stale-atoms): retires exactly these atoms; no extraction is completed. */
-  approved?: { retire: string[]; retiredBy: DerivedRetiredBy };
+  approved?: { retire: string[]; retiredBy: DerivedRetiredBy; expect?: Record<string, string> };
 }
 
 export type ManagedAtomPublication =
@@ -683,7 +683,7 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
           WHERE id=$3 AND source_id=$4 AND deleted_at IS NOT NULL`, [p.retiredBy ?? ATOM_RETIRED_BY_REEXTRACT, new Date().toISOString(), row.page_id, row.source_id]);
         if (p.activationId) await settleMember(tx, p.activationId, row.slug);
         if (p.origin.kind === 'page' && p.origin.pageId !== null) {
-          await bumpAtomGeneration(tx, row.source_id, row.source_incarnation, p.origin.pageId, p.origin.contentHash);
+          await bumpAtomGeneration(tx, row.source_id, row.source_incarnation, p.origin.pageId, p.origin.contentHash || null);
         }
       }
       return { ...result, atom_run_key: p.runKey, atom_kind: p.kind };

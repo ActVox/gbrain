@@ -39,7 +39,9 @@ export interface PublishRequest<C = unknown> {
   /** An operator release of this held row (repair generations --mode release-held). */
   release?: { holdId: string; reason: HeldReason };
   /** A previewed operator retirement (`gbrain repair stale-atoms`): retire exactly these keys, stamped `retiredBy`; `items` is ignored. */
-  approved?: { retire: readonly string[]; retiredBy: DerivedRetiredBy };
+  approved?: { retire: readonly string[]; retiredBy: DerivedRetiredBy; expect?: Readonly<Record<string, string>> };
+  /** Unmanaged only: runs in the activation transaction after the retirements (stale-atoms invalidates the origin's completions there). */
+  onRetired?: (tx: BrainEngine, retired: readonly string[]) => Promise<void>;
   /** A transcript key's current file, recorded on the generation so a moved file keeps its key. */
   locator?: string;
 }
@@ -188,7 +190,7 @@ function logFailure(key: GenerationKey, operationId: string, mode: string, error
 
 /** The set hash an operation binds: the proposal, or for an approved retirement the keys it retires. */
 export function requestSetHash(request: Pick<PublishRequest<unknown>, 'items' | 'approved'>): string {
-  return request.approved ? digest(['generation-approved-retire-v1', [...request.approved.retire].sort(), request.approved.retiredBy]) : itemSetHash(request.items);
+  return request.approved ? digest(['generation-approved-retire-v1', [...request.approved.retire].sort(), request.approved.retiredBy, request.approved.expect ?? null]) : itemSetHash(request.items);
 }
 
 /** The operation identity an identical replay matches (D2): kind, key, expected generation, input pin and result item-set hash. */
@@ -219,7 +221,7 @@ export async function planPublication<C>(db: BrainEngine, adapter: GenerationAda
   const evidence = unrecorded.length ? await adapter.legacyEvidence(db, key, unrecorded) : new Set<string>();
   const valve = await readValve(db, key, request.runId);
   const plan = planGeneration({ live, rows, proposal: request.items, input, config, modelProduced: adapter.modelProduced, strictOrder: adapter.strictOrder, additive: request.partial === true,
-    proofHolds: request.proof ? proofHolds(request.proof, input, live?.inputPin) : false, evidence, valve, release: request.release?.reason, approvedRetire: request.approved?.retire });
+    proofHolds: request.proof ? proofHolds(request.proof, input, live?.inputPin) : false, evidence, valve, release: request.release?.reason, approvedRetire: request.approved?.retire, approvedExpect: request.approved?.expect });
   return { input, rows, plan };
 }
 
@@ -269,6 +271,7 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
       if (!request.partial) await adapter.completeItems?.(tx, key, current.map(([itemKey]) => itemKey), request.context);
       await assertItemsLive(tx, adapter as GenerationAdapter<unknown>, key, new Map(current));
       await adapter.retireItems(tx, key, plan.retires, request.approved?.retiredBy ?? adapter.retiredBy);
+      if (plan.retires.length) await request.onRetired?.(tx, plan.retires);
       await faultPoint('generation:retired', { sourceId: key.sourceId, operation: key.kind });
       const activated = await activateGeneration(tx, key, live, { operationId, runId: request.runId, input, setHash, locator: request.locator,
         completeness: { complete: !request.partial, proof: request.proof?.kind ?? null, released: request.release?.reason ?? null,
