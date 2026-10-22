@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.382.0] - 2026-10-22
+
+**A one-shot command that writes now runs its persistence consumer on the direct database route when one is configured, and a write that database contention keeps refusing reads as retryable.** Before, `gbrain repair <kind> --apply` and other one-shot write commands claimed and scanned through a transaction-mode pooler even with `GBRAIN_DIRECT_DATABASE_URL` set.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A one-shot write command (`repair --apply`, `cli` writes) with `GBRAIN_DIRECT_DATABASE_URL` set and a transaction-mode pooler as the main URL | the consumer printed `reason=transaction_pooler … no direct route` and ran its claims, renewals and scans on the pooler, where a stalled round trip cannot be ended | starting the consumer gives the process one direct connection, as taking a lease already did; read-only one-shot commands still open none |
+| A write admission that deadlocks, serialization failures, lock or statement timeouts kept refusing for its whole retry budget | `storage_error` with `retryable: false`, and a repair apply recorded it as an item failure | `storage_error` with `reason: database_contention`, which reads retryable (no receipt was confirmed, so the same request_id is safe); a repair apply stops with what it applied and the command that resumes it |
+
+### What to watch for after you upgrade
+
+- A one-shot write command now opens one connection to the direct (or session-mode) URL. Commands that only read are unchanged.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/persistence/service.ts`, `src/core/direct-pool-profile.ts`: starting a persistence consumer makes the process short-lived.
+- `src/core/item-failure.ts`, `src/core/persistence/admission-retry.ts`, `src/core/error-registry.ts`, `docs/guides/error-codes.md`: admission contention is classified and reported as retryable contention.
+- Test: `test/oneshot-consumer-direct-route.test.ts` (PGLite and Postgres).
+
 ## [0.60.381.0] - 2026-10-22
 
 **A repair no longer soft-deletes a page whose content moved on in the database after its file was deleted.** `gbrain repair file-drift --held --side deleted --state file_gone --prefer file` (for example with `--provenance deleted_by_commit`) and `gbrain repair ghost-pages` took the commit that deleted a page's file as the deletion of the page. A page written in the database after that file was soft-deleted with content no commit holds, which a restore could recover only until the 72-hour purge.
