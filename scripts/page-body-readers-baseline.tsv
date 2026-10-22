@@ -617,5 +617,6 @@ src/core/cycle/extract-facts.ts	expireDeletedPageFacts	sql	INLINE	reads the dele
 src/core/generations/fence-restore.ts	planFenceRestore	call:serializePageToMarkdown	INLINE	a segmented page is refused segmented_unsupported before the page is serialized for the guarded restore write
 src/core/generations/fence-restore.ts	planFenceRestore	field	INLINE	a segmented page is refused segmented_unsupported before its fence blocks are read
 src/core/generations/fence.ts	readFenceBlocks	field	INLINE	a segmented page reads segmented (held fence_absent) before any body field is read
+src/core/generations/fence.ts	fenceReadOf	field	NONE	reads the fence block strings already read whole (inline, or from the marker segments of a segmented page), never a stored page body
 src/core/generations/fence.ts	fenceInput	field	NONE	reads the fence block strings of a FenceRead (already parsed), never a stored page body
 src/core/generations/fence.ts	storedBlocks	field	NONE	reads the fence block strings of a FenceRead (already parsed), never a stored page body
