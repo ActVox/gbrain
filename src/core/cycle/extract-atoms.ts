@@ -1508,9 +1508,10 @@ function transcriptRoot(filePath: string, corpusDir: string, meetingDir: string 
 
 /**
  * GBRA-161 PR 1b (Eng r3 F1): each transcript's generation key: its root label and path relative to that root, never its
- * basename or content hash, so two files of one name in two folders never share a key. A file whose key has no live
- * generation but whose content equals the input of a live transcript generation whose file is gone was moved: it keeps
- * that key, and the generation's locator follows it (recorded even when the unchanged file is not extracted again).
+ * basename or content hash, so two files of one name in two folders never share a key. A file a live generation names as
+ * its locator keeps that generation's key (the rename map). A file whose key has no live generation but whose content
+ * equals the input of a live transcript generation whose file is gone was moved: it keeps that key, and the generation's
+ * locator follows it (recorded even when the unchanged file is not extracted again).
  */
 async function resolveTranscriptKeys(engine: BrainEngine, sourceId: string, transcripts: ReadonlyArray<{ filePath: string; contentHash: string; root?: { path: string; label: string } }>,
   dryRun: boolean): Promise<Map<string, string>> {
@@ -1519,9 +1520,14 @@ async function resolveTranscriptKeys(engine: BrainEngine, sourceId: string, tran
   const live = await engine.executeRaw<{ id: number; owner_key: string; locator: string | null; input_pin: string | null }>(
     `SELECT id, owner_key, locator, input_pin FROM derived_generations WHERE source_id=$1 AND kind=$2 AND state='live' AND owner_key LIKE $3`,
     [sourceId, ATOM_KIND, `${TRANSCRIPT_KEY_PREFIX}%`]);
+  const located = new Set<string>();
+  for (const t of transcripts) {
+    const at = live.find(row => row.locator === t.filePath);
+    if (at) { own.set(t.filePath, at.owner_key.slice(TRANSCRIPT_KEY_PREFIX.length)); located.add(t.filePath); }
+  }
   const claimed = new Set([...own.values()].map(key => `${TRANSCRIPT_KEY_PREFIX}${key}`).filter(key => live.some(row => row.owner_key === key)));
   for (const t of transcripts) {
-    if (claimed.has(`${TRANSCRIPT_KEY_PREFIX}${own.get(t.filePath)}`)) continue;
+    if (located.has(t.filePath) || claimed.has(`${TRANSCRIPT_KEY_PREFIX}${own.get(t.filePath)}`)) continue;
     const moved = live.find(row => !claimed.has(row.owner_key) && row.input_pin === t.contentHash && row.locator && row.locator !== t.filePath && !existsSync(row.locator));
     if (!moved) continue;
     claimed.add(moved.owner_key);
