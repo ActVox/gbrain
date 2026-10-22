@@ -40,7 +40,7 @@ case $CMD in
       name=$($UBI up -s "$SIZE" -S "$STORAGE" --ttl-hours "$TTL")
       echo "$name" > "$cell/vm"
       echo "rtt $rtt: $name"
-      $UBI sync "$name" . >/dev/null
+      $UBI sync "$name" . work/gbrain >/dev/null
       $UBI ssh "$name" 'cd work/gbrain && bash scripts/bench/production-soak/vm-setup.sh' > "$cell/setup.log" 2>&1
       $UBI ssh "$name" "cd work/gbrain && setsid -f bash scripts/bench/production-soak/run.sh --pages $PAGES --rtt-ms $rtt --hours $HOURS --out \$HOME/soak/out --label rtt$rtt ${EXTRA[*]:-} > \$HOME/soak-run.log 2>&1 < /dev/null; echo launched"
     done
