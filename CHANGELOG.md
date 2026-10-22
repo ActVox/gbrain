@@ -10,6 +10,38 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.383.0] - 2026-10-22
+
+**A brain checkout that several agents, crons and hooks commit into no longer loses or brings back work.** A change the remote already took and then reverted is no longer put back by the next push. gbrain's own page commits never commit without the checkout's lock, and a refused commit leaves nothing staged for another writer to sweep up. Reported in #7381.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A local commit whose patch the remote already has (cherry-picked or rebased there), and the remote reverted it | the next `commit-push` or `--pull` silently put the change back | the commit is left out of the merge, the revert stands, and the merge message names it |
+| The same, but the remote edited those lines since | `integrate_conflict` on every push from then on | publishes cleanly with the remote's lines |
+| A page write (`put_page`, facts fences, takes, timeline, `lint --fix`) while another writer holds the commit lock past 2 s | committed without the lock | the file is written and noted in a pending ledger; the next locked page write or `gbrain git commit-push --pending` commits it |
+| git refuses a commit (hook, missing identity) | the paths stayed staged, and the next commit without paths by any writer published them | the exact earlier staging is restored |
+| `commit-push -- <dir>` while another writer has files staged under `<dir>` | they were committed too | refused (`commit_prestaged_paths`); name a file to claim it |
+| A brain folder inside a larger repository | commits and pushes could carry files outside it | `gbrain sources harden` records `gbrain.sourceRoot`; commit-push refuses to commit or publish files outside it (`commit_outside_source_root`) until the user agrees |
+| `scripts/brain-commit-push.sh` on a machine without gbrain | held the commit lock through the push | releases it first and pushes under `brain-publish.lock` |
+
+New and opt-in: `gbrain git guard --install` adds a `prepare-commit-msg` hook that refuses commits made around gbrain in that checkout, `--no-verify` included. `git config gbrain.quarantine true` turns a content conflict into a published merge that takes the remote's version and keeps this machine's under `refs/gbrain/quarantine/`. `gbrain doctor` adds `checkout_lagging`, `dirty_age`, `commits_outside_source_root` and `quarantined_changes`.
+
+### What to watch for after you upgrade
+
+- Rerun `gbrain sources harden <source>` on a brain checkout to record its source root and refresh the committed helper script.
+- A doctor `dirty_age` warning means page writes are waiting for a commit; its fix is `gbrain git commit-push --pending`.
+- Nothing is rewritten on upgrade, and there is no schema migration. The guard and quarantine stay off until you turn them on.
+
+### Itemized changes
+
+- `src/core/git/commit-push.ts`: patch-equivalent replay in `integrate`, locked-only write-through with the pending ledger, index restore, staged-sweep and source-root refusals, `--pending`, opt-in quarantine (`test/git-writer-safety-7381.serial.test.ts`).
+- `src/core/git/commit-guard.ts`, `src/commands/git.ts`: `gbrain git guard`.
+- `src/core/brain-repo-durability.ts`: helper fallback lock release, `recordSourceRoot`.
+- `src/commands/doctor/checks/git-writer.ts`: the four doctor checks (`test/doctor-git-writer-7381.test.ts`).
+- `docs/guides/shared-checkout-git.md`: source roots, pending page writes, quarantine, guard.
+
 ## [0.60.379.0] - 2026-10-22
 
 **Release binaries are built on Bun 1.4.4, which fixes the Brotli decoder flaw CVE-2026-111497, and `gbrain doctor` warns when gbrain runs on an older Bun.** A standalone gbrain binary embeds the Bun it was built with, so upgrading a separately installed `bun` does not fix it; install the new binary. Reported in #7373.
