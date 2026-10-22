@@ -5,7 +5,7 @@ import type { BrainEngine } from '../../engine.ts';
 import type { MinionHandler } from '../types.ts';
 import type { CycleReport, PhaseResult } from '../../cycle.ts';
 import { CODES } from '../../error-registry.ts';
-import { ItemRun } from '../../item-failure.ts';
+import { ItemRun, classifyItemFailure } from '../../item-failure.ts';
 import { OperationError } from '../../ops/contract.ts';
 import { VERSION } from '../../../version.ts';
 import { reportJobProgress } from './job-progress.ts';
@@ -31,6 +31,17 @@ import { reportJobProgress } from './job-progress.ts';
  * by another gbrain version is dropped, a new blocker key starts a new streak,
  * and `gbrain autopilot --retry-global` ends the back-off. A job whose
  * failures look systemic (ItemRun breaker) persists no streak.
+ *
+ * A phase failure classified run-scoped is the phase's typed blocker too
+ * (`fail:<code>`), and the job goes on to the next phase, unless it may pass
+ * on the next job (RETRY_NEXT_JOB_CODES, or any run-scoped error runCycle
+ * threw): then the job stops and the next job retries that phase first, at
+ * most STREAK_BYPASS_PASSES jobs in a row (`run_stops`) before it is recorded
+ * as the blocker, so the pass can still complete. A job's own stop (abort,
+ * cancel, stolen lock) always stops it. A phase skipped for
+ * `insufficient_cycle_budget` after another phase ran in the same job is
+ * moved to the next job (a deadline deferral) instead of counting as a
+ * `budget` blocker, and its skip time is never kept as its duration estimate.
  */
 export const GLOBAL_MAINTENANCE_PROGRESS_KEY = 'autopilot.global_maintenance.progress';
 /** A phase is not started when its last measured duration would end within this reserve of the job deadline. */
@@ -40,6 +51,13 @@ export const GLOBAL_FLOOR_MIN = 60;
 /** Earlier passes with one typed failure before the pass stamps past that phase; also where back-off starts. */
 export const STREAK_BYPASS_PASSES = 3;
 const MAX_BACKOFF_MS = 24 * 60 * 60_000;
+/** Run-scoped codes that may pass on the next job: the job stops and the next one retries the phase first. */
+const RETRY_NEXT_JOB_CODES: ReadonlySet<string> = new Set([
+  'database_contention', 'connection_lost', 'writer_busy', 'writer_lock_unavailable', 'writer_pool_capacity', 'queue_capacity',
+  'write_capacity_backpressure', 'maintenance_backpressure', 'write_claim_lost',
+]);
+/** Stops that belong to the job itself: always stop it, never counted against the phase. */
+const JOB_STOP_CODES: ReadonlySet<string> = new Set(['aborted', 'lock_stolen', 'cancelled']);
 
 /** One phase's consecutive passes blocked by the same kind of blocker. */
 export interface PhaseStreak {
@@ -80,6 +98,8 @@ export interface GlobalMaintenanceProgress {
   pass_bypassed?: string[];
   /** Blocker streak per phase; cleared when the phase passes. */
   failures?: Record<string, PhaseStreak>;
+  /** Consecutive jobs a phase stopped with the same retryable run-scoped code; cleared when the phase completes. */
+  run_stops?: Record<string, { code: string; count: number; last_at: string }>;
 }
 
 export async function readGlobalMaintenanceProgress(engine: BrainEngine): Promise<GlobalMaintenanceProgress> {
@@ -178,6 +198,7 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine, deps:
     progress.timeouts ??= {};
     progress.skip_this_pass ??= [];
     progress.failures ??= {};
+    progress.run_stops ??= {};
     for (const [phase, streak] of Object.entries(progress.failures)) {
       if (streak.version !== VERSION) delete progress.failures[phase];
     }
@@ -228,6 +249,18 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine, deps:
       progress.failures![phase] = streak;
       return streak;
     };
+    /** Whether a run-scoped failure stops the job (the next job retries the phase first) rather than becoming the phase's blocker. */
+    const stopsJob = (phase: string, code: string, thrown: boolean): boolean => {
+      if (JOB_STOP_CODES.has(code)) return true;
+      if (!thrown && !RETRY_NEXT_JOB_CODES.has(code)) return false;
+      const prev = progress.run_stops![phase];
+      const count = prev?.code === code ? prev.count : 0;
+      if (count >= STREAK_BYPASS_PASSES) return false;
+      progress.run_stops![phase] = { code, count: count + 1, last_at: new Date().toISOString() };
+      return true;
+    };
+    /** A run-scoped failure recorded as the phase's own: counted by the breaker, never rethrown by it. */
+    const contained = (phase: string, code: string) => new Error(`phase ${phase} failed with run-scoped ${code}; recorded as its blocker`);
     const blockStamp = (phase: string, streak: PhaseStreak, earlierPasses: number) => {
       if (!streakStampsPast(streak, earlierPasses)) { progress.pass_failed = true; return; }
       if (!progress.pass_bypassed!.includes(phase)) progress.pass_bypassed!.push(phase);
@@ -284,19 +317,30 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine, deps:
         yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
         });
       } catch (e) {
+        const classified = classifyItemFailure(e);
+        const runScoped = classified.scope === 'run';
+        if (runScoped && stopsJob(phase, classified.code, true)) return stopRun(e, phase);
         let failure;
-        try { failure = itemRun.fail(phase, e); } catch (stop) { return stopRun(stop, phase); }
+        try { failure = itemRun.fail(phase, runScoped ? contained(phase, classified.code) : e); } catch (stop) { return stopRun(stop, phase); }
+        const code = runScoped ? classified.code : failure.code;
+        const message = runScoped ? classified.message.slice(0, 500) : failure.message;
         progress.running_phase = undefined;
         progress.running_job = undefined;
-        ran.push({ phase, status: 'fail', duration_ms: 0, summary: `error: ${failure.message}`, details: {},
-          error: { class: 'InternalError', code: failure.code, message: failure.message } });
-        const blocked = recordBlocker(phase, `fail:${failure.code}`);
+        ran.push({ phase, status: 'fail', duration_ms: 0, summary: `error: ${message}`, details: {},
+          error: { class: 'InternalError', code, message } });
+        const blocked = recordBlocker(phase, `fail:${code}`);
         blockStamp(phase, blocked, blocked.count - 1);
         continue;
       }
-      reports.push(report);
       progress.running_phase = undefined;
       progress.running_job = undefined;
+      if (i > start && report.phases.some(r => r.phase === phase && r.details.reason === 'insufficient_cycle_budget')) {
+        deferred = phases.slice(i);
+        stopReason = 'deadline';
+        progress.next_phase = phase;
+        break;
+      }
+      reports.push(report);
       if (report.status === 'skipped' || report.reason === 'aborted' || report.reason === 'lock_stolen') {
         // A phase cut off by the job deadline would be cut off again next run.
         if (report.reason === 'aborted' && deadline !== null && Date.now() >= phaseDeadline!) {
@@ -311,11 +355,17 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine, deps:
       for (const result of report.phases) {
         ran.push(result);
         if (result.phase !== phase) continue;
-        progress.durations[phase] = result.duration_ms;
+        if (result.details.reason !== 'insufficient_cycle_budget') progress.durations[phase] = result.duration_ms;
         delete progress.timeouts[phase];
         if (result.status === 'fail') {
-          try { itemRun.fail(phase, phaseFailureError(result)); } catch (stop) { return stopRun(stop, phase); }
-        } else itemRun.succeed();
+          const error = phaseFailureError(result);
+          const classified = classifyItemFailure(error);
+          if (classified.scope === 'run' && stopsJob(phase, classified.code, false)) return stopRun(error, phase);
+          try { itemRun.fail(phase, classified.scope === 'run' ? contained(phase, classified.code) : error); } catch (stop) { return stopRun(stop, phase); }
+        } else {
+          delete progress.run_stops[phase];
+          itemRun.succeed();
+        }
         const key = phaseBlocker(result);
         if (!key) { delete progress.failures[phase]; continue; }
         const deferredCount = (result.details.triage as { deferred?: unknown } | undefined)?.deferred;

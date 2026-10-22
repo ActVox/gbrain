@@ -278,7 +278,7 @@ export interface TriageDecide {
   stats: TriageDecideStats;
   /** `llmModel`: today's triage model; its stored verdicts are cache hits too. */
   triage(t: DiscoveredTranscript, opts: { triageVersion: number; llmModel?: string; force?: boolean; staleBefore?: Date; signal?: AbortSignal; budgetExhausted: () => boolean }): Promise<TriageDecideResult>;
-  /** After today's path ran (shadow or inactive on): receipts only, nothing else changes. */
+  /** After today's path judged the transcript this pass (shadow or inactive on; never a cache hit): receipts only, nothing else changes. */
   observe(t: DiscoveredTranscript): Promise<void>;
 }
 

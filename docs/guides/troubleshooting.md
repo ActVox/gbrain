@@ -672,7 +672,14 @@ for two global intervals, then four, up to a day. A `deferred` streak
 (synthesize triage left transcripts for the next pass) lets a pass stamp past
 it once the deferred count has not shrunk for three passes in a row; while the
 count keeps shrinking, the stamp waits. Budget and child blockers never let a
-pass stamp past them; child failures back off too.
+pass stamp past them; child failures back off too. A phase that fails with a
+run-scoped code (a missing table, `permission_denied`, `write_quota_exhausted`,
+`recovery_required`) is a `fail:<code>` streak like any other failure, and
+the pass goes on to the next phase. A lost connection or contention stops the
+job and the next job retries that phase first, at most three jobs in a row;
+after that it is the phase's streak and the pass goes on. A phase skipped for
+`insufficient_cycle_budget` after another phase ran in the same job moves to
+the next job instead of counting as a `budget` streak.
 
 Doctor warns when the stamp is older than three global intervals
 (`autopilot.global_floor_min`, 60 minutes by default) while maintenance jobs

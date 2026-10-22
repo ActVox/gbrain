@@ -172,6 +172,21 @@ for (const kind of testBackends()) {
       expect(windowRequests).toBeGreaterThan(0);
     });
 
+    test('#7307 audit: shadow mode asks decide only for transcripts the LLM triage judged this pass, never for cache hits', async () => {
+      await engine.setConfig('decide.slots.triage.mode', 'shadow');
+      transport(0.9);
+      const cached = transcript('shadow-cached');
+      await seedLlm(cached);
+      const out = await pass([cached]);
+      expect({ windowRequests, judgeCalls, cacheHits: out.cacheHits }).toEqual({ windowRequests: 0, judgeCalls: 0, cacheHits: 1 });
+      const fresh = transcript('shadow-fresh');
+      await pass([fresh]);
+      expect({ asked: windowRequests > 0, judgeCalls }).toEqual({ asked: true, judgeCalls: 1 });
+      windowRequests = 0;
+      const again = await pass([fresh]);
+      expect({ windowRequests, judgeCalls, cacheHits: again.cacheHits }).toEqual({ windowRequests: 0, judgeCalls: 1, cacheHits: 1 });
+    });
+
     test('an LLM backoff marker after a margin hold is kept, and decide is not asked again while it runs', async () => {
       transport(0.47);
       const t = transcript('held-unreliable');

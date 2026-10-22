@@ -902,8 +902,8 @@ async function runPhaseSynthesizeInner(
         label: `synthesize:${basename(t.filePath)}`,
       });
       if (!spend.allowed) {
-        process.stderr.write(`[dream] synthesize budget: ${spend.reason}; deferring ${basename(t.filePath)} and the rest of this run\n`);
-        budgetExhaustedDeferrals.push(basename(t.filePath));
+        const alone = overBudgetAloneReason(spend, t.basename);
+        if (alone) skipReports.push({ filePath: t.filePath, reason: alone }); else { process.stderr.write(`[dream] synthesize budget: ${spend.reason}; deferring ${basename(t.filePath)} and the rest of this run\n`); budgetExhaustedDeferrals.push(basename(t.filePath)); }
         continue;
       }
       for (let i = 0; i < chunks.length; i++) {
@@ -2254,6 +2254,13 @@ export function parseSynthV2Key(key: string): ParsedSynthV2Key | null {
   }
 }
 
+/** A transcript over the whole synthesis cap on its own is skipped (like oversize_after_split), never a deferral of the rest; null for a cumulative denial or a 0 cap. */
+function overBudgetAloneReason(spend: { estimatedCostUsd: number; budgetUsd: number }, name: string): string | null {
+  if (spend.budgetUsd <= 0 || spend.estimatedCostUsd <= spend.budgetUsd) return null;
+  process.stderr.write(`[dream] transcript ${name} alone is estimated at $${spend.estimatedCostUsd.toFixed(4)}, over the $${spend.budgetUsd.toFixed(2)} dream.synthesize.budget_usd cap; skipping it. Raise the cap or use a cheaper synthesis model.\n`);
+  return `over_budget_alone: $${spend.estimatedCostUsd.toFixed(4)} > $${spend.budgetUsd.toFixed(2)}`;
+}
+
 // ── Triage pass (#4152) — shared by the synthesize phase and dream retriage ──
 
 /**
@@ -2470,9 +2477,11 @@ export async function runTriagePass(
   const gate = (v: RescueVerdictLike, content: string) =>
     passesTriageGate(v, content, cfg.threshold, rescueCfg, cfg.decide?.gate);
 
+  // Shadow / inactive decide observes only transcripts today's triage judged this pass, never a cache hit.
+  const freshlyJudged = new Set<number>();
   const processOne = async (idx: number): Promise<void> => {
     const d = cfg.decide;
-    if (!d?.acting) { await processLlm(idx); if (d) await d.observe(transcripts[idx]); return; }
+    if (!d?.acting) { await processLlm(idx); if (d && freshlyJudged.has(idx)) await d.observe(transcripts[idx]); return; }
     const t = transcripts[idx];
     const r = await d.triage(t, { triageVersion: TRIAGE_VERSION, llmModel: cfg.model, force: cfg.force, staleBefore: cfg.staleBefore, signal: cfg.signal, budgetExhausted });
     if (!r.verdict) {
@@ -2624,6 +2633,7 @@ export async function runTriagePass(
         reasons: triage.reasons,
         cached: false,
       };
+      freshlyJudged.add(idx);
     } catch (e) {
       // AIConfigError at chat time = provider auth/config went bad mid-run
       // (revoked key, recipe misconfig surfacing at first real call). Skip
