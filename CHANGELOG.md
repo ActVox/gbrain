@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.365.0] - 2026-10-22
+
+**Behind a split pooler route, a one-shot CLI command no longer opens direct database connections, and a short-lived command opens one instead of three.** Every gbrain process that saw a split route (a Supabase pooler URL or `GBRAIN_DIRECT_DATABASE_URL`) opened a direct (session) pool of up to 3 connections, whatever it ran. A host running many short commands beside `gbrain serve` and the jobs worker spent its session-mode connection budget on processes that ran one statement and exited. The direct pool now follows the command.
+
+### What changed
+
+| Process | Before | Now |
+|---|---|---|
+| `serve`, `jobs`, `autopilot`, `sync --watch` | up to 3 direct connections | up to 3 (unchanged) |
+| `sync`, `put`, `import`, `dream`, `cycle`, `sources`, `mcp`, `migrate-graduation`, `doctor`, `engine` | up to 3 | 1 |
+| Any other command | up to 3 | none; statements run on the ordinary pool |
+| A one-shot command applying pending schema migrations | up to 3 | 1, for the DDL only (advisory lock and 30-minute statement timeout kept) |
+| A one-shot command that takes a `gbrain_cycle_locks` lease | up to 3 | 1, so the lease heartbeat keeps its own connection |
+
+`gbrain engine status --probe` reports the profile as `mode.direct_profile`, and `single (one-shot command)` where the route is configured but unused.
+
+**Spend effect:** none. No model calls. **Overrides:** `GBRAIN_DIRECT_POOL_SIZE` still sets the size wherever a direct pool opens, `GBRAIN_DISABLE_DIRECT_POOL=1` still wins, and `GBRAIN_DIRECT_POOL_BY_COMMAND=0` restores the earlier behavior for every command. Embedders and tests keep the resident profile, so library behavior is unchanged.
+
+### Itemized changes
+
+- `src/core/direct-pool-profile.ts`: the process profile (resident, short-lived, one-shot); `src/cli/main.ts` sets it once per dispatched command.
+- `src/core/connection-manager.ts`: sizes the direct pool by profile, keeps `ddl()` on the direct route, adds `direct_profile` to `describeMode()`.
+- `src/core/db-lock.ts`: a lease promotes a one-shot process to short-lived.
+- `src/core/persistence/claim-phase.ts`: exports `OWNER_COMMANDS`.
+- `docs/ENGINES.md#direct-pool-by-command`.
+- Tests: `test/direct-pool-profile.test.ts` (pure resolution, PGLite and real Postgres), `test/cli-socket.test.ts`.
+
 ## [0.60.364.0] - 2026-10-22
 
 **A deletion-provenance preview over a long history no longer stalls or answers `unknown` for whole batches, and the database-only keep no longer re-reads the history for every page.** The read behind `gbrain repair file-drift --held --side deleted --state file_gone` walked the history once per 500 files with a pathspec. On a history of about 20,000 commits each walk ran past its 120 s limit and labelled its whole batch `unknown`, so a preview of about 2,000 held files sat silent for many minutes and returned round thousands of `unknown`. The `--provenance never_committed --prefer database` apply then spent about 11 s per page re-reading the history. Sync's check of whether a missing file was ever committed (#7130) had the same walk, so on a long history committed deletions were held instead of applied.
