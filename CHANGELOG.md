@@ -28,6 +28,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - Nothing to do. No data is rewritten.
 - Scripts that match `sync status` reasons see one new reason, `pass_abandoned`.
+- The `ip-address` override moves to `^10.7.4` (10.7.2 → 10.7.4 in `bun.lock`), the fixed version for advisory GHSA-rxp7-6hxx-x8q5 (medium).
 
 ### Itemized changes
 
@@ -36,6 +37,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - `src/core/persistence/sync-pass-run.ts`, `sync-pass-row.ts`, `sync-pass-status.ts`, `sync-status.ts`: a 30 s heartbeat on the open pass row, `obligations.abandoned_streak`, and the `pass_abandoned` reason.
 - `src/core/persistence/sync-git-stream.ts`: `racyFloor` for both stat caches.
 - Test: `test/sync-pass-abandoned-7355.test.ts` (PGLite and Postgres).
+- `package.json`, `bun.lock`: the `ip-address` override is bumped to `^10.7.4` for GHSA-rxp7-6hxx-x8q5.
 
 ## [0.60.376.0] - 2026-10-22
 
