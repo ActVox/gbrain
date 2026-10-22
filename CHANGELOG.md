@@ -10,6 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.378.0] - 2026-10-22
+
+**Warm search spends less time building its response on a brain with many saved facts, warm CLI calls start faster, and an older saved fact that matches every query word is no longer crowded out.** The response stage now reports where its time goes, so a slow response names its part.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Saved-fact probe on a search with query terms | its page filters made the planner read the whole pages index on every search once a brain held many facts (about 100 ms at 51k pages, growing with page count) | the probe reads only the facts table (0.05 ms); the page filters stay on the scan, so the result is the same |
+| Saved facts matching most query words | the newest 200 facts matching any word were kept, then three quarters of the words were required, so an older fact naming every word could be cut first | the word threshold is applied before the cut, ordered by words matched, then newest |
+| A warm CLI call answered by the serve socket | loaded 709 modules before sending (about 290 ms of CLI time on a fast machine) | loads 169 (about 95 ms); output is byte-identical |
+| `--timings` and `_meta.retrieval.timings` | the response stage was one number | `parts_ms.response` splits it into evidence, trust, meta, keyword_count and feedback; `overlapped_ms` names each concurrent meta read |
+
+### What to watch for after you upgrade
+
+- The saved facts a search's response carries can differ: facts matching more of the query's words now win over newer facts matching fewer. Page ranking is unchanged.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/ops/search.ts`: saved-fact probe and threshold-before-cut.
+- `src/core/search/stage-timings.ts`, `src/cli/search-timings.ts`: response parts and meta overlap labels.
+- `src/cli/cli-socket-client.ts`, `src/cli/main.ts`, `src/core/pool-end-timeout.ts`, `src/core/supabase-pooler-url.ts`: warm socket startup.
+- Tests: `test/search/saved-facts-probe.test.ts`, `test/search-saved-facts.test.ts`, `test/cli-socket-warm-graph.test.ts`, `test/search/stage-timings-ops.test.ts`.
+
 ## [0.60.377.0] - 2026-10-22
 
 **A managed sync on a large source no longer stops before its first commit while it is still reading the source.** The first managed pass of a ~311k-page source with years of Git history spent minutes reading and classifying the whole level before it committed anything, most of it in one walk of the history. The drain stopped any pass that committed nothing for 5 minutes, so on a slower machine or behind a pooler every pass stopped there with nothing saved, and the next pass started the same walk again. `gbrain sync status` kept telling you to run the plain sync, which repeated it.
