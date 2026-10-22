@@ -394,25 +394,31 @@ async function matchingSavedFacts(ctx: OperationContext, scope: SourceScope, que
     // fact's own columns only: every row the scan returns passes it, so it never changes the
     // result, and the page-eligibility filters stay on the scan, where they cost an index
     // lookup per candidate. In the probe the planner joined them to the whole pages index.
-    const rows = await ctx.engine.executeRaw<SavedFactMatch & { haystack: string }>(
-      `SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source,
-         lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) AS haystack
-       FROM facts f
-       WHERE ${active}
-         ${eligible}
-         AND lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE ANY($3::text[])
-         AND EXISTS (SELECT 1 FROM facts f WHERE ${active} LIMIT 1)
-       ORDER BY f.valid_from DESC, f.id DESC
-       LIMIT 200`,
-      [sources, [...AUDIT_ROW_SOURCES], terms.map(t => `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%`)],
-    );
+    // The term threshold is applied before the cut: a fact matching every term is never crowded
+    // out by newer facts that match only one.
     const need = Math.max(Math.min(2, terms.length), Math.ceil(terms.length * 0.75));
+    const rows = await ctx.engine.executeRaw<SavedFactMatch & { haystack: string; at: unknown; hits: unknown }>(
+      `SELECT * FROM (
+         SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source, f.valid_from AS at,
+           lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) AS haystack,
+           (SELECT count(*) FROM unnest($3::text[]) AS t(pattern) WHERE lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE t.pattern) AS hits
+         FROM facts f
+         WHERE ${active}
+           ${eligible}
+           AND lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE ANY($3::text[])
+           AND EXISTS (SELECT 1 FROM facts f WHERE ${active} LIMIT 1)
+       ) m
+       WHERE m.hits >= $4::int
+       ORDER BY m.hits DESC, m.at DESC, m.id DESC
+       LIMIT 200`,
+      [sources, [...AUDIT_ROW_SOURCES], terms.map(t => `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%`), need],
+    );
     return rows
       .map(r => ({ r, hits: terms.filter(t => r.haystack.includes(t)).length }))
       .filter(x => x.hits >= need)
       .sort((a, b) => b.hits - a.hits)
       .slice(0, 5)
-      .map(({ r: { haystack: _h, ...fact } }) => ({ ...fact, id: Number(fact.id) }));
+      .map(({ r: { haystack: _h, at: _a, hits: _n, ...fact } }) => ({ ...fact, id: Number(fact.id) }));
   } catch {
     return [];
   }
