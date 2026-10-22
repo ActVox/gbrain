@@ -568,7 +568,9 @@ function addCounts(counts: Record<string, number>, add: Record<string, number | 
 /**
  * #7149: a requested re-screen is consumed once the pass settled its path (imported, held, or settled at its level), not
  * only by the stamp: a pass that stopped before its stamp (timeout, writer_pending, not_converged) left the whole row
- * behind, so doctor kept reporting imported files as waiting and every later pass was forced to a full round.
+ * behind, so doctor kept reporting imported files as waiting and every later pass was forced to a full round. #7327: a
+ * batch that stops (a deadline, a yield, a block) consumes those of the entries its cursor passed, so the next pass resumes
+ * after them instead of re-screening every one again.
  */
 function retryConsumer(engine: BrainEngine, sourceId: string, incarnation: string, retry: readonly string[]): (paths: Iterable<string>) => Promise<void> {
   const open = new Set(retry);
@@ -754,7 +756,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       foldReport(c.sizeStates);
       return null;
     }
-    return drained;
+    return await consumeRetry(entries.slice(0, drained.managedCursor?.index ?? 0).map(entry => entry.path)).then(() => drained);
   };
   /** The pass ended on its stamp; a folded one (sync-pass-fold.ts) saves the round's telemetry beside the obligations it wrote. */
   const synced = async (onFold: boolean): Promise<SyncResult> => {

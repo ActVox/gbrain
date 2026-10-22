@@ -10,6 +10,52 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.370.0] - 2026-10-22
+
+**A managed sync pass stopped by its deadline now resumes its scheduled re-screens instead of starting over, and a holder that is only screening held files no longer looks stalled.** When `gbrain sources retry-held` scheduled more held files than one sync job's budget covers, every job re-screened the same files from the start and stopped before reaching the source's other work. New files were never imported, and the source's freshness never advanced. Followers also stopped with `drain_stalled` / `no_progress` while the holder was making steady progress.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A pass stops at its deadline, a yield or a block partway through a batch | the scheduled re-screens of every file it had already passed stay due, so the next pass re-screens all of them again | those re-screens are consumed, so the next pass resumes after them and reaches the rest of the source |
+| A drain holder that writes only holds for 5 minutes | a follower `gbrain sync` stops `blocked` / `drain_stalled`, and the status `stalled` flag is true | each hold write counts as holder progress, so the follower keeps following |
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and there is no schema migration. A source stuck in this loop finishes the scheduled re-screens over its next few sync jobs, then imports what was waiting behind them.
+
+### Itemized changes
+
+- `src/core/persistence/sync-pass-run.ts`: a stopped batch consumes the re-screens of the entries its cursor passed.
+- `src/core/persistence/sync-lease.ts`: `holderProgress` includes the source's hold-summary row write time in `last_progress_at`.
+- Tests: `test/sync-holds-only-converge-7327.test.ts` (PGLite and Postgres) and a new case in `test/persistence-sync-lease.test.ts`.
+
+## [0.60.369.0] - 2026-10-22
+
+**Writes behind a transaction-mode pooler no longer wait a round trip for BEGIN before their first statement.** Every persistence transaction opens with a transaction-local declaration (the protocol fence and brain id). That declaration now travels with BEGIN, so put and remember pay one round trip less per journal, effect, receipt and consumer transaction. On a local Postgres + PgBouncer rig at 40 ms RTT, no measured transaction waits on BEGIN any more, and remember drops from 212 to 205 round trips.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A persistence transaction's declaration | sent after BEGIN's answer | sent right behind BEGIN; every later statement still waits for the answer, in order |
+| BEGIN refused | the declaration was never sent | the waiting statements are rejected without being sent, even when the body catches the rejection |
+| Reserved connections on pools that do not pipeline (#6930) | waited for BEGIN | the same single exception, covering tagged, `unsafe`, savepoint, `file()`, `describe`, `cursor` and `forEach` statements |
+
+Lock order, the publication deadline, durability and the per-transaction fence are unchanged. Group and lane publication still wait for BEGIN's answer.
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- Vendored postgres.js: `sql.begin({ first })` (`patches/postgres@3.4.9.patch`, `vendor/postgres/*`, types).
+- `src/core/postgres-engine/reserved-transactions.ts`: the same exception on reserved connections.
+- `src/core/persistence/protocol.ts`: `isPersistenceDeclaration`; journal, effect-journal, effects, receipt true-up, consumer lane and single publication pass `pipelineFirst`.
+- Tests: `test/persistence-pipeline-first.test.ts`, `test/e2e/pgbouncer-transaction-pipeline-6930.test.ts`.
+
 ## [0.60.368.0] - 2026-10-22
 
 **Warm search against a remote pooled Postgres is under 2 seconds, and one search can no longer take the whole connection pool.** On a 50k-page brain behind a transaction-mode pooler at 66 ms RTT, with a 200 ms embedder and a 300 ms reranker, warm MCP search went from 2.5 s to 1.6 s at p50 and from 3.0 s to 2.0 s at p95. The CLI over a running `gbrain serve` socket went from 2.4 s to 1.8 s at p50 and from 2.8 s to 2.1 s at p95. Results, ranking, privacy filters and trust behavior are unchanged.
