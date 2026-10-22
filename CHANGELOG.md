@@ -10,6 +10,60 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.378.0] - 2026-10-22
+
+**Warm search spends less time building its response on a brain with many saved facts, warm CLI calls start faster, and an older saved fact that matches every query word is no longer crowded out.** The response stage now reports where its time goes, so a slow response names its part.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Saved-fact probe on a search with query terms | its page filters made the planner read the whole pages index on every search once a brain held many facts (about 100 ms at 51k pages, growing with page count) | the probe reads only the facts table (0.05 ms); the page filters stay on the scan, so the result is the same |
+| Saved facts matching most query words | the newest 200 facts matching any word were kept, then three quarters of the words were required, so an older fact naming every word could be cut first | the word threshold is applied before the cut, ordered by words matched, then newest |
+| A warm CLI call answered by the serve socket | loaded 709 modules before sending (about 290 ms of CLI time on a fast machine) | loads 169 (about 95 ms); output is byte-identical |
+| `--timings` and `_meta.retrieval.timings` | the response stage was one number | `parts_ms.response` splits it into evidence, trust, meta, keyword_count and feedback; `overlapped_ms` names each concurrent meta read |
+
+### What to watch for after you upgrade
+
+- The saved facts a search's response carries can differ: facts matching more of the query's words now win over newer facts matching fewer. Page ranking is unchanged.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/ops/search.ts`: saved-fact probe and threshold-before-cut.
+- `src/core/search/stage-timings.ts`, `src/cli/search-timings.ts`: response parts and meta overlap labels.
+- `src/cli/cli-socket-client.ts`, `src/cli/main.ts`, `src/core/pool-end-timeout.ts`, `src/core/supabase-pooler-url.ts`: warm socket startup.
+- Tests: `test/search/saved-facts-probe.test.ts`, `test/search-saved-facts.test.ts`, `test/cli-socket-warm-graph.test.ts`, `test/search/stage-timings-ops.test.ts`.
+
+## [0.60.377.0] - 2026-10-22
+
+**A managed sync on a large source no longer stops before its first commit while it is still reading the source.** The first managed pass of a ~311k-page source with years of Git history spent minutes reading and classifying the whole level before it committed anything, most of it in one walk of the history. The drain stopped any pass that committed nothing for 5 minutes, so on a slower machine or behind a pooler every pass stopped there with nothing saved, and the next pass started the same walk again. `gbrain sync status` kept telling you to run the plain sync, which repeated it.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A pass still reading a large source's level after 5 minutes | stopped `drain_stalled` / `no_progress`, nothing committed | keeps going while the read reports progress; a hung read still stops after 5 minutes |
+| A pass that follows one abandoned mid-walk | starts another walk of the whole history | joins the walk already running |
+| Two passes in a row that never ended | `resumable` / `pass_unfinished`, next: the plain sync | `blocked` / `pass_abandoned`, next: `gbrain doctor --json` and a report |
+| `sync status` during a long level read | round 0, no movement until the read ends | the pass row moves every 30 s |
+| Stat-cache racy window on a mount whose clock lags the process | measured against the process clock | measured against the earlier of the process and filesystem clocks |
+
+### What to watch for after you upgrade
+
+- Nothing to do. No data is rewritten.
+- Scripts that match `sync status` reasons see one new reason, `pass_abandoned`.
+- The `ip-address` override moves to `^10.7.4` (10.7.2 → 10.7.4 in `bun.lock`), the fixed version for advisory GHSA-rxp7-6hxx-x8q5 (medium).
+
+### Itemized changes
+
+- `src/core/persistence/sync-pass.ts`, `sync-yield.ts`, `sync-origin-evidence.ts`: the level read reports progress from its loops' pauses and the history walk's commits, and concurrent callers share one history walk.
+- `src/core/persistence/sync-drain.ts`: `managed_sync.level_progress` counts as progress.
+- `src/core/persistence/sync-pass-run.ts`, `sync-pass-row.ts`, `sync-pass-status.ts`, `sync-status.ts`: a 30 s heartbeat on the open pass row, `obligations.abandoned_streak`, and the `pass_abandoned` reason.
+- `src/core/persistence/sync-git-stream.ts`: `racyFloor` for both stat caches.
+- Test: `test/sync-pass-abandoned-7355.test.ts` (PGLite and Postgres).
+- `package.json`, `bun.lock`: the `ip-address` override is bumped to `^10.7.4` for GHSA-rxp7-6hxx-x8q5.
+
 ## [0.60.376.0] - 2026-10-22
 
 **Search and recall no longer stall on two slow statements in their tail on a large brain.** When the vector index walk runs out of budget, typically on a cold disk where the HNSW index is larger than the database cache, the fallback statement now runs in milliseconds instead of seconds. The keyword arm no longer spills its sort to disk. On a 50k-page brain behind a transaction-mode pooler at 66 ms RTT, warm search p95 dropped from 2.3 s to 2.0 s and warm recall p95 from 2.1 s to 1.8 s.
