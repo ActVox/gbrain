@@ -752,6 +752,9 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       foldReport(c.sizeStates);
       return null;
     }
+    // #7327: a batch that stops (a deadline, a yield, a block) settled the entries its cursor passed; their requested
+    // re-screens are consumed now, so the next pass resumes after them instead of re-screening every one again.
+    await consumeRetry(entries.slice(0, drained.managedCursor?.index ?? 0).map(entry => entry.path));
     return drained;
   };
   /** The pass ended on its stamp; a folded one (sync-pass-fold.ts) saves the round's telemetry beside the obligations it wrote. */
