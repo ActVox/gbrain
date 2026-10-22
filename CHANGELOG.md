@@ -10,6 +10,38 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.366.0] - 2026-10-22
+
+**Background maintenance that could never finish, and kept paying for model calls each time it tried, now finishes or stops spending.** Several maintenance steps failed the same way on every pass. A pinned question whose answer was longer than a fixed 2,000-token cap failed every refresh and was reported as a provider error. The nightly transcript step re-sent transcripts it had already judged to the paid decision service. The 72-hour purge refused a deleted duplicate page forever because another page shared its file. Some phase failures stopped every later maintenance job at the same place, so brain-wide maintenance never recorded a finished pass. Each of these now ends: the work completes, is skipped with a clear reason, or waits for a change that could make it succeed.
+
+### What changed
+
+| Stuck step | Before | Now |
+|---|---|---|
+| Pinned question with a long answer | `refresh_failed:provider_error` on every cooldown, paid each time | `refresh_failed:answer_too_long:<cap>` after one call; skipped until you raise `cycle.standing_questions.max_output_tokens` (default 2000) |
+| Transcript triage with System One triage on | Re-sent already-judged and borderline transcripts every pass | Asks only about transcripts today's triage has not judged; borderline answers cached 24 hours |
+| Retention purge of a deleted duplicate sharing a file | Refused every run, parked after 5 failures | Purged database-only; the file and the surviving page stay |
+| Purge park | Waited for `--retry-parked` forever | Retried once by each new gbrain version |
+| Phase failing with a missing table, permission or quota error | Stopped every later job at that phase | Counts as that phase's failure streak; later phases run and the pass is stamped |
+| New slug with a hyphen run (three hyphens in a row) | Accepted, then forked a second page on the next file import | Refused with `invalid_params` naming the folded slug |
+
+Other repeat spenders stop paying for the same answer: fence and content repair stop re-sending input a provider refused, concept synthesis checks a page it cannot republish before the model call, and the calibration profile skips the model when the scorecard has not changed. Takes grading reads oldest takes first, so takes past the first 50 get graded.
+
+**Spend effect:** less. Nothing pays again for a result it already has. **Defaults:** unchanged. No schema migration, and nothing rewrites data on upgrade.
+
+New doctor check `slug_path_mismatch` counts pages whose slug their file path does not produce, and names the read-only `gbrain repair frontmatter --source <id>` preview.
+
+Reported by @andrew-agents-bot (#7306, #7307), @TBWMT (#7311) and @liuwenyong1985 (#7305).
+
+### Itemized changes
+
+- Pinned questions: `cycle.standing_questions.max_output_tokens`, the `answer_too_long` receipt and phase skip.
+- Dream synthesize and `gbrain dream retriage`: today's-verdict reuse, 24-hour margin-hold cache, backoff respected, shadow mode asks only about newly judged transcripts, `over_budget_alone` skip, retriage follows `dream.synthesize.conversation_pages`.
+- Brain-wide maintenance: run-scoped phase failures count as a streak, budget-skipped phases run first in the next job, a non-shrinking triage deferral stops withholding `autopilot.last_global_at`.
+- Purge: shared-origin tombstones purged database-only; purge parks record the gbrain version; doctor `purge_parked_pages` counts the running version's parks. `gbrain delete --purge` on such a page still refuses.
+- Slugs: `put_page` and `capture` refuse hyphen runs and segment-final hyphens (`slug_hyphen_run`); existing pages still update with `slug_advisory`.
+- Repair lanes (`llm_refused`), `synthesize_concepts` (`publication_held`), `calibration_profile` (`unchanged_scorecard`), `grade_takes` (oldest-first window).
+
 ## [0.60.365.0] - 2026-10-22
 
 **Behind a split pooler route, a one-shot CLI command no longer opens direct database connections, and a short-lived command opens one instead of three.** Every gbrain process that saw a split route (a Supabase pooler URL or `GBRAIN_DIRECT_DATABASE_URL`) opened a direct (session) pool of up to 3 connections, whatever it ran. A host running many short commands beside `gbrain serve` and the jobs worker spent its session-mode connection budget on processes that ran one statement and exited. The direct pool now follows the command.
