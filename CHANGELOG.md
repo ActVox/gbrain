@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.375.0] - 2026-10-22
+
+**One-shot CLI writes behind a transaction-mode pooler pay fewer round trips before they answer.** A `gbrain put` or `remember` now runs only the persistence scans its own claim can depend on before replying, and leaves compaction, queue upkeep and the projection pass for after the reply. Behind PgBouncer at 40 ms RTT, put went from about 4.5 s and 228 round trips to about 4.1 s and 204, and remember from about 5.0 s and 222 to about 4.7 s and 199.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Housekeeping in a one-shot write | compaction, queue upkeep and the projection pass ran before the reply | they run after it, in a per-host turn taken at most once every 5 minutes (`GBRAIN_ONESHOT_HOUSEKEEPING_INTERVAL_MS`), skipped while a resident consumer on the host is live; recovery, expired claims, dead owners and topology still run first |
+| Config reads during one write | read again by context, the write switch, the contextual stamp and the receipt's capacity snapshot | the connect-time read serves context and the switch; one embedding-target read per page transaction; the capacity snapshot is one statement |
+| Connections a one-shot write opens | up to 10 | 6-7; the second opens beside the first |
+
+### What to watch for after you upgrade
+
+- When a one-shot command takes the host's housekeeping turn, its process can stay up for up to 5 s after printing the answer. A script that times the whole process sees that time.
+- Lock order, the publication deadline, durability and the per-transaction fence are unchanged. Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/persistence/housekeeping-turn.ts`: the per-host turn on an `op_checkpoints` row.
+- Config memo for makeContext source resolution, the write-switch seed and `readCapacityConfig`.
+- Tests: `test/write-roundtrips-gbra156.test.ts`, `test/e2e/write-roundtrips-gbra156-postgres.test.ts`, `test/oneshot-housekeeping-cli.test.ts`.
+
 ## [0.60.374.0] - 2026-10-22
 
 **`GBRAIN_DEBUG=1` now says whether a CLI read was answered by the warm serve socket.** Before, a missing socket and several early fallbacks were silent and a warm hit printed nothing, so a warm run and a cold run looked the same on stderr.
