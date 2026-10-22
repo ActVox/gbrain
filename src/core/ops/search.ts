@@ -54,7 +54,7 @@ import { resolveBoostMap, resolveHardExcludes } from '../search/source-boost.ts'
 import { pageReadFilter } from '../search/read-policy-sql.ts';
 import { QUERY_DESCRIPTION, SEARCH_DESCRIPTION, SEARCH_MATCH_DESCRIPTION } from '../operations-descriptions.ts';
 import { declaredNames, titleName } from '../mentions/aliases.ts';
-import { aliasPhrase, wholeQueryEntityNames, withAliasFanOut, type FanoutMeta, type ResolvedEntity } from '../search/alias-fanout.ts';
+import { aliasPhrase, resolveQueryEntity, wholeQueryEntityNames, withAliasFanOut, type FanoutMeta, type ResolvedEntity } from '../search/alias-fanout.ts';
 import { entitySavedFacts } from '../search/entity-facts.ts';
 import { mentionCoverageNotice, readMentionCoverage } from '../mentions/coverage.ts';
 import { keepEnumeratedRows, keywordCountMeta, parseSearchPaging, readKeywordPage, startKeywordCount, withCountMeta } from '../search/keyword-paging.ts';
@@ -63,7 +63,7 @@ import { heldFilesNotice, stampHeldHits } from '../persistence/held-reads.ts';
 import { opError } from './contract.ts';
 import { MIN_TRUST_PARAM, resolveReadEligibility } from '../eligibility/policy.ts';
 import { projectionEligibleSql } from '../eligibility/sql.ts';
-import { stampPageTrust } from '../eligibility/stamp.ts';
+import { loadPageTrust, stampPageTrust } from '../eligibility/stamp.ts';
 import type { TrustTier } from '../trust/tier.ts';
 import type { Operation, OperationContext } from './contract.ts';
 import { invalidParam, paramUse, readFix } from './op-fix.ts';
@@ -203,8 +203,11 @@ async function withEvidence(ctx: OperationContext, p: Record<string, unknown>, r
 async function evidenceOutput(ctx: OperationContext, p: Record<string, unknown>, results: SearchResult[], plan: EvidencePlan | null, scope: DeliveryScope,
   meta: HybridSearchMeta | null, snippetCap: number, timings: SearchTimings, buildMeta: (rows: SearchResult[]) => Promise<Record<string, unknown>>, keepEnumerated = false): Promise<SearchResult[]> {
   return timings.stage('response', async () => {
+    // Every returned row is a copy of one of `results`, so their page trust is read alongside evidence delivery.
+    const pageTrust = loadPageTrust(ctx.engine, results.filter(r => typeof r.fact_row?.id !== 'number'));
+    pageTrust.catch(() => {});
     const ev = await withEvidence(ctx, p, results, plan, scope, meta);
-    const rows = await stampPageTrust(ctx.engine, keepEnumerated ? keepEnumeratedRows(results, ev.rows) : ev.rows, scope.minTrust);
+    const rows = await stampPageTrust(ctx.engine, keepEnumerated ? keepEnumeratedRows(results, ev.rows) : ev.rows, scope.minTrust, pageTrust);
     return searchOutput(ctx, p, rows, await buildMeta(rows), snippetCap, timings, ev.evidence);
   });
 }
@@ -348,6 +351,17 @@ async function emitFanoutNotices(ctx: OperationContext, fanout: FanoutMeta | und
   if (notice) ctx.emitNotice?.(notice);
 }
 
+/**
+ * The alias fan-out's entity resolution depends on the query alone, so the
+ * handlers start it before the search; withAliasFanOut awaits it with its own
+ * error handling (the catch here only covers a search that throws first).
+ */
+function startEntityResolution(ctx: OperationContext, queryText: string, scope: SourceScope & { excludePrivate: boolean }): Promise<ResolvedEntity | null> {
+  const resolving = resolveQueryEntity(ctx.engine, queryText, scope);
+  resolving.catch(() => {});
+  return resolving;
+}
+
 export interface SavedFactMatch { id: number; fact: string; entity_slug: string | null; kind: string; valid_from: string; source: string }
 
 /**
@@ -367,28 +381,21 @@ async function matchingSavedFacts(ctx: OperationContext, scope: SourceScope, que
   const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
   const visibility = `${ctx.remote !== false ? `AND f.visibility = 'world'` : ''} ${excludePrivate ? `AND ${privateProvenanceFilterFragment('f')}` : ''}
          AND ${projectionEligibleSql('facts', 'f', { floor: scope.minTrust })}`;
-  try {
-    // Most searches have no saved fact to find: one indexed probe (idx_facts_since) with the
-    // same active-fact and visibility predicates skips the LIKE ANY scan when no fact qualifies.
-    const any = await ctx.engine.executeRaw(
-      `SELECT 1 FROM facts f
-       WHERE f.source_id = ANY($1::text[])
+  const active = `f.source_id = ANY($1::text[])
          AND f.expired_at IS NULL AND (f.valid_until IS NULL OR f.valid_until > now())
          AND f.source != ALL($2::text[])
-         ${visibility}
-       LIMIT 1`,
-      [sources, [...AUDIT_ROW_SOURCES]],
-    );
-    if (any.length === 0) return [];
+         ${visibility}`;
+  try {
+    // Most searches have no saved fact to find: the uncorrelated EXISTS is an indexed probe
+    // (idx_facts_since) the planner runs once, before the LIKE ANY scan, and the scan is skipped
+    // when no fact qualifies; one statement, so one round trip either way.
     const rows = await ctx.engine.executeRaw<SavedFactMatch & { haystack: string }>(
       `SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source,
          lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) AS haystack
        FROM facts f
-       WHERE f.source_id = ANY($1::text[])
-         AND f.expired_at IS NULL AND (f.valid_until IS NULL OR f.valid_until > now())
-         AND f.source != ALL($2::text[])
+       WHERE ${active}
          AND lower(f.fact || ' ' || COALESCE(f.entity_slug, '')) LIKE ANY($3::text[])
-         ${visibility}
+         AND EXISTS (SELECT 1 FROM facts f WHERE ${active} LIMIT 1)
        ORDER BY f.valid_from DESC, f.id DESC
        LIMIT 200`,
       [sources, [...AUDIT_ROW_SOURCES], terms.map(t => `%${t.replace(/[\\%_]/g, m => `\\${m}`)}%`)],
@@ -787,6 +794,7 @@ const search: Operation = {
     let capturedMeta: HybridSearchMeta | null = null;
     const searchDone = Promise.withResolvers<void>();
     const keywordCount = timings.overlap('keyword_count', startKeywordCount(ctx.engine, queryText, types, readOpts, searchDone.promise));
+    const resolving = offset === 0 ? startEntityResolution(ctx, queryText, { ...scope, excludePrivate }) : undefined;
     const explainPrep = await setup(() => prepareExplainTarget(ctx, p, scope, excludePrivate, 'search'));
     const searchOpts = {
       limit,
@@ -812,7 +820,7 @@ const search: Operation = {
     const declarations = new DeclarationMemo();
     const fanned = offset === 0
       ? await timings.stage('alias_fanout', () => withAliasFanOut(ctx.engine, primary, queryText, { ...scope, excludePrivate },
-        { excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...scope }, () => declarations.scan(primary, queryText)))
+        { excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...scope }, () => declarations.scan(primary, queryText), resolving))
       : { results: primary };
     let results = fanned.results.map(r => ({ ...r }));
     await emitFanoutNotices(ctx, fanned.fanout, scope);
@@ -1005,7 +1013,7 @@ const query: Operation = {
     // cross-source mode (matches SearchOpts.sourceId contract).
     const typeFilter = await setup(() => reconcileTypeFilter(ctx, querySourceScope, excludePrivate, types));
     types = typeFilter.types;
-    let capturedMeta: HybridSearchMeta | null = null; let queryEmbedding: Float32Array | null = null;
+    let capturedMeta: HybridSearchMeta | null = null; let queryEmbedding: Float32Array | null = null; const resolving = startEntityResolution(ctx, queryText, { ...querySourceScope, excludePrivate });
     const explainPrep = await setup(() => prepareExplainTarget(ctx, p, querySourceScope, excludePrivate, 'query'));
     // v0.32.x search-lite: route the query op through hybridSearchCached so
     // token budget and intent weighting apply at the operation boundary.
@@ -1070,7 +1078,7 @@ const query: Operation = {
     const declarations = new DeclarationMemo();
     const primaryRows = results;
     const fanned = await timings.stage('alias_fanout', () => withAliasFanOut(ctx.engine, primaryRows, queryText, { ...querySourceScope, excludePrivate },
-      { excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...querySourceScope }, () => declarations.scan(primaryRows, queryText)));
+      { excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...querySourceScope }, () => declarations.scan(primaryRows, queryText), resolving));
     await emitFanoutNotices(ctx, fanned.fanout, querySourceScope);
     results = await applyQueryArms(ctx.engine, p, queryText, fanned.results, { ...querySourceScope, excludePrivate, requireSafeChunks: ctx.remote !== false, filtered: !!types || !!where, evidencePlan: !!plan, evidenceBudget: plan?.budgetTokens, remote: ctx.remote !== false, queryEmbedding, rowCap: () => resolveEffectiveLimit(ctx, p), timer: timings });
     // #1663 — CRAG confidence gate. Grade what retrieval returned (zero-LLM;

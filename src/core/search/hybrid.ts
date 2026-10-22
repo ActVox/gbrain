@@ -1161,7 +1161,7 @@ export async function hybridSearch(
   }));
   opts?.explainTarget?.observe('reranked', rerankPinned);
   const { returnPool, adaptiveDecision, autocutDecision, relationalSlotDecision } = await timer.stage('post_fusion', () => sizeReturnPool(req, {
-    rerankPinned, deduped, exactLookupOpts: lexical.exactLookupOpts, relationalList, effectiveModality, identityLookups,
+    rerankPinned, deduped, relationalList, effectiveModality, identityLookups,
   }));
   opts?.explainTarget?.observe('return_pool', returnPool);
   return timer.stage('post_fusion', () => finalizeHybridResults(req, returnPool, {
