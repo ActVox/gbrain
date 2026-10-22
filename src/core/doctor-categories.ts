@@ -195,6 +195,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'takes_weight_grid',
   // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
   'unlinked_facts',
+  // #7160: title-prefixed person pages that likely duplicate an unprefixed page (preview only).
+  'person_title_duplicates',
   'edge_validity',
   'text_projection_readiness',
   'timeline_coverage',
@@ -327,6 +329,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'host_identity_mismatch',
   // #6696 C6: a live serve or worker on an older build than this checkout (doctor/checks/persistence-consumers.ts).
   'serve_build_drift',
+  // #7245: serve, the jobs supervisor, worker parents and job children on different builds (doctor/checks/runtime-build-skew.ts).
+  'runtime_build_skew',
   'stale_embedding_effects',
   'vector_plan',
   'keyword_plan',

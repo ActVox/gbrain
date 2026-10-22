@@ -319,8 +319,8 @@ src/core/output/writer.ts	WriteTxImpl.setCompiledTruth	field	INLINE
 src/core/output/writer.ts	WriteTxImpl.setFrontmatterField	call:putPage	INLINE	
 src/core/output/writer.ts	WriteTxImpl.setFrontmatterField	field	INLINE	
 src/core/oversized-backfill.ts	PAGE_BYTES_SQL	sql	SEGW	
-src/core/oversized-backfill.ts	reindexPage	call:serializeMarkdown	SEGW	
-src/core/oversized-backfill.ts	reindexPage	field	SEGW	
+src/core/oversized-backfill.ts	rewritePage	call:serializeMarkdown	SEGW	
+src/core/oversized-backfill.ts	rewritePage	field	SEGW	
 src/core/page-body/body-digests.ts	fileBodyDigests	field	NONE	scan.timeline is the scanned file's timeline byte ranges and digests.timeline a SHA-256, not a page body; each region is hashed piece by piece
 src/core/page-body/body-scan.ts	scanMarkdownString	field	NONE	not a stored body: scans an incoming markdown string for the segmenter
 src/core/page-body/content-hash-stream.ts	ContentHashStream.fromState	field	NONE	not a stored body: resumes the streaming content hash over incoming text
@@ -485,6 +485,8 @@ src/core/repair/redacted-facts.ts	pageTexts	field	INLINE	inline branch only (a s
 src/core/repair/redacted-facts.ts	pageTexts	sql	INLINE	page_versions rows that hold a body copy (compiled_truth IS NOT NULL); a segmented version has none and is not read
 src/core/repair/redacted-facts.ts	restoreFencedRows	call:serializePageToMarkdown	INLINE	inline pages only: a segmented page returns before the read, and its fenced rows preview as class segmented
 src/core/repair/redacted-facts.ts	restoreFencedRows	field	INLINE	inline pages only: a segmented page returns before the read, and its fenced rows preview as class segmented
+src/core/repair/visibility.ts	applyFactItem	call:serializePageToMarkdown	INLINE	inline pages only: a segmented page returns before the read and its fenced fact is left for the owner
+src/core/repair/visibility.ts	applyFactItem	field	INLINE	inline pages only: a segmented page returns before the read and its fenced fact is left for the owner
 src/core/repair/safe-chunks.ts	safeChunksRepair	sql	META	
 src/core/repair/segmented-mirror.ts	fileHoldsWithdrawnRows	field	NONE	the overlay result of one file fragment (a facts fence block) for the region digests (body-digests.ts); no page body is read
 src/core/repair/slug-conflicts.ts	pageContent	call:serializePageToMarkdown	SEGW	
@@ -503,7 +505,9 @@ src/core/repair/timeline.ts	removedRowIds	field	STREAM
 src/core/repair/timeline.ts	scanTimelineHistory	sql	STREAM	
 src/core/repair/timeline.ts	timelineRepair	call:serializePageToMarkdown	SEGW	
 src/core/repair/timeline.ts	timelineRepair	field	STREAM	
-src/core/repair/visibility.ts	planVisibilityRepair	sql	META	
+src/core/repair/visibility.ts	planAliases	sql	META	
+src/core/repair/visibility.ts	planEvents	sql	META	
+src/core/repair/visibility.ts	planLineage	sql	META	
 src/core/repair/visibility.ts	visibilityRepair	call:serializePageToMarkdown	SEGW	
 src/core/schema-migrations/v091-pages-generation-trigger-and-bookmark.ts	v091	sql	NONE	not the page body: historical generation trigger
 src/core/schema-migrations/v123-configurable-fts-language.ts	v123	sql	NONE	not the page body: historical
@@ -564,7 +568,7 @@ src/core/utils.ts	contentHashLegacy	field	META	legacy formula over an inline pag
 src/core/utils.ts	rowToPage	field	INLINE	installs throwing body getters on a segmented row (guardSegmentedBody); inline rows copy the columns
 src/core/utils.ts	rowToStalePage	field	STREAM	listStalePagesForExtraction lists inline pages only (segmented skipped in SQL, still counted stale)
 src/core/verbs/entity-card-identity.ts	excerptSource	field	LEAD	inline pages only; a segmented page reads truthLead (EXCERPT_LEAD_BYTES)
-src/core/verbs/entity-card.ts	selectEntityCandidates	sql	LEAD	boundedBodyPrefixSql AS compiled_truth
+src/core/verbs/entity-card.ts	CARD_ROW_COLUMNS	sql	LEAD	boundedBodyPrefixSql AS compiled_truth
 src/core/verbs/entity-names.ts	lookupOne	field	LEAD	bounded prefix rows
 src/core/verbs/entity-names.ts	lookupOne	sql	LEAD	boundedBodyPrefixSql AS compiled_truth
 src/core/write-gate-scan.ts	SPECS	field	STREAM	
@@ -599,3 +603,4 @@ src/core/persistence/page-edit.ts	applyPageEdits	call:serializePageToMarkdown	SE
 src/core/persistence/page-edit.ts	applyPageEdits	field	SEGW	within's stored-offset mapping on the materialized snapshot, as pageSegments; a segmented page takes prepareSegmentedEditMutation first
 src/core/persistence/page-edit.ts	prepareSegmentedEditMutation	call:serializePageToMarkdown	NONE	serializes the frontmatter head with an empty body; the body streams from the segments
 src/core/persistence/page-edit.ts	assertSegmentedFencesCompile	field	NONE	the fields hold only the stored fence text laid out at its lines (scanCanonicalFences input); no page body is read
+src/core/search/exact-scan.ts	buildExactBatchStatement	sql	META	#7191: octet_length of the body columns (stored size, never the body) decides an unreadable page
