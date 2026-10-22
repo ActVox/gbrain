@@ -1664,7 +1664,8 @@
           "16 active_bias_tags ARRAY/_text NOT NULL",
           "17 model_id text/text NOT NULL",
           "18 cost_usd numeric/numeric NULL",
-          "19 judge_model_agreement real/float4 NULL"
+          "19 judge_model_agreement real/float4 NULL",
+          "20 prompt_version text/text NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
