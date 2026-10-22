@@ -21,7 +21,7 @@
  * replayed request never reaches this check.
  *
  * #7305: put_page and capture also refuse a new slug with a hyphen run or a
- * segment-final hyphen (`notes/x-1900---2000-ab`, `notes/x-`), naming the
+ * segment-final hyphen (three hyphens between `notes/x-1900` and `2000-ab`, or `notes/x-`), naming the
  * folded slug (`notes/x-1900-2000-ab`): import and sync derive that folded slug
  * from the file, so the page would keep its identity only through the `slug:`
  * line its file is stamped with (#5966), and a file rewritten without it forks

@@ -1,7 +1,7 @@
 /**
  * #7305 `slug_path_mismatch`: live file-backed pages whose slug their recorded file path does not derive, such as a
- * hyphen run or a segment-final hyphen that the path rule folds (`notes/x-1900---2000-ab` recorded at
- * `notes/x-1900---2000-ab.md` imports as `notes/x-1900-2000-ab`). Import and sync keep such a page on its own slug only
+ * hyphen run or a segment-final hyphen that the path rule folds (a slug with three hyphens between `notes/x-1900` and
+ * `2000-ab`, recorded at that slug plus `.md`, imports as `notes/x-1900-2000-ab`). Import and sync keep such a page on its own slug only
  * through the `slug:` line its file carries (#5966); a file without that line imports as the derived slug and forks a
  * duplicate-origin twin (#6948), which sync then holds `origin_conflict`. put_page and capture refuse a new such slug;
  * this counts the pages that already exist.
