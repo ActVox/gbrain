@@ -38,6 +38,7 @@ import { leanRowsKeepId, projectRows, resultRowsFor } from '../search/lean-rows.
 import { buildScoreDetails } from '../search/explain-formatter.ts';
 import { SearchTimings } from '../search/stage-timings.ts';
 import { searchCostSnapshot, withSearchCost } from '../search/search-cost.ts';
+import { withSearchConnectionBudget } from '../search/connection-budget.ts';
 import { keepFrontmatterMatches } from '../search/frontmatter-where.ts';
 import { WHERE_PARAM, whereOpParam } from './where-param.ts';
 import { searchFilterHint } from '../search/filter-hint.ts';
@@ -1425,8 +1426,8 @@ const cache_stats: Operation = {
   },
 };
 
-/** Each search/query call runs under its own model-call cost meter (search/search-cost.ts). */
-const metered = (op: Operation): Operation => ({ ...op, handler: (ctx, p) => withSearchCost(() => op.handler(ctx, p)) });
+/** Each search/query call runs under its own model-call cost meter (search/search-cost.ts) and connection budget (search/connection-budget.ts). */
+const metered = (op: Operation): Operation => ({ ...op, handler: (ctx, p) => withSearchConnectionBudget(() => withSearchCost(() => op.handler(ctx, p))) });
 
 // Ops in EXACTLY the canonical `operations` array order.
 export const searchOperations: Operation[] = [

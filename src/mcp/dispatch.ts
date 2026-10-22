@@ -47,6 +47,7 @@ import { maybeRefreshBackupStatusInProcess } from '../core/backup/coverage.ts';
 import { operationScopesAllowed } from '../core/scope.ts';
 import { enforceReadTrustFloor } from '../core/eligibility/registry.ts';
 import { invalidateHotMemoryForEngine } from '../core/facts/meta-hook.ts';
+import { withSearchConnectionBudget } from '../core/search/connection-budget.ts';
 import { isEngineDegraded } from '../core/degraded-marker.ts';
 import { admittedPendingReceipt, type WriteReceipt } from '../core/persistence/types.ts';
 import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
@@ -874,6 +875,7 @@ export async function dispatchToolCall(
   // #6721: a read op answers every config read from one snapshot of the table
   // (config-snapshot.ts); a write reads config live, so it sees its own writes.
   const run = () => dispatchResolvedCall(engine, name, params, opts);
+  if (name === 'search' || name === 'query') return withSearchConnectionBudget(() => withRequestConfigSnapshot(engine, run));
   return operations.find(o => o.name === name)?.mutating === false
     ? withRequestConfigSnapshot(engine, run)
     : withoutRequestConfigSnapshot(run);

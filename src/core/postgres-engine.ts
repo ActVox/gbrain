@@ -18,6 +18,7 @@ import type { PageReadPolicy } from './types.ts';
 import { readRelationalFanout, readChainHop, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
 import postgres from '#postgres'
 import { reservedTransactions, type ReservedTransactions } from './postgres-engine/reserved-transactions.ts';
+import { holdSearchConnection } from './search/connection-budget.ts';
 import { traceSqlOptions } from './sql-trace.ts';
 import { hasPostgresCancellationCapability, postgresCancellationUnavailable, reserveWithCancellation } from './postgres-engine/cancellation.ts';
 import { runBoundedStatement } from './postgres-engine/bounded-statement.ts';
@@ -687,7 +688,7 @@ export class PostgresEngine implements BrainEngine {
     // .begin), which would skip a chained .finally and leak the counter.
     if (!this._pageTransaction) this.checkoutGauge.acquire('tx');
     try {
-      return await withCommitChecks(checks => withTransactionAbort(opts?.signal, attach => withHeldPageKeys(this._pageTransaction ? this._heldPageKeys : null, held => conn.begin(async (handle) => {
+      return await holdSearchConnection(() => withCommitChecks(checks => withTransactionAbort(opts?.signal, attach => withHeldPageKeys(this._pageTransaction ? this._heldPageKeys : null, held => conn.begin(async (handle) => {
         attach(handle as Discardable);
         if (!this._pageTransaction) this.checkoutGauge.checkedOut();
         const tx = composablePostgresTransaction(handle);
@@ -700,7 +701,7 @@ export class PostgresEngine implements BrainEngine {
         Object.defineProperty(txEngine, 'sql', { get: () => tx });
         Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
         return fn(txEngine);
-      }) as Promise<T>), { cancelSettleMs: cancelSettleMs() }));
+      }) as Promise<T>), { cancelSettleMs: cancelSettleMs() })));
     } finally {
       if (!this._pageTransaction) this.checkoutGauge.release('tx');
     }
@@ -2881,7 +2882,7 @@ export class PostgresEngine implements BrainEngine {
     if (opts?.signal?.aborted) {
       throw new DOMException('aborted', 'AbortError');
     }
-    return (async () => {
+    return holdSearchConnection(async () => {
       const signal = opts?.signal;
       let reserved: postgres.ReservedSql | undefined;
       let pending: ReturnType<typeof conn.unsafe> | undefined;
@@ -2925,7 +2926,7 @@ export class PostgresEngine implements BrainEngine {
         try { cancellation = pending.cancel().catch(() => { retired = true; }); }
         catch { retired = true; }
       }
-    })();
+    });
   }
 
   async executeRaw<T = Record<string, unknown>>(
