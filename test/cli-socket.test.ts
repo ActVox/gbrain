@@ -336,6 +336,22 @@ describe('serve listener', () => {
     expect(started.lines.filter(line => line.includes('identity_mismatch')).length).toBe(2);
   });
 
+  test('GBRA-175: a probe gets the handshake alone, runs nothing, and names a version mismatch', async () => {
+    let executed = 0;
+    const { path } = await start({ execute: async () => { executed++; return { frame: okFrame, settled: Promise.resolve() }; } });
+    const probe = (identity: CliSocketIdentity) => new Promise<unknown[]>((resolveFrames, reject) => {
+      const socket = net.createConnection(path);
+      let text = '';
+      socket.on('data', data => { text += data.toString(); });
+      socket.once('error', reject);
+      socket.once('close', () => resolveFrames(text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))));
+      socket.once('connect', () => socket.write(JSON.stringify({ v: 1, kind: 'probe', identity }) + '\n'));
+    });
+    expect(await probe(serveIdentity())).toEqual([{ v: 1, accepted: true }]);
+    expect(await probe({ ...serveIdentity(), version: '1.0.1' })).toEqual([{ v: 1, accepted: false, reason: 'identity_mismatch', mismatch: 'version' }]);
+    expect(executed).toBe(0);
+  });
+
   test('rejects a peer whose kernel uid differs, and one whose uid cannot be read', async () => {
     let calls = 0;
     // The first read is the start-up self-test on this process's own connection.
