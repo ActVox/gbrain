@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.376.0] - 2026-10-22
+
+**Search and recall no longer stall on two slow statements in their tail on a large brain.** When the vector index walk runs out of budget, typically on a cold disk where the HNSW index is larger than the database cache, the fallback statement now runs in milliseconds instead of seconds. The keyword arm no longer spills its sort to disk. On a 50k-page brain behind a transaction-mode pooler at 66 ms RTT, warm search p95 dropped from 2.3 s to 2.0 s and warm recall p95 from 2.1 s to 1.8 s.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The vector walk falls back to the joined pool statement | it materialized every page and rescanned it for each candidate (2.2-3.2 s at 50k pages) | it probes each candidate's page by key (12-25 ms); materialization is off only for that attempt |
+| A keyword query matching tens of thousands of chunks | chunk text and display columns rode through the bounded, window and dedup stages, spilling a 50 MB sort | only ids and scores ride through; text is read for the final ranked chunks only |
+
+Results are unchanged: the vector rows are the same under exact evaluation, and the keyword rows and order are the same whenever the 50k candidate bound does not apply, and equal to a non-spilling run when it does. The bound, the OR cap and the 8 s timeout are unchanged.
+
+### What to watch for after you upgrade
+
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/search/vector-statement.ts`, `src/core/search/vector-settings.ts`, both engines: `JOINED_STATEMENT_SETTINGS` on joined attempts behind an index walk.
+- `src/core/search/keyword-chunk-match.ts`: `KEYWORD_RANKED_ROWS_CTE`.
+- Tests: `test/search/vector-index-walk.test.ts`, `test/e2e/vector-index-walk-plan-postgres.test.ts`, `test/e2e/keyword-arm-ranking-postgres.test.ts`.
+
 ## [0.60.375.0] - 2026-10-22
 
 **One-shot CLI writes behind a transaction-mode pooler pay fewer round trips before they answer.** A `gbrain put` or `remember` now runs only the persistence scans its own claim can depend on before replying, and leaves compaction, queue upkeep and the projection pass for after the reply. Behind PgBouncer at 40 ms RTT, put went from about 4.5 s and 228 round trips to about 4.1 s and 204, and remember from about 5.0 s and 222 to about 4.7 s and 199.
