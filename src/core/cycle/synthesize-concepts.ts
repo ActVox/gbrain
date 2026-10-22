@@ -45,10 +45,8 @@ import { maintenancePreflight } from '../persistence/prepared-maintenance.ts';
 import { derivedWriteThrough, reportFileHolds } from './derived-write-through.ts';
 import { addSpellingRedirects, canonicalConceptStem, loadConceptRedirects, loadLiveConceptStems } from './concept-redirects.ts';
 import {
-  addManagedProvenanceLinks, CONCEPT_DEFERRAL_CODES, CONCEPT_HOLD_CODES, CONCEPT_PRESERVATION_CODE, conceptPreservationHold, publishClassicConcept, publishManagedConcept,
-  stripFenceSections,
+  addManagedProvenanceLinks, CONCEPT_DEFERRAL_CODES, CONCEPT_HOLD_CODES, conceptPublicationHold, publishClassicConcept, publishManagedConcept, stripFenceSections,
 } from './concept-publication.ts';
-import { isSegmentedPage, pageBodySegmentedError } from '../page-body/page-shape.ts';
 import { readPhaseConfigNumber, SYNTHESIZE_CONCEPTS_BUDGET_KEY, SYNTHESIZE_CONCEPTS_DEFAULT_BUDGET_USD } from './phase-config-values.ts';
 import { ConceptRetryBound, MAX_CONCEPT_ATTEMPTS } from './concept-retry-bound.ts';
 import { ConceptDriftSkips } from '../persistence/drift-conflicts.ts';
@@ -376,13 +374,8 @@ export async function runPhaseSynthesizeConcepts(
     }
     // #6643 (B1): a drifted concept would only add a conflict receipt per publication; checked live before any spend.
     if (await driftSkips.skip(conceptSlug, existingSnapshot)) continue;
-    // A page publication would refuse (a segmented body, or fences it cannot carry losslessly) is held before any spend.
-    if (existing) {
-      const preservation = isSegmentedPage(existing) ? null : conceptPreservationHold(existing);
-      const held = isSegmentedPage(existing) ? `page_body_segmented: ${pageBodySegmentedError(existing, 'synthesize_concepts').message}`
-        : preservation && `${CONCEPT_PRESERVATION_CODE}: ${preservation}`;
-      if (held) { publicationHeld.push({ concept: group.conceptSlug, reason: held }); continue; }
-    }
+    const held = existing && conceptPublicationHold(existing); // checked before any spend
+    if (held) { publicationHeld.push({ concept: group.conceptSlug, reason: held }); continue; }
     // A page hashed by the pre-D-N3 formula (full atom bodies) whose inputs are
     // provably unchanged keeps its narrative: only the hash is rewritten, no spend.
     const grandfathered = realNarrative && existing?.frontmatter?.member_hash === hashOf(synthModel, group.atomBodies);
