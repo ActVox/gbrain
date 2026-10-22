@@ -2395,7 +2395,11 @@ export interface TriagePassResult {
  * `score` is non-null AND `triage_version === TRIAGE_VERSION` AND
  * `model === cfg.model` (switching models re-judges, bounded by maxMs) AND it
  * postdates `staleBefore` (when set) AND `force` is off. Legacy boolean-era
- * rows always miss. `maxChars`/`maxTokens` are deliberately NOT part of
+ * rows always miss. With the decide triage slot acting, the same tuple under
+ * `cfg.model` is also a hit for the decide path (triage-decide.ts, #7307), so
+ * a transcript today's triage judged is never re-sent to the decide provider.
+ * A chat_fallback_chain answer (`answeredBy`) is never stored, so it can't be
+ * a hit for either path. `maxChars`/`maxTokens` are deliberately NOT part of
  * validity — tuning them must not cold-restart the corpus; use
  * `gbrain dream retriage --force` to re-judge under new sampling knobs.
  *
@@ -2470,7 +2474,7 @@ export async function runTriagePass(
     const d = cfg.decide;
     if (!d?.acting) { await processLlm(idx); if (d) await d.observe(transcripts[idx]); return; }
     const t = transcripts[idx];
-    const r = await d.triage(t, { triageVersion: TRIAGE_VERSION, force: cfg.force, staleBefore: cfg.staleBefore, signal: cfg.signal, budgetExhausted });
+    const r = await d.triage(t, { triageVersion: TRIAGE_VERSION, llmModel: cfg.model, force: cfg.force, staleBefore: cfg.staleBefore, signal: cfg.signal, budgetExhausted });
     if (!r.verdict) {
       if (r.deferred || judge) return processLlm(idx);
       reports[idx] = { filePath: t.filePath, worth: true, score: null, content_type: null, reasons: [r.reason ?? 'decide triage no-change'], cached: false };
@@ -2479,7 +2483,8 @@ export async function runTriagePass(
     if (r.cached) cacheHits++;
     else { judged++; if (cfg.shouldStop?.()) stopped = true; }
     byPath.set(t.filePath, r.verdict);
-    reports[idx] = { filePath: t.filePath, worth: gate(r.verdict, t.content).pass, score: r.verdict.score, content_type: r.verdict.content_type, reasons: r.verdict.reasons, cached: r.cached === true };
+    const g = gate(r.verdict, t.content);
+    reports[idx] = { filePath: t.filePath, worth: g.pass, ...(g.rescued ? { rescued: true, verified_segments: g.verified_segments } : {}), score: r.verdict.score, content_type: r.verdict.content_type, reasons: r.verdict.reasons, cached: r.cached === true };
   };
 
   const processLlm = async (idx: number): Promise<void> => {

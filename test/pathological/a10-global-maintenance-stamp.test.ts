@@ -5,7 +5,8 @@
  *
  * Authoring gate:
  * 1. Protects: a pass stamps past a phase that failed with the same code in
- *    three earlier passes (budget, deferral and child blockers never do), the
+ *    three earlier passes (budget and child blockers never do; a triage
+ *    deferral does once its count stops shrinking for three passes, #7307), the
  *    failing phase backs off, the back-off resets on a version change, a new
  *    blocker key and `gbrain autopilot --retry-global`, doctor reports
  *    `global_maintenance_stalled`, and `autopilot --status` exits 1 on it.
@@ -157,20 +158,66 @@ for (const { backend, databaseUrl } of pathologicalArms()) {
     }, 120_000);
 
     test('budget, deferral and child blockers never stop withholding the stamp', async () => {
-      const cases: Array<[string, Outcome, string]> = [
-        ['synthesize', { status: 'ok', details: { reason: 'insufficient_cycle_budget' } }, 'budget'],
-        ['synthesize', { status: 'ok', details: { triage: { deferred: 2 } } }, 'deferred'],
-        ['patterns', { status: 'warn', details: { child_outcome: 'timeout' } }, 'child:timeout'],
+      // #7307: a deferral stops withholding only when its backlog stops shrinking; this one shrinks every pass.
+      const cases: Array<[string, (n: number) => Outcome, string]> = [
+        ['synthesize', () => ({ status: 'ok', details: { reason: 'insufficient_cycle_budget' } }), 'budget'],
+        ['synthesize', (n) => ({ status: 'ok', details: { triage: { deferred: 10 - 2 * n } } }), 'deferred'],
+        ['patterns', () => ({ status: 'warn', details: { child_outcome: 'timeout' } }), 'child:timeout'],
       ];
       for (const [phase, outcome, key] of cases) {
         await resetState();
-        outcomes = { [phase]: outcome };
         for (let n = 0; n < 5; n++) {
+          outcomes = { [phase]: outcome(n) };
           const result = await expectUnitNotAborted(() => pass(['orphans', phase]));
           expect({ key, n, stamped: await stamped(), bypassed: result.pass_completed_with_failing_phase ?? null }).toEqual({ key, n, stamped: null, bypassed: null });
         }
         expect((await progress()).failures[phase]).toMatchObject({ key });
       }
+    }, 120_000);
+
+    test('#7307: a triage deferral that stops shrinking for three passes stops withholding the stamp; doctor names dream retriage', async () => {
+      const deferring = (deferred: number) => { outcomes = { synthesize: { status: 'ok', details: { triage: { deferred } } } }; };
+      const run = async (counts: number[]) => {
+        const out: Array<{ deferred: number; stamped: boolean }> = [];
+        for (const deferred of counts) {
+          await engine.executeRaw('DELETE FROM config WHERE key = $1', [LAST_GLOBAL_AT_KEY]);
+          deferring(deferred);
+          await expectUnitNotAborted(() => pass(['orphans', 'synthesize']));
+          out.push({ deferred, stamped: (await stamped()) !== null });
+        }
+        return out;
+      };
+      expect(await run([7, 7, 7, 7])).toEqual([
+        { deferred: 7, stamped: false }, { deferred: 7, stamped: false }, { deferred: 7, stamped: false }, { deferred: 7, stamped: true }]);
+      const streak = (await progress()).failures.synthesize;
+      expect(streak).toMatchObject({ key: 'deferred', count: 4, deferred: 7, stalled: 3 });
+      expect(streak.retry_at).toBeUndefined();
+
+      const check = await stalledCheck();
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('synthesize');
+      expect(check.message).toContain('gbrain dream retriage --dry-run');
+      expect(check.fix).toMatchObject({ argv: ['gbrain', 'dream', 'retriage'], consent: ['paid'], preview_argv: ['gbrain', 'dream', 'retriage', '--dry-run', '--json'] });
+
+      await resetState();
+      expect((await run([9, 9, 9, 8, 8, 8, 8])).map(r => r.stamped)).toEqual([false, false, false, false, false, false, true]);
+      await resetState();
+      expect((await run([5, 6, 7, 8])).map(r => r.stamped)).toEqual([false, false, false, true]);
+      const pastResult = await (async () => { deferring(8); return pass(['orphans', 'synthesize']); })();
+      expect(pastResult.pass_completed_with_failing_phase).toEqual([expect.objectContaining({ phase: 'synthesize', key: 'deferred', fix: 'gbrain dream retriage' })]);
+    }, 120_000);
+
+    test('#7307: a shrinking triage backlog keeps withholding the stamp, and a stale stamp names dream retriage, not the phase rerun', async () => {
+      for (const deferred of [30, 20, 10]) {
+        outcomes = { synthesize: { status: 'ok', details: { triage: { deferred } } } };
+        await pass(['orphans', 'synthesize']);
+      }
+      expect(await stamped()).toBeNull();
+      await engine.setConfig(LAST_GLOBAL_AT_KEY, new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+      const check = await stalledCheck();
+      expect(check.status).toBe('warn');
+      expect(check.message).toContain('10 transcript(s) left untriaged');
+      expect((check.fix as { argv: string[] }).argv).toEqual(['gbrain', 'dream', 'retriage']);
     }, 120_000);
 
     test('a run-scoped failure at the phase loop stops the job and records no streak', async () => {
