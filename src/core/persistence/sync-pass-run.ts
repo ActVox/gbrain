@@ -828,8 +828,7 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
         await writeLegacyMarkers(engine, level);
         value.obligations.legacy_markers_at = new Date().toISOString();
       }
-      const roundInput = { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions,
-        grantPrefixes: remote ? authority.writer.slugPrefixes : null, onSwept };
+      const roundInput = { passId, observedAt: startedAt, remote, admission, fullRound: kind === 'full', obligations: value.obligations, context, processingOptions, grantPrefixes: remote ? authority.writer.slugPrefixes : null, onSwept };
       await applyPassRound(engine, level, roundInput, applied);
       assertActive();
       if (!remote) value.obligations.deletes_withheld = applied.withheld?.set_hash ?? null;
