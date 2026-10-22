@@ -1172,6 +1172,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "string",
         "required": true,
         "description": "The id you sent, or the receipt's."
+      },
+      "applied": {
+        "type": "boolean",
+        "fullSurfaceOnly": true,
+        "description": "Also return applied: searchable yet, the gap, the write watermark."
       }
     },
     "scope": "write",

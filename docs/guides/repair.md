@@ -2179,16 +2179,19 @@ committing the file again clears the hold.
 
 <a id="file-drift-provenance"></a>**Provenance: who deleted each gone file.** Every page of a
 `--held --side deleted --state file_gone` preview names where its file went
-(JSON: `details.pages[].provenance`, counted in `details.provenance`), read from
-HEAD's full history with `--full-history`, so a deletion on a branch a merge
-kept is found (a plain `git log --diff-filter=D -- <path>` simplifies it away):
+(JSON: `details.pages[].provenance`, counted in `details.provenance` with every
+kind listed, zeros included), read from HEAD's full history with `--full-history`,
+so a deletion on a branch a merge kept is found (a plain
+`git log --diff-filter=D -- <path>` simplifies it away). The history is walked
+once and cached per commit, so a long history costs one walk per preview, and
+the preview reports the commits read on stderr while it walks:
 
 | Provenance | Meaning |
 |---|---|
 | `deleted_by_commit` | The newest commit that deleted the file, with its sha, author, date and subject (a merge only when its resolution dropped the file). |
 | `never_committed` | No commit ever held the file, so the page holds the only copy. |
-| `deletion_uncommitted` | HEAD still holds the file; only the worktree lost it. |
-| `unknown` | Git could not answer. |
+| `deletion_uncommitted` | HEAD still holds the file (even one an older commit deleted and a later one restored); only the worktree lost it. |
+| `unknown` | Git could not answer, or the history touched the file without a deletion it can name. |
 
 `--provenance <kind>` keeps only the held files of one provenance, so each
 population gets its own decision:
