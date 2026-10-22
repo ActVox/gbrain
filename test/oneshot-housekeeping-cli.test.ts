@@ -19,7 +19,7 @@ for (const backend of testBackends()) {
     let home: string;
     let close: (() => Promise<void>) | undefined;
     let pg: BrainEngine | undefined;
-    const pglite = new PGLiteEngine();
+    let pglite: PGLiteEngine;
 
     async function cli(args: string[], stdin?: string, env: Record<string, string> = {}) {
       const child = Bun.spawn([process.execPath, '--no-env-file', CLI, ...args], {
@@ -32,8 +32,8 @@ for (const backend of testBackends()) {
     async function sql<T>(text: string, params: unknown[] = []): Promise<T[]> {
       if (pg) return pg.executeRaw<T>(text, params);
       const { database_path } = JSON.parse(readFileSync(join(home, '.gbrain', 'config.json'), 'utf8'));
-      await pglite.connect({ database_path });
-      try { return await pglite.executeRaw<T>(text, params); } finally { await pglite.disconnect(); }
+      await pglite!.connect({ database_path });
+      try { return await pglite!.executeRaw<T>(text, params); } finally { await pglite!.disconnect(); }
     }
     const lastCompaction = async () => (await sql<{ value: string }>("SELECT value FROM config WHERE key='persistence.maintenance.last_compaction'"))[0]?.value;
     const compacted = async () => (await sql<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests WHERE compacted'))[0]!.n;
@@ -49,6 +49,7 @@ for (const backend of testBackends()) {
         const init = await cli(['init', '--url', url.toString(), '--non-interactive', '--no-embedding']);
         expect(init.code, init.stderr).toBe(0);
       } else {
+        pglite = new PGLiteEngine();
         const init = await cli(['init', '--pglite', '--no-embedding']);
         expect(init.code, init.stderr).toBe(0);
       }
