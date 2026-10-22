@@ -23,6 +23,7 @@ import { opError, OperationError, type OperationContext } from '../ops/contract.
 import { readFix } from '../ops/op-fix.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { stableJson } from '../persistence/digest.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from '../repair/core.ts';
@@ -306,6 +307,7 @@ async function releaseManaged(engine: BrainEngine, adapter: GenerationAdapter<un
   const slug = key.ownerKey.slice('source_slug:'.length);
   const page = await engine.getPage(slug, { sourceId: key.sourceId });
   if (!page?.content_hash) return refused(`origin page ${slug} is gone; the held result cannot publish`);
+  assertInlineBody(page, 'repair generations release-held');
   const origin = await atoms.readAtomOrigin(engine, session, { kind: 'page', slug, content: page.compiled_truth, contentHash: page.content_hash });
   const outcome = await atoms.publishManagedAtomGeneration(engine, session, origin, proposal.map(item => ({ slug: item.key, content: item.content, links: [] })),
     { key, content: page.compiled_truth, runId: `release:${approved.hold_id}`, release: { holdId: approved.hold_id, reason: approved.reason } });

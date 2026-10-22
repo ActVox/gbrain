@@ -610,3 +610,4 @@ src/core/generations/adapters/page.ts	preimageMarkdown	call:serializeMarkdown	NO
 src/core/generations/adapters/page.ts	preimageMarkdown	field	NONE	reads the body field of a ledger preimage JSON copy; segmented and oversize pages have no preimage
 src/core/generations/adapters/page.ts	pageVersionEvidence	sql	INLINE	legacy-adoption evidence: hashes retained page_versions copies of derived atom pages and compares identity hashes only; segmented versions (compiled_truth NULL) are skipped
 src/core/generations/adapters/atoms.ts	atomGenerationAdapter	sql	META	input size only: body_bytes for a segmented page, octet_length of an inline page columns (pages leave body_bytes NULL inline)
+src/core/generations/repair.ts	releaseManaged	field	INLINE	assertInlineBody refuses a segmented origin page before the managed release reads its body to bind the origin
