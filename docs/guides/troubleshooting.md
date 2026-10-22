@@ -58,7 +58,7 @@
 | [A page write refused `owner_unavailable`, detail `unbound_source`, on a classic Postgres brain](write-refusals.md#unbound-sources-on-postgres) | don't retry; write the page as `<slug>.md` in the source's checkout, commit it, and run `gbrain sync --source <id>` (a remote agent gives those steps to the user); database-only pages or managed mode are the user's choice | agent, after the user agrees (remote: user) | none | `gbrain get <slug> --source <id>` |
 | [`owner_unavailable`, reason `binding_missing`, `incarnation_changed`, `local_path_missing` or `coordination_path_missing`](#owner-unavailable) | `gbrain sources writer status --source <id> --json`; the registration is missing or outdated and re-binding or re-registering the checkout is the host administrator's decision | brain host | none | the same status read shows an active binding for this host |
 | Background work (autopilot, jobs, connector syncs) refused `owner_unavailable` "Background writes to source <id> are paused: its canonical owner could not be verified" or "its worktree is recovering" | run the fix, `gbrain sources writer status --source <id> --json`, which names what the source waits on; a deleted owner marker (`.gbrain-owner.json`) is repaired by a writer self-transfer, the user's decision. Nothing was submitted and no request id was used; interactive writes are unaffected | agent; the self-transfer after the user agrees | none to inspect | the same status read shows an active binding; the next background run admits |
-| Doctor warns `purge_parked_pages` | fix the cause each page's last error names, preview `gbrain pages purge-deleted --retry-parked --dry-run --json`, then with the user's agreement run `gbrain pages purge-deleted --retry-parked --yes` | agent, after the user agrees | `destructive` | `gbrain doctor --only purge_parked_pages --json` |
+| Doctor warns `purge_parked_pages` | a park an older gbrain wrote is retried once by the next purge run after an upgrade and is not counted; for the rest, fix the cause each page's last error names, preview `gbrain pages purge-deleted --retry-parked --dry-run --json`, then with the user's agreement run `gbrain pages purge-deleted --retry-parked --yes` | agent, after the user agrees | `destructive` | `gbrain doctor --only purge_parked_pages --json` |
 | [`gbrain repair fences` skipped a file `sync_in_progress` while a sync runs](repair.md#fence-repair-during-a-sync) | nothing: a write in flight or the running sync's frozen manifest still names that file; every other candidate repairs now and the next run picks this one up (`gbrain sync --source <id> --no-pull` finishes the sync) | agent | none | `gbrain doctor --only fence_integrity --json` |
 | [A Google or GitHub item is held (`connector_held_items`)](#held-connector-items) | `gbrain sources status <id>`, fix the cause, then `gbrain sources retry-held <id>` and `gbrain sync --source <id>` | agent, after the user agrees | `egress` (fetches from the provider again) | `gbrain doctor --only connector_held_items --json` |
 | `gbrain google status` exits 1 naming `calendar_unreadable`, doctor warns `google_calendar_readable`, or the sync log prints `[google] calendar_unreadable` (calendar pages stop arriving) | `gbrain google calendars --account <email>` lists the calendars the account can read; then `gbrain sources set-calendar <source> <calendar-id>` and `gbrain sync --source <source>` ([unreadable calendar](google-connect.md#unreadable-calendar)) | agent, after the user agrees which calendar | none (on a managed brain whose source also syncs Gmail or Contacts, the change re-reads their history: `confirmation_required`, re-run with `--yes` after the user agrees) | `gbrain doctor --only google_calendar_readable --json` is ok |
@@ -668,8 +668,18 @@ it blocked: `fail:<code>` (the phase failed), `budget`, `child:<outcome>` or
 `deferred`. After a phase fails with the same code in three passes in a row,
 later passes stamp past it (the job result lists it under
 `pass_completed_with_failing_phase`) and the phase backs off: it is skipped
-for two global intervals, then four, up to a day. Budget, deferral and child
-blockers never let a pass stamp past them; child failures back off too.
+for two global intervals, then four, up to a day. A `deferred` streak
+(synthesize triage left transcripts for the next pass) lets a pass stamp past
+it once the deferred count has not shrunk for three passes in a row; while the
+count keeps shrinking, the stamp waits. Budget and child blockers never let a
+pass stamp past them; child failures back off too. A phase that fails with a
+run-scoped code (a missing table, `permission_denied`, `write_quota_exhausted`,
+`recovery_required`) is a `fail:<code>` streak like any other failure, and
+the pass goes on to the next phase. A lost connection or contention stops the
+job and the next job retries that phase first, at most three jobs in a row;
+after that it is the phase's streak and the pass goes on. A phase skipped for
+`insufficient_cycle_budget` after another phase ran in the same job moves to
+the next job instead of counting as a `budget` streak.
 
 Doctor warns when the stamp is older than three global intervals
 (`autopilot.global_floor_min`, 60 minutes by default) while maintenance jobs
@@ -680,7 +690,12 @@ the phase, its blocker key and back-off, or the last failed job.
 1. Run the named phase in the foreground to see its error:
    `gbrain dream --phase <name>`. LLM and embedding phases spend tokens, so
    ask the user first. With no phase named, read the failed job:
-   `gbrain jobs get <id>`.
+   `gbrain jobs get <id>`. For a `deferred` streak, doctor names
+   `gbrain dream retriage` instead: preview with
+   `gbrain dream retriage --dry-run`, then run it to judge the whole backlog in
+   one pass without the `dream.triage.max_ms` window (paid; it asks before
+   spending more than a few dollars). It reads conversation pages too, so it
+   works on `dream.synthesize.conversation_pages` brains.
 2. Fix the cause the error names, then end the back-off so the next pass
    runs the phase again: `gbrain autopilot --retry-global --phase <name>`
    (without `--phase`, every backed-off phase). The streak count stays, so a

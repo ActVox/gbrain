@@ -351,10 +351,16 @@ async function selectHeld(engine: BrainEngine, sourceId: string, opts: RepairPla
   let window = selected.filter(target => target.inWindow).map(({ inWindow: _inWindow, ...target }) => target);
   // GBRA-133: a gone file's provenance (sync-origin-evidence.ts), read for every held file a --provenance selection filters, else for one window.
   const gone = window.filter(target => target.state === 'file_gone').slice(0, opts.provenance ? undefined : HELD_WINDOW_PAGES);
-  const provenance: Record<string, number> = {};
+  const provenance: Record<string, number> = Object.fromEntries([...DELETION_PROVENANCES, 'unknown'].map(kind => [kind, 0]));
   if (gone.length) {
     const binding = await getWorktreeBinding(engine, sourceId);
-    const read = await readDeletionProvenance(join(binding!.local_path!, binding!.relative_path), gone.map(target => target.hold.path));
+    // One walk of the history; a long one takes a while, so the preview says it is reading (stderr).
+    opts.progress?.start('repair.file_drift.provenance', gone.length);
+    let read: Map<string, DeletionProvenance>;
+    try {
+      read = await readDeletionProvenance(join(binding!.local_path!, binding!.relative_path), gone.map(target => target.hold.path),
+        { onCommit: commits => opts.progress?.heartbeat(`read ${commits} commit(s) of history for ${gone.length} held file(s)`) });
+    } finally { opts.progress?.finish(); }
     for (const target of gone) {
       target.provenance = read.get(target.hold.path) ?? { kind: 'unknown' };
       provenance[target.provenance.kind] = (provenance[target.provenance.kind] ?? 0) + 1;

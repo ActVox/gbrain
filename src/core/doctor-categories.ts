@@ -211,6 +211,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ghost_pages',
   // #6948: files recorded by several live pages (origin twins) and the pages_live_origin_key index (doctor/checks/origin-twins.ts).
   'origin_twins',
+  // #7305: live pages whose slug their recorded file path does not derive, and whose file lacks the slug: stamp (doctor/checks/slug-path-mismatch.ts).
+  'slug_path_mismatch',
   // #6729: inexact renames whose identity sync did not keep, until the pair gets a disposition (doctor/checks/rename-identity-downgrades.ts).
   'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).

@@ -270,6 +270,9 @@ src/core/fence-repair/repair-tiers.ts	holderAt	field	STREAM
 src/core/fence-repair/tier1.ts	pageHasFenceText	field	STREAM	
 src/core/fts-language.ts	pageSearchVectorTriggerFnSql	sql	LEAD	
 src/core/google/loops-extract.ts	runLoopsExtract	field	STREAM	tail slice(-12000) of a getPage body; per-job: segmented page: getter throws page_body_segmented
+src/core/google/sweep-shared.ts	carryStoredFences	call:serializePageToMarkdown	INLINE	asserts inline (assertInlineBody); importRendered refuses a segmented page first
+src/core/google/sweep-shared.ts	carryStoredFences	field	INLINE	asserts inline (assertInlineBody); importRendered refuses a segmented page first
+src/core/google/sweep-shared.ts	withStoredFactsFence	field	INLINE	asserts inline (assertInlineBody); importRendered refuses a segmented page first
 src/core/import-file.ts	applyImportTransaction	call:putPage	SEGW	lane 1d file (streaming ingest); code/image pages inline
 src/core/import-file.ts	importCodeFile	call:putPage	SEGW	lane 1d file (streaming ingest); code/image pages inline
 src/core/import-file.ts	importFromContent	call:contentHash	META	lane 1d file
