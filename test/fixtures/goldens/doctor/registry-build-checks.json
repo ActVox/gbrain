@@ -903,6 +903,10 @@
       },
       {
         "category": "brain",
+        "name": "slug_path_mismatch"
+      },
+      {
+        "category": "brain",
         "name": "rename_identity_downgrades"
       },
       {
