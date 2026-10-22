@@ -3,6 +3,8 @@
  * number per pass (#7189). Before the fix, a Git edit to a page the sweep had not reached yet classified `drift` with an
  * unknown side and was held `file_drift`, so the edit never became searchable. That's what turned the managed serve-watch
  * freshness cells red. A page that still holds its file at the baseline commit changed only in Git, so the edit imports.
+ * The sweep itself also ran before the round's imports, adding its cost to every commit's latency until it finished; a
+ * round with imports now sweeps after them.
  */
 import { expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -10,6 +12,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { drainProjections } from '../src/core/page-state/projections.ts';
+import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { SYNC_IMPORT_PROVENANCE_OP } from '../src/core/persistence/sync-holds.ts';
 import { MANAGED_SYNC_PASS_OP } from '../src/core/persistence/sync-pass-row.ts';
 import { PASS_LEGACY_SWEEP_MAX } from '../src/core/persistence/sync-pass-apply.ts';
@@ -51,7 +54,14 @@ for (const backend of testBackends()) {
 
     writeFileSync(join(root, `notes/${name(last)}.md`), body(last, 'An edited body naming acme-example.'));
     git(root, 'add', '-A'); git(root, 'commit', '-qm', 'edit');
-    const result = await performManagedSync(engine, OPTS);
+    // The bounded legacy sweep runs after the round's import, so it never delays the edit becoming visible.
+    const seenAtSlice: boolean[] = [];
+    installFaultHook(async point => {
+      if (point === 'sync:legacy_slice') seenAtSlice.push(((await engine.getPage(slug, { sourceId: 'default' }))?.compiled_truth ?? '').includes('acme-example'));
+    });
+    const result = await performManagedSync(engine, OPTS).finally(() => installFaultHook(undefined));
+    expect(seenAtSlice.length).toBeGreaterThan(0);
+    expect(seenAtSlice.every(Boolean)).toBe(true);
     expect(result.status).toBe('synced');
     const holds = await engine.executeRaw<{ code: string }>("SELECT completed_keys->0->>'code' AS code FROM op_checkpoints WHERE op='sync-hold' AND completed_keys->0->>'path'=$1", [`notes/${name(last)}.md`]);
     expect(holds).toEqual([]);
