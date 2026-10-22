@@ -304,7 +304,7 @@ async function writerLoop(directUrl: string, startedAt: number): Promise<void> {
     let sha = '', err = '';
     for (let attempt = 0; attempt < 10 && !sha; attempt++) {
       try {
-        git('add', '-A', '--', ...touched, ...removed);
+        git('add', '-A', '--', ...touched.filter(p => existsSync(join(REPO_A, p))));
         git('commit', '-q', '-m', 'soak writer ' + n + ' ' + token);
         sha = git('rev-parse', 'HEAD');
       } catch (e) { err = String(e).slice(0, 300); await sleep(2000); }

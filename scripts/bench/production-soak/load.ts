@@ -3,7 +3,7 @@
  * Production-shaped scale soak, step 2: load a fixture.ts brain into Postgres
  * the way production got there (GBRA-174). Opt-in bench code, never run in CI.
  *
- *   bun scripts/bench/production-soak/load.ts --fixture <dir> --work <dir> [--db soak_brain] [--skip-embed]
+ *   bun scripts/bench/production-soak/load.ts --fixture <dir> --work <dir> [--db soak_brain] [--skip-embed] [--extract-budget-s 1200]
  *
  * 1. Starts the topology (lib.ts): Postgres, the session and transaction
  *    PgBouncers and toxiproxy (no latency while loading).
@@ -40,7 +40,7 @@ const WORK = resolve(flag('work') ?? '');
 const DB = flag('db', 'soak_brain')!;
 const CLI = join(resolve(flag('gbrain-root', REPO)!), 'src', 'cli.ts');
 const log = (m: string) => baseLog('soak-load', m);
-if (!flag('fixture') || !flag('work') || !/^[a-z0-9_]+$/.test(DB)) { console.error('usage: load.ts --fixture <dir> --work <dir> [--db name] [--skip-embed]'); process.exit(2); }
+if (!flag('fixture') || !flag('work') || !/^[a-z0-9_]+$/.test(DB)) { console.error('usage: load.ts --fixture <dir> --work <dir> [--db name] [--skip-embed] [--extract-budget-s 1200]'); process.exit(2); }
 
 interface SourceRow { id: string; repo: string; head: string; import_base: string; live_pages: number }
 const manifest = JSON.parse(readFileSync(join(FIXTURE, 'manifest.json'), 'utf8'));
@@ -125,12 +125,20 @@ async function main() {
     ready['after_activation_' + s.id] = { state: st.json?.state ?? null, reason: st.json?.reason ?? null, holds: Array.isArray(st.json?.holds) ? st.json.holds.length : null, legacy_swept: st.json?.convergence?.counts?.legacy_swept ?? null, legacy_recorded: st.json?.convergence?.counts?.legacy_recorded ?? null };
   }
 
+  const sql = postgres(topo.direct(DB), { max: 1, onnotice: () => {} });
   const t3 = now();
+  const extractBudgetMs = Number(flag('extract-budget-s', '1200')) * 1000;
   for (const s of sources) {
+    const ts = now();
     for (let i = 0; i < 30; i++) {
-      const r = await gb(CLI, home, env, ['extract', '--stale', '--catch-up', '--source-id', s.id, '--brain', 'host'], { allowFail: true });
+      const left = extractBudgetMs - (now() - ts);
+      if (left <= 0) break;
+      const r = await gb(CLI, home, env, ['extract', '--stale', '--catch-up', '--source-id', s.id, '--brain', 'host'], { allowFail: true, timeoutMs: left });
       if (r.code !== 0 || !/Actionable: [1-9]\d* page\(s\) still need|[1-9]\d* page\(s\) due for the mention pass/.test(r.stdout + r.stderr)) break;
     }
+    const [x] = await sql.unsafe('SELECT count(*)::int AS n FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND links_extracted_at IS NULL', [s.id]) as any[];
+    ready['extract_' + s.id] = { ms: Math.round(now() - ts), capped: now() - ts >= extractBudgetMs, remaining: x?.n ?? null };
+    log('extract ' + s.id + ': ' + JSON.stringify(ready['extract_' + s.id]));
   }
   ready.extract_ms = Math.round(now() - t3);
   if (!argv.includes('--skip-embed')) {
@@ -148,7 +156,6 @@ async function main() {
   git(sa.repo, 'merge', '-q', '--ff-only', 'final');
   ready.backlog_commits = Number(git(sa.repo, 'rev-list', '--count', 'import-base..HEAD'));
 
-  const sql = postgres(topo.direct(DB), { max: 1, onnotice: () => {} });
   await sql.unsafe('ANALYZE');
   ready.import_records = await sql.unsafe("SELECT p.source_id, count(*)::int AS pages, count(o.fingerprint)::int AS recorded FROM pages p LEFT JOIN op_checkpoints o ON o.op = 'sync-import-provenance' AND (o.completed_keys->0->>'page_id')::bigint = p.id WHERE p.deleted_at IS NULL GROUP BY 1 ORDER BY 1");
   const [c] = await sql.unsafe("SELECT (SELECT count(*) FROM pages WHERE deleted_at IS NULL)::int AS pages, (SELECT count(*) FROM content_chunks)::int AS chunks, (SELECT count(*) FROM content_chunks WHERE embedding IS NULL)::int AS unembedded, pg_database_size(current_database())::bigint AS bytes") as any[];
