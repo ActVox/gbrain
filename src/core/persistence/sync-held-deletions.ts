@@ -46,19 +46,20 @@ const TRANSIENT: ReadonlySet<HeldDeletionRefusal> = new Set(['provenance_unknown
 export interface HeldDeletionState { screened: Set<string>; applied: number; refused: number }
 export const newHeldDeletionState = (): HeldDeletionState => ({ screened: new Set(), applied: 0, refused: 0 });
 
-/** Whether the switch is on for `sourceId` (the per-source key wins over the brain-wide one; only `true` turns it on). */
-export async function heldDeletionsEnabled(engine: { getConfig(key: string): Promise<string | null> }, sourceId: string): Promise<boolean> {
-  const value = (await engine.getConfig(`${SYNC_APPLY_HELD_DELETIONS_KEY}.source.${sourceId}`)) ?? await engine.getConfig(SYNC_APPLY_HELD_DELETIONS_KEY);
+/** Whether the switch is on for `sourceId` (the per-source key wins over the brain-wide one; only `true` turns it on): one read, once per pass. */
+export async function heldDeletionsEnabled(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string): Promise<boolean> {
+  const own = `${SYNC_APPLY_HELD_DELETIONS_KEY}.source.${sourceId}`;
+  const rows = await engine.executeRaw<{ key: string; value: string | null }>('SELECT key, value FROM config WHERE key = ANY($1::text[])', [[own, SYNC_APPLY_HELD_DELETIONS_KEY]]);
+  const value = rows.find(row => row.key === own)?.value ?? rows.find(row => row.key === SYNC_APPLY_HELD_DELETIONS_KEY)?.value;
   return value?.trim().toLowerCase() === 'true';
 }
 
 /**
  * Settles the round's held committed deletions the proof accepts as deletes (`heldDeletion` on the result) and marks
  * the ones it refuses (`heldDeletionRefused`), turning a settled hold back into a `delete_drift` so the pass records the
- * refusal on it. A no-op while the switch is off.
+ * refusal on it. The pass reads the switch once (`heldDeletionsEnabled`) and calls this only while it is on.
  */
 export async function applyHeldDeletions(engine: BrainEngine, level: ShadowLevel, context: ManagedSyncContext, state: HeldDeletionState): Promise<void> {
-  if (!await heldDeletionsEnabled(engine, level.sourceId)) return;
   const holdPath = (entry: ShadowPath) => level.scope ? entry.path.slice(level.scope.length + 1) : entry.path;
   const page = (entry: ShadowPath) => entry.slug !== null && entry.pageId !== null && entry.revision !== null && entry.state.page?.live === true;
   const fresh = level.paths.filter(entry => entry.result.cls === 'delete_drift' && entry.result.state === 'file_gone' && !entry.result.uncommitted && !entry.result.settled && !entry.result.inFlight && page(entry));

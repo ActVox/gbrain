@@ -126,6 +126,8 @@ export interface PassApplyInput {
   screen?: ConvergenceScreen;
   /** GBRA-108: after each committed legacy-sweep slice (the pass saves its row and reports progress). */
   onSwept?: () => Promise<void>;
+  /** GBRA-133: `sync.apply_held_deletions` is on for the source (read once per pass, sync-held-deletions.ts). */
+  heldDeletions?: boolean;
 }
 
 /** The source-relative path (`SyncEntry.path`, the hold key) and the recorded origin of a level path. */
@@ -154,7 +156,7 @@ export async function applyPassRound(engine: BrainEngine, level: ShadowLevel, in
       if (!grantSees(level, entry, input.grantPrefixes) && !entry.result.settled) settleAs(entry, { settled: true, action: 'none', classAction: 'none' });
     }
   }
-  if (!input.remote && input.admission === 'normal') await applyHeldDeletions(engine, level, input.context, state.heldDeletions);
+  if (input.heldDeletions && !input.remote && input.admission === 'normal') await applyHeldDeletions(engine, level, input.context, state.heldDeletions);
   await applyDeleteValve(engine, level, input, state);
   if (input.remote) {
     // #6948: a remote pass writes no hold, so a path several live pages claim is left as it is for the owner's pass to hold.
