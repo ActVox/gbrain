@@ -36,6 +36,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - `src/core/schema-migrations/v267-pages-title-search-index.ts`, `src/schema.sql`: the title index.
 - `src/core/search/connection-budget.ts`, `src/core/search/hybrid/arms.ts`: urgent search connections.
 - `src/core/search/cosine-rescore.ts`, `src/core/search/collapse.ts`, `src/core/search/hybrid/rank.ts`, `src/core/search/hybrid/request.ts`: cosine re-score and collapse facts start beside fusion.
+- `package.json`, `bun.lock`: `zod` raised to `^4.6.6` as a direct dependency and an override, so every copy resolves 4.6.7, for the high-severity advisory GHSA-mrhx-c7xc-m3w5 in 4.3.6.
 - Tests: driver and harness pins, PgBouncer e2e for the pipelined body, `test/e2e/search-read-pipeline-postgres.test.ts`, title-arm index and predicate equivalence, urgent budget, prefetch and cosine equivalence.
 
 ## [0.60.407.0] - 2026-10-23
