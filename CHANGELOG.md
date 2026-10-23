@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.392.0] - 2026-10-23
+
+**The unit-lane PostgreSQL arms job runs 12 shards instead of 11, so adding a new arm file no longer fails CI on the shard budget.** Nothing in gbrain itself changed.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `unit-postgres-arms` two-worker makespan per shard (mined weights, Bun 1.4.0 cell) | 568.9 s average, 569.8 s largest, against the 570 s budget: one more arm file pushed shards over | 521.4 s average, 522.4 s largest |
+| Same, Bun 1.4.4 PostgreSQL-only cell | 471.4 s average, 471.9 s largest | 431.9 s average, 432.4 s largest |
+| Check names | `Unit-lane PostgreSQL arms N/11 / Bun …` | `Unit-lane PostgreSQL arms N/12 / Bun …` (aggregated by `test-status`; none is a required check) |
+
+### Itemized changes
+
+- `scripts/postgres-unit-arms.ts`: `ARM_SHARDS` 12; `.github/workflows/persistence-validation.yml`: the matrix, job name and `run` argument follow it (pinned by `test/scripts/postgres-unit-arms.test.ts`).
+- `docs/architecture/key-files/ci-health-and-test-guards.md`, `scripts/ubicloud/README.md`: shard count.
+
 ## [0.60.391.0] - 2026-10-23
 
 **Managed atom extraction now publishes through the same generation primitive as unmanaged brains, and an origin's old and new atoms can both be live in between, never neither (GBRA-161 PR 1b).** On a managed brain a re-extraction used to overwrite and retire atoms page by page, so a crash between requests could leave an origin with neither its old atoms nor its new ones. Transcript-derived atoms were also keyed by file name, so two same-named transcripts in different folders shared one key.
