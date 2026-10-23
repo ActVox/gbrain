@@ -97,7 +97,7 @@ describe.skipIf(!(pooled && pooledAdmin))('#6930 transaction pipelining through 
       await engine.executeRaw('SELECT 1 AS bounded_read', [], { timeoutMs: 5000 });
       timedOut = await engine.executeRaw('SELECT pg_sleep(2) AS slept', [], { timeoutMs: 200 }).then(() => 'none', (e: { code?: string }) => e.code);
     });
-    expect(sentBeforeAnswer(records, /^BEGIN; SET LOCAL statement_timeout|^SELECT 1 AS bounded_read$|^COMMIT$/, 3)).toEqual([true, true]);
+    expect(sentBeforeAnswer(records, /^BEGIN READ WRITE; SET LOCAL statement_timeout|^SELECT 1 AS bounded_read$|^COMMIT$/, 3)).toEqual([true, true]);
     expect(timedOut).toBe('57014');
   }, 60_000);
 
@@ -148,7 +148,7 @@ describe.skipIf(!(pooled && pooledAdmin))('#6930 transaction pipelining through 
       await engine.withReservedConnection(conn => (conn as unknown as { transaction<R>(run: (tx: PostgresEngine) => Promise<R>): Promise<R> })
         .transaction(tx => Promise.all([tx.executeRaw('SELECT 1 AS reserved_body'), tx.executeRaw('SELECT 2 AS reserved_body')])));
     });
-    const begin = records.find(r => /^begin$/i.test(r.sql))!;
+    const begin = records.find(r => /^begin read write$/i.test(r.sql))!;
     const first = records.find(r => /AS reserved_body$/.test(r.sql))!;
     expect(first.conn).toBe(begin.conn);
     expect(first.t >= end(begin)).toBe(true);
@@ -186,7 +186,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a transaction\'s first stat
           "SELECT current_setting('gbrain.persistence_protocol', true) AS protocol, txid_current()::text AS xid, pg_backend_pid() AS pid /* after declaration */");
       }, { pipelineFirst: isPersistenceDeclaration });
     });
-    const begin = records.find(r => /^begin\s*$/i.test(r.sql))!;
+    const begin = records.find(r => /^begin read write$/i.test(r.sql))!;
     const declared = records.find(r => r.sql === declaration)!;
     const after = records.find(r => /after declaration \*\/$/.test(r.sql))!;
     expect(declared.t < end(begin)).toBe(true);
@@ -201,7 +201,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a transaction\'s first stat
         await tx.executeRaw(`DELETE FROM ${table} WHERE n=0`);
       }, { pipelineFirst: isPersistenceDeclaration });
     });
-    const begin = records.find(r => /^begin\s*$/i.test(r.sql))!;
+    const begin = records.find(r => /^begin read write$/i.test(r.sql))!;
     const insert = records.find(r => /refused first \*\/$/.test(r.sql))!;
     expect(insert.t >= end(begin)).toBe(true);
   }, 60_000);
@@ -276,7 +276,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a transaction\'s first stat
         await tx.executeRaw('SELECT 1 AS reserved_after_declaration');
       }, { pipelineFirst: isPersistenceDeclaration }));
     });
-    const begin = records.find(r => /^begin$/i.test(r.sql))!;
+    const begin = records.find(r => /^begin read write$/i.test(r.sql))!;
     const declared = records.find(r => r.sql === declaration)!;
     const after = records.find(r => /AS reserved_after_declaration$/.test(r.sql))!;
     expect([declared.conn, after.conn]).toEqual([begin.conn, begin.conn]);
@@ -331,7 +331,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a transaction\'s first stat
     const records = await traced('first-off', 1, async engine => {
       await engine.transaction(tx => declarePersistenceProtocol(tx), { pipelineFirst: isPersistenceDeclaration });
     }, { GBRAIN_PG_TXN_PIPELINE: '0' });
-    const begin = records.find(r => /^begin\s*$/i.test(r.sql))!;
+    const begin = records.find(r => /^begin read write$/i.test(r.sql))!;
     const declared = records.find(r => r.sql === declaration)!;
     expect(declared.t >= end(begin)).toBe(true);
   }, 60_000);
@@ -343,7 +343,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a transaction\'s first stat
       failed = await engine.executeRaw('SELECT 1/0 AS bounded_failure', [], { timeoutMs: 5000 }).then(() => 'none', (e: { code?: string }) => e.code);
       next = await engine.sql.unsafe("SELECT current_setting('statement_timeout') AS timeout, now() = statement_timestamp() AS fresh") as unknown as typeof next;
     });
-    expect(sentBeforeAnswer(records, /^BEGIN; SET LOCAL statement_timeout|^SELECT 1\/0 AS bounded_failure$|^COMMIT$/, 3)).toEqual([true, true]);
+    expect(sentBeforeAnswer(records, /^BEGIN READ WRITE; SET LOCAL statement_timeout|^SELECT 1\/0 AS bounded_failure$|^COMMIT$/, 3)).toEqual([true, true]);
     expect(failed).toBe('22012');
     expect(next.map(r => r.fresh)).toEqual([true]);
     expect(next[0]!.timeout).not.toBe('5s');
