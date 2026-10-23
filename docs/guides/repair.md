@@ -1594,14 +1594,6 @@ gbrain repair generations --kind synthesis --mode cleanup --since <ISO-8601> --a
 gbrain repair generations --kind synthesis --mode restore --since 30d --json
 ```
 
-
-
-
-
-
-```
-
-
 ### Extractor facts
 
 A managed write by a gbrain older than v0.60.11.0 to a conversation page
