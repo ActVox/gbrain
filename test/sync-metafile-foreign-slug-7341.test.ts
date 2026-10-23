@@ -1,7 +1,7 @@
 /**
  * #7341: since GBRA-150 a managed sync imports a typed nested scaffolding file (`index.md`, `README.md`, …) as a page.
  * One whose frontmatter `slug:` names another page (typically its folder: `slug: dir/x` in `dir/x/index.md`) could
- * only be held `frontmatter_slug_conflict`, so a folder of generated hub pages turned into hundreds of holds after the
+ * only be held `frontmatter_slug_conflict` (it may name the folder, or just its leaf: `slug: x`), so a folder of generated hub pages turned into hundreds of holds after the
  * upgrade. Such a file stays scaffolding, as it was before GBRA-150:
  *   - it is not imported and not held, and the source converges;
  *   - a hold an earlier version wrote for it is released by the next sync;
@@ -29,6 +29,7 @@ const FILES: Record<string, string> = {
   'projects/beta-example/index.md': hub('beta-example', '"projects/beta-example"'),
   'projects/gamma-example/index.md': hub('gamma-example', 'projects/gamma-example/index'),
   'projects/delta-example/index.md': hub('delta-example', null),
+  'projects/epsilon-example/index.md': hub('epsilon-example', 'epsilon-example'),
   'notes/a.md': '---\ntitle: A\n---\nA synthetic observation.\n',
 };
 const holdCodes = async (engine: BrainEngine) => Object.fromEntries((await engine.executeRaw<{ record: { path: string; code: string } }>(
