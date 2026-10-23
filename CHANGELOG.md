@@ -75,6 +75,84 @@ identifiers and attribution are available in the pre-removal Git revision
 
 Duplicate facts reported by @mikez93 (#7043). Hot-memory dedupe reported by @benswinney (#7023). Session-start re-injection reported by @benswinney (#7026). Assistant facts relinked onto core pages reported by @andrew-agents-bot (#7270).
 
+## [0.60.396.0] - 2026-10-23
+
+**A fact you replace now stops being current at the moment its replacement starts, and facts imported from a dated page take the page's date instead of the day you imported it (#7214, #7247).** Before this release, telling the brain "my address changed" saved the new fact but left the old one open-ended, so a question about any date after the change could still get the old answer. Facts read from a page's facts table with no date of their own were dated the day sync or import ran, so a meeting note from last March imported today looked like it happened today.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `remember` with `replaces`, a near-duplicate that supersedes an older fact, or a published facts batch that supersedes | the old fact was marked replaced but its `valid_until` stayed empty | the old fact's `valid_until` is closed at the new fact's `valid_from`, in the database row and in its struck facts-fence row |
+| An "as of" question for a date between the two facts | could return both facts as current | returns only the fact that was true then |
+| A replacement dated on or before the fact it replaces | n/a | leaves the old fact's interval as it was |
+| A facts-fence row with no `valid_from` cell on a page that states a date (`event_date`, `date`, `published`, or a dated filename) | `put_page`, sync and import stored the write time; `extract_facts` used the page's creation or import time | every write path stores the page's stated date |
+| The same row on a page with no stated date | the write time | the write time, as before |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade. Facts already stored keep the dates and intervals they have.
+- No migration.
+
+### Itemized changes
+
+- `src/core/facts/supersede-interval.ts`: `supersededValidUntil` picks the retired fact's `valid_until` (the replacement's `valid_from`, unless the replacement is backdated to or before the retired fact). `engine-sql/facts.ts` `insertFact`, `persistence/memory-prepare.ts`, `persistence/facts-prepare.ts` and the `facts-fence.ts` strike use it.
+- `src/core/facts/extract-from-fence.ts`: `pageFactDate` reads the page's stated date (`FACT_DATE_SOURCES`), used by `persistence/canonical-projections.ts` and `cycle/extract-facts.ts` when a fence row has no `valid_from`.
+- Tests: `test/remember-replaces-valid-until-7214.test.ts` and `test/fence-valid-from-page-date-7247.test.ts`, on PGLite and on Postgres through `test/e2e/` `registerPostgresTests` wrappers.
+
+## [0.60.395.0] - 2026-10-23
+
+**Re-synthesis now retires an earlier output it fully covers, and a model change no longer rewrites every deterministic concept page (GBRA-161 PR 4, #7065, #7269).** Re-synthesizing a transcript used to leave the earlier run's pages live beside the new ones, and switching the synthesis model rewrote every T3 concept page even though T3 pages never call the model.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A transcript is re-synthesized and an earlier page is an exact duplicate, or has the same normalized subject and every one of its claim sentences, verbatim quotes and source citations is covered by the new run | both stayed live | the earlier page retires at activation: versioned, stamped `synthesis-resynthesis`, its file removed, restorable for 30 days |
+| The new run did not read the whole transcript (a chunk of a chunked transcript died) | n/a | the generation is partial and nothing retires until a complete run |
+| An earlier page holds a claim, quote or citation the new run lacks, or its topic was renamed | stayed live | stays live; `gbrain repair generations --kind synthesis --mode cleanup --since 30d` lists it with what only it holds, and `--apply --expect <hash> --yes` retires exactly the previewed pages (stamped `synthesis-cleanup`) |
+| The synthesis model changes | every T3 concept page was rewritten | T3 groups leave the model out of their member hash, so nothing is rewritten; T1 and T2 keep it, and a no-op rewrite publishes nothing |
+
+### What to watch for after you upgrade
+
+- No migration, and nothing runs on upgrade. Pages written before the generation ledger are never retired.
+- `generations.synthesis.retire_previous` defaults on; set it false to keep every earlier output live.
+- Retirement is conservative. On a synthetic brain 32 of 107 earlier outputs (29.9%) retired automatically; a real model paraphrases more than that test's stub, so expect fewer. The rest stay live for the cleanup preview.
+- Managed synthesis restore is refused, like every non-fence managed restore.
+
+### Itemized changes
+
+- Synthesis activation in postprocess retires matched earlier outputs through the generation primitive on managed and unmanaged brains; the coverage check lives in a new unit-tested module (`test/generations-synthesis-coverage.test.ts`).
+- `gbrain repair generations --kind synthesis --mode cleanup`: preview first, apply bound to the preview hash.
+- `synthesize_concepts`: T3 member hashes exclude the synthesis model (#7269, reported by @p3ob7o).
+- Tests on PGLite and Postgres, red on the base: `g4-synthesis-resynthesis-7065` and `g4-concept-t3-model-hash-7269`; their Postgres arms run through `test/e2e/` `registerPostgresTests` wrappers, not `test/postgres-unit-arms.txt`.
+
+## [0.60.394.0] - 2026-10-23
+
+**Life Chronicle events publish through the generation primitive, so a dropped event takes its timeline row with it and a model shrink retires nothing (GBRA-161 PR 3).** A re-judgment that dropped an event used to soft-delete the event but leave its timeline row behind, and a model that returned fewer events retired the rest page by page.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A re-judgment drops an event | the event was soft-deleted and stamped; its timeline row stayed | the event retires and its timeline row is deleted in the same activation; `gbrain repair generations --kind chronicle-event` restores both |
+| The model returns `[]` or fewer events than the shrink floor | the missing events retired (3 of 4 when one came back) | the result is held and nothing retires |
+| A depth page is deleted | its events stayed until a chat provider re-judged the page | its events retire with `originGone` before the phase looks for work, with no chat provider needed |
+| A managed brain re-judges a depth page | per-event retire requests | new and changed events go through the existing chronicle event request; one `managed_generation_activate` request, bound to the depth page revision, retires what was dropped |
+| A `retired_by` stamp on a chronicle event | trusted on its own for restore | allows a restore only when the generation ledger or the chronicle ledger backs it |
+
+### What to watch for after you upgrade
+
+- No migration. Events published before this release have no generation, so deleting their depth page does not retire them; they stay live.
+- A manual `runChronicleExtract` run now treats events whose identity matches the live generation as its own, so it can replace or retire them. Before, it left them alone as operator edits.
+- Nothing new submits `managed_maintenance_chronicle_retire`. Its preparer stays to replay requests an earlier release journaled, and it now drops the timeline row too.
+
+### Itemized changes
+
+- `src/core/generations/adapters/chronicle-events.ts`: the `chronicle_event` adapter, one generation per depth page (key `depth:<slug>`), each event and its timeline row one item.
+- `src/core/chronicle/publish.ts` publishes through the primitive on unmanaged brains in one transaction and through managed activation and `managed_generation_restore` on managed brains.
+- Tests: `test/pathological/g3-chronicle-generations.test.ts`, red on the base and green on PGLite and Postgres in managed and unmanaged mode; its Postgres arm runs through the `test/e2e/` `registerPostgresTests` wrapper, not `test/postgres-unit-arms.txt`.
+
 ## [0.60.393.0] - 2026-10-23
 
 **The Postgres vector-plan test no longer fails at random on a fresh database.** It compared an exact plan's rows with an HNSW plan's approximate rows. Rows are now judged under exact evaluation, as in the PGLite twin. No product code changed.

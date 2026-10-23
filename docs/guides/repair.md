@@ -1572,6 +1572,28 @@ held result waits, with the read-only release preview as its fix;
 `generation_retirements` reports what is restorable. Show the user the preview
 before running the apply. Managed brains keep their coordinator path for now.
 
+Life Chronicle events publish the same way (`--kind chronicle-event`, key
+`depth:<slug>`): a restore brings back the events a re-judgment or a deleted
+depth page retired, with their timeline rows on the depth page, and it runs on
+managed brains as one coordinated request.
+
+Dream synthesis outputs publish as a generation per transcript (`--kind
+synthesis`, key `transcript:<root>/<path>`): a complete re-synthesis retires an
+earlier output it matched (an exact duplicate, or the same subject with every
+claim, quote and citation covered; `retired_by: synthesis-resynthesis`) and
+keeps every other one live. `--mode cleanup` lists those unmatched
+predecessors with why and what each holds alone; show the user the preview, and
+`--apply --expect <hash> --yes` retires exactly the listed ones
+(`retired_by: synthesis-cleanup`). `--mode restore` brings a retired output back
+and puts its file back (unmanaged brains). `gbrain config set
+generations.synthesis.retire_previous false` stops automatic retirement.
+
+```bash
+gbrain repair generations --kind synthesis --mode cleanup --since 30d --json
+gbrain repair generations --kind synthesis --mode cleanup --since <ISO-8601> --apply --expect <hash> --yes
+gbrain repair generations --kind synthesis --mode restore --since 30d --json
+```
+
 ### Extractor facts
 
 A managed write by a gbrain older than v0.60.11.0 to a conversation page
