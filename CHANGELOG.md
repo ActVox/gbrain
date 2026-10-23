@@ -36,7 +36,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - Transcript keys are `transcript:<root>/<path>` with a rename map; identity hashing ignores `source_kind`, `ingested_via` and ephemeral frontmatter keys; the shrink floor is strictly below.
 - Migration v266 (`derived-generation-activations`); doctor `generation_pending`.
 - Tests on PGLite and Postgres: the managed #7013 shape, a kill between activation and members, a two-file retirement after resume, managed and unmanaged contention on one key, same-name transcripts and a rename, and a legacy atom without evidence.
-- CI: the unit-lane PostgreSQL arms job runs 12 shards instead of 11 (`ARM_SHARDS`). With the three new arm files, each counted at the p75 fallback weight until it is measured, every Bun 1.4.0 shard went past the 570 s two-worker budget. With 12 shards the largest makespan is 526 s.
+- The three new Postgres-armed files (the load probe, the managed atom keys and the managed probes) run their Postgres arm through `test/e2e/` `registerPostgresTests` wrappers, not `test/postgres-unit-arms.txt`, whose shards are at their makespan budget. The load probe runs at 200 origins in every lane; `GBRAIN_TEST_GENERATION_LOAD=1` keeps the 10,000-origin measurement.
 
 ## [0.60.389.0] - 2026-10-23
 
