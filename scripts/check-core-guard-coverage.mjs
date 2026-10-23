@@ -35,6 +35,7 @@ const EXEMPT = {
   'src/core/persistence/connector-google-receipts.ts': 'connector receipt rows, not page text',
   'src/core/persistence/projection-reindex.ts': 'rebuilds derived projections; page text is unchanged',
   'src/core/persistence/noop-kernel.ts': 'decides that nothing would change; publishes nothing',
+  'src/core/generations/managed.ts': 'the generation activation flips the derived ledger; it writes no page text (its member page writes go through preparePageMutation)',
   'src/core/persistence/consumer.ts': 'dispatches to preparers; no page content of its own',
   'src/core/persistence/coordinator.ts': 'takes the ordered source lock from exclusiveSources; prepares nothing itself',
   'src/core/persistence/effect-journal.ts': 'post-publication effects; no page text',
