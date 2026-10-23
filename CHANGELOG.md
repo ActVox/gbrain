@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.406.0] - 2026-10-23
+## [0.60.405.0] - 2026-10-23
 
 **`gbrain repair <kind> --apply` no longer stops with `idempotency_conflict` when two of its items write the same page while the first write is still pending, and every fact of a page with many facts now applies in one run.**
 
