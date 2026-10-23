@@ -6,10 +6,12 @@
  * (`fenceLockRow`) now takes `FOR KEY SHARE`, which a renewal passes; the takeover upsert also writes the key
  * (`id = EXCLUDED.id`), so it still waits for the fence, and a transaction fenced before a takeover keeps its token.
  *
- * PGLite (one connection) checks the fence's verdicts; Postgres also checks the lock conflicts, here and through
+ * A static check pins the one way the token may change. PGLite (one connection) checks the fence's verdicts; Postgres also checks the lock conflicts, here and through
  * test/e2e/drain-lease-key-share-7442-postgres.test.ts.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -66,6 +68,21 @@ describe('#7442: the drain-lease fence lets the renewal through and still holds 
     }
   }, 60_000);
 
+  test('the token changes only in an ON CONFLICT upsert that also writes the key, so a KEY SHARE fence holds it off', () => {
+    const assignments: string[] = [];
+    for (const file of readdirSync('src', { recursive: true }) as string[]) {
+      if (!file.endsWith('.ts')) continue;
+      const lines = readFileSync(join('src', file), 'utf8').split('\n');
+      lines.forEach((line, i) => {
+        if (!/(^|[\s,(])acquisition_token\s*=(?!=)/.test(line) || /\b(WHERE|AND|OR)\b[^,]*acquisition_token\s*=/i.test(line)) return;
+        const before = lines.slice(Math.max(0, i - 6), i).join('\n');
+        assignments.push(`${file}:${i + 1} ${/ON CONFLICT \(id\) DO UPDATE\s+SET id = EXCLUDED\.id,/.test(before) ? 'keyed-upsert' : 'UNKEYED'}`);
+      });
+    }
+    expect(assignments.length).toBeGreaterThan(0);
+    expect(assignments.filter(a => !a.endsWith('keyed-upsert'))).toEqual([]);
+  });
+
   test('a renewal commits while a fenced transaction is open (Postgres)', async () => {
     for (const { backend, engine } of engines) {
       if (backend !== 'postgres') continue;
@@ -76,6 +93,32 @@ describe('#7442: the drain-lease fence lets the renewal through and still holds 
       try {
         expect(await within(handle.refresh(), 5_000)).toBe(true);
       } finally { open.release(); await open.done; }
+      await handle.release();
+    }
+  }, 60_000);
+
+  test('a follower polling a live holder waits behind the fence, and the holder\'s renewal does not queue behind that follower (Postgres)', async () => {
+    for (const { backend, engine } of engines) {
+      if (backend !== 'postgres') continue;
+      const handle = (await tryAcquireDbLock(engine, ID, 2))!;
+      const open = fencedTransaction(engine, handle.acquisitionToken);
+      await open.entered;
+      const follower = tryAcquireDbLock(engine, ID, 2);
+      let lost;
+      try {
+        let waiting = 0;
+        for (let i = 0; i < 100 && !waiting; i++) {
+          await delay(50);
+          waiting = (await engine.executeRaw<{ n: number }>(
+            "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%INSERT INTO gbrain_cycle_locks%'"))[0]!.n;
+        }
+        expect(waiting).toBe(1);
+        expect(await within(handle.refresh(), 1_000)).toBe(true);
+        expect(await within(handle.refresh(), 1_000)).toBe(true);
+      } finally { open.release(); await open.done; lost = await follower; }
+      expect(lost).toBeNull();
+      expect(await tokenOf(engine)).toBe(handle.acquisitionToken);
+      expect(await handle.refresh()).toBe(true);
       await handle.release();
     }
   }, 60_000);
