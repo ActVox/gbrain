@@ -451,6 +451,21 @@ export async function clearDeletionHold(tx: Exec, input: { sourceId: string; inc
   return clearGitHold(tx, { ...input, observedAt: hold.observed_at });
 }
 
+/** GBRA-133: a deleted-side `file_drift` hold whose file is gone from the level and the disk (sync-pass.ts `deletionCandidates`). */
+export interface DeletionCandidate { path: string; page_id: number | null; slug: string | null }
+
+/**
+ * GBRA-133: the candidates whose page is no longer live (no live page has its id or its slug), so both sides of the held
+ * deletion agree and the stamp releases the hold. One statement; none without candidates.
+ */
+export async function settledDeletionHolds(tx: Exec, sourceId: string, candidates: readonly DeletionCandidate[] | undefined): Promise<string[]> {
+  if (!candidates?.length) return [];
+  const live = await tx.executeRaw<{ id: string; slug: string }>('SELECT id::text AS id, slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND (id = ANY($2::bigint[]) OR slug = ANY($3::text[]))',
+    [sourceId, candidates.flatMap(c => c.page_id === null ? [] : [c.page_id]), candidates.flatMap(c => c.slug === null ? [] : [c.slug])]);
+  const ids = new Set(live.map(row => row.id)), slugs = new Set(live.map(row => row.slug));
+  return candidates.filter(c => (c.page_id === null || !ids.has(String(c.page_id))) && (c.slug === null || !slugs.has(c.slug))).map(c => c.path);
+}
+
 /** #5984: which of these paths have a hold row (one indexed read), so a batched waiver run clears only those. */
 export async function heldGitPaths(tx: Exec, sourceId: string, incarnation: string, paths: readonly string[]): Promise<Set<string>> {
   if (!paths.length) return new Set();

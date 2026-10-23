@@ -57,7 +57,7 @@ import { readConvergedWatermark } from './sync-pass-batch.ts';
 import { foldPassCheckpoint, type PassFold } from './sync-pass-fold.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
 import { chunkerStamp } from '../chunkers/code.ts';
-import { addFencesNormalized, clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, type FencesTally, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
+import { addFencesNormalized, clearGitHold, clearGitHoldRetryPaths, countGitHolds, recordSyncImportProvenance, settledDeletionHolds, type DeletionCandidate, type FencesTally, syncDiskProvenance, syncImportParser, syncImportParserFor, type SyncImportProvenanceBase } from './sync-holds.ts';
 import { clearSyncSlice, writeSyncSlice, type SyncSliceState } from './sync-slices.ts';
 import { CHECKPOINT_MOVED_MESSAGE, emptySyncScope, pinnedSlugModeMismatch, slugModeMismatchCause } from './sync-slug-mode.ts';
 import { readPagePurgeTombstones } from './page-purge.ts';
@@ -134,6 +134,8 @@ export interface PassStamp {
   closesEpisode: boolean;
   /** `sources retry-held` paths this pass re-screened (compare-and-delete) and held paths that left the source. */
   retryTaken: string[]; releasedHolds: string[];
+  /** GBRA-133: deleted-side holds whose file is gone; the stamp releases those whose page is no longer live. */
+  deletionCandidates?: DeletionCandidate[];
   selectionFp: string; parserFp: string; pack: string | null;
   /** The pass ran a full round (resets `passes_since_full`). */
   full: boolean;
@@ -547,7 +549,7 @@ export async function publishPassStamp(tx: BrainEngine, row: WriteRequest, p: Sy
   }
   await recordPassTail(tx, row.source_id, p.passId!, { changed: read.changed, extract: stamp.extract, ...(stamp.since ? { since: stamp.since } : {}) });
   await recordPassFenceTrend(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, passId: p.passId!, since: pass.value.obligations.converged?.request_hwm ?? null });
-  for (const path of stamp.releasedHolds) await releaseHold(tx, path);
+  for (const path of [...stamp.releasedHolds, ...await settledDeletionHolds(tx, row.source_id, stamp.deletionCandidates)]) await releaseHold(tx, path);
   if (stamp.retryTaken.length) await clearGitHoldRetryPaths(tx, row.source_id, stamp.incarnation, stamp.retryTaken);
   const watermark = read.watermark ?? await readConvergedWatermark(tx, { worktreeId: row.worktree_id!, sourceId: row.source_id, incarnation: row.source_incarnation }, row.request_id, OPEN_AT_STAMP_CAP,
     { prior: pass.value.obligations.converged?.writeback });
