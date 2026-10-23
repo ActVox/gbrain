@@ -138,29 +138,19 @@ Timing knobs the drain uses:
 
 ### Level reuse
 
-A pass in a long-running process (the serve, or `gbrain sync --watch`) keeps
-the tree listing of the commit it read. The next pass at a new commit lists
-only what changed between the two commits (`git diff-tree`) and patches that
-listing instead of listing the whole tree; it still judges every path. Any
-doubt reads the tree whole: a new process, another source or incarnation, a
-pass that failed before it walked the listing, a listing unused for 10
-minutes, a diff larger than a quarter of the tree (and over 2,000 paths), a
-scope with pathspec characters, or a Git error.
-
-The same process also keeps the pages-and-import-records read (`I⋈P`) of its
-last pass that ended synced. The next pass's first round proves, in its own
-database snapshot, which page rows and import records changed since that read,
-from any writer (a write still in flight at that read counts as changed), and
-re-reads only those. It reads everything whole when the page or record counts
-do not add up (a deletion leaves no other trace), when the changed pages pass a
-quarter of the source (and 2,000), when the transaction-id span is too wide to
-judge, when any statement fails, after a pass that did not end synced, or when
-the kept read is older than 10 minutes. Holds, markers, open work and the Git
-level are read every round as before. `gbrain config set
-sync.level_reuse false` turns both off and every pass reads the whole tree and `I⋈P`;
-`true` or unset keeps it on. `GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1` also reads
-every reused listing whole and fails the pass on any difference (tests and the
-nightly freshness cell use it).
+A long-running process (the serve, `gbrain sync --watch`) keeps the tree
+listing of the commit its last pass read. The next pass lists only what
+changed since (`git diff-tree`) and still judges every path. It also keeps
+the pages-and-import-records read (`I⋈P`) of its last synced pass and, in its
+own snapshot, re-reads only rows any writer changed since. Any doubt reads
+whole: a new process, another source, a failed or unsynced pass, a read older
+than 10 minutes, a change over a quarter of the tree or source (and over
+2,000), counts that do not add up (a deletion leaves no other trace), a wide
+transaction-id span, pathspec characters in scope, or any error. Holds,
+markers, open work and the Git level are read every round.
+`gbrain config set sync.level_reuse false` turns both off.
+`GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1` also reads whole and fails the pass on any
+difference (tests and the nightly freshness cell).
 
 ### Sync config keys
 
