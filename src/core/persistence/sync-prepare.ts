@@ -52,7 +52,7 @@ import { checkpointCursorReplaced } from './sync-checkpoint-replaced.ts';
 import { recordPassTail, recordSyncTail } from './sync-tail-record.ts';
 import { readPassRow, writePassRow, OPEN_AT_STAMP_CAP, type ManagedSyncPassValue } from './sync-pass-row.ts';
 import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
-import { syncLockId } from '../db-lock.ts';
+import { fenceLockRow, syncLockId } from '../db-lock.ts';
 import { readConvergedWatermark } from './sync-pass-batch.ts';
 import { foldPassCheckpoint, type PassFold } from './sync-pass-fold.ts';
 import { frontmatterSlugConflictMessage } from './verb-errors.ts';
@@ -503,7 +503,7 @@ export const PASS_LEASE_LOST_MESSAGE = 'The sync pass that admitted this checkpo
 
 /**
  * #6712 PR 4b (design v3.2 §3.3; v3 §3.3): a converged pass's stamp. Clause 1: the drain lease that admitted it is live
- * (`FOR SHARE` on the lock row with the pass's token) and the pass row still names this pass. Clause 2: no recovery row and no
+ * (`fenceLockRow`: `FOR KEY SHARE` on the lock row with the pass's token) and the pass row still names this pass. Clause 2: no recovery row and no
  * other open managed-sync request of the worktree (`findOpenPassWork`). Then, at the configured selection only,
  * `last_commit`, `last_sync_at` and the slug-root pin under `WHERE id AND incarnation` (and `chunker_version`); the tail
  * obligation, hold release, the retry compare-and-delete, and the pass row's converged state (`request_hwm`,
@@ -511,7 +511,7 @@ export const PASS_LEASE_LOST_MESSAGE = 'The sync pass that admitted this checkpo
  */
 async function applyPassCheckpoint(tx: BrainEngine, row: WriteRequest, p: SyncIntent, root: string, releaseHold: (tx: BrainEngine, path: string | null) => Promise<void>): Promise<Record<string, unknown>> {
   const stamp = p.stamp!;
-  const lease = await tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]);
+  const lease = await fenceLockRow(tx, syncLockId(row.source_id), stamp.leaseToken);
   const pass = lease.length ? await readPassRow(tx, row.source_id, stamp.incarnation) : null;
   if (!pass || pass.value.lease_token !== stamp.leaseToken || pass.value.telemetry.pass_id !== p.passId) throw syncPublicationRefusal('revision_conflict', PASS_LEASE_LOST_MESSAGE, row, p,
     `The pass that admitted checkpoint ${row.request_id} of ${row.source_id} lost the source's drain lease, or another pass started since, so nothing was stamped.`);
