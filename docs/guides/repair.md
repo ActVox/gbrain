@@ -1572,6 +1572,11 @@ held result waits, with the read-only release preview as its fix;
 `generation_retirements` reports what is restorable. Show the user the preview
 before running the apply. Managed brains keep their coordinator path for now.
 
+Life Chronicle events publish the same way (`--kind chronicle-event`, key
+`depth:<slug>`): a restore brings back the events a re-judgment or a deleted
+depth page retired, with their timeline rows on the depth page, and it runs on
+managed brains as one coordinated request.
+
 ### Extractor facts
 
 A managed write by a gbrain older than v0.60.11.0 to a conversation page
