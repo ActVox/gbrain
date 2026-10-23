@@ -66,6 +66,7 @@ import type {
 } from './types.ts';
 import { DREAM_VERDICT_TTL_SECONDS, clampSearchLimit, type TransactionOptions } from './engine.ts';
 import { transactionAborted, withTransactionAbort, type Discardable } from './postgres-engine/transaction-abort.ts';
+import { readWriteTransactions, retryReadOnlyAutocommit } from './postgres-engine/read-write-transactions.ts';
 import { searchLimitCap } from './search/eval-pool-depth.ts';
 import { executeRawJsonb, type SqlValue } from './sql-query.ts';
 import { sanitizeForJsonb, sanitizeText, buildLinkRows, buildTimelineRows } from './batch-rows.ts';
@@ -683,6 +684,7 @@ export class PostgresEngine implements BrainEngine {
 
   private async transactionOn<T>(conn: ReturnType<typeof postgres>, fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions): Promise<T> {
     if (opts?.signal?.aborted) throw transactionAborted(opts.signal);
+    conn = readWriteTransactions(conn);
     // try/finally, not .finally on the chained promise: begin() can throw
     // SYNCHRONOUSLY (e.g. nested transaction on a tx clone whose conn has no
     // .begin), which would skip a chained .finally and leak the counter.
@@ -2943,7 +2945,7 @@ export class PostgresEngine implements BrainEngine {
       if (opts?.timeoutMs !== undefined && !this._pageTransaction) {
         return await runBoundedStatement<T>(this.sql, sql, params, { ...opts, timeoutMs: opts.timeoutMs }, () => this.checkoutGauge.checkedOut());
       }
-      return await this.runUnsafe<T>(this.sql, sql, params, opts);
+      return await retryReadOnlyAutocommit(this.sql, c => this.runUnsafe<T>(c, sql, params, opts));
     } finally {
       this.checkoutGauge.release('raw');
     }
@@ -2992,7 +2994,7 @@ export class PostgresEngine implements BrainEngine {
     // try/finally, not .finally — see executeRaw (sync throw on pre-aborted signal).
     this.checkoutGauge.acquire('direct');
     try {
-      return await this.runUnsafe<T>(conn, sql, params, opts);
+      return await retryReadOnlyAutocommit(conn, c => this.runUnsafe<T>(c, sql, params, opts));
     } finally {
       this.checkoutGauge.release('direct');
     }

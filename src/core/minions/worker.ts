@@ -89,6 +89,7 @@ import { evaluateQuietHours, type QuietHoursConfig } from './quiet-hours.ts';
 import { endedByShutdown, releaseUndrainedClaims, settleShutdownInterruptedJob } from './worker-shutdown.ts';
 import { isWatchdogSuspect, settleWatchdogAbort } from './watchdog-attribution.ts';
 import { IdleWaiter } from './idle-wait.ts';
+import { jobOutcomeResult, jobResultOutcome } from './job-outcome.ts';
 import { DEFAULT_LONG_JOB_NAMES, DEFAULT_SHORT_JOB_RESERVED_SLOTS, claimExclusions } from './lanes.ts';
 import { jobRefusal, refusedJobResult } from './refusal.ts';
 import { readFileSync } from 'fs';
@@ -1565,12 +1566,11 @@ export class MinionWorker extends EventEmitter {
 
       clearInterval(lockTimer);
 
-      // Complete the job (token-fenced)
-      const completed = await this.queue.completeJob(
-        job.id,
-        lockToken,
-        result != null ? (typeof result === 'object' ? result as Record<string, unknown> : { value: result }) : undefined,
-      );
+      const stored = result != null ? (typeof result === 'object' ? result as Record<string, unknown> : { value: result }) : undefined;
+      const verdict = jobResultOutcome(stored);
+      const completed = verdict.outcome === 'failed'
+        ? await this.queue.failJob(job.id, lockToken, verdict.reason!, 'failed', 0, jobOutcomeResult(stored, verdict))
+        : await this.queue.completeJob(job.id, lockToken, jobOutcomeResult(stored, verdict));
       const execution = this.executions.get(lockToken);
       if (execution) execution.stopped = true;
 
@@ -1578,6 +1578,7 @@ export class MinionWorker extends EventEmitter {
         console.warn(`Job ${job.id} completion dropped (lock token mismatch, job was reclaimed)`);
         return;
       }
+      if (verdict.outcome === 'failed') console.log(`Job ${job.id} (${job.name}) finished failed: ${verdict.reason}`);
       // resolveParent is folded into queue.completeJob() (same transaction as
       // status flip + token rollup + child_done), so a process crash here can't
       // strand the parent in waiting-children.
