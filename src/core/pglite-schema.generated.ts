@@ -647,6 +647,7 @@ CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
+CREATE INDEX IF NOT EXISTS idx_pages_title_search ON pages USING GIN (ts_filter(search_vector, '{a}'));
 
 CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS \$\$
 DECLARE
