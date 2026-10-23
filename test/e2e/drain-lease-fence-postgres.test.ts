@@ -25,10 +25,11 @@ afterAll(async () => { await close?.(); });
 
 run('the fence holds the lease row FOR SHARE, so it blocks a takeover until its transaction ends', async () => {
   const other = postgres(url, { max: 1, prepare: false });
-  // A takeover as tryAcquireDbLock's upsert or --break-lock writes it, from another connection, giving up after 1 s.
+  // A takeover as --break-lock writes it (a DELETE, which conflicts with every row lock a fence can take, FOR KEY SHARE
+  // included), from another connection, giving up after 1 s.
   const takeover = () => other.begin(async tx => {
     await tx.unsafe("SET LOCAL lock_timeout = '1s'");
-    return tx.unsafe('UPDATE gbrain_cycle_locks SET acquisition_token = gen_random_uuid() WHERE id = $1 RETURNING id', [syncLockId('default')]);
+    return tx.unsafe('DELETE FROM gbrain_cycle_locks WHERE id = $1 RETURNING id', [syncLockId('default')]);
   });
   try {
     let duringFence: unknown;

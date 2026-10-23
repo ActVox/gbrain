@@ -82,10 +82,13 @@ for (const backend of testBackends()) {
 
     // Postgres only: PGLite is one connection, so nothing can try a takeover while the stamp's transaction is open.
     if (backend === 'postgres') {
-      /** A takeover as tryAcquireDbLock's upsert or --break-lock writes it, from another connection, giving up after 1 s. */
+      /**
+       * A takeover as --break-lock writes it (a DELETE, which conflicts with every row lock a fence can take, FOR KEY SHARE
+       * included), from another connection, giving up after 1 s.
+       */
       const takeoverDuring = (engine: BrainEngine) => engine.transaction(async tx => {
         await tx.executeRaw("SET LOCAL lock_timeout = '1s'");
-        return (await tx.executeRaw('UPDATE gbrain_cycle_locks SET acquisition_token=gen_random_uuid() WHERE id=$1 RETURNING id', [syncLockId('default')])).length;
+        return (await tx.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id=$1 RETURNING id', [syncLockId('default')])).length;
       }).catch((error: { code?: string }) => error.code ?? String(error));
 
       test('a folded stamp holds the lease row FOR SHARE until its import commits, so a takeover waits', () => brain(async ({ engine, root }) => {
