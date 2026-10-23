@@ -10,6 +10,34 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.408.0] - 2026-10-23
+
+**Warm hybrid search on a large brain behind a transaction-mode pooler spends about 500 ms less on the server.** On a synthetic 600k-page brain at a 66 ms round trip (mock embed 200 ms, mock rerank 300 ms), warm p50 went from 1,995 ms wall / 1,891 ms server total to 1,436 / 1,356 ms. Search reads no longer wait a round trip for BEGIN, the title arm reads a small weight-A index, search arms take pool slots ahead of background work, and two reads that only depend on fusion's inputs start beside it. Results are unchanged: the new title predicate returned identical rows and scores to the old one on 405 strict and relaxed queries at 600k.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A search read transaction on a pool that pipelines inside a transaction (PgBouncer transaction mode) | each statement waited for BEGIN's answer, one round trip per scoped read | plain `SELECT`/`WITH` reads and the transaction-local settings statement go out behind BEGIN in order; the first statement that is not a plain read and everything after it waits as before; page transactions are unchanged |
+| Title-only matching (the title arm and its OR re-run) | a weight-labeled query on `idx_pages_search`, which cannot check weight, so a large brain rechecked tens of thousands of heap rows | `ts_filter(search_vector, '{a}') @@ query` on the new `idx_pages_title_search` (migration v267, built online); the statement also takes the keyword statement settings (`work_mem` 32MB) so its bitmap stays exact |
+| Search arms waiting for one of the 4 search connections | queued with every other waiter | the vector side, lexical stage and relational stage wait in an urgent queue served first; the limit stays 4 |
+| Cosine re-score and the collapse fact read | started after fusion | start beside fusion and apply after it, with the same results |
+
+### What to watch for after you upgrade
+
+- Migration v267 builds `idx_pages_title_search` concurrently on Postgres. On the 600k synthetic brain it took under 2 seconds and is about an eighth the size of `idx_pages_search`.
+- `scripts/bench/production-soak/stage-probe.ts` prints per-stage warm search timings against a soak fixture behind a toxiproxy round trip, with an optional statement trace.
+
+### Itemized changes
+
+- `vendor/postgres` (and `patches/postgres@3.4.9.patch`): `begin({ early }, fn)` sends accepted statements behind BEGIN.
+- `src/core/postgres-engine.ts`, `src/core/postgres-engine/search-settings.ts`, `src/core/engine.ts`: `TransactionOptions.pipelineEarly` and `isPipelinableSearchRead` for search read transactions.
+- `src/core/search/title-statement.ts`, `src/core/engine-sql/titles.ts`: weight-A title predicate and statement settings.
+- `src/core/schema-migrations/v267-pages-title-search-index.ts`, `src/schema.sql`: the title index.
+- `src/core/search/connection-budget.ts`, `src/core/search/hybrid/arms.ts`: urgent search connections.
+- `src/core/search/cosine-rescore.ts`, `src/core/search/collapse.ts`, `src/core/search/hybrid/rank.ts`, `src/core/search/hybrid/request.ts`: cosine re-score and collapse facts start beside fusion.
+- Tests: driver and harness pins, PgBouncer e2e for the pipelined body, `test/e2e/search-read-pipeline-postgres.test.ts`, title-arm index and predicate equivalence, urgent budget, prefetch and cosine equivalence.
+
 ## [0.60.407.0] - 2026-10-23
 
 **A long-running sync process (the serve, `gbrain sync --watch`) no longer reads the whole Git tree and the whole pages-and-import-records join on every pass: it patches the last pass's reads with what changed. A remote `list_jobs` call is capped at 500 jobs, so `jobs list --limit 100000` on a thin client can no longer run the serve out of memory.** Both reuses fail closed to a whole read on any doubt, and `gbrain config set sync.level_reuse false` turns them off.
