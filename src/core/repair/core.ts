@@ -452,7 +452,9 @@ async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, sc
     opts.progress?.tick(1, `${item.source_id}:${item.slug}`);
     // A preview-bound kind may retire its approved set with its last item, so every earlier receipt settles before that item runs.
     const lastApproved = !!opts.expect && index === plan.items.length - 1;
-    if (unresolved.length && (unresolved.length >= window || lastApproved) && !await settle(lastApproved ? 0 : window - 1)) {
+    // An item on a page this run's pending write is still changing waits for it, so it writes the page's new revision.
+    const samePage = unresolved.some(open => open.item.source_id === item.source_id && open.item.slug === item.slug);
+    if (unresolved.length && (unresolved.length >= window || lastApproved || samePage) && !await settle(lastApproved || samePage ? 0 : window - 1)) {
       result.stopped = pendingStop(settleMs ? `; nothing published for ${Math.round(settleMs / 1000)}s` : '');
       return finish();
     }
