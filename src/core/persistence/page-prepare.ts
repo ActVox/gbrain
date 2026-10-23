@@ -367,7 +367,7 @@ async function compareFileTarget(engine: BrainEngine, row: Pick<WriteRequest, 's
       // #6394: a page that never recorded its file reconciles against the file at its slug path only when adopted explicitly.
       const adopt = !snapshot.page.source_path && !snapshot.page.source_uri ? ['--adopt-slug-path'] : [];
       // #6693: a committed Git change sync has not imported yet (another agent's commit), on a page that records its file.
-      if (!adopt.length && await waitingOnWhile(options.clock, 'git', () => committedPendingImport(engine, row.source_id, root, path))) throw pendingImportRefusal(row, options.remote === true);
+      if (!adopt.length && await waitingOnWhile(options.clock, 'git', () => committedPendingImport(engine, row.source_id, root, path, options.clock?.signal))) throw pendingImportRefusal(row, options.remote === true);
       throw opError('source_changed', 'The canonical file contains an uncoordinated local edit.',
         `On the brain host, run gbrain sources reconcile ${row.source_id} ${row.slug} --brain <brain id, host by default> --preview${adopt.length ? ' --adopt-slug-path (the page records no file of its own, so the preview adopts the file at its slug path)' : ''}, review and apply the resolved preview, then retry this write with a new request_id. Neither copy was overwritten.`,
         { detail: 'file_database_drift', fix: readFix(`Previews how page ${row.slug}'s canonical file and database copy reconcile; a preview never changes canonical content.`,
