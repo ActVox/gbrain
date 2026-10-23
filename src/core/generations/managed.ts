@@ -37,8 +37,12 @@ export const GENERATION_ACTIVATE_INTENT = 'managed_generation_activate';
 export const GENERATION_ACTIVATE_SLUG = '__generation_activate__';
 
 export type MemberAction = 'create' | 'overwrite' | 'retire';
-/** One member of an activation: `identity` is what it leaves (the retired identity for a retirement), `before` what the target held when planned. */
-export interface ActivationMember { slug: string; action: MemberAction; identity: string; before: string | null }
+/**
+ * One member of an activation: `identity` is what it leaves (the retired identity for a retirement), `before` what the
+ * target held when planned. A database-only kind's overwrite carries `preimage`, the before-state its request replaces
+ * ahead of the activation.
+ */
+export interface ActivationMember { slug: string; action: MemberAction; identity: string; before: string | null; preimage?: Record<string, unknown> | null }
 
 export interface ActivationPlanIntent {
   kind: typeof GENERATION_ACTIVATE_INTENT;
@@ -60,6 +64,8 @@ export interface ActivationPlanIntent {
   /** The adapter context the activation reads the input and items with (atoms: the transcript file). */
   context: unknown;
   locator: string | null;
+  /** Completeness evidence the producer adds (PublishRequest.note). */
+  note?: Record<string, unknown>;
 }
 /** The journaled activation intent: the plan plus the run key its batch shares. */
 export type ActivationIntent = ActivationPlanIntent & { runKey: string } & Record<string, unknown>;
@@ -96,21 +102,27 @@ export async function planManagedGeneration<C>(engine: BrainEngine, adapter: Gen
     const outcome = await engine.transaction(tx => recordHeld(tx, request.key, config, planned as PublishRequest<unknown>, setHash, plan.reason, plan.context));
     return { kind: 'held', outcome: outcome as Extract<PublishOutcome, { state: 'held' }> };
   }
-  if (plan.kind === 'unchanged' && !request.items.length) return { kind: 'unchanged' };
+  if (plan.kind === 'unchanged' && (!request.items.length || adapter.publishesInPlace)) return { kind: 'unchanged' };
   const retires = plan.kind === 'publish' ? plan.retires : [];
+  // A kind whose producer already wrote its items (publishesInPlace) keeps each one live at its identity without a member.
+  const inPlace = adapter.publishesInPlace === true ? request.items.filter(item => { const row = rows.get(item.key); return row?.live && row.identityHash === item.identityHash; }) : [];
+  if (adapter.publishesInPlace && inPlace.length !== request.items.length) {
+    throw liveConflict(request.key, request.items.filter(item => !inPlace.includes(item)).map(item => item.key));
+  }
   const members: Array<ActivationMember & { item?: ProposedItem }> = [
-    ...request.items.map(item => { const row = rows.get(item.key);
-      return row?.live ? { slug: item.key, action: 'overwrite' as const, identity: item.identityHash, before: row.identityHash, item }
+    ...request.items.filter(item => !inPlace.includes(item)).map(item => { const row = rows.get(item.key);
+      return row?.live ? { slug: item.key, action: 'overwrite' as const, identity: item.identityHash, before: row.identityHash, item,
+          ...(adapter.databaseOnly && item.identityHash !== row.identityHash ? { preimage: row.preimage().json } : {}) }
         : { slug: item.key, action: 'create' as const, identity: item.identityHash, before: null, item }; }),
     ...retires.map(slug => ({ slug, action: 'retire' as const, identity: rows.get(slug)!.identityHash, before: rows.get(slug)!.identityHash })),
   ];
   const operationId = publishOperationId(planned as PublishRequest<unknown>, setHash);
-  const kept = request.approved && plan.kind === 'publish' ? plan.kept : [];
+  const kept = request.approved && plan.kind === 'publish' ? plan.kept : inPlace.map(item => item.key);
   return { kind: 'publish', members, intent: { kind: GENERATION_ACTIVATE_INTENT, activationId: activationRequestId(operationId, opts.scope ?? null), key: request.key,
     expectedGeneration: planned.expectedGeneration!, input: request.input ?? input, operationId, setHash, runId: request.runId ?? null, partial: request.partial === true,
     proof: request.proof ?? null, retiredBy: request.approved?.retiredBy ?? opts.retiredBy ?? adapter.retiredBy, approved: request.approved !== undefined,
     members: members.map(({ item: _item, ...member }) => member), kept, carried: plan.kind === 'publish' ? plan.carried : [],
-    context: request.context ?? null, locator: opts.locator ?? null } };
+    context: request.context ?? null, locator: opts.locator ?? null, ...(request.note ? { note: request.note } : {}) } };
 }
 
 /** Records an admitted activation and its members, in the admission transaction (before any member runs). */
@@ -134,7 +146,8 @@ export async function prepareGenerationActivation(engine: BrainEngine, row: Writ
       { fix: readFix('Shows the source owner and any write in flight, read-only.', { argv: ['gbrain', 'sources', 'writer', 'status', '--source', row.source_id, '--json'] }) });
   }
   const memberKeys = [...new Set([...p.members.map(member => member.slug), ...p.kept])];
-  return { observedRevision: null, noop: true, additionalPageKeys: adapter.lockKeys(p.key, memberKeys),
+  // A database-only kind journals its activation on the input page, bound to the revision it planned against.
+  return { observedRevision: typeof p.expected_revision === 'string' ? p.expected_revision : null, noop: true, additionalPageKeys: adapter.lockKeys(p.key, memberKeys),
     validate: async tx => { await tx.executeRaw('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [generationKeyLock(p.key)]); },
     apply: async tx => {
       const live = await readLiveGeneration(tx, p.key);
@@ -142,24 +155,32 @@ export async function prepareGenerationActivation(engine: BrainEngine, row: Writ
         throw generationFenced('stale_generation', p.key, `the live generation is ${live?.generation ?? 0}, the producer planned against ${p.expectedGeneration} (activation ${p.activationId})`);
       }
       const input = await adapter.readInput(tx, p.key, p.context);
-      if (p.proof ? !proofHolds(p.proof, input, live?.inputPin) : (p.input && input?.pin !== p.input.pin)) {
+      const proven = p.proof?.kind === 'originIneligible' ? await adapter.proofHolds?.(tx, p.key, p.proof) === true && (!p.input || input?.pin === p.input.pin)
+        : p.proof ? proofHolds(p.proof, input, live?.inputPin) : !p.input || input?.pin === p.input.pin;
+      if (!proven) {
         throw generationFenced('pin_moved', p.key, `its input changed after the producer read it (activation ${p.activationId})`);
       }
       const rows = await adapter.readItems(tx, p.key, memberKeys, p.context);
+      // A database-only kind wrote its new and changed items before the activation; it retires inside it.
+      const databaseOnly = adapter.databaseOnly === true;
       const wrong = p.members.filter(member => { const current = rows.get(member.slug);
-        return !current?.live || current.identityHash !== (member.action === 'create' ? member.identity : member.before); }).map(member => member.slug);
+        return !current?.live || current.identityHash !== (member.action === 'create' || (databaseOnly && member.action === 'overwrite') ? member.identity : member.before); })
+        .map(member => member.slug);
       if (wrong.length) throw liveConflict(p.key, wrong);
       const items: LedgerItem[] = [
         ...p.members.map(member => { const current = rows.get(member.slug)!;
+          const pending = databaseOnly ? {} : { pending: true };
           if (member.action === 'create') return { key: member.slug, identityHash: member.identity, action: 'published' as const };
-          if (member.action === 'retire') return { key: member.slug, identityHash: member.identity, action: 'retired' as const, preimage: current.preimage(), pending: true };
-          return member.identity === member.before ? { key: member.slug, identityHash: member.identity, action: 'kept' as const, pending: true }
-            : { key: member.slug, identityHash: member.identity, action: 'published' as const, preimage: current.preimage(), pending: true }; }),
+          if (member.action === 'retire') return { key: member.slug, identityHash: member.identity, action: 'retired' as const, preimage: current.preimage(), ...pending };
+          if (member.identity === member.before) return { key: member.slug, identityHash: member.identity, action: 'kept' as const, ...pending };
+          const preimage = !databaseOnly ? current.preimage() : member.preimage ? { json: member.preimage, bytes: Buffer.byteLength(JSON.stringify(member.preimage)) } : undefined;
+          return { key: member.slug, identityHash: member.identity, action: 'published' as const, ...(preimage ? { preimage } : {}), ...pending }; }),
         ...p.kept.filter(slug => rows.get(slug)?.live).map(slug => ({ key: slug, identityHash: rows.get(slug)!.identityHash, action: 'kept' as const })),
         ...p.carried.filter(slug => live?.items.has(slug)).map(slug => ({ key: slug, identityHash: live!.items.get(slug)!, action: 'kept' as const })),
       ];
+      if (databaseOnly) await adapter.retireItems(tx, p.key, p.members.filter(member => member.action === 'retire').map(member => member.slug), p.retiredBy);
       const activated = await activateGeneration(tx, p.key, live, { operationId: p.operationId, runId: p.runId ?? undefined, input, setHash: p.setHash,
-        completeness: { complete: !p.partial, proof: p.proof?.kind ?? null, managed: true, ...(p.approved ? { approved: p.retiredBy } : {}) },
+        completeness: { complete: !p.partial, proof: p.proof?.kind ?? null, managed: true, ...(p.approved ? { approved: p.retiredBy } : {}), ...p.note },
         activationId: p.activationId, locator: p.locator }, items);
       await tx.executeRaw(`UPDATE derived_generation_activations SET state='activated', generation_id=$2, updated_at=now() WHERE id=$1`, [p.activationId, activated.id]);
       const retires = p.members.filter(member => member.action === 'retire').length;
