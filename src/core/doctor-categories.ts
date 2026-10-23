@@ -68,6 +68,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'connector_held_items',
   'git_held_files',
   'fence_integrity',
+  // GBRA-161: derived items live generations retired in the restore window, and results held instead of published (doctor/checks/generations.ts).
+  'generation_held',
+  'generation_pending',
+  'generation_retirements',
   // #5575: stored trust tier counts, the legacy-row backfill, scan and source claims.
   'trust_tiers',
   'trust_scan',
@@ -191,6 +195,11 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'git_convergence',
   // #5186: an ownership marker committed to a source checkout's Git index.
   'tracked_ownership_marker',
+  // #7381: a source checkout behind its upstream, write-through files or staged files waiting for a commit, unpushed commits outside the source root (doctor/checks/git-writer.ts).
+  'checkout_lagging',
+  'dirty_age',
+  'commits_outside_source_root',
+  'quarantined_changes',
   'takes_count',
   'takes_weight_grid',
   // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
@@ -211,6 +220,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ghost_pages',
   // #6948: files recorded by several live pages (origin twins) and the pages_live_origin_key index (doctor/checks/origin-twins.ts).
   'origin_twins',
+  // #7305: live pages whose slug their recorded file path does not derive, and whose file lacks the slug: stamp (doctor/checks/slug-path-mismatch.ts).
+  'slug_path_mismatch',
   // #6729: inexact renames whose identity sync did not keep, until the pair gets a disposition (doctor/checks/rename-identity-downgrades.ts).
   'rename_identity_downgrades',
   // #6609: live pages of a classic checkout whose recorded file a full sync would not find (doctor/checks/missing-recorded-files.ts).
