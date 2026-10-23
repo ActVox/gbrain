@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.393.0] - 2026-10-23
+
+**The Postgres vector-plan test no longer fails at random on a fresh database.** It compared an exact plan's rows with an HNSW plan's approximate rows. Rows are now judged under exact evaluation, as in the PGLite twin. No product code changed.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `test/e2e/vector-index-walk-plan-postgres.test.ts`, joined statement rows | compared with the `enable_material: on` plan's rows, which walk HNSW over a graph each fresh database builds with random levels, so 5 or 10 of 20 rows could differ | each settings set's rows are read with index scans off and must equal the statement's exact window, all 20 in order; plan-shape assertions are unchanged |
+
+### Itemized changes
+
+- `test/e2e/vector-index-walk-plan-postgres.test.ts`: exact-evaluation row comparison.
+
 ## [0.60.392.0] - 2026-10-23
 
 **The unit-lane PostgreSQL arms job runs 12 shards instead of 11, so adding a new arm file no longer fails CI on the shard budget.** Nothing in gbrain itself changed.
