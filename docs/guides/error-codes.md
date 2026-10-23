@@ -1577,6 +1577,40 @@ More: [docs/guides/shared-brain-skills.md#approve-publication-following-and-edit
 |---|---|---|---|---|---|---|
 | The eval gate found retrieval regressions or correctness below its thresholds. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
+### generation_fenced
+
+<a id="generation_fenced"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A derived result was not published because the live generation or its input changed after the producer read them; nothing was written. | The generation primitive (GBRA-161) publishes a result only against the generation and input pin it was computed from. A concurrent run that published first (stale_generation), or an input edited since the read (pin_moved), would otherwise let an older result replace a newer one. | Run the producer again; it reads the current generation and input and recomputes. | agent | `repeat the read that failed` | 11 | yes |
+
+Reasons: `stale_generation`, `pin_moved`.
+
+More: [docs/architecture/generations.md#publishing](../../docs/architecture/generations.md#publishing)
+
+### generation_held
+
+<a id="generation_held"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A derived result was recorded as held instead of published, so nothing it would have retired was retired. | A model-produced result at or below the input-relative shrink floor (shrunk), one over generations.max_items (oversize), one over the run window retirement budget (valve), an empty result without a proof the input is really empty (no_proof, fence_absent), repeated failed attempts on one input (attempts_exhausted) a segmented page the ledger cannot keep a copy of (segmented_unsupported) or a ranked result whose cut is ambiguous (tie) would retire live items on evidence the primitive does not accept (GBRA-161 D4/D5). | Preview the held set with gbrain repair generations --kind <kind> --mode release-held --held --since <restore_days>d. shrunk, valve and attempts_exhausted publish once with --apply --expect <hash> --yes after the user agrees; oversize needs gbrain config set generations.max_items first; no_proof, fence_absent, segmented_unsupported and tie clear only when the input or the producer result changes. Run: gbrain doctor --only generation_held --json | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `shrunk`, `oversize`, `valve`, `no_proof`, `fence_absent`, `attempts_exhausted`, `segmented_unsupported`, `tie`.
+
+More: [docs/guides/repair.md#generations](../../docs/guides/repair.md#generations)
+
+### generation_live_conflict
+
+<a id="generation_live_conflict"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A derived generation was not activated because one of its items was not live at the content the publication wrote; nothing was committed. | Activation rechecks every item of the new generation under the key lock; an item another writer changed or deleted in between would make the ledger record a set that is not what the pages say. | Run the producer again; it reads the items as they are now. | agent | `repeat the read that failed` | 11 | yes |
+
+More: [docs/architecture/generations.md#publishing](../../docs/architecture/generations.md#publishing)
+
 ### ghost_mass_delete_refused
 
 <a id="ghost_mass_delete_refused"></a>
