@@ -18,6 +18,7 @@ import { policyHash, readGenerationsConfig, type GenerationsConfig } from './con
 import type { DerivedRetiredBy } from '../persistence/derived-retirement-hold.ts';
 import type { GenerationAdapter, GenerationKey, HeldReason, InputState, ItemRow, Preimage, ProposedItem } from './contract.ts';
 import { planGeneration, type LiveGeneration, type Plan } from './plan.ts';
+import type { WriteTrust } from '../trust/tier.ts';
 import { proofHolds, type EmptySourceProof } from './proofs.ts';
 
 /** The largest held proposal the ledger keeps (UTF-8 bytes of its JSON); a larger one is held without a releasable copy. */
@@ -44,6 +45,10 @@ export interface PublishRequest<C = unknown> {
   onRetired?: (tx: BrainEngine, retired: readonly string[]) => Promise<void>;
   /** A transcript key's current file, recorded on the generation so a moved file keeps its key. */
   locator?: string;
+  /** Recorded on the generation's completeness evidence (synthesis: the earlier outputs it left live, for the cleanup listing). */
+  note?: Record<string, unknown>;
+  /** The write trust of a derived item (single-page kinds): the activation transaction is attributed at this tier. */
+  trust?: WriteTrust;
 }
 
 export type PublishOutcome =
@@ -222,7 +227,7 @@ export async function planPublication<C>(db: BrainEngine, adapter: GenerationAda
   const valve = await readValve(db, key, request.runId);
   const proven = request.proof?.kind === 'originIneligible' ? await adapter.proofHolds?.(db, key, request.proof) === true
     : request.proof ? proofHolds(request.proof, input, live?.inputPin) : false;
-  const plan = planGeneration({ live, rows, proposal: request.items, input, config, modelProduced: adapter.modelProduced, strictOrder: adapter.strictOrder, additive: request.partial === true,
+  const plan = planGeneration({ live, rows, proposal: request.items, input, config, modelProduced: adapter.modelProduced, inPlace: adapter.publishesInPlace, strictOrder: adapter.strictOrder, additive: request.partial === true,
     proofHolds: proven, evidence, valve, release: request.release?.reason, approvedRetire: request.approved?.retire, approvedExpect: request.approved?.expect });
   return { input, rows, plan };
 }
@@ -277,11 +282,11 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
       await faultPoint('generation:retired', { sourceId: key.sourceId, operation: key.kind });
       const activated = await activateGeneration(tx, key, live, { operationId, runId: request.runId, input, setHash, locator: request.locator,
         completeness: { complete: !request.partial, proof: request.proof?.kind ?? null, released: request.release?.reason ?? null,
-          ...(request.approved ? { approved: request.approved.retiredBy } : {}) } }, ledgerItems(plan, rows, live));
+          ...(request.approved ? { approved: request.approved.retiredBy } : {}), ...request.note } }, ledgerItems(plan, rows, live));
       if (plan.retires.length) await bumpValve(tx, key, request.runId, plan.retires.length);
       return { state: 'published', generationId: activated.id, generation: activated.generation, puts: plan.puts.map(item => item.key), kept: plan.kept,
         adopted: plan.adopted, retired: plan.retires, protected: plan.protectedKeys } satisfies PublishOutcome;
-    });
+    }, request.trust);
     if (outcome.state === 'published') await faultPoint('generation:activated', { sourceId: key.sourceId, operation: key.kind });
     return outcome;
   } catch (error) {
