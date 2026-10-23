@@ -14,12 +14,18 @@ on:
       - '.github/workflows/tla-spec.yml'
       - 'src/core/persistence/sync-lease.ts'
       - 'src/core/db-lock.ts'
+      - 'src/core/persistence/sync-pass-fold.ts'
+      - 'src/core/persistence/sync-prepare.ts'
       - 'test/spec-drain-lease-constants.test.ts'
       - 'test/persistence-sync-lease.test.ts'
       - 'test/db-lock-auto-takeover.test.ts'
       - 'test/db-lock-fencing.test.ts'
       - 'test/sync-fenced-slices-gbra133.test.ts'
       - 'test/e2e/drain-lease-fence-postgres.test.ts'
+      - 'test/drain-lease-guards.test.ts'
+      - 'test/e2e/drain-lease-guards-postgres.test.ts'
+      - 'test/drain-lease-stamp-fence.test.ts'
+      - 'test/e2e/drain-lease-stamp-fence-postgres.test.ts'
   push:
     branches: [master]
     paths: *paths

@@ -30,6 +30,68 @@
       }
     },
     {
+      "id": "fold-stamp-ignores-token",
+      "kind": "guard",
+      "title": "a folded pass stamp's proof admits a token that is not the row's",
+      "expect": "FencedTxnsMatchRow",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "FenceToken(p)  == rowTok = tok[p]",
+        "after": "FenceToken(p)  == TRUE"
+      },
+      "code": {
+        "edits": [
+          {
+            "file": "src/core/persistence/sync-pass-fold.ts",
+            "before": "acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
+            "after": "$2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/drain-lease-stamp-fence.test.ts",
+            "filter": "a folded stamp is refused"
+          },
+          {
+            "test": "test/e2e/drain-lease-stamp-fence-postgres.test.ts",
+            "filter": "a folded stamp is refused",
+            "postgres": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "checkpoint-stamp-ignores-token",
+      "kind": "guard",
+      "title": "the checkpoint request's stamp admits a token that is not the row's",
+      "expect": "FencedTxnsMatchRow",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "FenceToken(p)  == rowTok = tok[p]",
+        "after": "FenceToken(p)  == TRUE"
+      },
+      "code": {
+        "edits": [
+          {
+            "file": "src/core/persistence/sync-prepare.ts",
+            "before": "acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
+            "after": "$2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/drain-lease-stamp-fence.test.ts",
+            "filter": "a checkpoint request is refused"
+          },
+          {
+            "test": "test/e2e/drain-lease-stamp-fence-postgres.test.ts",
+            "filter": "a checkpoint request is refused",
+            "postgres": true
+          }
+        ]
+      }
+    },
+    {
       "id": "fence-without-share-lock",
       "kind": "guard",
       "title": "the fence reads the row without FOR SHARE, so a takeover proceeds under an open transaction",
