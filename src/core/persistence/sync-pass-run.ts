@@ -53,6 +53,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { principalAttribution } from './attribution.ts';
 import { isCodeFilePath, readMetafilePagesMode, resolveSlugForPath } from '../sync.ts';
 import { readPassSwitches } from './sync-held-deletions.ts';
+import { keepPassPages, takePassPages } from './sync-tree-reuse.ts';
 import { syncOriginPath } from './sync-origin.ts';
 import { databaseOnlyPageSql } from './unbound-pages.ts';
 import { originMarkerFingerprint } from './sync-markers.ts';
@@ -666,6 +667,16 @@ async function pinPassRow(engine: BrainEngine, value: ManagedSyncPassValue, inpu
   }
 }
 
+/**
+ * The pass's level cache: its next round at the same commit reuses the tree; it dies with the pass. With `sync.level_reuse` its
+ * first round starts from the `I⋈P` of this process's last pass of the source that ended synced (sync-tree-reuse.ts; taken
+ * either way, so off drops it), and a synced end keeps its own.
+ */
+function openPassLevelCache(sourceId: string, incarnation: string, levelReuse: boolean): PassLevelCache {
+  const kept = takePassPages<NonNullable<PassLevelCache['pages']>>([sourceId, incarnation]);
+  return { pages: levelReuse ? kept : undefined };
+}
+
 /** Design §7 (v3 §7): whether this batch crossed the approved envelope, which defers embeddings for the rest of the pass. */
 async function envelopeCrossed(engine: BrainEngine, value: ManagedSyncPassValue, costScope: string, processingOptions: SyncProcessingOptions): Promise<boolean> {
   const envelope = value.obligations.cost;
@@ -784,10 +795,12 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
     }
     return await consumeRetry(entries.slice(0, drained.managedCursor?.index ?? 0).map(entry => entry.path)).then(() => drained);
   };
+  const levelCache = openPassLevelCache(sourceId, incarnation, levelReuse);
   /** The pass ended on its stamp; a folded one (sync-pass-fold.ts) saves the round's telemetry beside the obligations it wrote. */
   const synced = async (onFold: boolean): Promise<SyncResult> => {
     if (onFold) await save('synced', configured ? null : 'selection_scoped');
     rememberLevel();
+    if (levelReuse && levelCache.pages) keepPassPages([sourceId, incarnation], { ...levelCache.pages, key: levelCache.pages.acrossKey, across: true });
     await clearPassFailures(engine, sourceId, incarnation);
     await finishPassApply(engine, sourceId, applied);
     return result(configured && context.source.last_commit === null ? 'first_sync' : 'synced', configured ? undefined : 'selection_scoped');
@@ -825,8 +838,6 @@ export async function runSyncPass(engine: BrainEngine, input: SyncPassInput): Pr
       const drained = await input.drainBatch(`${PASS_BATCH_KEY_PREFIX}${passId}:${batchNo++}`, replay, sliceBase);
       if (!('entries' in drained)) return await stop(drained);
     }
-    // The pass's level cache: its next round at the same commit reuses the tree; it dies with the pass.
-    const levelCache: PassLevelCache = {};
     for (let round = 1; round <= PASS_MAX_ROUNDS; round++) {
       assertActive();
       value.telemetry.round = round;

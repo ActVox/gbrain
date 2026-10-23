@@ -145,8 +145,19 @@ listing instead of listing the whole tree; it still judges every path. Any
 doubt reads the tree whole: a new process, another source or incarnation, a
 pass that failed before it walked the listing, a listing unused for 10
 minutes, a diff larger than a quarter of the tree (and over 2,000 paths), a
-scope with pathspec characters, or a Git error. `gbrain config set
-sync.level_reuse false` turns reuse off and every pass reads the whole tree;
+scope with pathspec characters, or a Git error.
+
+The same process also keeps the pages-and-import-records read (`I⋈P`) of its
+last pass that ended synced. The next pass's first round proves, in its own
+database snapshot, which page rows and import records changed since that read,
+from any writer (a write still in flight at that read counts as changed), and
+re-reads only those. It reads everything whole when the page or record counts
+do not add up (a deletion leaves no other trace), when the changed pages pass a
+quarter of the source (and 2,000), when the transaction-id span is too wide to
+judge, when any statement fails, after a pass that did not end synced, or when
+the kept read is older than 10 minutes. Holds, markers, open work and the Git
+level are read every round as before. `gbrain config set
+sync.level_reuse false` turns both off and every pass reads the whole tree and `I⋈P`;
 `true` or unset keeps it on. `GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1` also reads
 every reused listing whole and fails the pass on any difference (tests and the
 nightly freshness cell use it).

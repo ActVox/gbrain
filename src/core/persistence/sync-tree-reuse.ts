@@ -58,20 +58,49 @@ export async function readTreeLevelReusing(gitRoot: string, head: string, scope:
     for (const { path, entry } of changes) { if (entry) prior.tree.set(path, entry); else prior.tree.delete(path); }
     reuse = 'patched';
   }
-  if (process.env.GBRAIN_SYNC_LEVEL_REUSE_VERIFY === '1') {
+  if (levelReuseVerify()) {
     const fresh = await readTreeLevel(gitRoot, head, scope, opts.shared);
-    const differs = fresh.size !== prior.tree.size ? `${prior.tree.size} paths, whole read ${fresh.size}`
-      : [...fresh].find(([path, entry]) => { const own = prior.tree.get(path); return own?.oid !== entry.oid || own.mode !== entry.mode; })?.[0];
-    // One stderr line per check, so the nightly oracle cell can count them in the serve's log.
-    const verdict = differs ? new LevelReuseMismatch('T', `${reuse} from ${prior.head} to ${head}: ${differs}`) : null;
-    console.error(verdict ? `[level_reuse] level_reuse_mismatch ${verdict.message}` : `[level_reuse] level_reuse_verified T ${reuse} at ${head}`);
-    if (verdict) throw verdict;
+    reportLevelReuseCheck('T', `${reuse} from ${prior.head} to ${head}`, fresh.size !== prior.tree.size ? `${prior.tree.size} paths, whole read ${fresh.size}`
+      : [...fresh].find(([path, entry]) => { const own = prior.tree.get(path); return own?.oid !== entry.oid || own.mode !== entry.mode; })?.[0]);
   }
   return { tree: prior.tree, reuse, keep: keep(prior.tree) };
 }
 
-/** Drops every kept listing (tests). */
+/** Whether every reused level read is compared with a whole read (tests and the nightly oracle cell). */
+export const levelReuseVerify = (): boolean => process.env.GBRAIN_SYNC_LEVEL_REUSE_VERIFY === '1';
+
+/** One `[level_reuse]` stderr line per verified read (the nightly oracle counts them); a difference throws. */
+export function reportLevelReuseCheck(read: string, how: string, differs: string | null | undefined): void {
+  const verdict = differs ? new LevelReuseMismatch(read, `${how}: ${differs}`) : null;
+  console.error(verdict ? `[level_reuse] level_reuse_mismatch ${verdict.message}` : `[level_reuse] level_reuse_verified ${read} ${how}`);
+  if (verdict) throw verdict;
+}
+
+/**
+ * `I⋈P` across passes (sync-pass.ts `readRoundSnapshot`): the pages table and mark (S1) of a pass that ended synced, for the next
+ * pass's first round to prove and patch (sync-pass-confirm.ts, `across`). Same rules as a listing: taken while used, dropped
+ * when unused for TREE_REUSE_MAX_AGE_MS, keyed by source and incarnation.
+ */
+const passPages = new Map<string, { value: unknown; at: number; expiry: ReturnType<typeof setTimeout> }>();
+export function keepPassPages<T extends object>(key: readonly string[], value: T): void {
+  const k = JSON.stringify(key);
+  const prior = passPages.get(k);
+  if (prior) clearTimeout(prior.expiry);
+  const expiry = setTimeout(() => { if (passPages.get(k)?.value === value) passPages.delete(k); }, TREE_REUSE_MAX_AGE_MS);
+  expiry.unref?.();
+  passPages.set(k, { value, at: Date.now(), expiry });
+}
+export function takePassPages<T>(key: readonly string[]): T | undefined {
+  const k = JSON.stringify(key), entry = passPages.get(k);
+  if (!entry) return undefined;
+  clearTimeout(entry.expiry);
+  passPages.delete(k);
+  return Date.now() - entry.at > TREE_REUSE_MAX_AGE_MS ? undefined : entry.value as T;
+}
+
+/** Drops every kept listing and pages table (tests). */
 export function __resetTreeReuseForTests(): void {
-  for (const entry of entries.values()) clearTimeout(entry.expiry);
+  for (const entry of [...entries.values(), ...passPages.values()]) clearTimeout(entry.expiry);
   entries.clear();
+  passPages.clear();
 }
