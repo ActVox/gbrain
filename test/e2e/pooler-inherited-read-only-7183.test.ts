@@ -1,5 +1,5 @@
 /**
- * #7183 / #7187: gbrain writes through server connections whose transactions default to read-only.
+ * #7183: gbrain writes through server connections whose transactions default to read-only.
  *
  * A client that runs a session-level `SET default_transaction_read_only = on` through a transaction-mode pooler can
  * leave that default on a server connection other clients then borrow; a role or database default does the same for
@@ -7,7 +7,8 @@
  * session leak itself depends on the pooler build: PgBouncer 1.26 restores this setting per client), connects a fresh
  * engine (through PgBouncer in the backend matrix's pooled pass), and checks that the engine's transactions, its
  * autocommit statements, the database lease and the Minions queue still write, and that the stall detector reclaims an
- * `active` job left with an expired lock by a worker that died on the refused writes (#7187).
+ * `active` job left with an expired lock by a worker that died on the refused writes, leaving the drain-lease
+ * holder record to its lease (#7261).
  *
  * Listed in scripts/e2e-backend-matrix.txt: run once on direct Postgres and once through transaction-mode PgBouncer.
  */
@@ -107,7 +108,7 @@ describeDb(`writes on read-only-default server connections (${pooled ? 'pgbounce
     expect((await queue.getJob(job.id))!.error_text).toBe('handler failure');
   }, 60_000);
 
-  test('#7187: the stall detector reclaims a job and drops a drain-lease holder row left active with expired locks', async () => {
+  test('the stall detector reclaims a job a worker left active with an expired lock, and leaves the drain-lease holder record (#7261)', async () => {
     const job = await queue.add('ro-stuck', {}, { max_attempts: 3 });
     const claimed = await queue.claim('dead-worker:1', 60_000, 'default', ['ro-stuck']);
     expect(claimed?.id).toBe(job.id);
@@ -120,10 +121,10 @@ describeDb(`writes on read-only-default server connections (${pooled ? 'pgbounce
       `INSERT INTO minion_jobs(name, queue, status, submission_authority, data, max_attempts, max_stalled, lock_token, lock_until, started_at, remove_on_complete, remove_on_fail)
        VALUES ('sync', 'gbrain-drain-lease', 'active', '{"version":1,"kind":"application"}'::jsonb, '{"sourceId":"source-a"}'::jsonb, 1, 0,
                'dead-lease-token', now() - interval '5 minutes', now() - interval '10 minutes', true, true) RETURNING id`);
-    const { requeued, released } = await queue.handleStalled(0);
+    const { requeued, dead } = await queue.handleStalled(0);
     expect(requeued.map(j => j.id)).toEqual([stuck.id]);
-    expect(released.map(j => j.id)).toEqual([Number(beacon.id)]);
+    expect(dead).toEqual([]);
     expect(await queue.getJob(stuck.id)).toMatchObject({ status: 'waiting', stalled_counter: 1, lock_token: null });
-    expect(await queue.getJob(Number(beacon.id))).toBeNull();
+    expect(await queue.getJob(Number(beacon.id))).toMatchObject({ status: 'active', attempts_made: 0 });
   });
 });

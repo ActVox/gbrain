@@ -12,14 +12,13 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.405.0] - 2026-10-23
 
-**Writes on Postgres no longer fail because a transaction-mode pooler handed gbrain a server connection that another client left read-only, a stall sweep no longer stops on a dead drain holder, and a job whose phase failed no longer ends `completed`.**
+**Writes on Postgres no longer fail because a transaction-mode pooler handed gbrain a server connection that another client left read-only, and a job whose phase failed no longer ends `completed`.**
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
 | A pooled server connection defaults to read-only (another client's session-level `SET default_transaction_read_only = on`, or a role or database default) | sync, page writes, leases and the jobs queue failed with SQLSTATE 25006, reported as `storage_error` or `internal_error` | every transaction gbrain opens declares `READ WRITE`, an autocommit statement refused with 25006 runs once more inside a read-write transaction, and a refusal that persists (a read-only server) is `connection_inherited_read_only` in write receipts, `gbrain sync status` and the error envelope |
-| A drain-lease holder died without deleting its `gbrain-drain-lease` row | every stall sweep aborted on a table constraint, so jobs with expired locks stayed `active` | the sweep drops holder rows whose holder stopped renewing and reclaims stalled jobs |
 | A job handler's result reports a failed phase, or a `failed` / `blocked_by_failures` status | the job ended `completed` | it ends `failed` (no retry); its error names the phase, and its result keeps `job_outcome` (`phase_failed` with `failed_phase`, or `failed`) |
 | An `autopilot-cycle` job ends `phase_failed` | n/a | it does not count toward the source failure cooldown; a thrown handler, a timeout or stall and `blocked_by_failures` still do |
 

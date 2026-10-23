@@ -16,7 +16,6 @@ import type {
 } from './types.ts';
 import { rowToMinionJob, rowToInboxMessage, rowToAttachment } from './types.ts';
 import { WATCHDOG_SUSPECT_MARK, releaseWatchdogClaim, requeueCoRunnerStalls, unmarkedJobSql } from './watchdog-attribution.ts';
-import { releaseExpiredHolderRows } from './drain-holder-rows.ts';
 export { WATCHDOG_SUSPECT_MARK } from './watchdog-attribution.ts';
 import { coalesceOnIdempotencyKey, decideCoalesce, insertOrCoalesce } from './idempotency-coalesce.ts';
 import { withSubmitterLabel } from './job-insight.ts';
@@ -1657,7 +1656,6 @@ export class MinionQueue {
    * Threshold (ms):
    *   timeout_ms set   -> timeout_ms * 2
    *   timeout_ms null  -> 2 * lockDurationMs * max_stalled
-   * Drain-lease holder rows are not jobs (drain-holder-rows.ts).
    */
   async handleWallClockTimeouts(lockDurationMs: number): Promise<MinionJob[]> {
     await assertNoUnreviewedJobs(this.engine);
@@ -2137,8 +2135,8 @@ export class MinionQueue {
     return rows.map(rowToMinionJob);
   }
 
-  /** Detect and handle stalled jobs. Single CTE, no off-by-one. Returns affected jobs; `released`: dropped holder rows (drain-holder-rows.ts). */
-  async handleStalled(graceMsOverride?: number): Promise<{ requeued: MinionJob[]; dead: MinionJob[]; released: MinionJob[] }> {
+  /** Detect and handle stalled jobs. Single CTE, no off-by-one. Returns affected jobs. */
+  async handleStalled(graceMsOverride?: number): Promise<{ requeued: MinionJob[]; dead: MinionJob[] }> {
     await assertNoUnreviewedJobs(this.engine);
     // W0 fix-wave (Tier-1 #4): the dead-letter branch previously emitted NO
     // child_done and never unblocked aggregator parents — a child that died
@@ -2152,7 +2150,6 @@ export class MinionQueue {
     // override; the worker sweep resolves from env/default.
     const graceMs = graceMsOverride ?? resolveStallReclaimGraceMs();
     return this.engine.transaction(async (tx) => {
-      const released = await releaseExpiredHolderRows(tx, graceMs);
       const candidates = await tx.executeRaw<{ id: number; parent_job_id: number | null; stalled_counter: number; max_stalled: number }>(
         `SELECT id, parent_job_id, stalled_counter, max_stalled
            FROM minion_jobs
@@ -2160,7 +2157,7 @@ export class MinionQueue {
             AND lock_until < now() - ($1::double precision * interval '1 millisecond')`,
         [graceMs]
       );
-      if (candidates.length === 0) return { requeued: [], dead: [], released };
+      if (candidates.length === 0) return { requeued: [], dead: [] };
       // GBRA-130 A-30: the claims of a worker that held several (a kernel OOM kill) requeue marked, no stall counted.
       const coRunners = await requeueCoRunnerStalls(tx, candidates, graceMs);
       const ids = coRunners.rest.map(c => c.id);
@@ -2207,7 +2204,7 @@ export class MinionQueue {
       // other terminal kill. Outcome 'dead' (not 'timeout') so consumers can
       // distinguish "died via max-stall" from "timed out during run".
       await this.killJobs(tx, deadRows, 'dead', 'max stalled count exceeded');
-      return { requeued: [...coRunners.requeued, ...requeuedRows].map(rowToMinionJob), dead: deadRows.map(rowToMinionJob), released };
+      return { requeued: [...coRunners.requeued, ...requeuedRows].map(rowToMinionJob), dead: deadRows.map(rowToMinionJob) };
     }).then(async (result) => {
       // W0 ship-review (data-migration): the per-kill unblock above is
       // forward-only — parents stranded in 'waiting-children' by PRE-upgrade
