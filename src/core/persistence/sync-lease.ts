@@ -93,6 +93,30 @@ export async function assertDrainLease(tx: Pick<BrainEngine, 'executeRaw'>, sour
   if (!rows.length) throw new LockStolenError(lease.lockId, `the drain lease of source ${sourceId} is no longer held by this pass`);
 }
 
+/** GBRA-133: the longest a transaction holding the fence stays open (plus the item that crosses it); a renewal times out after 30 s. */
+export const FENCED_SLICE_MS = 5_000;
+
+/**
+ * GBRA-133: `write` for each item in fenced transactions of at most `FENCED_SLICE_MS`. The fence holds the lock row
+ * `FOR SHARE`, which blocks this lease's own renewal and release until the transaction ends: one transaction that wrote a
+ * round's holds at 65 ms per round trip stayed open for 14 minutes, every renewal timed out and the lease lapsed under the
+ * pass. Each slice is fenced again, so a lapsed lease stops the writes at the next slice. `committed` sees each slice once it commits.
+ */
+export async function inFencedSlices<T>(engine: BrainEngine, sourceId: string, items: readonly T[],
+  write: (tx: BrainEngine, item: T) => Promise<void>, committed?: (slice: readonly T[]) => void): Promise<void> {
+  for (let start = 0; start < items.length;) {
+    const end = await engine.transaction(async tx => {
+      await assertDrainLease(tx, sourceId);
+      const began = performance.now();
+      let next = start;
+      do await write(tx, items[next++]!); while (next < items.length && performance.now() - began < FENCED_SLICE_MS);
+      return next;
+    });
+    committed?.(items.slice(start, end));
+    start = end;
+  }
+}
+
 const iso = (value: Date | null | undefined) => value ? value.toISOString() : null;
 
 /** The live holder of a source's drain lease (kind and id from the row this module writes beside the lock), or null. */
@@ -108,8 +132,9 @@ export async function readDrainHolder(engine: BrainEngine, sourceId: string): Pr
 }
 
 /**
- * The source's managed-sync commits since `since`, and its last commit, cursor save or (#6712 PR 4b, design v3.2 §3.7)
- * pass row write at all: a pass writes its row at the pin, per batch and at the stamp.
+ * The source's managed-sync commits since `since`, and its last commit, cursor save, (#6712 PR 4b, design v3.2 §3.7)
+ * pass row write or (#7327) hold write at all: a pass writes its row at the pin, per batch and at the stamp, and every
+ * hold it writes or re-screens touches the source's hold summary row, so a pass screening only holds is progressing.
  */
 async function holderProgress(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string, since: Date | null): Promise<DrainHolderProgress> {
   const [row] = await engine.executeRaw<{ committed: number | string; last_committed_at: Date | string | null; last_saved_at: Date | string | null }>(`
@@ -118,7 +143,8 @@ async function holderProgress(engine: Pick<BrainEngine, 'executeRaw'>, sourceId:
       (SELECT max(r.completed_at) FROM persistence_requests r WHERE r.worktree_id=b.worktree_id AND r.source_incarnation=b.source_incarnation
         AND r.state='committed' AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%') AS last_committed_at,
       GREATEST((SELECT max(c.updated_at) FROM op_checkpoints c WHERE c.op='managed-sync' AND c.completed_keys->0->>'sourceId'=$1),
-        (SELECT c.updated_at FROM op_checkpoints c WHERE c.op=$3 AND c.fingerprint=b.source_id||':'||b.source_incarnation::text)) AS last_saved_at
+        (SELECT c.updated_at FROM op_checkpoints c WHERE c.op=$3 AND c.fingerprint=b.source_id||':'||b.source_incarnation::text),
+        (SELECT c.updated_at FROM op_checkpoints c WHERE c.op='sync-hold-summary' AND c.fingerprint=b.source_id||':'||b.source_incarnation::text)) AS last_saved_at
     FROM persistence_source_bindings b WHERE b.source_id=$1`, [sourceId, (since ?? new Date(0)).toISOString(), MANAGED_SYNC_PASS_OP]);
   const at = (value: Date | string | null | undefined) => value == null ? null : new Date(value).toISOString();
   const committedAt = at(row?.last_committed_at), savedAt = at(row?.last_saved_at);
@@ -126,7 +152,7 @@ async function holderProgress(engine: Pick<BrainEngine, 'executeRaw'>, sourceId:
     last_progress_at: [committedAt, savedAt].filter((value): value is string => !!value).sort().pop() ?? null };
 }
 
-/** A holder that has held the lease, and made no commit or cursor save, for `HOLDER_STALL_MS`. */
+/** A holder that has held the lease, and made no commit, cursor save or hold write, for `HOLDER_STALL_MS`. */
 export function holderStalled(holder: DrainHolder | null, now = Date.now()): boolean {
   if (!holder?.started_at || !holder.progress) return false;
   const since = Math.max(Date.parse(holder.started_at), holder.progress.last_progress_at ? Date.parse(holder.progress.last_progress_at) : 0);

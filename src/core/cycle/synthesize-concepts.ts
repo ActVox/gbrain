@@ -45,7 +45,7 @@ import { maintenancePreflight } from '../persistence/prepared-maintenance.ts';
 import { derivedWriteThrough, reportFileHolds } from './derived-write-through.ts';
 import { addSpellingRedirects, canonicalConceptStem, loadConceptRedirects, loadLiveConceptStems } from './concept-redirects.ts';
 import {
-  addManagedProvenanceLinks, CONCEPT_DEFERRAL_CODES, CONCEPT_HOLD_CODES, publishClassicConcept, publishManagedConcept, stripFenceSections,
+  addManagedProvenanceLinks, CONCEPT_DEFERRAL_CODES, CONCEPT_HOLD_CODES, conceptPublicationHold, publishClassicConcept, publishManagedConcept, stripFenceSections,
 } from './concept-publication.ts';
 import { readPhaseConfigNumber, SYNTHESIZE_CONCEPTS_BUDGET_KEY, SYNTHESIZE_CONCEPTS_DEFAULT_BUDGET_USD } from './phase-config-values.ts';
 import { ConceptRetryBound, MAX_CONCEPT_ATTEMPTS } from './concept-retry-bound.ts';
@@ -365,18 +365,30 @@ export async function runPhaseSynthesizeConcepts(
       .digest('hex').slice(0, 16);
     const narrativeBodies = group.atomBodies.map(stripFenceSections);
     const hashFor = (model: string): string => hashOf(model, narrativeBodies);
-    const memberHash = hashFor(synthModel);
+    // #7269: a T3 narrative is the deterministic template, which never calls the model, so its hash leaves the model out.
+    const hashModel = group.tier === 'T1' || group.tier === 'T2' ? synthModel : '';
+    const memberHash = hashFor(hashModel);
     const priorMode = existing?.frontmatter?.synthesis_mode;
     const realNarrative = priorMode === 'llm' || priorMode === 'deterministic_tier';
     if (existing?.frontmatter?.member_hash === memberHash && realNarrative) {
       skippedUnchanged.push(conceptSlug);
       continue;
     }
+    // #7269: rewriting a deterministic page to the template it already holds, at a visibility it already has, would
+    // publish nothing new (a page hashed with the model before the fix keeps its body and is not rewritten).
+    const priorVisibility: Visibility = existing?.frontmatter?.visibility === 'private' ? 'private' : 'world';
+    if (hashModel === '' && priorMode === 'deterministic_tier' && strictestVisibility([group.visibility, priorVisibility]) === priorVisibility
+      && stripFenceSections(existing!.compiled_truth).trim() === deterministicNarrative(group).trim()) {
+      skippedUnchanged.push(conceptSlug);
+      continue;
+    }
     // #6643 (B1): a drifted concept would only add a conflict receipt per publication; checked live before any spend.
     if (await driftSkips.skip(conceptSlug, existingSnapshot)) continue;
+    const held = existing && conceptPublicationHold(existing); // checked before any spend
+    if (held) { publicationHeld.push({ concept: group.conceptSlug, reason: held }); continue; }
     // A page hashed by the pre-D-N3 formula (full atom bodies) whose inputs are
     // provably unchanged keeps its narrative: only the hash is rewritten, no spend.
-    const grandfathered = realNarrative && existing?.frontmatter?.member_hash === hashOf(synthModel, group.atomBodies);
+    const grandfathered = realNarrative && existing?.frontmatter?.member_hash === hashOf(hashModel, group.atomBodies);
     if (!grandfathered) tierCounts[group.tier]++;
     let narrative: string;
     let synthesisMode: ConceptSynthesisMode, unverifiedClaims: UnverifiedClaim[] = [];
@@ -430,7 +442,6 @@ export async function runPhaseSynthesizeConcepts(
             ({ narrative, unverified: unverifiedClaims } = await groundConceptNarrative(engine, text, group));
             synthesisMode = 'llm';
             if (result.fallbackFrom) fallbackWriter = result.model;
-            retries.succeed(`${opts.sourceId ?? 'default'}:${conceptSlug}`);
           } else {
             failures.push({ concept: group.conceptSlug, error: stopped ? `output stopped before the end (stopReason=${result.stopReason})` : 'empty model response' });
             narrative = deterministicNarrative(group);
@@ -524,6 +535,7 @@ export async function runPhaseSynthesizeConcepts(
       // #5525: a world concept stays private until every member's provenance
       // edge is durable, because a later private flip reaches it through them.
       if (!await publishOrRecord('private')) continue;
+      if (synthesisMode === 'llm') retries.succeed(`${opts.sourceId ?? 'default'}:${conceptSlug}`);
       // #4589: bank concept<->member-atom provenance edges. The prompt forbids
       // enumerating atoms in the body and no frontmatter field maps to a link
       // verb, so without this every concept page lands with zero edges (graph

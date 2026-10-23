@@ -1,10 +1,12 @@
 /**
- * GBRA-161 PR 1b load probe (opt-in: GBRAIN_TEST_GENERATION_LOAD=1; GBRAIN_TEST_GENERATION_LOAD_ORIGINS, default 10000): publishes
- * one atom generation per origin page through the primitive, then a second generation per origin that replaces its atom
+ * GBRA-161 PR 1b load probe: publishes one atom generation per origin page through the primitive, then a second
+ * generation per origin that replaces its atom
  * (one retirement each), and reports lock-wait percentiles (page locks and the generation key lock, measured per call)
  * and ledger growth (rows and on-disk bytes of derived_generations and derived_generation_items). Postgres runs 8
  * publishers at once; PGLite has one connection. It reports numbers and asserts only that every publication landed:
- * the plan sets no threshold.
+ * the plan sets no threshold. Every lane runs it at SMOKE_ORIGINS, so the concurrent publish path runs against each
+ * arm's own database; the measured run (GBRAIN_TEST_GENERATION_LOAD=1) defaults to 10000 origins, and
+ * GBRAIN_TEST_GENERATION_LOAD_ORIGINS sets either size.
  */
 import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -18,8 +20,8 @@ import { isolatedSharedSkillsEngine } from '../helpers/shared-skills-engine.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { pathologicalArms } from './harness.ts';
 
-const ENABLED = process.env.GBRAIN_TEST_GENERATION_LOAD === '1';
-const ORIGINS = Number(process.env.GBRAIN_TEST_GENERATION_LOAD_ORIGINS ?? 10000);
+const SMOKE_ORIGINS = 200;
+const ORIGINS = Number(process.env.GBRAIN_TEST_GENERATION_LOAD_ORIGINS ?? (process.env.GBRAIN_TEST_GENERATION_LOAD === '1' ? 10000 : SMOKE_ORIGINS));
 
 const percentile = (values: number[], p: number) => { const sorted = [...values].sort((a, b) => a - b); return sorted.length ? sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)]! : 0; };
 const atomMarkdown = (origin: string, title: string) => '---\ntype: atom\ntitle: ' + title + '\natom_type: insight\nsource_slug: ' + origin + '\nextracted_by: extract_atoms-load\n---\n' + title + '.\n';
@@ -32,7 +34,7 @@ async function ledgerSize(engine: BrainEngine) {
 
 for (const { backend, databaseUrl } of pathologicalArms()) {
   describe('GBRA-161 PR 1b generation load probe (' + backend + ')', () => {
-    test.skipIf(!ENABLED)(ORIGINS + ' origins: two generations each; lock-wait percentiles and ledger growth', async () => {
+    test(ORIGINS + ' origins: two generations each; lock-wait percentiles and ledger growth', async () => {
       const home = mkdtempSync(join(tmpdir(), 'gbrain-g1-load-'));
       try {
         await withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {

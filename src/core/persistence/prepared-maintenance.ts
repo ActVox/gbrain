@@ -155,8 +155,10 @@ async function submitMaintenance(engine: BrainEngine, authority: MaintenanceAuth
     throw opError('page_identity_changed', 'The deleted page was restored or purged before maintenance admitted its request.',
       `Page ${slug} in '${authority.writer.sourceId}' is no longer soft-deleted, so nothing was submitted for it. Run maintenance again to plan from the current pages.`);
   }
-  // #5876: only a Life Chronicle event its extractor retired may be restored by a later generation.
-  if (snapshot?.page.deleted_at && intent.deleted_page !== true && !(intent.restore_retired === true && snapshot.page.frontmatter?.retired_by === 'life-chronicle')) {
+  // #5876: only a Life Chronicle event its extractor retired may be restored by a later generation; the stamp counts only
+  // when the generation ledger (or the chronicle ledger's owned hashes) verifies it (GBRA-161 PR 3).
+  if (snapshot?.page.deleted_at && intent.deleted_page !== true && !(intent.restore_retired === true
+    && await (await import('../generations/adapters/chronicle-events.ts')).verifiedChronicleRetirement(engine, authority.writer.sourceId, snapshot.page))) {
     throw opError('page_not_found', 'Maintenance cannot restore a deleted page.',
       `Page ${slug} in '${authority.writer.sourceId}' was deleted after maintenance read it, and maintenance never recreates deleted pages; nothing was submitted. Run maintenance again to plan from the current pages.`);
   }
@@ -540,6 +542,7 @@ async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, co
   if (row.intent?.kind === 'managed_maintenance_restore_reextract_atom') return (await import('../repair/atoms-restore.ts')).prepareAtomRestore(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_retire_ghost_page') return (await import('../repair/ghost-pages.ts')).prepareGhostPageRetirement(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_file_drift_remove') return (await import('../repair/file-drift.ts')).prepareDriftFileRemoval(engine, row);
+  if (row.intent?.kind === 'managed_maintenance_file_drift_detach') return (await import('../repair/file-drift.ts')).prepareDriftDetach(engine, row);
   if (row.intent?.kind === 'managed_maintenance_merge_legacy_twin') return (await import('../repair/legacy-twins.ts')).prepareLegacyTwinMerge(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_resolve_origin_twin') return (await import('../repair/origin-twins.ts')).prepareOriginTwinResolve(engine, row, config);
   if (row.intent?.kind !== 'managed_maintenance_consolidate') throw opError('invalid_params', 'Unsupported maintenance request.',

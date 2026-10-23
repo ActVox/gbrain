@@ -85,7 +85,6 @@ src/core/chronicle/backfill.ts	runChronicleBackfill	sql	STREAM
 src/core/chronicle/execute.ts	executeChronicleRow	field	LEAD	
 src/core/chronicle/extract-events.ts	chronicleJudgeContext	field	LEAD	
 src/core/chronicle/ledger.ts	decideChronicle	field	LEAD	
-src/core/chronicle/publish.ts	publishChronicleGeneration	call:putPage	INLINE	
 src/core/chronicle/publish.ts	publishChronicleGeneration	call:serializeMarkdown	INLINE	
 src/core/code-chunks.ts	prepareCodeChunks	field	INLINE	
 src/core/company-brain/inspection.ts	readPage	field	STREAM	
@@ -270,6 +269,9 @@ src/core/fence-repair/repair-tiers.ts	holderAt	field	STREAM
 src/core/fence-repair/tier1.ts	pageHasFenceText	field	STREAM	
 src/core/fts-language.ts	pageSearchVectorTriggerFnSql	sql	LEAD	
 src/core/google/loops-extract.ts	runLoopsExtract	field	STREAM	tail slice(-12000) of a getPage body; per-job: segmented page: getter throws page_body_segmented
+src/core/google/sweep-shared.ts	carryStoredFences	call:serializePageToMarkdown	INLINE	asserts inline (assertInlineBody); importRendered refuses a segmented page first
+src/core/google/sweep-shared.ts	carryStoredFences	field	INLINE	asserts inline (assertInlineBody); importRendered refuses a segmented page first
+src/core/google/sweep-shared.ts	withStoredFactsFence	field	INLINE	asserts inline (assertInlineBody); importRendered refuses a segmented page first
 src/core/import-file.ts	applyImportTransaction	call:putPage	SEGW	lane 1d file (streaming ingest); code/image pages inline
 src/core/import-file.ts	importCodeFile	call:putPage	SEGW	lane 1d file (streaming ingest); code/image pages inline
 src/core/import-file.ts	importFromContent	call:contentHash	META	lane 1d file
@@ -319,8 +321,8 @@ src/core/output/writer.ts	WriteTxImpl.setCompiledTruth	field	INLINE
 src/core/output/writer.ts	WriteTxImpl.setFrontmatterField	call:putPage	INLINE	
 src/core/output/writer.ts	WriteTxImpl.setFrontmatterField	field	INLINE	
 src/core/oversized-backfill.ts	PAGE_BYTES_SQL	sql	SEGW	
-src/core/oversized-backfill.ts	reindexPage	call:serializeMarkdown	SEGW	
-src/core/oversized-backfill.ts	reindexPage	field	SEGW	
+src/core/oversized-backfill.ts	rewritePage	call:serializeMarkdown	SEGW	
+src/core/oversized-backfill.ts	rewritePage	field	SEGW	
 src/core/page-body/body-digests.ts	fileBodyDigests	field	NONE	scan.timeline is the scanned file's timeline byte ranges and digests.timeline a SHA-256, not a page body; each region is hashed piece by piece
 src/core/page-body/body-scan.ts	scanMarkdownString	field	NONE	not a stored body: scans an incoming markdown string for the segmenter
 src/core/page-body/content-hash-stream.ts	ContentHashStream.fromState	field	NONE	not a stored body: resumes the streaming content hash over incoming text
@@ -507,7 +509,9 @@ src/core/repair/timeline.ts	removedRowIds	field	STREAM
 src/core/repair/timeline.ts	scanTimelineHistory	sql	STREAM	
 src/core/repair/timeline.ts	timelineRepair	call:serializePageToMarkdown	SEGW	
 src/core/repair/timeline.ts	timelineRepair	field	STREAM	
-src/core/repair/visibility.ts	planVisibilityRepair	sql	META	
+src/core/repair/visibility.ts	planAliases	sql	META	
+src/core/repair/visibility.ts	planEvents	sql	META	
+src/core/repair/visibility.ts	planLineage	sql	META	
 src/core/repair/visibility.ts	visibilityRepair	call:serializePageToMarkdown	SEGW	
 src/core/schema-migrations/v091-pages-generation-trigger-and-bookmark.ts	v091	sql	NONE	not the page body: historical generation trigger
 src/core/schema-migrations/v123-configurable-fts-language.ts	v123	sql	NONE	not the page body: historical
@@ -529,7 +533,7 @@ src/core/search/entity-anchor.ts	entityAnchoredPages	sql	STREAM
 src/core/search/evidence-delivery.ts	deliverEvidence	field	STREAM	inline pages: the fence overlay over the whole body; a segmented page (no body) skips it and is planned from windows (search/segmented-evidence.ts)
 src/core/search/evidence-delivery.ts	selectLongPages	sql	META	sizes a segmented page from its NULL body (0), so it is never selected as a long page; moves to body_bytes
 src/core/search/provenance-demotion.ts	applyGeneratedDemotion	field	LEAD	
-src/core/search/provenance-demotion.ts	applyGeneratedDemotion	sql	LEAD	
+src/core/search/provenance-demotion.ts	readGeneratedPages	sql	LEAD	
 src/core/search/read-enrichment.ts	readAliases	sql	NONE	not the page body: SELECT * FROM pages used for identity columns
 src/core/search/read-enrichment.ts	readChainHop	sql	META	SELECT * FROM pages by id; protectedBodyFilter(ev) reads body_flags for a segmented page
 src/core/search/relational-recall.ts	hydrate	field	LEAD	synopsis from boundedBodyPrefixSql
@@ -603,6 +607,8 @@ src/core/persistence/page-edit.ts	applyPageEdits	call:serializePageToMarkdown	SE
 src/core/persistence/page-edit.ts	applyPageEdits	field	SEGW	within's stored-offset mapping on the materialized snapshot, as pageSegments; a segmented page takes prepareSegmentedEditMutation first
 src/core/persistence/page-edit.ts	prepareSegmentedEditMutation	call:serializePageToMarkdown	NONE	serializes the frontmatter head with an empty body; the body streams from the segments
 src/core/persistence/page-edit.ts	assertSegmentedFencesCompile	field	NONE	the fields hold only the stored fence text laid out at its lines (scanCanonicalFences input); no page body is read
+src/core/generations/adapters/chronicle-events.ts	chronicleEventAdapter	field	NONE	restoreItem reads the body field of a ledger preimage JSON copy; segmented and oversize pages have no preimage
+src/core/generations/adapters/chronicle-events.ts	writeEventPage	call:putPage	INLINE	writes a Life Chronicle event page from the extractor's short proposal or a ledger preimage JSON copy; no stored page body is read
 src/core/generations/adapters/page.ts	pageIdentityHash	field	INLINE	identity hash of a derived page item: a segmented row hashes its empty inline body and is held segmented_unsupported before any write, so no segmented page is rewritten or retired
 src/core/generations/adapters/page.ts	markdownItem	field	NONE	reads the compiled_truth parseMarkdown returns for the producer's proposed markdown; no stored page body is read
 src/core/generations/adapters/page.ts	readPageRows	sql	INLINE	reads derived page items (atoms) with body_storage; a segmented row is marked segmented and held segmented_unsupported, with no preimage
@@ -613,6 +619,8 @@ src/core/generations/adapters/page.ts	preimageMarkdown	field	NONE	reads the body
 src/core/generations/adapters/page.ts	pageVersionEvidence	sql	INLINE	legacy-adoption evidence: hashes retained page_versions copies of derived atom pages and compares identity hashes only; segmented versions (compiled_truth NULL) are skipped
 src/core/generations/adapters/atoms.ts	atomGenerationAdapter	sql	META	input size only: body_bytes for a segmented page, octet_length of an inline page columns (pages leave body_bytes NULL inline)
 src/core/generations/repair.ts	releaseManaged	field	INLINE	assertInlineBody refuses a segmented origin page before the managed release reads its body to bind the origin
+src/core/search/exact-scan.ts	buildExactBatchStatement	sql	META	#7191: octet_length of the body columns (stored size, never the body) decides an unreadable page
+src/core/cycle/synthesize-generations.ts	pages	sql	INLINE	reads the synthesis outputs of one re-synthesized transcript for the predecessor coverage match (generations/synthesis-coverage.ts); segmented pages are excluded in SQL, so a segmented earlier output is never compared and stays live as an unreadable unmatched predecessor
 src/core/cycle/extract-facts.ts	expireDeletedPageFacts	sql	INLINE	reads the deleted page's stored fence through readFenceBlocks, which reads a segmented page as segmented: no fence proof, so its rows expire only when a live generation recorded them (GBRA-161 PR 2)
 src/core/generations/fence-restore.ts	planFenceRestore	call:serializePageToMarkdown	INLINE	a segmented page is refused segmented_unsupported before the page is serialized for the guarded restore write
 src/core/generations/fence-restore.ts	planFenceRestore	field	INLINE	a segmented page is refused segmented_unsupported before its fence blocks are read

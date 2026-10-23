@@ -39,6 +39,7 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
+import { classifyItemFailure } from '../core/item-failure.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
 import { join, relative, dirname } from 'path';
@@ -867,6 +868,9 @@ Extraction:
   ("touched since"): import, sync, enrich, and extraction stamps all advance
   it. It is NOT the content's authored/effective date.
 
+  --type, --since and --infer-dates filter synced pages, so they need
+  --source db; the default --source fs walk refuses them (exit 2).
+
 Incremental sweep:
 ${ATTENDANCE_REPAIR_HELP}
   gbrain extract --stale [--source-id <id>] [--include-frontmatter]
@@ -1156,6 +1160,19 @@ export async function runExtract(engine: BrainEngine, args: string[], authority?
   if (fromMeetings && subcommand !== 'timeline' && subcommand !== 'all') {
     console.error(
       `--from-meetings is a timeline-pass only. Re-run as 'gbrain extract timeline --from-meetings' or 'gbrain extract all --from-meetings'.`,
+    );
+    process.exit(2);
+  }
+  // #7394: the file walk reads files, not page rows, so it cannot apply a page-row filter. Refuse rather than walk
+  // every file and report it as a filtered pass.
+  const rowFilters = [typeFilter !== undefined && `--type ${typeFilter}`, since !== undefined && `--since ${since}`, inferDates && '--infer-dates'].filter((f): f is string => !!f);
+  if (rowFilters.length && source === 'fs') {
+    console.error(
+      `${rowFilters.map(f => f.split(' ')[0]).join(', ')} ${rowFilters.length > 1 ? 'filter synced pages, so they require' : 'filters synced pages, so it requires'} --source db ` +
+      `(currently --source fs, which walks every file and would ignore ${rowFilters.length > 1 ? 'them' : 'it'}). Re-run as:\n\n` +
+      `  gbrain extract ${subcommand} --source db ${rowFilters.join(' ')}` +
+      (sourceIdFilter ? ` --source-id ${sourceIdFilter}` : '') +
+      (dryRun ? ' --dry-run' : '') + (jsonMode ? ' --json' : '') + '\n',
     );
     process.exit(2);
   }
@@ -2214,6 +2231,7 @@ export async function extractStaleFromDB(
   // from a genuinely missing target.
   let skippedCrossSource = 0, skippedChanged = 0, skippedConcurrentWrite = 0;
   const unknownSource: UnknownSourceSkip[] = [];
+  const contentFailures: string[] = [];
 
   const wantedEnabled = await isWantedPagesEnabled(engine);
   const plannerTick = await plannerStatsForLinkDrain(engine, async () => totalStale);
@@ -2258,9 +2276,16 @@ export async function extractStaleFromDB(
             page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
           return !resolved.ok ? undefined : targetSlug === page.slug && resolved.toSourceId === page.source_id ? snapshot.page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
         } };
-        const extracted: Awaited<ReturnType<typeof extractSegmentedPageLinks>> = fullContent === null
-          ? await extractSegmentedPageLinks(engine, { ...withoutBody(snapshot.page), id: Number(snapshot.page.id), slug: page.slug, source_id: page.source_id }, resolver, { ...pageLinkOpts, temporal: true })
-          : await extractPageLinks(page.slug, fullContent, snapshot.page.frontmatter, snapshot.page.type, resolver, pageLinkOpts);
+        // #7357: a page whose own content the reader refuses (a run over the block bound) is reported and stays stale; the sweep goes on.
+        const extracted: Awaited<ReturnType<typeof extractSegmentedPageLinks>> | null = await (fullContent === null
+          ? extractSegmentedPageLinks(engine, { ...withoutBody(snapshot.page), id: Number(snapshot.page.id), slug: page.slug, source_id: page.source_id }, resolver, { ...pageLinkOpts, temporal: true })
+          : extractPageLinks(page.slug, fullContent, snapshot.page.frontmatter, snapshot.page.type, resolver, pageLinkOpts)).catch((error: unknown) => {
+          const f = classifyItemFailure(error);
+          if (f.scope !== 'item' || f.class !== 'content') throw error;
+          contentFailures.push(`${page.source_id}:${page.slug}: ${f.code}: ${f.message.slice(0, 500)}`);
+          return null;
+        });
+        if (!extracted) continue;
         if (!extracted.attendanceComplete) {
           skippedAttendanceIncomplete++;
           attendanceBlocked.push({ slug: page.slug, source_id: page.source_id, revision: snapshot.revision });
@@ -2354,6 +2379,7 @@ export async function extractStaleFromDB(
     if (skippedChanged) log(settingsChangedSkipLine(skippedChanged));
     if (skippedConcurrentWrite) log(concurrentWriteSkipLine(skippedConcurrentWrite));
     if (unknownSource.length) log(unknownSourceSkipLine(unknownSource));
+    if (contentFailures.length) log(`${contentFailures.length} page(s) failed link extraction and stay stale; the other pages were derived:\n  ${contentFailures.slice(0, 20).join('\n  ')}`);
     if (skippedMissingTarget > 0) {
       log(`Skipped ${skippedMissingTarget} candidate(s) whose target page doesn't exist (references to non-pages are never persisted).`);
     }
@@ -2372,10 +2398,11 @@ export async function extractStaleFromDB(
       ...(skippedAttendanceIncomplete ? { skipped_attendance_incomplete: skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skipped_changed: skippedChanged } : {}),
       ...(skippedConcurrentWrite ? { skipped_concurrent_write: skippedConcurrentWrite } : {}),
       ...(unknownSource.length ? { skipped_unknown_source: unknownSource.length, unknown_source_pages: unknownSource.slice(0, 20) } : {}), ...mentionJsonFields(mentions), ...counts,
+      ...(contentFailures.length ? { failed: contentFailures.length, failures: contentFailures.slice(0, 20) } : {}),
     }) + '\n');
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource,
-    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skippedChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), ...(unknownSource.length ? { skippedUnknownSource: unknownSource.length } : {}), mentions };
+    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skippedChanged } : {}), ...(skippedConcurrentWrite ? { skippedConcurrentWrite } : {}), ...(unknownSource.length ? { skippedUnknownSource: unknownSource.length } : {}), ...(contentFailures.length ? { linkFailed: contentFailures.length } : {}), mentions };
 }
 
 /**
