@@ -38,6 +38,7 @@ import { RELEASABLE_HELD_REASONS, type GenerationAdapter, type GenerationKey, ty
 import { listOrphanCandidates, listPendingMembers, planManagedGeneration, requestUuid } from './managed.ts';
 import { admitInPlaceGeneration } from './managed-retire.ts';
 import { SYNTHESIS_CLEANUP_RETIRED_BY } from './adapters/synthesis.ts';
+import { applyFenceRestore, planFenceRestore } from './fence-restore.ts';
 import { activateGeneration, assertItemsLive, itemSetHash, lockGeneration, publishGeneration, readLiveGeneration, type LedgerItem } from './publish.ts';
 
 export const GENERATION_MODES = ['restore', 'release-held', 'cleanup'] as const;
@@ -185,7 +186,8 @@ async function selectEntries(db: BrainEngine, adapter: GenerationAdapter<unknown
         WHERE g.source_id = ANY($1::text[]) AND g.kind = $2 AND g.state = 'live'${where} ORDER BY g.id`, params);
     const entries: Entry[] = [];
     for (const row of rows) {
-      const plan = await planRestore(db, adapter, keyOf(adapter.kind, row.source_id, row.owner_key), Number(row.id), Number(row.prev_id));
+      const key = keyOf(adapter.kind, row.source_id, row.owner_key);
+      const plan = adapter.fence ? await planFenceRestore(db, key, Number(row.id), Number(row.prev_id)) : await planRestore(db, adapter, key, Number(row.id), Number(row.prev_id));
       if (!plan.revive.length && !plan.retire.length && !plan.refused.length) continue;
       entries.push({ mode: 'restore', id: Number(row.id), source_id: row.source_id, owner_key: row.owner_key, generation: Number(row.generation),
         restore_to: Number(row.prev_generation), restore_to_id: Number(row.prev_id), revive: plan.revive, retire: plan.retire, refused: plan.refused });
@@ -301,6 +303,12 @@ async function applyEntry(ctx: OperationContext, adapter: GenerationAdapter<unkn
     const outcome = await publishGeneration(ctx.engine, adapter, { key, items: row.proposal, runId: `release:${approved.hold_id}`, release: { holdId: approved.hold_id, reason: approved.reason } });
     if (outcome.state === 'held') return { applied: false, outcome: 'refused', reason: `${approved.owner_key}: still held (${outcome.reason})` };
     return { applied: true, outcome: 'released', detail: { generation: outcome.generation, ...(outcome.state === 'published' ? { retired: outcome.retired.length } : {}) } };
+  }
+  if (adapter.fence) {
+    const restored = await applyFenceRestore(ctx, key, approved);
+    if (restored === 'changed') return changed('the live generation, its fence or the page changed since the preview');
+    if (Array.isArray(restored)) return { applied: false, outcome: 'refused', reason: restored.join(', ') };
+    return { applied: true, outcome: 'restored', detail: { restore_of: approved.restore_to, revived: approved.revive.length, retired: approved.retire.length } };
   }
   let restored: Awaited<ReturnType<typeof restoreGeneration>>;
   if (await managedPersistenceEnabled(ctx.engine)) {

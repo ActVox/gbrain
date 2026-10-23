@@ -100,6 +100,10 @@ export interface SyncClassified {
   pending?: 'keep_db';
   /** #6712 PR 4b: a write `sync.admission` pauses (`paused_keep_db`, §8). */
   paused?: 'keep_db';
+  /** GBRA-133 (sync-held-deletions.ts): a held committed deletion `sync.apply_held_deletions` proved, deleted with this receipt. */
+  heldDeletion?: { commit: string; blob_oid: string };
+  /** GBRA-133: why that proof refused this held deletion; its hold records it at the page's revision. */
+  heldDeletionRefused?: string;
 }
 
 const CLEAN = new Set<SyncDirtiness | null>(['clean', 'clean_eol', 'clean_lfs']);

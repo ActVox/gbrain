@@ -18,6 +18,7 @@ import { policyHash, readGenerationsConfig, type GenerationsConfig } from './con
 import type { DerivedRetiredBy } from '../persistence/derived-retirement-hold.ts';
 import type { GenerationAdapter, GenerationKey, HeldReason, InputState, ItemRow, Preimage, ProposedItem } from './contract.ts';
 import { planGeneration, type LiveGeneration, type Plan } from './plan.ts';
+import type { WriteTrust } from '../trust/tier.ts';
 import { proofHolds, type EmptySourceProof } from './proofs.ts';
 
 /** The largest held proposal the ledger keeps (UTF-8 bytes of its JSON); a larger one is held without a releasable copy. */
@@ -46,6 +47,8 @@ export interface PublishRequest<C = unknown> {
   locator?: string;
   /** Recorded on the generation's completeness evidence (synthesis: the earlier outputs it left live, for the cleanup listing). */
   note?: Record<string, unknown>;
+  /** The write trust of a derived item (single-page kinds): the activation transaction is attributed at this tier. */
+  trust?: WriteTrust;
 }
 
 export type PublishOutcome =
@@ -103,13 +106,15 @@ export async function activateGeneration(tx: BrainEngine, key: GenerationKey, li
       JSON.stringify(row.completeness), row.setHash, row.restoreOf ?? null, row.activationId ?? null, row.locator ?? live?.locator ?? null]);
   const id = Number(created!.id);
   if (live) await tx.executeRaw('UPDATE derived_generations SET superseded_by=$1 WHERE id=$2', [id, live.id]);
-  for (const item of items) {
+  if (items.length) {
     await tx.executeRaw(`INSERT INTO derived_generation_items (generation_id, item_key, identity_hash, action, preimage, preimage_bytes, pending)
-      VALUES ($1,$2,$3,$4,$5::text::jsonb,$6,$7)`,
-      [id, item.key, item.identityHash, item.action, item.preimage?.json ? JSON.stringify(item.preimage.json) : null, item.preimage?.bytes ?? null, item.pending === true]);
+      SELECT $1, i.item_key, i.identity_hash, i.action, i.preimage, i.preimage_bytes, i.pending
+      FROM jsonb_to_recordset($2::text::jsonb) AS i(item_key text, identity_hash text, action text, preimage jsonb, preimage_bytes integer, pending boolean)`,
+      [id, JSON.stringify(items.map(item => ({ item_key: item.key, identity_hash: item.identityHash, action: item.action, preimage: item.preimage?.json ?? null,
+        preimage_bytes: item.preimage?.bytes ?? null, pending: item.pending === true })))]);
   }
-  await tx.executeRaw(`DELETE FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='held'`, [key.sourceId, key.kind, key.ownerKey]);
-  await tx.executeRaw('DELETE FROM derived_generation_attempts WHERE source_id=$1 AND kind=$2 AND owner_key=$3', [key.sourceId, key.kind, key.ownerKey]);
+  await tx.executeRaw(`WITH held AS (DELETE FROM derived_generations WHERE source_id=$1 AND kind=$2 AND owner_key=$3 AND state='held' RETURNING 1)
+    DELETE FROM derived_generation_attempts WHERE source_id=$1 AND kind=$2 AND owner_key=$3`, [key.sourceId, key.kind, key.ownerKey]);
   return { id, generation };
 }
 
@@ -283,7 +288,7 @@ export async function publishGeneration<C>(engine: BrainEngine, adapter: Generat
       if (plan.retires.length) await bumpValve(tx, key, request.runId, plan.retires.length);
       return { state: 'published', generationId: activated.id, generation: activated.generation, puts: plan.puts.map(item => item.key), kept: plan.kept,
         adopted: plan.adopted, retired: plan.retires, protected: plan.protectedKeys } satisfies PublishOutcome;
-    });
+    }, request.trust);
     if (outcome.state === 'published') await faultPoint('generation:activated', { sourceId: key.sourceId, operation: key.kind });
     return outcome;
   } catch (error) {
