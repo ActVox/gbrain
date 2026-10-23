@@ -80,5 +80,7 @@ describe('the TLA+ workflow runs when anything a mutant names changes', () => {
     const { mutants } = JSON.parse(readFileSync(join(SPEC, 'mutants.json'), 'utf8')) as { mutants: Array<{ code?: { edits: Array<{ file: string }>; tests: Array<{ test: string }> } }> };
     const named = new Set(mutants.flatMap(m => m.code ? [...m.code.edits.map(e => e.file), ...m.code.tests.map(t => t.test)] : []));
     expect([...named].filter(file => !paths.has(file)), 'add these to on.pull_request.paths in .github/workflows/tla-spec.yml').toEqual([]);
+    const list = (from: string, to: string) => [...workflow.slice(workflow.indexOf(from), workflow.indexOf(to)).matchAll(/^\s+- '([^']+)'$/gm)].map(m => m[1]);
+    expect(list('  push:', '  schedule:'), 'on.push.paths must repeat on.pull_request.paths exactly').toEqual(list('  pull_request:', '  push:'));
   });
 });

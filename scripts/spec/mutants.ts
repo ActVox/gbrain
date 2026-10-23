@@ -108,10 +108,10 @@ interface TestRun { outcome: 'passed' | 'assertion' | 'broken'; why: string; log
 function bunTest(cwd: string, t: CodeTest, log: string): TestRun {
   const junit = log.replace(/[.]log$/, '.xml');
   rmSync(junit, { force: true });
-  const r = spawnSync('bun', ['test', '--timeout=300000', '--reporter=junit', `--reporter-outfile=${junit}`, t.test, '-t', t.filter],
-    { cwd, encoding: 'utf8', env: process.env, timeout: 600_000 });
+  const argv = ['test', '--timeout=300000', '--reporter=junit', `--reporter-outfile=${junit}`, t.test, '-t', t.filter];
+  const r = spawnSync('bun', argv, { cwd, encoding: 'utf8', env: process.env, timeout: 600_000 });
   const text = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  writeFileSync(log, `$ bun test ${t.test} -t ${JSON.stringify(t.filter)}\nexit ${r.status} signal ${r.signal} error ${r.error?.message ?? 'none'}\n\n${text}`);
+  writeFileSync(log, `$ bun ${argv.map(a => JSON.stringify(a)).join(' ')}\nexit ${r.status} signal ${r.signal} error ${r.error?.message ?? 'none'}\n\n${text}`);
   const broken = (why: string): TestRun => ({ outcome: 'broken', why, log });
   if (r.error) return broken(`bun did not run (${(r.error as NodeJS.ErrnoException).code ?? r.error.message})`);
   if (r.signal) return broken(`bun was terminated by ${r.signal}`);

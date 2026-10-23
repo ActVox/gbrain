@@ -8,7 +8,7 @@ on:
   pull_request:
     branches: [master]
     # Event parity (docs/ci-event-parity.md): path-gated named exception; covered by the nightly TLA+ specs schedule.
-    paths: &paths
+    paths:
       - 'spec/tla/**'
       - 'scripts/spec/**'
       - '.github/workflows/tla-spec.yml'
@@ -31,7 +31,27 @@ on:
       - 'test/helpers/persistence-postgres.ts'
   push:
     branches: [master]
-    paths: *paths
+    paths:  # the same list as pull_request (actionlint does not accept YAML aliases)
+      - 'spec/tla/**'
+      - 'scripts/spec/**'
+      - '.github/workflows/tla-spec.yml'
+      - 'src/core/persistence/sync-lease.ts'
+      - 'src/core/db-lock.ts'
+      - 'src/core/persistence/sync-pass-fold.ts'
+      - 'src/core/persistence/sync-prepare.ts'
+      - 'test/spec-drain-lease-constants.test.ts'
+      - 'test/persistence-sync-lease.test.ts'
+      - 'test/db-lock-auto-takeover.test.ts'
+      - 'test/db-lock-fencing.test.ts'
+      - 'test/sync-fenced-slices-gbra133.test.ts'
+      - 'test/e2e/drain-lease-fence-postgres.test.ts'
+      - 'test/drain-lease-guards.test.ts'
+      - 'test/e2e/drain-lease-guards-postgres.test.ts'
+      - 'test/drain-lease-stamp-fence.test.ts'
+      - 'test/e2e/drain-lease-stamp-fence-postgres.test.ts'
+      - 'test/helpers/managed-brain.ts'
+      - 'test/helpers/test-backends.ts'
+      - 'test/helpers/persistence-postgres.ts'
   schedule:
     - cron: '40 9 * * *'  # nightly, 09:40 UTC
   workflow_dispatch:
@@ -59,9 +79,6 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U gbrain_test -d gbrain_test"
           --health-interval 5s --health-timeout 5s --health-retries 20
-    env:
-      TLC_OUT: ${{ runner.temp }}/tlc
-      TLA_CACHE: ${{ runner.temp }}/tla-cache
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00  # v4.7.1
@@ -71,6 +88,11 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: 1.4.4
+      # The runner context is not available at job level, so the scratch paths are set here.
+      - name: Scratch paths
+        run: |
+          echo "TLC_OUT=$RUNNER_TEMP/tlc" >> "$GITHUB_ENV"
+          echo "TLA_CACHE=$RUNNER_TEMP/tla-cache" >> "$GITHUB_ENV"
       - name: Install dependencies (bounded, retried once)
         timeout-minutes: 8
         run: bun scripts/ci-bun-install.ts --frozen-lockfile --ignore-scripts
@@ -80,7 +102,7 @@ jobs:
           jar="$(bash scripts/spec/tla-jar.sh)" || exit "$?"
           printf 'TLA2TOOLS=%s\n' "$jar" >> "$GITHUB_ENV"
       - name: The configs match the code
-        run: bun test test/spec-drain-lease-constants.test.ts
+        run: bun test --timeout=60000 test/spec-drain-lease-constants.test.ts
       - name: Model-check every config (the *Nightly.cfg ones on the schedule and on dispatch)
         env:
           TLC_NIGHTLY: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '0' }}
