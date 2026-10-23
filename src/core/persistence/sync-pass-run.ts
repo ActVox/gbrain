@@ -175,6 +175,8 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
   const discovery = { root: level.root, gitRoot: level.gitRoot, target: level.head, sourceId: level.sourceId } as SyncDiscovery;
   const named = (entry: ShadowPath): SyncEntry => ({ ...entryPaths(level, entry.path), action: 'import', working: working(entry) });
   if (adopting.length) {
+    // A batch-wide read runs on this thread under PGLite (at 8k new files, about as long as the loops' budget): it starts a stretch of its own.
+    await step.pause();
     const identities = await engine.executeRaw<LegacyIdentity>("SELECT id, slug, source_path, deleted_at, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND (source_path IS NULL OR slug=ANY($2::text[]))",
       [level.sourceId, [...new Set(adopting.map(entry => slugOf.get(entry.path)!))]]);
     const bySlug = new Map(identities.map(page => [page.slug, page]));
@@ -186,6 +188,7 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     }
   }
   const slugs = [...new Set([...slugOf.values()].filter(Boolean))];
+  if (slugs.length) await step.pause();
   const holders = new Map((slugs.length ? await engine.executeRaw<{ id: number | string; slug: string; source_path: string | null; revision: string; deleted: boolean; unbound: boolean; fm_id: string | null }>(
     `SELECT id, slug, source_path, knowledge_revision::text AS revision, deleted_at IS NOT NULL AS deleted, ${databaseOnlyPageSql('pages')} AS unbound, frontmatter->>'id' AS fm_id FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])`, [level.sourceId, slugs]) : [])
     .map(page => [page.slug, page]));
@@ -283,7 +286,10 @@ async function batchEntries(engine: BrainEngine, level: ShadowLevel, deletes: Sh
     }
     entries.push({ ...base, pageId: null, revision: null });
   }
-  return { entries: [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))], collisions, skipped, downgrades, identity };
+  const batch = [...deleteEntries.values(), ...entries.sort((a, b) => a.path.localeCompare(b.path))];
+  // The drain freezes the batch's first entry (and reads its blob window) right after: it starts on a turn of its own too.
+  await step.pause();
+  return { entries: batch, collisions, skipped, downgrades, identity };
 }
 
 /**
