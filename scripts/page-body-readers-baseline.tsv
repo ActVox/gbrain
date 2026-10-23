@@ -473,6 +473,7 @@ src/core/repair/duplicate-facts.ts	strikeFencedCopies	call:serializePageToMarkdo
 src/core/repair/duplicate-facts.ts	strikeFencedCopies	field	INLINE	inline pages only: a segmented page returns before the read, and its fenced copies stay active (listed as segmented_page)
 src/core/repair/extractor-facts.ts	restorePageFacts	field	STREAM	
 src/core/repair/extractor-facts.ts	restorePageFacts	sql	STREAM	
+src/core/repair/fact-claim-dates.ts	movePage	call:serializePageToMarkdown	SEGW	refuses a segmented page: the plan lists it segmented_page and movePage keeps one as changed_since_preview
 src/core/repair/fences.ts	afterBytes	field	STREAM	
 src/core/repair/fences.ts	fencesRepair	field	STREAM	
 src/core/repair/frontmatter.ts	analyzeFile	field	LEAD	
@@ -500,6 +501,9 @@ src/core/repair/take-supersession.ts	readPage	call:serializePageToMarkdown	SEGW
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	call:serializePageToMarkdown	SEGW	
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	field	STREAM	
 src/core/repair/timeline-comments.ts	timelineCommentsRepair	sql	STREAM	
+src/core/repair/timeline-order.ts	plannedChange	call:serializePageToMarkdown	SEGW	
+src/core/repair/timeline-order.ts	plannedChange	field	SEGW	
+src/core/repair/timeline-order.ts	scan	sql	SEGW	SQL exclusion: body_storage='inline' only; segmented pages carrying timeline rows are counted (segmentedTimelinePages) and named in a warning
 src/core/repair/timeline.ts	classifyTimelinePage	field	STREAM	
 src/core/repair/timeline.ts	recountTimelinePages	sql	STREAM	
 src/core/repair/timeline.ts	removedRowIds	field	STREAM	
@@ -552,6 +556,7 @@ src/core/timeline-extract.ts	retractCoordinated	sql	STREAM
 src/core/timeline-extract.ts	retractRemovedTimelineEntries	field	STREAM	
 src/core/timeline-extract.ts	retractRemovedTimelineEntries	sql	STREAM	
 src/core/timeline-extract.ts	retractStoredPage	field	STREAM	
+src/core/timeline-order.ts	orderTimeline	field	SEGW	pure text core; its only caller (repair/timeline-order.ts) passes inline pages
 src/core/timeline-write-through.ts	writeTimelineEntryThrough	field	SEGW	assertInlineBody before the file or row is touched
 src/core/timeline-write-through.ts	writeTimelineEntryThrough	sql	SEGW	assertInlineBody before the file or row is touched
 src/core/transcripts/recover.ts	userlessCodexSessions	sql	STREAM	
@@ -621,3 +626,10 @@ src/core/generations/adapters/atoms.ts	atomGenerationAdapter	sql	META	input size
 src/core/generations/repair.ts	releaseManaged	field	INLINE	assertInlineBody refuses a segmented origin page before the managed release reads its body to bind the origin
 src/core/search/exact-scan.ts	buildExactBatchStatement	sql	META	#7191: octet_length of the body columns (stored size, never the body) decides an unreadable page
 src/core/cycle/synthesize-generations.ts	pages	sql	INLINE	reads the synthesis outputs of one re-synthesized transcript for the predecessor coverage match (generations/synthesis-coverage.ts); segmented pages are excluded in SQL, so a segmented earlier output is never compared and stays live as an unreadable unmatched predecessor
+src/core/cycle/extract-facts.ts	expireDeletedPageFacts	sql	INLINE	reads the deleted page's stored fence through readFenceBlocks, which reads a segmented page as segmented: no fence proof, so its rows expire only when a live generation recorded them (GBRA-161 PR 2)
+src/core/generations/fence-restore.ts	planFenceRestore	call:serializePageToMarkdown	INLINE	a segmented page is refused segmented_unsupported before the page is serialized for the guarded restore write
+src/core/generations/fence-restore.ts	planFenceRestore	field	INLINE	a segmented page is refused segmented_unsupported before its fence blocks are read
+src/core/generations/fence.ts	readFenceBlocks	field	INLINE	a segmented page reads segmented (held fence_absent) before any body field is read
+src/core/generations/fence.ts	fenceReadOf	field	NONE	reads the fence block strings already read whole (inline, or from the marker segments of a segmented page), never a stored page body
+src/core/generations/fence.ts	fenceInput	field	NONE	reads the fence block strings of a FenceRead (already parsed), never a stored page body
+src/core/generations/fence.ts	storedBlocks	field	NONE	reads the fence block strings of a FenceRead (already parsed), never a stored page body

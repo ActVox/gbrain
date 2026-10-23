@@ -10,29 +10,96 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.400.0] - 2026-10-23
+## [0.60.402.0] - 2026-10-23
 
-**A Windows backup whose PowerShell starts too slowly now says so instead of blaming the destination's permissions, and a post-compaction SessionStart whose serve did not answer in time now says so in its heartbeat.** Three CI flakes behind these are fixed without loosening any bound, and the nightly race hunt runs every file again.
+**Facts and takes publish through the generation primitive: a page whose `## Facts` or takes section went missing keeps its rows and is held for the owner to decide, instead of having every fact closed (GBRA-161 PR 2).** A fact or take fence that was absent, unread or only partly read used to count as an empty result, so an edit that lost the section, or a segmented page read in pieces, retired every row on the page.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| Windows backup: PowerShell 5.1 does not start within the protection step's 15 s (a cold machine's first starts) | refused with `private_backup_path_unavailable`: "this destination's permissions prevented…", which pointed at the wrong cause | refused with `private_backup_protection_timeout`: PowerShell did not start in time, run the backup again; a real ACL refusal still reports `private_backup_path_unavailable` |
-| SessionStart's context pack when a live serve answers nothing within the 1 s client timeout | no pack, heartbeat `ok` with no reason | no pack, heartbeat `degraded` / `ipc_unavailable`, as the user-prompt and compact hooks already report; no serve at all still reads `ok` |
-| CI: Windows security-regressions backup round trip | PowerShell 5.1 was still cold when the test ran (46 s: both bounds expired) | the job starts Windows PowerShell once before the backup steps; the cold path is covered by a simulated 50 s cold start |
-| CI: bootstrap-hook-under-serve in the serial pool | three pooled neighbours could starve the real serve past the hook's 1 s IPC timeout (Pin 3b at 1,008 ms) | runs on the sequential exclusive lane; the exclusive cap is 4 |
-| Nightly race hunt when 3 iterations of every Postgres arm no longer fit 12 shards of 55 minutes | the files past the budget did not run and the job failed "race hunt over budget" (17 files on 2026-10-23) | every file runs 3 iterations in up to 24 shards; the second 12 queue behind the first, so concurrency stays at 12 |
-| CI: a loop-lag bound that fails | printed only the reading | also prints the worst stretch's wall time and the thread's schedstat (time on a CPU, time runnable waiting) |
+| A fully read `## Facts` or takes fence has fewer rows (10→9, 10→1, 10→0) | published | still publishes, as a complete result at any count; an empty fence is the proof that retires every row |
+| A page's fence is absent, unread, or segmented and not read whole | every fact or take on the page was closed | nothing retires; the generation is held `fence_absent` and listed by doctor `generation_held`, `gbrain sync status` (`fence_holds`) and `get_page` (`fence_held`), with a fix that asks the owner first |
+| A page is deleted | its facts expired | they expire only with `originGone` proof |
+| Consolidation closes a strict chain | no before-state was kept | before-state is recorded, so restore reopens it; a tie holds |
+| A fence restore | n/a | transplants only the approved fence block into the current page and refuses overlapping edits; the body, timeline, tags and the other fence survive |
+| A purge of a generation | left recorded fence text on the ledger | also scrubs the fence blocks the generation recorded |
+
+### What to watch for after you upgrade
+
+- No migration, and nothing runs on upgrade.
+- A page held `fence_absent` keeps its rows until the owner chooses: restore the section to keep them, or write the empty fence block the fix prints to retire them (`get_page` with `include_content: true` and `put_page` with `expected_revision` for a page with no file). `edit_page` refuses to write fence markers.
+- `deleteFactsForPage`, `expireFact` and `insertFacts({ deleteForPageFirst })` are deprecated and guarded.
 
 ### Itemized changes
 
-- `src/core/backup/private-path.ts`: a protection launch killed at its bound throws `private_backup_protection_timeout` (`test/backup-powershell-warmup.serial.test.ts`: the simulator keeps a virtual cold-start clock, so a warm-up killed at 30 s leaves the next launch cold).
-- `src/core/context/session-start-pack.ts`, `src/commands/hook.ts`: `ipcUnavailable` when a secret exists but the round trip failed (`test/hook-session-start-serve-wait.serial.test.ts`).
-- `scripts/run-serial-tests.sh`, `scripts/serial-files.tsv`, `test/scripts/serial-files.test.ts`: bootstrap-hook-under-serve joins `EXCLUSIVE_FILES`; the growth guard allows 4.
-- `.github/workflows/test.yml`: Windows PowerShell start step in security-regressions.
-- `scripts/stress/gate.ts`: `RACE_FLOOR_MAX_SHARDS` (24) packs the 3-iteration floor shard by shard; the race-hunt report reads every page of the run's jobs, so its shard count and runner-minutes are no longer 0 on a run with more than 100 jobs. `scripts/stress/iteration-weights.json`: measured iterations for the 456 files that ran on 2026-10-23.
-- `test/helpers/cpu-time.ts`: `watchLoopLag({ reportAtMs })`; the five yield-bound tests pass their bound.
+- `src/core/generations/adapters/fact-rows.ts` and `take-rows.ts`: fence and consolidation adapters; canonical kinds have no shrink floor.
+- `publishExtractedFacts` in `src/core/generations/adapters/extracted-facts.ts` for the conversation lane and the backstop: only a `whole_body` result can retire, an empty one is held `no_proof`, and a fact attributed to the assistant or a third party is stored with no entity and listed in `detached`.
+- The managed-import statement budgets rise by 5 per engine (81 on PGLite, 79 on Postgres), with the reason next to each constant.
+- Tests on PGLite and Postgres, red on the base where they cover a bug: the absent fence, a deleted page expiring only with `originGone`, #6023 tie and strict-chain restore, the canonical 10→9/1/0 edits, the `fence_absent` surfaces, fence restore preserving unrelated content and the non-user fact rule. The three new g2 Postgres arms run through `test/e2e/` `registerPostgresTests` wrappers, not `test/postgres-unit-arms.txt`.
+
+## [0.60.401.0] - 2026-10-23
+
+**Sync no longer turns a folder of hub `index.md` files with their own `slug:` line into one hold per file (#7341), an agreed reconcile clears a stalled write's hold (#7364), and a new switch, off by default, lets sync apply a held deletion it can prove.** Since 0.60.337.0, sync imports a nested `index.md` or `README.md` that has `type:` or `title:`. If that file's frontmatter `slug:` named another page (its folder, or just its leaf name), the import could only hold it as `frontmatter_slug_conflict`, so a folder of generated hubs produced hundreds of holds. Those files are scaffolding again, and the next sync releases their holds.
+
+### How to use it
+
+```bash
+gbrain sync --source <id>                                   # releases the #7341 holds; nothing else to run
+gbrain sources reconcile --source <id> --apply              # also clears a stalled write's hold once page and file agree
+gbrain sources retry-held <id> --dry-run --json             # hold_rows: the exact hold row each refusal reads
+gbrain config set sync.apply_held_deletions true            # opt in (off by default); per source: sync.apply_held_deletions.source.<id>
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `dir/x/index.md` with `type:` and `slug: x` or `slug: dir/x` | imported, then held `frontmatter_slug_conflict` | skipped as scaffolding, as before 0.60.337.0; an existing hold is released by the next sync |
+| A `preparation_stalled` or `write_interrupted` hold whose page and file agree after `sources reconcile --apply` | stayed until it ran out of retries | cleared by the reconcile |
+| A write refused because sync holds its file | named the hold code only | also names the hold row (source and incarnation, and locally the fingerprint) |
+| A held deletion of a file a commit removed, where the page equals the file's last committed bytes | held until `gbrain repair file-drift --held --provenance deleted_by_commit` | unchanged by default; with `sync.apply_held_deletions true`, sync soft-deletes it with a receipt |
+
+### What to watch for after you upgrade
+
+- `sync.apply_held_deletions` is off by default, so nothing deletes on upgrade. When it is on, sync deletes a held page only when the file's provenance is `deleted_by_commit`, the page equals the file's last committed blob, and the page's revision is file-backed (a page written in the database after the file is kept). Each deletion is an ordinary sync soft delete: restorable within the purge window, counted by `sync.max_deletes` and the mass-delete valve, and its write request carries `heldDeletion` (commit and blob). A refused page stays held, and `meta.held_deletion.refused` says why.
+- To make a skipped hub a page, remove its `slug:` line.
+
+## [0.60.400.0] - 2026-10-23
+
+**Facts that a bulk import dated with the day it ran can now take the date their claim states, and out-of-order timelines can be put back in date order (#7247).** A bulk import that stamps the day it ran onto every fact makes hundreds of facts look like they all happened that day, so timelines and "as of" questions put them on one date. Doctor now spots those days, and an explicit repair moves each such fact to the one date its claim states. A second explicit repair fixes timelines that imports or hand edits left out of date order, with a copied bullet or a second timeline section.
+
+### How to use it
+
+```bash
+gbrain doctor --only fact_bulk_dates                                      # the loaded days per source
+gbrain repair fact-claim-dates --source <id>                              # preview
+gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes
+gbrain repair timeline-order --source <id> [--slug <slug>]...             # preview
+gbrain repair timeline-order --source <id> --apply --expect <hash> --yes
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| One day holds 200 or more of a source's active facts, at least a quarter of them, across 20 or more entities | nothing reported it | doctor `fact_bulk_dates` warns with the day, its fact and entity counts and how many claims state one earlier date |
+| A fact on such a day whose claim states exactly one earlier date ("closed a seed round on 2025-03-14") | kept the load day | `gbrain repair fact-claim-dates` moves it to that date, in the page's facts table and the database |
+| A fact on such a day with no date, several dates or a later one | kept the load day | still keeps it, and the preview counts it |
+| A timeline with bullets out of date order, an exact copy of a bullet, or a second `## Timeline` section | stayed that way | `gbrain repair timeline-order` sorts the bullets in the direction the page uses, drops the later exact copy and joins the sections |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade. Both repairs run only when named, preview first, and apply exactly the previewed set (`--apply --expect <hash> --yes`). They refuse `preview_changed` when anything moved since the preview.
+- Pages are rewritten through revision-bound `put_page`. On a managed brain, `git revert` of the repair commit undoes it.
+- A page that `timeline-order` cannot safely rearrange is listed as `needs_human` and kept. Near-duplicate bullets are only counted.
+
+### Itemized changes
+
+- `src/commands/doctor/checks/fact-bulk-dates.ts` and `src/core/facts/bulk-days.ts`: the `fact_bulk_dates` check and the shared `findBulkFactDays` rule.
+- `src/core/repair/fact-claim-dates.ts`: the `fact-claim-dates` repair kind (`--day` names a loaded day the rule does not detect).
+- `src/core/timeline-order.ts` and `src/core/repair/timeline-order.ts`: the `timeline-order` repair kind (`--slug` limits it to named pages).
+- Tests: `test/repair-fact-claim-dates-7247.test.ts`, `test/repair-timeline-order.test.ts`, `test/timeline-order.test.ts`; Postgres arms through `test/e2e/` `registerPostgresTests` wrappers.
 
 ## [0.60.399.0] - 2026-10-23
 

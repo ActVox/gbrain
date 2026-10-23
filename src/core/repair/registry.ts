@@ -36,6 +36,7 @@ import { currentCliWriteWait } from '../persistence/write-wait.ts';
 import { REPAIR_KINDS, runRepair, type RepairHandler, type RepairKind, type RepairResult, type RepairScope } from './core.ts';
 import { timelineRepair } from './timeline.ts';
 import { timelineCommentsRepair } from './timeline-comments.ts';
+import { timelineOrderRepair } from './timeline-order.ts';
 import { visibilityRepair } from './visibility.ts';
 import { safeChunksRepair } from './safe-chunks.ts';
 import { contextualModeRepair } from './contextual-mode.ts';
@@ -82,6 +83,7 @@ import { missingTablesRepair } from './missing-tables.ts';
 import { urlCloneFencesRepair } from './url-clone-fences.ts';
 import { segmentedMirrorRepair } from './segmented-mirror.ts';
 import { uncommittedDeletionsRepair, UNCOMMITTED_DELETIONS_CONSENT_TEXT } from './uncommitted-deletions.ts';
+import { factClaimDatesRepair } from './fact-claim-dates.ts';
 import { generationsRepair, generationsSelectionArgv, type GenerationsSelection } from '../generations/repair.ts';
 import { restoreDaysHint } from '../generations/config.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
@@ -325,6 +327,21 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     summary: 'Clean timeline rows filed from adjacent HTML comments (#6184): drop the materialized bullets that copied a section END marker into the page, '
       + 'delete rows that are only comment markup, and strip the markup from the rest. Each page whose bullets change is re-embedded by its publication.',
   },
+  'timeline-order': {
+    handler: timelineOrderRepair, embeds: 'effect', checks: [], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: 'Rewrite the previewed pages so each timeline is in date order, without exact duplicate bullets, in one section',
+      why: 'The preview listed each page whose timeline bullets are out of date order, repeat a bullet exactly, or sit in more than one timeline section, with the page revision it read.',
+      risk: 'Only timeline bullets move; a later exact copy of a bullet is dropped and a later timeline section\'s bullets join the first. No other text changes and no timeline row is added or removed. A page that changed since the preview refuses the apply (preview_changed). Managed sources commit the file through the Git effect; undo with git revert or gbrain revert.',
+      user_message: 'Put the previewed timelines in date order? Exact duplicate bullets are dropped and split timeline sections are joined',
+    },
+    summary: 'Put existing timelines back in date order (#7247): bulk imports and hand edits appended - **YYYY-MM-DD** | bullets at the end, '
+      + 'copied one twice, or started a second ## Timeline section. Bullets move with their indented lines in the direction the page already uses '
+      + '(ascending unless mostly descending), stable for equal dates; prose, sub-headings and comments stay where they are. Exact duplicates in one '
+      + 'run keep the first copy; near duplicates are only counted. Later timeline sections join the first one only when nothing but bullets moves. A '
+      + 'page with a line the parser cannot place, or that would not read back with the same text and timeline rows, is listed needs_human. --slug '
+      + '<slug> narrows. Preview-bound: --apply --expect <hash> --yes rewrites exactly the previewed pages through revision-bound put_page; runs only when named.',
+  },
   fences: {
     handler: fencesRepair, embeds: 'effect', checks: ['fence_integrity'], preview_bound: true, spends: 'llm',
     summary: 'Repair malformed facts and takes fences (#6188) that sync held or that pages store: per file or page the free tiers first (the lossless '
@@ -522,6 +539,22 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'never deletes it again. Pages already purged cannot be restored by this command; only a backup (pg_dump, or gbrain backup create) can bring them back. '
       + 'Runs only when named; never on upgrade.',
   },
+  'fact-claim-dates': {
+    handler: factClaimDatesRepair, embeds: 'effect', checks: ['fact_bulk_dates'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: 'Set the valid_from of the previewed facts to the date each one\'s claim states',
+      why: 'The preview listed each facts fence row and database-only fact dated with the day a bulk load ran whose claim states exactly one earlier date; that date replaces the load day.',
+      risk: 'Only the listed valid_from cells change; every other row and page stays as it is. Page edits publish through revision-bound put_page (a managed brain commits the file, so git revert undoes it; page history keeps the earlier revision). A page that changed since the preview is skipped.',
+      user_message: 'Move the previewed facts to the date their claim states? Only their valid_from changes',
+    },
+    summary: 'Give facts that a bulk load dated with the day it ran the date their claim states (#7247). Needs --source; --day YYYY-MM-DD names the '
+      + 'loaded day instead of the days doctor fact_bulk_dates detects (200+ active facts, 25%+ of the source, 20+ entities on one UTC day). Candidates '
+      + 'are active facts of that day whose claim holds exactly one ISO date, a real date from 1900 to the day before; facts with none, several or one out '
+      + 'of range are counted and kept. A fence row\'s valid_from cell is rewritten and the page published through revision-bound put_page, so the facts '
+      + 'row follows the file; a database-only fact is updated directly on an unmanaged brain and counted database_only_managed on a managed one. '
+      + 'Preview-bound and destructive: --apply --expect <hash> --yes recomputes the plan (preview_changed when it differs) and moves exactly the '
+      + 'previewed rows. Runs only when named; never on upgrade.',
+  },
   'generations': {
     handler: generationsRepair, embeds: 'effect', checks: ['generation_retirements', 'generation_held', 'generation_pending'], explicit_only: true, preview_bound: true, consent: 'destructive',
     consentText: {
@@ -623,16 +656,16 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
     async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; includeCrossEntity?: boolean; only?: string[]; skip?: string[];
       slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number; stop?: AbortSignal; recordDatabaseStops?: boolean;
       prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string; held?: boolean; side?: string; state?: string; provenance?: string; cursor?: string; progress?: ProgressReporter;
-      keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean; afterPage?: number; generations?: GenerationsSelection } = {}): Promise<RepairResult> {
+      keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean; afterPage?: number; generations?: GenerationsSelection; day?: string } = {}): Promise<RepairResult> {
       const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0], writeWaitMs } as OperationContext;
       const spec = repairSpec(kind, opts.registry);
       return runRepair(ctx, spec.handler, scope, { apply: opts.apply, limit: run.limit, embeddingModel, sourceFlag: run.sourceFlag, spec,
         embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: [...(opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : []),
           ...(run.olderThan ? ['--older-than', run.olderThan] : []), ...(run.includeFailures ? ['--include-failures'] : []), ...(run.force ? ['--force'] : []),
-          ...(run.afterPage !== undefined ? ['--after', String(run.afterPage)] : []), ...(run.generations ? generationsSelectionArgv(run.generations) : [])],
+          ...(run.afterPage !== undefined ? ['--after', String(run.afterPage)] : []), ...(run.generations ? generationsSelectionArgv(run.generations) : []), ...(run.day ? ['--day', run.day] : [])],
         explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous, includeCrossEntity: run.includeCrossEntity, only: run.only, skip: run.skip, slugs: run.slugs, noLlm: run.noLlm,
         maxLlmUsd: run.maxLlmUsd, deadline: run.deadline, ...(run.stop ? { stop: run.stop } : {}), ...(run.recordDatabaseStops ? { recordDatabaseStops: true } : {}), prefer: run.prefer, requests: run.requests, allDrifted: run.allDrifted, driftClass: run.driftClass, since: run.since,
-        held: run.held, side: run.side, state: run.state, provenance: run.provenance, cursor: run.cursor, progress: run.progress, keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force, from: run.from, close: run.close, afterPage: run.afterPage, generations: run.generations });
+        held: run.held, side: run.side, state: run.state, provenance: run.provenance, cursor: run.cursor, progress: run.progress, keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force, from: run.from, close: run.close, afterPage: run.afterPage, generations: run.generations, day: run.day });
     },
   };
 }

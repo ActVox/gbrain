@@ -54,6 +54,34 @@ Adapters (`contract.ts`) own one kind each: `adapters/atoms.ts` (atoms, one key 
 release. An atom's identity leaves out the provenance a managed writer stamps (`source_kind`, `ingested_via`,
 `ingested_at`, `trust_tier` and the other content-hash ephemeral keys), so a managed write never reads as an edit.
 
+### Facts and takes (PR 2)
+
+A page's `## Facts` and takes fences are canonical, so their kinds (`fact_fence`, `take_fence`, one key `page:<slug>`
+each, `generations/fence.ts`) have no shrink floor, valve or item cap: a fence read whole and valid is complete whatever
+its row count, and an empty one retires every row (`fenceParsedEmpty`). Every writer that would retire fence rows (the
+page publication's projection, `extract_facts`, `gbrain extract takes`) calls `publishFenceGeneration` in its own
+transaction, under the page key, before it writes. A fence that is absent, unread or on a segmented page holds
+(`fence_absent`): nothing retires, and doctor `generation_held`, `gbrain sync status` (`fence_holds`) and
+`get_page` (`fence_held`) list the page with an `ask_user` fix naming both outcomes (restore the section to keep the
+rows, or write the exact empty fence it prints to retire them; never a default). The rows of a deleted page expire only
+on `originGone`: the page is gone under its key and the rows came from a fence (a live generation, or a fence in the
+deleted page's stored body); otherwise they are held `no_proof`. Each retired or replaced row's before-state is on the
+ledger. A fence restore (`fence-restore.ts`) writes the earlier generation's fence block into the page as it is now
+through a guarded `put_page` bound to its revision, leaving the body, timeline, tags and the other fence alone, and
+refuses a fence edited since (`edited_since`, `section_moved`).
+
+The dream consolidate phase records each cluster (`consolidation`, key `entity:<slug>:cluster:<ids>`,
+`adapters/fact-rows.ts`): a strict chain records each member's `valid_until`, `consolidated_at` and
+`consolidated_into` before it closes them (unmanaged and managed), a same-instant tie (#6023) is held `tie` with nothing
+written, and `--mode restore` reopens a chain, which the phase then leaves open.
+
+Model-extracted facts publish through `publishExtractedFacts` (`adapters/extracted-facts.ts`, kind `extracted_facts`,
+key `page:<slug>:<writer>`), the path the conversation lane and the facts backstop move onto: a `whole_body` result
+retires what it dropped under the model floor and valve, an `appended_range` result is additive, and an
+assistant-attributed or third-party fact is stored on its source page with no entity, never attached to an entity page
+as an owner fact. `deleteFactsForPage`, `expireFact` and `insertFacts({ deleteForPageFirst })` are deprecated; no
+production code calls them (`test/generations-deprecated-fact-writers.test.ts`).
+
 Life Chronicle events publish through `publishChronicleGeneration` (`adapters/chronicle-events.ts`, kind
 `chronicle_event`, key `depth:<slug>`, GBRA-161 PR 3). Each judged revision of a depth page (meeting, conversation,
 calendar page) is a generation of event pages; each event's timeline projection row on the depth page belongs to its
@@ -162,7 +190,7 @@ doctor `atom_retirements_restorable` leaves out an atom whose retirement the led
 publishes a held result once (a managed source releases an atom page key through its writer), and `--mode cleanup` lists
 pending members and orphan candidates, read-only (for `synthesis` it also lists unmatched predecessors, which its
 `--apply` retires; see [Synthesis](#synthesis)). A managed source restores retired atoms with `gbrain repair
-atoms-restore`; `--mode restore` refuses there. Doctor reports `generation_retirements` (ok, with the restorable
+atoms-restore`; `--mode restore` refuses there for every kind but the fence kinds, whose restore is a guarded page write. Doctor reports `generation_retirements` (ok, with the restorable
 count), `generation_held` (warn) and `generation_pending` (warn).
 
 ## Purge

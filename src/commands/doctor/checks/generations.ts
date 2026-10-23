@@ -21,6 +21,7 @@ import { readGenerationsConfig } from '../../../core/generations/config.ts';
 import { RELEASABLE_HELD_REASONS, type HeldReason } from '../../../core/generations/contract.ts';
 import { generationsPreviewArgv } from '../../../core/generations/repair.ts';
 import { listOrphanCandidates, listPendingMembers } from '../../../core/generations/managed.ts';
+import { fenceHoldEntries } from '../../../core/generations/fence.ts';
 
 const DOCS = 'docs/guides/repair.md#generations';
 
@@ -64,6 +65,16 @@ export async function generationHeldCheck(engine: BrainEngine, sourceIds?: strin
     const count = byReason.reduce((sum, row) => sum + row.count, 0);
     const details = { count, releasable: byReason.filter(row => row.releasable).reduce((sum, row) => sum + row.count, 0), by_reason: byReason, repair: 'generations', docs: DOCS };
     if (!count) return { name: 'generation_held', status: 'ok', details, message: 'No derived generation is held.' };
+    const fences = await fenceHoldEntries(engine, sources);
+    if (fences.length) {
+      const fence = fences[0]!;
+      return { name: 'generation_held', status: 'warn', details: { ...details, fence_holds: fences.map(({ fix: _fix, ...hold }) => hold) },
+        message: `${count} derived result(s) were held instead of published (${byReason.map(row => `${row.source_id}/${row.kind} ${row.held_reason}: ${row.count}`).join('; ')}); `
+          + 'the previous generation of each key stays live and nothing was retired. '
+          + `${fences.length} page(s) lost a facts or takes fence (first: ${fence.slug} in ${fence.source_id}, ${fence.kind} ${fence.reason}, ${fence.rows} row(s) kept); `
+          + 'whether to restore the section or retire its rows is the user\'s decision.',
+        fix: fence.fix };
+    }
     const first = byReason.find(row => row.releasable) ?? byReason[0]!;
     const preview = generationsPreviewArgv({ kind: first.kind, sourceId: first.source_id }, 'release-held');
     return { name: 'generation_held', status: 'warn', details,

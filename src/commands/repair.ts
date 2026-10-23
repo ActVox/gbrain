@@ -40,6 +40,8 @@ import { cliOptsToProgressOptions, getCliOptions } from '../core/cli-options.ts'
 export const CONTENT_LANE = 'content';
 const REPAIR_CONTENT_HELP = `       gbrain repair content [--source <id>] [--only <path>]... [--skip <path>]... [--no-llm] [--max-usd <n>] [--diff]
                              [--apply [--expect <hash>[,<hash>]]] [--json]`;
+/** #7247: the usage line of the timeline-order kind, which also takes --slug (the hash covers the selection). */
+const REPAIR_ORDER_HELP = '       gbrain repair timeline-order [--source <id>] [--slug <slug>]... [--apply --expect <preview-hash> --yes] [--json]';
 const REPAIR_CONTENT_SUMMARY = `  content      The content-repair lane (#6377), not a kind: runs ${CONTENT_REPAIR_KINDS.join(', then ')} over the same
                --source/--only selection, so the holds managed sync records for a file's content (invalid_fence,
                frontmatter_slug_conflict) clear in one pass. The preview plans every kind before anything is written and
@@ -86,6 +88,8 @@ export const REPAIR_HELP = `Usage: gbrain repair [<kind>] [--apply] [--source <i
                                  [--source <id>] [--apply --expect <preview-hash> --yes] [--json]
        gbrain repair url-clone-fences [--source <id>] [--apply --expect <preview-hash> --yes] [--json]
        gbrain repair duplicate-facts [--source <id>] [--include-cross-entity] [--apply --expect <preview-hash> --yes] [--json]
+       gbrain repair fact-claim-dates --source <id> [--day YYYY-MM-DD] [--apply --expect <preview-hash> --yes] [--json]
+${REPAIR_ORDER_HELP}
        gbrain repair rename-identity --source <id> [--slug <new-slug> [--from <old-slug>] [--close]
                                      [--apply --expect <preview-hash> --yes]] [--json]
 ${REPAIR_CONTENT_HELP}
@@ -158,10 +162,13 @@ Options:
   --after <page-id>
                  uncommitted-deletions: preview the next window, below the next_after page id the previous preview printed;
                  the hash and the apply command carry it.
+  --day <YYYY-MM-DD>
+                 fact-claim-dates: the UTC day a bulk load stamped on the facts, instead of the days the preview detects;
+                 the hash and the apply command carry it.
   --kind <kind> [--mode restore|release-held] (--run <id> | --since <ISO-8601|7d> | --key <owner> | --generation <id> | --held)
                  generations: the ledger kind and the operation (one of --run, --since, --key, --generation
                  or --held is required; --mode defaults to restore); the hash and the apply command carry them.
-  --yes          frontmatter, conversation-labels, stuck-recovery, ghost-pages, legacy-twins, rename-identity, url-clone-fences, uncommitted-deletions, generations, duplicate-facts --apply: the user agreed
+  --yes          frontmatter, conversation-labels, stuck-recovery, ghost-pages, legacy-twins, rename-identity, url-clone-fences, uncommitted-deletions, generations, fact-claim-dates, duplicate-facts --apply: the user agreed
                  to the previewed changes (destructive consent; without it a terminal asks, and a non-interactive run exits 3 with the consent payload).
   --json         Machine-readable output with a stable shape (frontmatter: every per-file diff).
 
@@ -178,22 +185,22 @@ A sources add --url clone whose pull stops at pull_blocked_local_changes: docs/g
 Renames whose identity sync did not keep (rename-identity): docs/guides/live-sync.md#renaming-a-page.`;
 
 const BOOLEAN_FLAGS = new Set(['--apply', '--all', '--json', '--no-embed', '--include-ambiguous', '--include-cross-entity', '--diff', '--yes', '--no-llm', '--all-drifted', '--include-failures', '--force', '--close', '--held']);
-const VALUE_FLAGS = new Set(['--source', '--limit', '--expect', '--only', '--skip', '--slug', '--max-usd', '--prefer', '--request', '--class', '--since', '--keep', '--request-id', '--older-than', '--from', '--side', '--state', '--after', '--cursor', '--provenance', '--kind', '--mode', '--run', '--key', '--generation']);
+const VALUE_FLAGS = new Set(['--source', '--limit', '--expect', '--only', '--skip', '--slug', '--max-usd', '--prefer', '--request', '--class', '--since', '--keep', '--request-id', '--older-than', '--from', '--side', '--state', '--after', '--cursor', '--provenance', '--kind', '--mode', '--run', '--key', '--generation', '--day']);
 /** Flags only some kinds accept, with the kinds that do. */
 const KIND_FLAGS: Record<string, readonly string[]> = {
   '--only': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--skip': ['frontmatter', 'fences', 'slug-conflicts', 'file-drift', CONTENT_LANE], '--diff': ['frontmatter', 'fences', 'slug-conflicts', CONTENT_LANE], '--yes': ['frontmatter', 'conversation-labels', 'stuck-recovery', 'ghost-pages', 'legacy-twins', 'rename-identity', 'url-clone-fences'],
   '--include-cross-entity': ['duplicate-facts'],
-  '--slug': ['fences', 'file-drift', 'rename-identity', 'overwritten-edits', 'origin-twins'], '--from': ['rename-identity'], '--close': ['rename-identity'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift', 'visibility'], '--since': ['file-drift', 'generations'],
+  '--slug': ['fences', 'file-drift', 'rename-identity', 'overwritten-edits', 'origin-twins', 'timeline-order'], '--from': ['rename-identity'], '--close': ['rename-identity'], '--prefer': ['file-drift'], '--request': ['file-drift'], '--all-drifted': ['file-drift'], '--class': ['file-drift', 'visibility'], '--since': ['file-drift', 'generations'],
   '--held': ['file-drift', 'generations'], '--side': ['file-drift'], '--state': ['file-drift'], '--cursor': ['file-drift'], '--provenance': ['file-drift'],
   '--keep': ['stuck-recovery'], '--request-id': ['stuck-recovery'],
   '--older-than': ['receipt-compaction'], '--include-failures': ['receipt-compaction'], '--force': ['receipt-compaction'],
   '--after': ['uncommitted-deletions'],
-  '--kind': ['generations'], '--mode': ['generations'], '--run': ['generations'], '--key': ['generations'], '--generation': ['generations'],
+  '--kind': ['generations'], '--mode': ['generations'], '--run': ['generations'], '--key': ['generations'], '--generation': ['generations'], '--day': ['fact-claim-dates'],
 };
 const VALUE_EXAMPLES: Record<string, string> = { '--source': 'default', '--limit': '50', '--expect': 'PLAN_HASH', '--only': 'notes/a.md', '--skip': 'notes/a.md',
   '--slug': 'notes/a', '--max-usd': '0.50', '--prefer': 'file', '--request': 'REQUEST_UUID', '--class': 'review_required', '--since': '7d', '--side': 'deleted', '--state': 'tombstone_edited', '--keep': 'prior',
   '--request-id': '123e4567-e89b-42d3-a456-426614174000', '--older-than': '30d', '--from': 'notes/old', '--after': '1200', '--cursor': 'NEXT_CURSOR', '--provenance': 'never_committed',
-  '--kind': 'atom', '--mode': 'restore', '--run': 'RUN_ID', '--key': 'page:notes/a', '--generation': '42' };
+  '--kind': 'atom', '--mode': 'restore', '--run': 'RUN_ID', '--key': 'page:notes/a', '--generation': '42', '--day': '2026-01-15' };
 /** A usage refusal whose fix is the read-only preview (gbrain repair without --apply writes nothing). */
 const invalid = (message: string, suggestion: string, preview: string[] = ['gbrain', 'repair', '--json']) => opError('invalid_params', message, suggestion,
   { fix: readFix('Previews the repair; without --apply it writes nothing.', { argv: preview }) });
@@ -203,7 +210,7 @@ interface RepairArgs { kind?: string; apply: boolean; all: boolean; json: boolea
   allDrifted: boolean; prefer?: 'file' | 'database'; requests: string[]; driftClass?: string; since?: string;
   held: boolean; side?: string; state?: string; provenance?: string; cursor?: string;
   keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures: boolean; force: boolean; from?: string; close: boolean; afterPage?: number;
-  generationKind?: string; generationMode?: string; run?: string; key?: string; generation?: number }
+  generationKind?: string; generationMode?: string; run?: string; key?: string; generation?: number; day?: string }
 
 /** `--max-usd` on a kind that never calls a paid model: the cap belongs to the doctor remediation run. */
 function maxUsdRefusal(flag: string, cap: string | undefined, kind: string | undefined): OperationError {
@@ -307,6 +314,13 @@ export function parseRepairArgs(args: string[]): RepairArgs {
         ['gbrain', 'repair', 'uncommitted-deletions', ...(parsed.source ? ['--source', parsed.source] : []), '--json']);
       parsed.afterPage = Number(value);
     }
+    else if (flag === '--day') {
+      const [year, month, date] = value.split('-').map(Number);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || new Date(Date.UTC(year!, month! - 1, date)).toISOString().slice(0, 10) !== value) throw invalid(`--day takes a calendar day as YYYY-MM-DD (got "${value}").`,
+        'Pass the UTC day doctor fact_bulk_dates reports, e.g. --day 2026-01-15, or omit --day to repair every detected day.',
+        ['gbrain', 'repair', 'fact-claim-dates', ...(parsed.source ? ['--source', parsed.source] : []), '--json']);
+      parsed.day = value;
+    }
     else if (flag === '--kind') parsed.generationKind = value;
     else if (flag === '--mode') parsed.generationMode = value;
     else if (flag === '--run') parsed.run = value;
@@ -407,7 +421,7 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
   if (args.includes('--help') || args.includes('-h')) { console.log(REPAIR_HELP); return; }
   const { kind, apply, all, json, noEmbed, includeAmbiguous, includeCrossEntity, source, expect, only, skip, slugs, diff, noLlm, maxUsd, limit: limitText,
     prefer, requests, allDrifted, driftClass, since, held, side, state, provenance, cursor, keep, requestId, olderThan, includeFailures, force, from, close, afterPage,
-    generationKind, generationMode, run, key, generation } = parseRepairArgs(args);
+    generationKind, generationMode, run, key, generation, day } = parseRepairArgs(args);
   const generations: GenerationsSelection | undefined = kind === 'generations' ? { kind: generationKind ?? '', mode: (generationMode ?? 'restore') as GenerationMode,
     ...(run ? { run } : {}), ...(since ? { since } : {}), ...(key ? { key } : {}), ...(generation !== undefined ? { generation } : {}), ...(held ? { held } : {}) } : undefined;
   if (generations) {
@@ -438,9 +452,9 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
     const preview = ['gbrain', 'repair', kind, ...(source ? ['--source', source] : []), ...only.flatMap(path => ['--only', path]), ...skip.flatMap(path => ['--skip', path]),
       ...(includeAmbiguous ? ['--include-ambiguous'] : []), ...(includeCrossEntity ? ['--include-cross-entity'] : []), ...(requestId ? ['--request-id', requestId] : []),
       ...(olderThan ? ['--older-than', olderThan] : []), ...(includeFailures ? ['--include-failures'] : []), ...(force ? ['--force'] : []),
-      ...(afterPage !== undefined ? ['--after', String(afterPage)] : []),
+      ...(afterPage !== undefined ? ['--after', String(afterPage)] : []), ...(day ? ['--day', day] : []),
       ...(kind === 'rename-identity' ? [...slugs.flatMap(slug => ['--slug', slug]), ...(from ? ['--from', from] : []), ...(close ? ['--close'] : [])] : []),
-      ...(kind === 'origin-twins' ? slugs.flatMap(slug => ['--slug', slug]) : []),
+      ...(kind === 'origin-twins' || kind === 'timeline-order' ? slugs.flatMap(slug => ['--slug', slug]) : []),
       ...(generations ? generationsSelectionArgv(generations) : [])];
     const custom = repairSpec(kind as RepairKind).consentText;
     const text = custom ? { ...custom, why: `Preview ${expect}: ${custom.why}`, user_message: `${custom.user_message} (preview ${expect.slice(0, 12)}${keep ? `, keep ${keep}` : ''})` } : {
@@ -469,7 +483,7 @@ export async function runRepairCommand(engine: BrainEngine, args: string[]): Pro
     ...(k === kind && keep ? { keep } : {}), ...(k === kind && requestId ? { requestId } : {}),
     ...(k === kind && k === 'receipt-compaction' ? { olderThan, includeFailures, force } : {}),
     ...(k === kind && k === 'rename-identity' ? { from, close } : {}), ...(k === kind && afterPage !== undefined ? { afterPage } : {}),
-    ...(k === kind && generations ? { generations } : {}),
+    ...(k === kind && generations ? { generations } : {}), ...(k === kind && day ? { day } : {}),
     ...(apply ? { stop: stop.signal, recordDatabaseStops: true } : {}) })).finally(() => releaseSignals?.());
   if (apply) clearHealthMemo(engine);
   const paidKinds = results.filter(r => r.paid).map(r => r.kind);
