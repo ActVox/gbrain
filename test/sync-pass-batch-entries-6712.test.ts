@@ -45,7 +45,7 @@ describe('GBRA-133 PR 2b: a first sync builds its batch in linear time', () => {
     const stop = new AbortController();
     window.open = false;
     installFaultHook(async point => {
-      if (point === 'sync:batch_entries' && !lag) { lag = watchLoopLag(); window.open = inWindow(); }
+      if (point === 'sync:batch_entries' && !lag) { lag = watchLoopLag({ reportAtMs: MAX_LAG_MS }); window.open = inWindow(); }
       if (point === 'sync:after_freeze' && lag && maxLag === undefined) { window.open = false; maxLag = lag.stop().maxLag; stop.abort(); }
     });
     await performManagedSync(engine, { sourceId: 'default', noPull: true, noEmbed: true, noExtract: true, signal: stop.signal }).catch(() => undefined);

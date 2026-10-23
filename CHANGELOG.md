@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.400.0] - 2026-10-23
+
+**A Windows backup whose PowerShell starts too slowly now says so instead of blaming the destination's permissions, and a post-compaction SessionStart whose serve did not answer in time now says so in its heartbeat.** Three CI flakes behind these are fixed without loosening any bound.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Windows backup: PowerShell 5.1 does not start within the protection step's 15 s (a cold machine's first starts) | refused with `private_backup_path_unavailable`: "this destination's permissions prevented…", which pointed at the wrong cause | refused with `private_backup_protection_timeout`: PowerShell did not start in time, run the backup again; a real ACL refusal still reports `private_backup_path_unavailable` |
+| SessionStart's context pack when a live serve answers nothing within the 1 s client timeout | no pack, heartbeat `ok` with no reason | no pack, heartbeat `degraded` / `ipc_unavailable`, as the user-prompt and compact hooks already report; no serve at all still reads `ok` |
+| CI: Windows security-regressions backup round trip | PowerShell 5.1 was still cold when the test ran (46 s: both bounds expired) | the job starts Windows PowerShell once before the backup steps; the cold path is covered by a simulated 50 s cold start |
+| CI: bootstrap-hook-under-serve in the serial pool | three pooled neighbours could starve the real serve past the hook's 1 s IPC timeout (Pin 3b at 1,008 ms) | runs on the sequential exclusive lane; the exclusive cap is 4 |
+| CI: a loop-lag bound that fails | printed only the reading | also prints the worst stretch's wall time and the thread's schedstat (time on a CPU, time runnable waiting) |
+
+### Itemized changes
+
+- `src/core/backup/private-path.ts`: a protection launch killed at its bound throws `private_backup_protection_timeout` (`test/backup-powershell-warmup.serial.test.ts`: the simulator keeps a virtual cold-start clock, so a warm-up killed at 30 s leaves the next launch cold).
+- `src/core/context/session-start-pack.ts`, `src/commands/hook.ts`: `ipcUnavailable` when a secret exists but the round trip failed (`test/hook-session-start-serve-wait.serial.test.ts`).
+- `scripts/run-serial-tests.sh`, `scripts/serial-files.tsv`, `test/scripts/serial-files.test.ts`: bootstrap-hook-under-serve joins `EXCLUSIVE_FILES`; the growth guard allows 4.
+- `.github/workflows/test.yml`: Windows PowerShell start step in security-regressions.
+- `test/helpers/cpu-time.ts`: `watchLoopLag({ reportAtMs })`; the five yield-bound tests pass their bound.
+
 ## [0.60.399.0] - 2026-10-23
 
 **The dream summary, the `think --save` page and the drift report keep an edit made while they were being composed, and every overwrite is restorable; the timeline, mention and concept-provenance writers act only on the page revision they read (GBRA-161 PR 5).** These writers used to overwrite or delete against whatever the page held when they finished, so an edit made in between was lost and an overwritten page had no saved copy.

@@ -564,6 +564,7 @@ async function hookSessionStart(io: HookIo): Promise<number> {
           awaitServe,
         });
         serveNotReady = res.serveNotReady;
+        if (res.ipcUnavailable && outcome === 'ok') { outcome = 'degraded'; reason = 'ipc_unavailable'; }
         const pack = res.pack;
         if (pack && !pack.ok && pack.error === 'source_mismatch' && outcome === 'ok') { outcome = 'degraded'; reason = 'source_mismatch'; } // #5941
         if (pack?.ok && pack.degradedReason === 'server_budget' && outcome === 'ok') { outcome = 'degraded'; reason = 'server_budget'; }
