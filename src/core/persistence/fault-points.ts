@@ -14,6 +14,8 @@ import type { WriteRequest } from './model.ts';
 
 export type PublicationBoundary = Parameters<NonNullable<PublicationHooks['boundary']>>[0];
 export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${EffectKind}:mid` | 'effect:embedding:settle'
+  // An embedding effect that read its page at its own revision, before it reads the page's text projection (effects.ts `embedPage`).
+  | 'effect:embedding:page_read'
   | 'effect_recovery:before_clear' | 'publication_recovery:before_clear'
   // A streamed (version 2) withdrawal mirror (effect-recovery.ts): once its record is durable and before its file is
   // streamed into the publication stage, and after that step (the stage written and flushed, or left as it was found),
@@ -85,7 +87,12 @@ export type FaultPoint = `publication:${PublicationBoundary}` | `effect:${Effect
   | 'large_file:stage_copying' | 'large_file:stage_flushed'
   // A streamed file (large-file.ts `stageStreamedContent`: restore_page, a segmented withdrawal mirror) after each piece is
   // written to its in-progress name, before the stream is verified, flushed and renamed to the reserved stage name.
-  | 'large_file:stage_streaming';
+  | 'large_file:stage_streaming'
+  // GBRA-161: inside a generation activation, after its items are written and after its retirements, both before the commit;
+  // and after the activation committed, before the producer acknowledges it.
+  | 'generation:published' | 'generation:retired' | 'generation:activated'
+  // GBRA-161 PR 1b: as a managed generation member (an overwrite or retirement after its activation committed) is prepared.
+  | 'generation:member';
 /**
  * `signal` (#6278, `consumer:preparing` only): the preparation's abort signal, so
  * a stalling hook can model both the reporter's cases: a preparer that honours
