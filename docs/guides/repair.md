@@ -2309,6 +2309,27 @@ the only copy of that content. Recreate its file with
 keep it. `gbrain repair ghost-pages` lists such a page apart the same way, and
 the soft-delete itself refuses one (`refused`, `database_ahead_of_file`).
 
+<a id="apply-held-deletions"></a>**Letting sync apply proven deletions (`sync.apply_held_deletions`, off by
+default).** `gbrain config set sync.apply_held_deletions true` (or
+`sync.apply_held_deletions.source.<id> true` for one source; a per-source value
+wins) lets a managed sync delete a held `file_gone` page itself, and only when
+every check passes: the file's provenance is `deleted_by_commit`, the page at
+its current revision equals the file's last committed bytes (the blob in the
+first parent of the newest deleting commit, compared the way sync compares a
+file with a page before replacing it), and the page's revision is file-backed
+by the test above. The deletion is an ordinary sync deletion: a soft delete
+with the same restore window (`gbrain restore <slug> --force`), counted by the
+mass-delete valve and the `sync.max_deletes` / `sync.max_delete_ratio` caps,
+and its write request carries `heldDeletion` (the deleting commit and the blob)
+as the page's receipt. Any other held page stays held, and its hold records why
+(`meta.held_deletion.refused`: `content_differs`, `database_ahead_of_file`,
+`not_deleted_by_commit` or `page_changed`) at the page's revision, so it is not
+screened again until the page changes. A file deleted, committed again with
+other bytes and deleted again is judged against its last committed bytes.
+Turning the switch on makes the next sync read the whole source once; a sync
+screens at most 200 held deletions, and the rest wait for a later sync that
+reads the source (a new commit, or the daily full round).
+
 `--provenance never_committed --prefer file` is refused: it would soft-delete
 the only copy of each page. A database-only page is no longer screened against
 a file; a file synced back at its old path binds it again. The apply re-checks
