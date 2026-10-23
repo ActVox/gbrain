@@ -20,7 +20,7 @@ import { relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
-import { syncGit } from './sync-discovery.ts';
+import { syncGitAsync } from './sync-discovery.ts';
 import { PENDING_IMPORT_MESSAGE } from './verb-errors.ts';
 
 export const PENDING_IMPORT = 'pending_import';
@@ -32,12 +32,12 @@ export async function committedPendingImport(engine: BrainEngine, sourceId: stri
   const [source] = await engine.executeRaw<{ last_commit: string | null }>('SELECT last_commit FROM sources WHERE id=$1', [sourceId]);
   const rel = `./${relative(root, path).split(sep).join('/')}`;
   try {
-    const head = syncGit(root, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`]).trim();
-    if (!head || syncGit(root, ['hash-object', '--', rel]).trim() !== head) return false;
+    const head = (await syncGitAsync(root, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`])).trim();
+    if (!head || (await syncGitAsync(root, ['hash-object', '--', rel])).trim() !== head) return false;
     if (!source?.last_commit) return true;
-    syncGit(root, ['cat-file', '-e', `${source.last_commit}^{commit}`]);
+    await syncGitAsync(root, ['cat-file', '-e', `${source.last_commit}^{commit}`]);
     let imported = '';
-    try { imported = syncGit(root, ['rev-parse', '--verify', '--quiet', `${source.last_commit}:${rel}`]).trim(); } catch { imported = ''; }
+    try { imported = (await syncGitAsync(root, ['rev-parse', '--verify', '--quiet', `${source.last_commit}:${rel}`])).trim(); } catch { imported = ''; }
     return imported !== head;
   } catch {
     return false;
