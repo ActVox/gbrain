@@ -233,7 +233,6 @@ test/managed-sync-row-parity.test.ts
 test/managed-sync-stale-group-head.test.ts
 test/migration-persistence-request-id-index.test.ts
 test/migration-persistence-request-slug-index.test.ts
-test/multi-source-drift-param-cap-7388.test.ts
 test/on-commit-embedding.serial.test.ts
 test/oneshot-consumer-direct-route.test.ts
 test/oneshot-housekeeping-cli.test.ts
