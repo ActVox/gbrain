@@ -604,6 +604,12 @@ async function reclassifyByOrigin(gitRoot: string, tips: Array<string | null | u
   return true;
 }
 
+/** GBRA-133: the deleted-side `file_drift` holds whose file is gone (`gone`, on the Git path); the stamp releases those whose page is no longer live. */
+function deletionCandidates(holds: readonly GitHoldRecord[], gone: (path: string) => boolean, toGit: (path: string) => string): DeletionCandidate[] {
+  return holds.filter(hold => hold.code === 'file_drift' && fileDriftSide(hold.meta) === 'deleted' && gone(toGit(hold.path)))
+    .map(hold => ({ path: hold.path, page_id: hold.page_id ?? null, slug: hold.slug ?? null }));
+}
+
 /**
  * The shadow level of a managed source: every path classified, nothing written. Null for a company-brain source, which
  * keeps its frozen manifest (design v3.2 §3.6).
@@ -900,11 +906,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
     releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
-    deletionCandidates: holds.filter(hold => {
-      const path = toGit(hold.path);
-      return hold.code === 'file_drift' && fileDriftSide(hold.meta) === 'deleted' && domain.has(path) && !tree.has(path)
-        && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !readPresent(root, path, scope);
-    }).map(hold => ({ path: hold.path, page_id: hold.page_id ?? null, slug: hold.slug ?? null })),
+    deletionCandidates: deletionCandidates(holds, path => domain.has(path) && !tree.has(path)
+      && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !readPresent(root, path, scope), toGit),
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
     ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), ...(treeReuse ? { treeReuse } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
