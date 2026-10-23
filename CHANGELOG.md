@@ -10,6 +10,63 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.394.0] - 2026-10-23
+
+**Life Chronicle events publish through the generation primitive, so a dropped event takes its timeline row with it and a model shrink retires nothing (GBRA-161 PR 3).** A re-judgment that dropped an event used to soft-delete the event but leave its timeline row behind, and a model that returned fewer events retired the rest page by page.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A re-judgment drops an event | the event was soft-deleted and stamped; its timeline row stayed | the event retires and its timeline row is deleted in the same activation; `gbrain repair generations --kind chronicle-event` restores both |
+| The model returns `[]` or fewer events than the shrink floor | the missing events retired (3 of 4 when one came back) | the result is held and nothing retires |
+| A depth page is deleted | its events stayed until a chat provider re-judged the page | its events retire with `originGone` before the phase looks for work, with no chat provider needed |
+| A managed brain re-judges a depth page | per-event retire requests | new and changed events go through the existing chronicle event request; one `managed_generation_activate` request, bound to the depth page revision, retires what was dropped |
+| A `retired_by` stamp on a chronicle event | trusted on its own for restore | allows a restore only when the generation ledger or the chronicle ledger backs it |
+
+### What to watch for after you upgrade
+
+- No migration. Events published before this release have no generation, so deleting their depth page does not retire them; they stay live.
+- A manual `runChronicleExtract` run now treats events whose identity matches the live generation as its own, so it can replace or retire them. Before, it left them alone as operator edits.
+- Nothing new submits `managed_maintenance_chronicle_retire`. Its preparer stays to replay requests an earlier release journaled, and it now drops the timeline row too.
+
+### Itemized changes
+
+- `src/core/generations/adapters/chronicle-events.ts`: the `chronicle_event` adapter, one generation per depth page (key `depth:<slug>`), each event and its timeline row one item.
+- `src/core/chronicle/publish.ts` publishes through the primitive on unmanaged brains in one transaction and through managed activation and `managed_generation_restore` on managed brains.
+- Tests: `test/pathological/g3-chronicle-generations.test.ts`, red on the base and green on PGLite and Postgres in managed and unmanaged mode; its Postgres arm runs through the `test/e2e/` `registerPostgresTests` wrapper, not `test/postgres-unit-arms.txt`.
+
+## [0.60.393.0] - 2026-10-23
+
+**The Postgres vector-plan test no longer fails at random on a fresh database.** It compared an exact plan's rows with an HNSW plan's approximate rows. Rows are now judged under exact evaluation, as in the PGLite twin. No product code changed.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `test/e2e/vector-index-walk-plan-postgres.test.ts`, joined statement rows | compared with the `enable_material: on` plan's rows, which walk HNSW over a graph each fresh database builds with random levels, so 5 or 10 of 20 rows could differ | each settings set's rows are read with index scans off and must equal the statement's exact window, all 20 in order; plan-shape assertions are unchanged |
+
+### Itemized changes
+
+- `test/e2e/vector-index-walk-plan-postgres.test.ts`: exact-evaluation row comparison.
+
+## [0.60.392.0] - 2026-10-23
+
+**The unit-lane PostgreSQL arms job runs 12 shards instead of 11, so adding a new arm file no longer fails CI on the shard budget.** Nothing in gbrain itself changed.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `unit-postgres-arms` two-worker makespan per shard (mined weights, Bun 1.4.0 cell) | 568.9 s average, 569.8 s largest, against the 570 s budget: one more arm file pushed shards over | 521.4 s average, 522.4 s largest |
+| Same, Bun 1.4.4 PostgreSQL-only cell | 471.4 s average, 471.9 s largest | 431.9 s average, 432.4 s largest |
+| Check names | `Unit-lane PostgreSQL arms N/11 / Bun …` | `Unit-lane PostgreSQL arms N/12 / Bun …` (aggregated by `test-status`; none is a required check) |
+
+### Itemized changes
+
+- `scripts/postgres-unit-arms.ts`: `ARM_SHARDS` 12; `.github/workflows/persistence-validation.yml`: the matrix, job name and `run` argument follow it (pinned by `test/scripts/postgres-unit-arms.test.ts`).
+- `docs/architecture/key-files/ci-health-and-test-guards.md`, `scripts/ubicloud/README.md`: shard count.
+
 ## [0.60.391.0] - 2026-10-23
 
 **Managed atom extraction now publishes through the same generation primitive as unmanaged brains, and an origin's old and new atoms can both be live in between, never neither (GBRA-161 PR 1b).** On a managed brain a re-extraction used to overwrite and retire atoms page by page, so a crash between requests could leave an origin with neither its old atoms nor its new ones. Transcript-derived atoms were also keyed by file name, so two same-named transcripts in different folders shared one key.
