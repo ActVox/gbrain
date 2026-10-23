@@ -1605,14 +1605,6 @@ the same copy from page history).
 gbrain repair generations --kind drift_report --mode restore --since 7d --json
 ```
 
-
-
-
-
-
-```
-
-
 ### Extractor facts
 
 A managed write by a gbrain older than v0.60.11.0 to a conversation page
