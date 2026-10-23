@@ -37,6 +37,8 @@ export interface GenerationAdapter<C = unknown> {
   modelProduced: boolean;
   /** The result is a ranked cut: every item carries a distinct `order`, and a tie (or a missing rank) holds the result (`tie`). */
   strictOrder?: boolean;
+  /** A canonical fence kind (generations/fence.ts): it publishes through `publishFenceGeneration` and restores by transplanting the fence. */
+  fence?: 'facts' | 'takes';
   /**
    * Its items are database-only pages (no canonical file). A managed source then writes the new and changed items as
    * ordinary requests before the activation, and the activation itself retires what the generation dropped (no retire
