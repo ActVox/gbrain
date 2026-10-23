@@ -43,7 +43,7 @@ copy of the tree there. A failed or interrupted run leaves only partial logs in 
 | `MUTANT_STALE` | A mutant's `before` text is not found exactly once. | The spec or code moved: update the mutant's text in `mutants.json` to the new line that implements the same guard. |
 | `MUTANT_SURVIVED` | No property caught a model mutant, or the named test passed with the guard removed from the code. | A property or a test stopped pinning the guard. Restore it; never delete the mutant to go green. |
 | `MUTANT_WRONG_PROPERTY` | A different property caught it, or a survivor became load-bearing. | Read the trace; update `expect`, and give a new load-bearing guard a code edit and a test. |
-| `MUTANT_INCOMPLETE` | TLC did not finish or did not start; a named test failed without the edit or matched no test; or with the edit the test did not end in a clean assertion failure (a signal, a timeout, a load error, an error between tests). | Read the log the message names. Fix the test or filter first; a run that did not fail on the test's own assertion proves nothing. An interrupted run may be rerun once with the printed command. |
+| `MUTANT_INCOMPLETE` | TLC did not finish or did not start; a named test failed without the edit or matched no test; or with the edit the test did not end in a clean assertion failure (a signal, a timeout, a load error, an error between tests). | Read the log the message names. Fix the test or filter first; a run that did not fail on the test's own assertion proves nothing. A named test asserts with plain `expect()`: a custom message makes Bun report the failure as an `Error`, not an `AssertionError`. An interrupted run may be rerun once with the printed command. |
 | `MUTANT_NOTHING_CHECKED` | Every check the selection asked for was skipped (a Postgres test without `DATABASE_URL`). | Point `DATABASE_URL` at a test database (`GBRAIN_TEST_ALLOW_DATABASE_URL=1`). |
 
 ## drain-lease: the managed-sync drain lease
@@ -59,7 +59,7 @@ lock with the token stamped on its request: a folded stamp's proof (`provenStamp
 | `DrainLease.cfg` | Two drainers, one fenced transaction at a time, the code's timing at 10 s ticks: every property. |
 | `DrainLeaseSafety.cfg` | Every adverse assumption on (live holders stolen by a lying pid probe or `--force-break-lock`, fenced transactions longer than the renewal timeout, no renewal priority, a cancelled renewal settling late), 20 s ticks: the safety properties, which must hold anyway. |
 | `DrainLeaseStamp.cfg` | The same, plus the pass stamp's fence: a coordinator transaction that holds the row `FOR SHARE` by any issued token, overlaps the holder's and survives its crash. |
-| `DrainLeaseLanesNightly.cfg` | The safety config with two overlapping fenced transactions per holder, at a shorter clock bound. About 5 minutes, so `tlc.sh` runs it only with `TLC_NIGHTLY=1` (the schedule and dispatch). |
+| `DrainLeaseLanesNightly.cfg` | The safety config with two overlapping fenced transactions per holder, at a shorter clock bound. About 2 minutes on 4 CPUs, so `tlc.sh` runs it only with `TLC_NIGHTLY=1` (the schedule and dispatch). |
 
 `test/spec-drain-lease-constants.test.ts` keeps every config's timing equal to the code's constants and checks the
 ordering the liveness property needs.

@@ -12,7 +12,7 @@
 #   TLC_TIMEOUT    TLC did not finish within TLC_TIMEOUT_S (default 600): the state space grew; shrink the config
 #   TLC_ERROR      TLC stopped (parse or semantic error, out of memory): the log names the line
 # Env: TLA2TOOLS (a jar to use; otherwise scripts/spec/tla-jar.sh downloads the pinned one), TLC_OUT (logs; default
-# .context/tlc), TLC_WORKERS (default: CPUs / configs run at once), TLC_TIMEOUT_S, TLC_JAVA_OPTS, TLC_NIGHTLY (1 also runs
+# .context/tlc), TLC_WORKERS (default: every CPU; configs run one at a time), TLC_TIMEOUT_S, TLC_JAVA_OPTS, TLC_NIGHTLY (1 also runs
 # the *Nightly.cfg configs, which take too long for every pull request).
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -38,7 +38,9 @@ for dir in "${specs[@]}"; do
   for cfg in "${cfgs[@]}"; do [ -f "$dir/$cfg" ] || { echo "TLC_ERROR: no config $dir/$cfg" >&2; exit 2; }; jobs+=("$dir|$module|$cfg"); done
 done
 cpus="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
-workers="${TLC_WORKERS:-$(( cpus / ${#jobs[@]} > 0 ? cpus / ${#jobs[@]} : 1 ))}"
+# One config at a time with every CPU: the configs differ in size by 100x, so running them side by side leaves the
+# largest on a fraction of the machine.
+workers="${TLC_WORKERS:-$cpus}"
 
 run() { # dir module cfg -> runs TLC on a private copy, so its states/ directory never lands in the tree
   local dir="$1" module="$2" cfg="$3" work="$out/$(basename "$1")-${3%.cfg}" rc=0
@@ -47,9 +49,7 @@ run() { # dir module cfg -> runs TLC on a private copy, so its states/ directory
      -cp "$jar" tlc2.TLC -workers "$workers" -config "$cfg" -metadir "$work/states" "$module.tla") > "$work/tlc.log" 2>&1 || rc=$?
   echo "$rc" > "$work/rc"
 }
-pids=()
-for job in "${jobs[@]}"; do IFS='|' read -r d m c <<< "$job"; run "$d" "$m" "$c" & pids+=($!); done
-wait "${pids[@]}"
+for job in "${jobs[@]}"; do IFS='|' read -r d m c <<< "$job"; run "$d" "$m" "$c"; done
 
 status=0
 for job in "${jobs[@]}"; do

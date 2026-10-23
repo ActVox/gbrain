@@ -49,35 +49,38 @@ async function succeed(engine: BrainEngine, id: string) {
   return row(engine, id);
 }
 
-describe('drain lease lock-row guards', () => {
-  test('a live holder whose row has not expired is never taken over (takeover-ignores-ttl)', async () => {
-    for (const { backend, engine } of engines) {
+// One describe per engine, and no custom expect() messages: the mutant runner counts a failure as a caught guard only
+// when Bun reports it as an AssertionError, and a custom message turns it into a plain Error.
+for (const backend of testBackends()) {
+  const engineFor = () => engines.find(e => e.backend === backend)!.engine;
+
+  describe(`drain lease lock-row guards (${backend})`, () => {
+    test('a live holder whose row has not expired is never taken over (takeover-ignores-ttl)', async () => {
+      const engine = engineFor();
       const holder = await tryAcquireDbLock(engine, 'test-guard-live', DRAIN_LEASE_TTL_MINUTES);
-      expect(holder, backend).not.toBeNull();
+      expect(holder).not.toBeNull();
       const before = await row(engine, 'test-guard-live');
-      expect(await tryAcquireDbLock(engine, 'test-guard-live', DRAIN_LEASE_TTL_MINUTES), backend).toBeNull();
-      expect(await row(engine, 'test-guard-live'), backend).toEqual(before);
+      expect(await tryAcquireDbLock(engine, 'test-guard-live', DRAIN_LEASE_TTL_MINUTES)).toBeNull();
+      expect(await row(engine, 'test-guard-live')).toEqual(before);
       await holder!.release();
-    }
-  });
+    });
 
-  test("a former holder's refresh leaves its successor's row as it was (renewal-ignores-token)", async () => {
-    for (const { backend, engine } of engines) {
+    test("a former holder's refresh leaves its successor's row as it was (renewal-ignores-token)", async () => {
+      const engine = engineFor();
       const former = await tryAcquireDbLock(engine, 'test-guard-refresh', DRAIN_LEASE_TTL_MINUTES);
-      expect(former, backend).not.toBeNull();
+      expect(former).not.toBeNull();
       const successor = await succeed(engine, 'test-guard-refresh');
-      expect(await former!.refresh(), backend).toBe(false);
-      expect(await row(engine, 'test-guard-refresh'), backend).toEqual(successor);
-    }
-  });
+      expect(await former!.refresh()).toBe(false);
+      expect(await row(engine, 'test-guard-refresh')).toEqual(successor);
+    });
 
-  test("a former holder's release leaves its successor's row in place (release-ignores-token)", async () => {
-    for (const { backend, engine } of engines) {
+    test("a former holder's release leaves its successor's row in place (release-ignores-token)", async () => {
+      const engine = engineFor();
       const former = await tryAcquireDbLock(engine, 'test-guard-release', DRAIN_LEASE_TTL_MINUTES);
-      expect(former, backend).not.toBeNull();
+      expect(former).not.toBeNull();
       const successor = await succeed(engine, 'test-guard-release');
       await former!.release();
-      expect(await row(engine, 'test-guard-release'), backend).toEqual(successor);
-    }
+      expect(await row(engine, 'test-guard-release')).toEqual(successor);
+    });
   });
-});
+}
