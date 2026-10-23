@@ -375,7 +375,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a search read transaction s
         }, { pipelineEarly: isPipelinableSearchRead });
       }
     });
-    const measured = records.slice(records.findLastIndex(r => /^begin\s*$/i.test(r.sql)));
+    const measured = records.slice(records.findLastIndex(r => /^begin read write$/i.test(r.sql)));
     const begin = measured[0]!;
     const applied = measured.find(r => r.sql === settings)!;
     const read = measured.find(r => /early read 1 \*\/$/.test(r.sql))!;
@@ -397,7 +397,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a search read transaction s
         await tx.executeRaw(`DELETE FROM ${table} WHERE n = 0`);
       }, { pipelineEarly: isPipelinableSearchRead });
     });
-    const begin = records.find(r => /^begin\s*$/i.test(r.sql))!;
+    const begin = records.find(r => /^begin read write$/i.test(r.sql))!;
     const before = records.find(r => /AS early_before_write$/.test(r.sql))!;
     const write = records.find(r => /refused write \*\/$/.test(r.sql))!;
     const after = records.find(r => /AS early_after_write$/.test(r.sql))!;
@@ -423,7 +423,7 @@ describe.skipIf(!(pooled && pooledAdmin))('GBRA-156: a search read transaction s
     const records = await traced('early-off', 1, async engine => {
       await engine.transaction(tx => tx.executeRaw('SELECT 1 AS early_switched_off'), { pipelineEarly: isPipelinableSearchRead });
     }, { GBRAIN_PG_TXN_PIPELINE: '0' });
-    const begin = records.find(r => /^begin\s*$/i.test(r.sql))!;
+    const begin = records.find(r => /^begin read write$/i.test(r.sql))!;
     const read = records.find(r => /AS early_switched_off$/.test(r.sql))!;
     expect(read.t >= end(begin)).toBe(true);
   }, 60_000);

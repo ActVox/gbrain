@@ -155,7 +155,7 @@ export const CODES = {
   connection_inherited_read_only: { class: 'host_only', retryable: false, actor: 'host_admin',
     summary: "The database refused a write as read-only (SQLSTATE 25006): the server connection defaults to read-only transactions, so nothing was written.",
     why: "default_transaction_read_only is on for that server connection: session state another client set on a connection a transaction-mode pooler shares, a role or database default, or a read-only server. gbrain opens its transactions READ WRITE and runs a refused autocommit statement once more inside one, so a session default alone no longer stops it; a read-only server (a hot standby) still refuses.",
-    docs: 'docs/guides/troubleshooting.md#inherited-read-only-connections',
+    docs: 'docs/guides/write-refusals.md#connection_inherited_read_only',
     suggestion: "Ask the database operator to reset the pooler's server connections (PgBouncer: RECONNECT, or server_reset_query = DISCARD ALL with server_reset_query_always = 1), find the client that issues session-level SET through the pooler (read-only audits belong in BEGIN READ ONLY ... COMMIT), and check ALTER ROLE / ALTER DATABASE ... SET default_transaction_read_only; then retry.",
     fix: { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'host_admin', why: 'Read-only: reports the database connection and what is blocked on it.', requires_exclusive: false } },
   connection_lost: { class: 'retryable', retryable: true, actor: 'agent',
