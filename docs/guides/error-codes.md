@@ -685,6 +685,16 @@ More: [docs/guides/write-refusals.md#colon_slug_windows_write_through](../../doc
 
 More: [docs/guides/shared-checkout-git.md#outcomes](../../docs/guides/shared-checkout-git.md#outcomes)
 
+### commit_outside_source_root
+
+<a id="commit_outside_source_root"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The commit or publish was refused: it changes files outside the brain's configured source root (git config gbrain.sourceRoot), often a commit made without gbrain git commit-push. | The step needs the user's decision before it runs. | Stop and ask the user; re-run only with the authorization the message names. | user | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/shared-checkout-git.md#source-roots](../../docs/guides/shared-checkout-git.md#source-roots)
+
 ### commit_paths_invalid
 
 <a id="commit_paths_invalid"></a>
@@ -692,6 +702,16 @@ More: [docs/guides/shared-checkout-git.md#outcomes](../../docs/guides/shared-che
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The commit was refused before staging: no paths, a path outside the checkout, the whole checkout, or a path git would not stage. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/shared-checkout-git.md#outcomes](../../docs/guides/shared-checkout-git.md#outcomes)
+
+### commit_prestaged_paths
+
+<a id="commit_prestaged_paths"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The commit was refused before staging: files another writer had already staged sit under a named directory, and committing them would publish that writer's work. | The step needs the user's decision before it runs. | Stop and ask the user; re-run only with the authorization the message names. | user | `repeat the read that failed` | 1 | no |
 
 More: [docs/guides/shared-checkout-git.md#outcomes](../../docs/guides/shared-checkout-git.md#outcomes)
 
@@ -1566,6 +1586,40 @@ More: [docs/guides/shared-brain-skills.md#approve-publication-following-and-edit
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The eval gate found retrieval regressions or correctness below its thresholds. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### generation_fenced
+
+<a id="generation_fenced"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A derived result was not published because the live generation or its input changed after the producer read them; nothing was written. | The generation primitive (GBRA-161) publishes a result only against the generation and input pin it was computed from. A concurrent run that published first (stale_generation), or an input edited since the read (pin_moved), would otherwise let an older result replace a newer one. | Run the producer again; it reads the current generation and input and recomputes. | agent | `repeat the read that failed` | 11 | yes |
+
+Reasons: `stale_generation`, `pin_moved`.
+
+More: [docs/architecture/generations.md#publishing](../../docs/architecture/generations.md#publishing)
+
+### generation_held
+
+<a id="generation_held"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A derived result was recorded as held instead of published, so nothing it would have retired was retired. | A model-produced result at or below the input-relative shrink floor (shrunk), one over generations.max_items (oversize), one over the run window retirement budget (valve), an empty result without a proof the input is really empty (no_proof, fence_absent), repeated failed attempts on one input (attempts_exhausted) a segmented page the ledger cannot keep a copy of (segmented_unsupported) or a ranked result whose cut is ambiguous (tie) would retire live items on evidence the primitive does not accept (GBRA-161 D4/D5). | Preview the held set with gbrain repair generations --kind <kind> --mode release-held --held --since <restore_days>d. shrunk, valve and attempts_exhausted publish once with --apply --expect <hash> --yes after the user agrees; oversize needs gbrain config set generations.max_items first; no_proof, fence_absent, segmented_unsupported and tie clear only when the input or the producer result changes. Run: gbrain doctor --only generation_held --json | agent | `repeat the read that failed` | 1 | no |
+
+Reasons: `shrunk`, `oversize`, `valve`, `no_proof`, `fence_absent`, `attempts_exhausted`, `segmented_unsupported`, `tie`.
+
+More: [docs/guides/repair.md#generations](../../docs/guides/repair.md#generations)
+
+### generation_live_conflict
+
+<a id="generation_live_conflict"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A derived generation was not activated because one of its items was not live at the content the publication wrote; nothing was committed. | Activation rechecks every item of the new generation under the key lock; an item another writer changed or deleted in between would make the ledger record a set that is not what the pages say. | Run the producer again; it reads the items as they are now. | agent | `repeat the read that failed` | 11 | yes |
+
+More: [docs/architecture/generations.md#publishing](../../docs/architecture/generations.md#publishing)
 
 ### ghost_mass_delete_refused
 
@@ -3139,6 +3193,16 @@ More: [docs/guides/pinned-questions.md#who-can-see-pinned-questions](../../docs/
 |---|---|---|---|---|---|---|
 | The bounded queue is full; existing requests keep their place. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
+### rank_entities_timeout
+
+<a id="rank_entities_timeout"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| rank_entities did not finish within its statement deadline (Postgres statement_timeout); nothing was ranked. | The ranking aggregates every edge in scope in one statement; a whole-brain ranking on a large graph can exceed the deadline, and a partial ranking would misstate the top rows. | Narrow the ranking with source_id, types or link_type, then call rank_entities again. | agent | `repeat the read that failed` | 1 | no |
+
+More: [docs/guides/graph-ranking.md#rank_entities_timeout](../../docs/guides/graph-ranking.md#rank_entities_timeout)
+
 ### rate_limited
 
 <a id="rate_limited"></a>
@@ -3433,6 +3497,14 @@ Reasons: `rename_source_changed`.
 |---|---|---|---|---|---|---|
 | This command needs the brain's local database, and this install is a thin client of a remote brain. | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
 
+### reserved_frontmatter_key
+
+<a id="reserved_frontmatter_key"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A remote page write tried to add or change a frontmatter key only a trusted derived writer sets (`retired_by`, `retired_at`, `retired_generation`); nothing was written. | Those keys mark a page a derived writer retired, which the purge holds for 30 days and the repairs treat as machine-owned. A remote caller that could set them could make a page look machine-retired. Carrying the stored value unchanged, or dropping the key, is allowed. | Remove the key from the frontmatter (or keep the stored value) and write the page again. | agent | `repeat the read that failed` | 1 | no |
+
 ### reset_upstream_refused
 
 <a id="reset_upstream_refused"></a>
@@ -3508,6 +3580,16 @@ More: [docs/guides/windowed-reads.md#revision_changed](../../docs/guides/windowe
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The exact authorized revision is unavailable. | A capability this request needs is not configured or not reachable on this brain. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. | agent | `gbrain doctor --json` | 1 | no |
+
+### runtime_build_skew
+
+<a id="runtime_build_skew"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Long-running gbrain processes on this host run different builds, or one runs an older build than its install holds on disk: serve, the jobs supervisor, worker parents (in memory) and the job children they spawn from the install (on disk). | A process keeps the code it loaded at start, and `gbrain jobs run-child` spawns a fresh process from the install on disk for every job, so after a checkout reset or an upgrade on disk newer job code runs under an older worker and next to an older serve until each process restarts. | Restart the process the check names (serve with its service command, the supervisor with `gbrain jobs supervisor stop` then `gbrain jobs supervisor start --detach`, a worker by stopping its pid so its supervisor respawns it), then each other listed process on an older build; nothing restarts automatically. Run: gbrain doctor --only runtime_build_skew --json | agent | `gbrain doctor --only runtime_build_skew --json` | 1 | no |
+
+More: [docs/guides/troubleshooting.md#runtime-build-skew](../../docs/guides/troubleshooting.md#runtime-build-skew)
 
 ### schema_lock_blocked
 
@@ -3897,7 +3979,11 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Reading or writing durable storage failed. | Usually a dropped connection or a failed statement; the same error after a rerun is not transient. `detail: persistence_mode_unknown` (#6482): the persistence_brain singleton is missing, duplicated or carries a non-boolean `enabled`, so gbrain cannot tell whether the brain is managed and refuses every write, sync, connector run and activation step that depends on it rather than route a managed brain through the unmanaged writer; only a well-formed `enabled: false` row selects the unmanaged path. | For persistence_mode_unknown: run gbrain sources writer status --probe --json on the brain host (it reports the malformed state instead of refusing), fix the persistence_brain row it names, then gbrain doctor --json. | host_admin | `gbrain doctor --json` | 1 | no |
+| Reading or writing durable storage failed. | Usually a dropped connection or a failed statement; the same error after a rerun is not transient. `reason: database_contention`: a write admission that deadlocks, serialization failures, lock timeouts or statement timeouts kept refusing for its whole retry budget; no receipt was confirmed, so the same request_id is safe to retry once the contention clears. `detail: persistence_mode_unknown` (#6482): the persistence_brain singleton is missing, duplicated or carries a non-boolean `enabled`, so gbrain cannot tell whether the brain is managed and refuses every write, sync, connector run and activation step that depends on it rather than route a managed brain through the unmanaged writer; only a well-formed `enabled: false` row selects the unmanaged path. | For persistence_mode_unknown: run gbrain sources writer status --probe --json on the brain host (it reports the malformed state instead of refusing), fix the persistence_brain row it names, then gbrain doctor --json. | host_admin | `gbrain doctor --json` | 1 | no |
+
+Reasons: `database_contention`.
+
+Override: reason `database_contention`: retryable, exit 1, retryable.
 
 ### sync_admission_restricted
 

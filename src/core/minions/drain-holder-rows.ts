@@ -5,7 +5,7 @@
  * stall sweep deletes one whose holder stopped renewing it and both sweeps leave the queue out of their candidates.
  */
 import type { BrainEngine } from '../engine.ts';
-import { LEASE_BEACON_QUEUE } from '../persistence/sync-lease.ts';
+import { LEASE_BEACON_QUEUE } from './protected-names.ts';
 import { rowToMinionJob, type MinionJob } from './types.ts';
 
 export { LEASE_BEACON_QUEUE as HOLDER_ROW_QUEUE };
