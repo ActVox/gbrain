@@ -2268,7 +2268,9 @@ A `file_gone` hold whose `meta.reason` is `never_committed` or `ignored`
 (#7130) is a page whose file is missing although Git never committed it: the
 sync could not tell a deletion from a file that never reached the repository,
 so the page may hold the only copy. `--prefer file` deletes it after review;
-committing the file again clears the hold.
+committing the file again clears the hold. Reason `origin_unknown` means the
+sync's history read did not finish, so it could not tell whether a commit held
+the file and kept the page; the provenance below reads the whole history.
 
 <a id="file-drift-provenance"></a>**Provenance: who deleted each gone file.** Every page of a
 `--held --side deleted --state file_gone` preview names where its file went
