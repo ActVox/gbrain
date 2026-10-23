@@ -85,6 +85,7 @@ import { generationsRepair, generationsSelectionArgv, type GenerationsSelection 
 import { restoreDaysHint } from '../generations/config.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
+import type { ProgressReporter } from '../progress.ts';
 
 export interface RepairKindSpec {
   kind: RepairKind;
@@ -119,10 +120,11 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     summary: 'Write database-only timeline rows back into their pages as marked bullets (#5567). Rows that cannot round-trip are kept and counted. Each repaired page is re-embedded by its publication.',
   },
   visibility: {
-    handler: visibilityRepair, embeds: 'effect', checks: ['derived_visibility'],
+    handler: visibilityRepair, embeds: 'effect', checks: ['derived_visibility'], preview_bound: true,
     summary: 'Stamp explicit visibility on extracted atoms and synthesized concepts, tighten-only (#5525). Transcript and missing origins become private; nothing is ever loosened. '
       + 'Also makes private the chronicle events of a private origin, the pages that carry a privacy alias (access: private, ...) but no visibility, and the world facts held in or extracted from a private page. '
-      + 'Each repaired page is re-embedded by its publication.',
+      + 'The preview plans by class (--class facts|events|aliases|lineage; facts first, only lineage reads links), lists one window (--limit, default 1000) '
+      + 'and prints --apply --expect <hash>, which applies exactly that window (resumable); preview again for the next window. Each repaired page is re-embedded by its publication.',
   },
   'safe-chunks': {
     handler: safeChunksRepair, embeds: 'inline', checks: ['safe_index_pending'],
@@ -600,8 +602,8 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
      * `maxLlmUsd`: what this run may spend on a paid chat model (`spends: 'llm'` kinds; undefined = no run cap).
      */
     async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[];
-      slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number;
-      prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string; held?: boolean; side?: string; state?: string;
+      slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number; stop?: AbortSignal; recordDatabaseStops?: boolean;
+      prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string; since?: string; held?: boolean; side?: string; state?: string; provenance?: string; cursor?: string; progress?: ProgressReporter;
       keep?: 'prior' | 'disk' | 'withdrawn'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean; from?: string; close?: boolean; afterPage?: number; generations?: GenerationsSelection } = {}): Promise<RepairResult> {
       const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0], writeWaitMs } as OperationContext;
       const spec = repairSpec(kind, opts.registry);
@@ -610,8 +612,8 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
           ...(run.olderThan ? ['--older-than', run.olderThan] : []), ...(run.includeFailures ? ['--include-failures'] : []), ...(run.force ? ['--force'] : []),
           ...(run.afterPage !== undefined ? ['--after', String(run.afterPage)] : []), ...(run.generations ? generationsSelectionArgv(run.generations) : [])],
         explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous, only: run.only, skip: run.skip, slugs: run.slugs, noLlm: run.noLlm,
-        maxLlmUsd: run.maxLlmUsd, deadline: run.deadline, prefer: run.prefer, requests: run.requests, allDrifted: run.allDrifted, driftClass: run.driftClass, since: run.since,
-        held: run.held, side: run.side, state: run.state, keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force, from: run.from, close: run.close, afterPage: run.afterPage, generations: run.generations });
+        maxLlmUsd: run.maxLlmUsd, deadline: run.deadline, ...(run.stop ? { stop: run.stop } : {}), ...(run.recordDatabaseStops ? { recordDatabaseStops: true } : {}), prefer: run.prefer, requests: run.requests, allDrifted: run.allDrifted, driftClass: run.driftClass, since: run.since,
+        held: run.held, side: run.side, state: run.state, provenance: run.provenance, cursor: run.cursor, progress: run.progress, keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force, from: run.from, close: run.close, afterPage: run.afterPage, generations: run.generations });
     },
   };
 }
