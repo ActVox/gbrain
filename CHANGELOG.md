@@ -10,22 +10,54 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.390.0] - 2026-10-23
+## [0.60.391.0] - 2026-10-23
 
-**The unit-lane PostgreSQL arms job runs 12 shards instead of 11, so adding a new arm file no longer fails CI on the shard budget.** Nothing in gbrain itself changed.
+**Managed atom extraction now publishes through the same generation primitive as unmanaged brains, and an origin's old and new atoms can both be live in between, never neither (GBRA-161 PR 1b).** On a managed brain a re-extraction used to overwrite and retire atoms page by page, so a crash between requests could leave an origin with neither its old atoms nor its new ones. Transcript-derived atoms were also keyed by file name, so two same-named transcripts in different folders shared one key.
 
 ### What changed
 
 | Situation | Before | Now |
 |---|---|---|
-| `unit-postgres-arms` two-worker makespan per shard (mined weights, Bun 1.4.0 cell) | 568.9 s average, 569.8 s largest, against the 570 s budget: one more arm file pushed shards over | 521.4 s average, 522.4 s largest |
-| Same, Bun 1.4.4 PostgreSQL-only cell | 471.4 s average, 471.9 s largest | 431.9 s average, 432.4 s largest |
-| Check names | `Unit-lane PostgreSQL arms N/11 / Bun …` | `Unit-lane PostgreSQL arms N/12 / Bun …` (aggregated by `test-status`; none is a required check) |
+| A managed re-extraction replaces an origin's atoms | per-page overwrites and retirements as they came | new identities first; one `managed_generation_activate` request checks every successor is live and flips the ledger; the superseded atoms stay live and are marked pending, then each member request versions, stamps `managed-reextract` and overwrites or retires |
+| A crash between the activation and its member requests | an origin could be left with neither generation | old and new stay live; the next extraction run finishes the remaining members once (doctor `generation_pending` lists them) |
+| A member an activation never claimed | could be retired | listed as an orphan candidate, never retired automatically |
+| Two transcripts with the same name in different folders, or a moved transcript | one shared key by file name | keyed by source and source-relative path; a moved file whose content pin matches keeps its key |
+| A pre-ledger atom with no retained producer evidence | retired by a re-extraction that left it out | stays live and is reported as protected |
+| `gbrain repair stale-atoms` | its own retirement | retires through the primitive |
+
+### What to watch for after you upgrade
+
+- Migration v266 adds `derived_generation_activations`, the `locator` and `activation_id` columns on `derived_generations` and a `pending` column on `derived_generation_items`. New columns default to the old behavior and no existing row changes.
+- Pending members resume on the next extraction run, not through repair. On a managed brain, `gbrain repair generations --mode restore` is refused and points to `gbrain repair atoms-restore`, and `--mode release-held` covers atom page keys only.
 
 ### Itemized changes
 
-- `scripts/postgres-unit-arms.ts`: `ARM_SHARDS` 12; `.github/workflows/persistence-validation.yml`: the matrix, job name and `run` argument follow it (pinned by `test/scripts/postgres-unit-arms.test.ts`).
-- `docs/architecture/key-files/ci-health-and-test-guards.md`, `scripts/ubicloud/README.md`: shard count.
+- `src/core/generations/managed.ts`: the managed publication (create, activate, member overwrites and retirements) and the `managed_generation_activate` maintenance request (trusted local only).
+- Transcript keys are `transcript:<root>/<path>` with a rename map; identity hashing ignores `source_kind`, `ingested_via` and ephemeral frontmatter keys; the shrink floor is strictly below.
+- Migration v266 (`derived-generation-activations`); doctor `generation_pending`.
+- Tests on PGLite and Postgres: the managed #7013 shape, a kill between activation and members, a two-file retirement after resume, managed and unmanaged contention on one key, same-name transcripts and a rename, and a legacy atom without evidence.
+- The three new Postgres-armed files (the load probe, the managed atom keys and the managed probes) run their Postgres arm through `test/e2e/` `registerPostgresTests` wrappers, not `test/postgres-unit-arms.txt`, whose shards are at their makespan budget. The load probe runs at 200 origins in every lane; `GBRAIN_TEST_GENERATION_LOAD=1` keeps the 10,000-origin measurement.
+
+## [0.60.390.0] - 2026-10-23
+
+**`gbrain doctor` can verify a source with 65,534 or more files for cross-source drift, and `gbrain extract` no longer ignores `--type` on its default file walk.** Before, `multi_source_drift` on such a source always reported "not verified" (`MAX_PARAMETERS_EXCEEDED`), and `extract timeline --type email` walked every file and reported the full-corpus count as if the pass had been filtered.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| doctor `multi_source_drift` on a source with 65,534 or more files | not verified: the existence probe sent one bind parameter per file, over the Postgres cap (on PGLite the statement failed), and lowering `GBRAIN_DRIFT_LIMIT` only truncated the walk | verified: the probe sends the slugs as one array parameter |
+| `gbrain extract links\|timeline\|all --type T` (or `--since`, `--infer-dates`) without `--source db` | the file walk ignored the filter and processed every file | exits 2 and prints the same command with `--source db`, which applies the filter |
+
+### What to watch for after you upgrade
+
+- A script that passed `--type`, `--since` or `--infer-dates` to `gbrain extract` without `--source db` now exits 2. Add `--source db` to get the filtered pass it meant to run.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/multi-source-drift.ts`: the existence probe uses `unnest($1::text[])` (#7388; `test/multi-source-drift-param-cap-7388.test.ts`, PGLite and Postgres).
+- `src/commands/extract.ts`: file-walk refusal and help (#7394; `test/extract-row-filters-fs-7394.test.ts`).
 
 ## [0.60.389.0] - 2026-10-23
 

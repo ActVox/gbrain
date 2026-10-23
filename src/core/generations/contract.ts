@@ -42,7 +42,7 @@ export interface GenerationAdapter<C = unknown> {
   /** The input as stored now, or null when it is gone. `context` carries an input the database does not hold (a transcript). */
   readInput(engine: BrainEngine, key: GenerationKey, context: C | undefined): Promise<InputState | null>;
   /** Rows of the named keys (deleted rows included) and of every live row the key owns by its origin metadata. */
-  readItems(engine: BrainEngine, key: GenerationKey, itemKeys: readonly string[]): Promise<Map<string, ItemRow>>;
+  readItems(engine: BrainEngine, key: GenerationKey, itemKeys: readonly string[], context?: C): Promise<Map<string, ItemRow>>;
   /** Of these unrecorded owned rows, the keys whose retained producer evidence shows them unedited at their identity. */
   legacyEvidence(engine: BrainEngine, key: GenerationKey, rows: readonly ItemRow[]): Promise<Set<string>>;
   /** Writes new and changed items inside the activation transaction. */

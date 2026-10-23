@@ -22,6 +22,11 @@ Migration v265 (a placeholder number, restamped when the change merges) adds fou
   later run of the same result stops at that held row until `--mode release-held` publishes it. A fenced producer is
   not counted. Only error codes are stored.
 
+Migration v266 (also a placeholder) adds the managed side (PR 1b): `derived_generations.locator` (a transcript key's
+current file) and `activation_id`, `derived_generation_items.pending` (an item a member request still overwrites or
+retires; a retirement marked pending is `retire_pending` and still live), and `derived_generation_activations`: one row
+per admitted managed activation with its members and whether it activated.
+
 ## Publishing
 
 Under the item page locks (slug order) and then the key's advisory lock, `publishGeneration`:
@@ -45,15 +50,45 @@ Under the item page locks (slug order) and then the key's advisory lock, `publis
 A partial result (an input cut at its cap, #6503) publishes additively: it writes its items, carries the rest of the
 live generation forward, retires nothing and completes nothing.
 
-Adapters (`contract.ts`) own one kind each: `adapters/atoms.ts` (unmanaged atoms, one key per origin page or
-transcript) in this release. Managed brains keep the coordinator path until PR 1b.
+Adapters (`contract.ts`) own one kind each: `adapters/atoms.ts` (atoms, one key per origin page or transcript) in this
+release. An atom's identity leaves out the provenance a managed writer stamps (`source_kind`, `ingested_via`,
+`ingested_at`, `trust_tier` and the other content-hash ephemeral keys), so a managed write never reads as an edit.
+
+### Managed sources
+
+A managed source (`generations/managed.ts`) never composes a generation in one transaction: every page write is its own
+coordinated request with its own file. A publication is planned without locks and admitted as one batch, in order:
+
+1. `create` members: page writes of new identities only (a key no live row holds);
+2. one `managed_generation_activate` request (trusted local only; a remote one is refused): under the member page locks
+   and then the key lock it rechecks the expected generation, the input pin and each member at its planned identity,
+   flips the ledger and marks every item a member still overwrites or retires `pending`;
+3. `overwrite` and `retire` members: the existing per-page managed put and delete requests (version first, stamp), each
+   refusing unless its item is pending on the live generation its activation made, and clearing the mark on commit.
+
+The activation id is digest(operation id, run scope) and each member's digest(activation id, slug, action), so a rerun
+replays them. Between steps 1 and 3 old and new items are both live, never neither. The next extraction run of the
+source resumes pending members (`resumeManagedGenerationMembers`): a request still queued is waited on, one that ended
+without committing is submitted again, and a page edited since keeps its content. Pages a `create` member wrote for an
+activation that never happened are orphan candidates: doctor `generation_pending` and `--mode cleanup` list them with
+their activation id, and nothing retires them automatically.
+
+A transcript's key is its corpus root label and root-relative path (`transcript:corpus/team-a/2026-09-07-standup.txt`),
+never its basename or content hash. A file a live generation names as its `locator` keeps that key, and a file whose
+content equals the input of a live generation whose file is gone was moved: it keeps that key and the locator follows.
+
+`gbrain repair stale-atoms` retires each listed atom as an approved generation of its origin key (no floor or valve),
+bound to the atom's identity; `atoms-restore` keeps its command and JSON and still restores managed retirements, and
+doctor `atom_retirements_restorable` leaves out an atom whose retirement the ledger records, so it warns once.
 
 ## Repair
 
 `gbrain repair generations --kind <kind>` is explicit-only and preview-bound (docs/guides/repair.md#generations):
 `--mode restore` (the default) republishes the item set the selected live generation replaced, `--mode release-held`
-publishes a held result once. Doctor reports `generation_retirements` (ok, with the restorable count) and
-`generation_held` (warn).
+publishes a held result once (a managed source releases an atom page key through its writer), and `--mode cleanup` lists
+pending members and orphan candidates, read-only. A managed source restores retired atoms with `gbrain repair
+atoms-restore`; `--mode restore` refuses there. Doctor reports `generation_retirements` (ok, with the restorable
+count), `generation_held` (warn) and `generation_pending` (warn).
 
 ## Purge
 
@@ -95,3 +130,10 @@ proposal carrying the claim (`ledger-scrub.ts`). Restore then refuses that item 
 - Attempts have their own table instead of the held row's `attempts` column, because a held row means a result
   waits for the operator (doctor warns, release-held lists it) and a key has at most one; counting failures there
   would warn before any result is held and displace a real held result.
+- The shrink floor holds a result strictly below `shrink_floor` of the owned items (scaled by the input ratio), so a
+  result exactly at the floor publishes; this is the plan's "below it the result is held".
+- A managed activation's id includes the producer's run scope, because a connector run refused after an owner claimed the
+  source must not collide with the owner's run of the same result.
+- Managed `--mode restore` is refused and `atoms-restore` stays the managed restore path, because a generation restore
+  writes pages in one transaction, which a managed source cannot do; a managed restore through member requests is left
+  for a later PR.
