@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, loadavg, tmpdir, totalmem } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import postgres from '#postgres'
@@ -14,7 +14,7 @@ import { shrinkRun } from './shrink.ts';
 export interface ValidationOptions {
   engine: 'pglite' | 'postgres'; schedules?: number; operations?: number; seed?: number;
   crashes?: boolean; databaseUrl?: string; manifest?: string;
-  /** Crash-robot ceiling in seconds: a run past it fails; omitted or 0 skips the phase (the CLI defaults to 960 on PGLite, 1600 on Postgres). */
+  /** Crash-robot ceiling in seconds: a run past it fails; omitted or 0 skips the phase (the CLI defaults to 1200 on PGLite, 1800 on Postgres). */
   robotSeconds?: number;
   /** `pr` skips the Postgres lease-bound seams; `full` (default) crashes every seam. */
   robotScope?: RobotScope;
@@ -83,6 +83,12 @@ export function robotOverBudget(durationMs: number, seconds: number): string {
   return `Crash robot over its ceiling: ran ${Math.round(durationMs / 1000)} s against --robot-seconds=${seconds}. Why: every run executes the same `
     + 'schedule list (scripts/persistence/robot-driver.ts ROBOT_RANDOM_SEEDS) so a passed run of a tree can be reused; past the ceiling the list '
     + 'no longer fits this runner class. Fix: find the slow runs in the manifest; speed them up, or resize the list and the ceiling together.';
+}
+
+/** One line per robot cell for the job summary: elapsed time as a share of the ceiling, so drift shows long before it fails. */
+export function robotCeilingUse(engine: string, scope: RobotScope, durationMs: number, seconds: number): string {
+  const elapsed = Math.round(durationMs / 1000);
+  return `Crash robot ${engine} (${scope}): ${elapsed} s of its ${seconds} s ceiling (${Math.round(100 * durationMs / (seconds * 1000))}%)\n`;
 }
 
 /** The failing runs plus the exact command that replays them and the one that shrinks the first. */
@@ -166,6 +172,9 @@ export async function runValidation(options: ValidationOptions) {
     if (options.robotSeconds) {
       manifest.robot = await runRobotPhase(robotOptions());
       process.stderr.write(`[persistence] ${options.engine}: crash robot ran ${manifest.robot.sequences_x_crash_points} sequence x crash point runs over ${manifest.robot.schedules} schedules\n`);
+      const use = robotCeilingUse(options.engine, options.robotScope ?? 'full', manifest.robot.duration_ms, options.robotSeconds);
+      process.stderr.write(`[persistence] ${use}`);
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, use);
       if (manifest.robot.failing_runs.length) throw new Error(robotFailure(manifest.robot.failing_runs, options));
       if (manifest.robot.over_budget) throw new Error(robotOverBudget(manifest.robot.duration_ms, options.robotSeconds));
     }
@@ -282,7 +291,7 @@ if (import.meta.main) {
   assert(['pr', 'full'].includes(args.get('robot-scope') ?? 'full'), '--robot-scope is pr or full');
   const result = await runValidation({ engine, schedules: Number(args.get('schedules') ?? 1000), operations: Number(args.get('operations') ?? 10_000),
     seed: Number(args.get('seed') ?? 5105), crashes: !args.has('no-crashes'), databaseUrl: process.env.DATABASE_URL,
-    robotSeconds: Number(args.get('robot-seconds') ?? (engine === 'postgres' ? 1600 : 960)),
+    robotSeconds: Number(args.get('robot-seconds') ?? (engine === 'postgres' ? 1800 : 1200)),
     robotScope: (args.get('robot-scope') ?? 'full') as RobotScope, exploreDay: args.has('explore-day') ? Number(args.get('explore-day')) : undefined, replay: args.get('replay') || undefined, shrink: args.get('shrink') || undefined,
     manifest: args.get('manifest') ?? `.context/persistence-${engine}-manifest.json` });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

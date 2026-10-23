@@ -21,7 +21,7 @@ import { descriptor, executeOp, parseDescriptor, SessionDrops } from '../scripts
 import { ReferenceModel } from '../scripts/persistence/model.ts';
 import { crossBoundarySequences, pageBody, randomSchedule } from '../scripts/persistence/generator.ts';
 import { ROBOT_RANDOM_SEEDS, ROBOT_ROTATION_SEEDS, ROBOT_TOPOLOGY, explorationSeeds, restrict, runRobotPhase, type RobotRun } from '../scripts/persistence/robot-driver.ts';
-import { robotFailure, robotFullGate, robotOverBudget, runValidation, spawnWorker } from '../scripts/persistence/validate.ts';
+import { robotCeilingUse, robotFailure, robotFullGate, robotOverBudget, runValidation, spawnWorker } from '../scripts/persistence/validate.ts';
 import { faultPoint, installFaultHook, type FaultDetail, type FaultPoint } from '../src/core/persistence/fault-points.ts';
 import { shrinkRun } from '../scripts/persistence/shrink.ts';
 import { finish, fixedChunks, LEVEL_CHUNK_BYTES, runSchedule, runSteps, seamCounter } from '../scripts/persistence/crash-robot.ts';
@@ -627,6 +627,11 @@ describe('every robot run covers a fixed schedule list (reuse of a passed run is
     expect((await plan({ seconds: 0.001 })).robot).toMatchObject({ over_budget: true });
     expect((await plan({ seconds: 600 })).robot).toMatchObject({ over_budget: false });
     expect(robotOverBudget(1_234_000, 960)).toMatch(/over its ceiling: ran 1234 s against --robot-seconds=960/);
+  });
+
+  test('each cell reports its elapsed time as a share of its ceiling for the job summary', () => {
+    expect(robotCeilingUse('pglite', 'full', 880_400, 1200)).toBe('Crash robot pglite (full): 880 s of its 1200 s ceiling (73%)\n');
+    expect(robotCeilingUse('postgres', 'pr', 1_900_000, 1800)).toBe('Crash robot postgres (pr): 1900 s of its 1800 s ceiling (106%)\n');
   });
 
   test('the nightly adds one rotation seed (each within four nights) and one never-run seed after the fixed list', async () => {
