@@ -37,7 +37,7 @@ isolatedTest(import.meta.path, 'the dirtiness probe yields between file reads; n
     const read = discovery.readSyncFile;
     let reads = 0;
     spies.push(spyOn(discovery, 'readSyncFile').mockImplementation(((...args: Parameters<typeof read>) => { reads++; spinCpuMs(READ_CPU_MS); return read(...args); }) as typeof read));
-    const lag = watchLoopLag();
+    const lag = watchLoopLag({ reportAtMs: MAX_LAG_MS });
     let probed: Awaited<ReturnType<typeof probeDirtiness>>, maxLag = 0;
     try { probed = await probeDirtiness(root, root, [...tree.keys()], tree, index); }
     finally { ({ maxLag } = lag.stop()); }
