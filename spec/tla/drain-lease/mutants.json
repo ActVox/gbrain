@@ -1,0 +1,159 @@
+{
+  "$comment": "Each mutant removes one guard. `spec` edits the model and TLC must report `expect` (or nothing, for `survives`). `code` makes the same edit to the implementation and the named test must fail under it and pass without it. Run: bun scripts/spec/mutants.ts [--spec-only|--code-only] [--only <id>]. See spec/tla/README.md.",
+  "module": "DrainLease",
+  "config": "DrainLease.cfg",
+  "mutants": [
+    {
+      "id": "fence-ignores-token",
+      "title": "the fence admits a transaction whose token is not the row's",
+      "expect": "FencedTxnsMatchRow",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "FenceToken(p)  == rowTok = tok[p]",
+        "after": "FenceToken(p)  == TRUE"
+      },
+      "code": {
+        "file": "src/core/persistence/sync-lease.ts",
+        "before": "WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
+        "after": "WHERE id=$1 AND $2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE",
+        "test": "test/persistence-sync-lease.test.ts",
+        "filter": "taken over after its TTL"
+      }
+    },
+    {
+      "id": "fence-without-share-lock",
+      "title": "the fence reads the row without FOR SHARE, so a takeover proceeds under an open transaction",
+      "expect": "FencedTxnsMatchRow",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "Sharers == {p \\in Procs : OpenTx(p) # {}}",
+        "after": "Sharers == {}"
+      },
+      "code": {
+        "file": "src/core/persistence/sync-lease.ts",
+        "before": "AND ttl_expires_at > now() FOR SHARE'",
+        "after": "AND ttl_expires_at > now()'",
+        "test": "test/e2e/drain-lease-fence-postgres.test.ts",
+        "filter": "blocks a takeover",
+        "postgres": true
+      }
+    },
+    {
+      "id": "takeover-ignores-ttl",
+      "title": "the upsert takes over a row whose TTL has not expired",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "TakeoverAllowed == Expired /\\ rowRef + Grace < now",
+        "after": "TakeoverAllowed == TRUE"
+      },
+      "code": {
+        "file": "src/core/db-lock.ts",
+        "before": "         WHERE gbrain_cycle_locks.ttl_expires_at < NOW()\n           AND (gbrain_cycle_locks.last_refreshed_at IS NULL\n                OR gbrain_cycle_locks.last_refreshed_at < NOW() - $5 * INTERVAL '1 second')",
+        "after": "         WHERE $5::int IS NOT NULL",
+        "test": "test/db-lock-auto-takeover.test.ts",
+        "filter": "does NOT reclaim a live same-host holder"
+      }
+    },
+    {
+      "id": "release-ignores-token",
+      "title": "release deletes the row whatever its token, so a former holder frees its successor's lease",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "ReleaseMatches(p) == rowTok = tok[p]",
+        "after": "ReleaseMatches(p) == TRUE"
+      },
+      "code": {
+        "file": "src/core/db-lock.ts",
+        "before": "      release: async () => {\n        deregister();\n        await db.query(\n          `DELETE FROM gbrain_cycle_locks WHERE id = $1 AND holder_pid = $2 AND acquisition_token = $3::uuid`,",
+        "after": "      release: async () => {\n        deregister();\n        await db.query(\n          `DELETE FROM gbrain_cycle_locks WHERE id = $1 AND $2::int IS NOT NULL AND $3::uuid IS NOT NULL`,",
+        "test": "test/db-lock-fencing.test.ts",
+        "filter": "release\\(\\) after a steal is a fenced no-op"
+      }
+    },
+    {
+      "id": "pid-probe-calls-live-holder-dead",
+      "title": "the dead-pid takeover reclaims a live holder (EPERM read as dead, or --force-break-lock)",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.cfg",
+        "before": "UnsafeSteals = FALSE",
+        "after": "UnsafeSteals = TRUE"
+      },
+      "code": {
+        "file": "src/core/db-lock.ts",
+        "before": "if (probeResult === 'alive' || probeResult === 'eperm') return 'alive';",
+        "after": "if (probeResult === 'alive') return 'alive';",
+        "test": "test/db-lock-auto-takeover.test.ts",
+        "filter": "same-host \\+ EPERM"
+      }
+    },
+    {
+      "id": "fenced-transaction-outlives-renewal-timeout",
+      "title": "#7415: back-to-back fenced transactions that each outlive the renewal timeout starve the renewal until the lease lapses",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.cfg",
+        "before": "MaxTxMs = 20000",
+        "after": "MaxTxMs = 30000"
+      },
+      "code": {
+        "file": "src/core/persistence/sync-lease.ts",
+        "before": "export const FENCED_SLICE_MS = 5_000;",
+        "after": "export const FENCED_SLICE_MS = Number.POSITIVE_INFINITY;",
+        "test": "test/sync-fenced-slices-gbra133.test.ts",
+        "filter": "fenced slices"
+      }
+    },
+    {
+      "id": "fence-skips-queued-renewal",
+      "title": "a new fenced transaction overtakes a renewal waiting on the row (the RenewalWinsGap assumption fails)",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.cfg",
+        "before": "RenewalWinsGap = TRUE",
+        "after": "RenewalWinsGap = FALSE"
+      }
+    },
+    {
+      "id": "renewal-ignores-token",
+      "title": "the renewal extends whatever row exists, so a late renewal from a former holder rewinds its successor's expiry",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "RenewMatches(p) == rowTok = tok[p]",
+        "after": "RenewMatches(p) == rowTok # None"
+      },
+      "code": {
+        "file": "src/core/db-lock.ts",
+        "before": "            WHERE id = $2 AND holder_pid = $3 AND acquisition_token = $4::uuid\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n        );\n        return res.rows.length > 0;",
+        "after": "            WHERE id = $2 AND holder_pid = $3 AND $4::uuid IS NOT NULL\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n        );\n        return res.rows.length > 0;",
+        "test": "test/db-lock-fencing.test.ts",
+        "filter": "after a steal, the old handle refresh\\(\\) returns false"
+      }
+    },
+    {
+      "id": "fence-ignores-signal",
+      "title": "the fence ignores an aborted lease signal",
+      "expect": "survives",
+      "reason": "Defense in depth: every abort is also visible to the fence's token or expiry check (the local deadline never outlasts the row's expiry, and a refused renewal means the token moved).",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "FenceSignal(p) == ~aborted[p]",
+        "after": "FenceSignal(p) == TRUE"
+      }
+    },
+    {
+      "id": "fence-ignores-expiry",
+      "title": "the fence admits under an expired row that nobody took over",
+      "expect": "survives",
+      "reason": "Defense in depth: FOR SHARE blocks a takeover while the transaction is open, and the token check refuses after one. test/persistence-sync-lease.test.ts still pins the refusal (\"expired untaken\").",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "FenceExpiry    == rowExp > now",
+        "after": "FenceExpiry    == TRUE"
+      }
+    }
+  ]
+}
