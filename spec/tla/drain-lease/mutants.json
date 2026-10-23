@@ -36,8 +36,8 @@
       "expect": "FencedTxnsMatchRow",
       "spec": {
         "file": "DrainLease.tla",
-        "before": "FenceToken(p)  == rowTok = tok[p]",
-        "after": "FenceToken(p)  == TRUE"
+        "before": "StampToken(t)  == rowTok = t",
+        "after": "StampToken(t)  == TRUE"
       },
       "code": {
         "edits": [
@@ -58,7 +58,8 @@
             "postgres": true
           }
         ]
-      }
+      },
+      "config": "DrainLeaseStamp.cfg"
     },
     {
       "id": "checkpoint-stamp-ignores-token",
@@ -67,8 +68,8 @@
       "expect": "FencedTxnsMatchRow",
       "spec": {
         "file": "DrainLease.tla",
-        "before": "FenceToken(p)  == rowTok = tok[p]",
-        "after": "FenceToken(p)  == TRUE"
+        "before": "StampToken(t)  == rowTok = t",
+        "after": "StampToken(t)  == TRUE"
       },
       "code": {
         "edits": [
@@ -86,6 +87,63 @@
           {
             "test": "test/e2e/drain-lease-stamp-fence-postgres.test.ts",
             "filter": "a checkpoint request is refused",
+            "postgres": true
+          }
+        ]
+      },
+      "config": "DrainLeaseStamp.cfg"
+    },
+    {
+      "id": "fold-stamp-without-share-lock",
+      "kind": "guard",
+      "title": "a folded stamp's proof reads the row without FOR SHARE, so a takeover proceeds before its import commits",
+      "expect": "FencedTxnsMatchRow",
+      "config": "DrainLeaseStamp.cfg",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "StampSharing == stampTok # None",
+        "after": "StampSharing == FALSE"
+      },
+      "code": {
+        "edits": [
+          {
+            "file": "src/core/persistence/sync-pass-fold.ts",
+            "before": "ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]",
+            "after": "ttl_expires_at > now()', [syncLockId(row.source_id), stamp.leaseToken]"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/e2e/drain-lease-stamp-fence-postgres.test.ts",
+            "filter": "a folded stamp holds the lease row FOR SHARE",
+            "postgres": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "checkpoint-stamp-without-share-lock",
+      "kind": "guard",
+      "title": "the checkpoint request reads the row without FOR SHARE, so a takeover proceeds before it commits",
+      "expect": "FencedTxnsMatchRow",
+      "config": "DrainLeaseStamp.cfg",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "StampSharing == stampTok # None",
+        "after": "StampSharing == FALSE"
+      },
+      "code": {
+        "edits": [
+          {
+            "file": "src/core/persistence/sync-prepare.ts",
+            "before": "ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]",
+            "after": "ttl_expires_at > now()', [syncLockId(row.source_id), stamp.leaseToken]"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/e2e/drain-lease-stamp-fence-postgres.test.ts",
+            "filter": "a checkpoint request holds the lease row FOR SHARE",
             "postgres": true
           }
         ]
@@ -298,6 +356,17 @@
         "file": "DrainLease.cfg",
         "before": "Lanes = 1",
         "after": "Lanes = 2"
+      }
+    },
+    {
+      "id": "stamp-overlaps-fence",
+      "kind": "assumption",
+      "title": "the coordinator's pass-stamp transaction holds the row FOR SHARE beside the holder's fenced transactions (#7442)",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.cfg",
+        "before": "  Stamps = FALSE",
+        "after": "  Stamps = TRUE"
       }
     },
     {

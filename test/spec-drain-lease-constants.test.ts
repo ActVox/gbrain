@@ -4,7 +4,7 @@
  * checks a protocol the code no longer runs. Read spec/tla/README.md ("Timing") before changing either side.
  */
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DRAIN_LEASE_REFRESH_MS, DRAIN_LEASE_TTL_MINUTES, FENCED_SLICE_MS } from '../src/core/persistence/sync-lease.ts';
 import { HOLDER_TAKEOVER_GRACE_MS, resolveStealGraceSeconds } from '../src/core/db-lock.ts';
@@ -12,7 +12,7 @@ import { withEnv } from './helpers/with-env.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const SPEC = join(ROOT, 'spec/tla/drain-lease');
-const CONFIGS = ['DrainLease.cfg', 'DrainLeaseSafety.cfg'];
+const CONFIGS = readdirSync(SPEC).filter(f => f.endsWith('.cfg')).sort();
 
 function constants(cfg: string): Record<string, string> {
   const out: Record<string, string> = {};

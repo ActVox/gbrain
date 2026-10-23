@@ -26,6 +26,9 @@ on:
       - 'test/e2e/drain-lease-guards-postgres.test.ts'
       - 'test/drain-lease-stamp-fence.test.ts'
       - 'test/e2e/drain-lease-stamp-fence-postgres.test.ts'
+      - 'test/helpers/managed-brain.ts'
+      - 'test/helpers/test-backends.ts'
+      - 'test/helpers/persistence-postgres.ts'
   push:
     branches: [master]
     paths: *paths
@@ -78,7 +81,10 @@ jobs:
           printf 'TLA2TOOLS=%s\n' "$jar" >> "$GITHUB_ENV"
       - name: The configs match the code
         run: bun test test/spec-drain-lease-constants.test.ts
-      - name: Model-check every config
+      - name: Model-check every config (the *Nightly.cfg ones on the schedule and on dispatch)
+        env:
+          TLC_NIGHTLY: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '0' }}
+          TLC_TIMEOUT_S: '900'
         run: bash scripts/spec/tlc.sh
       # Only after the model check passed: a mutant means something only against a spec whose properties hold.
       - name: Every guard mutant is caught, in the model and in the code

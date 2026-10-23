@@ -12,7 +12,8 @@
 #   TLC_TIMEOUT    TLC did not finish within TLC_TIMEOUT_S (default 600): the state space grew; shrink the config
 #   TLC_ERROR      TLC stopped (parse or semantic error, out of memory): the log names the line
 # Env: TLA2TOOLS (a jar to use; otherwise scripts/spec/tla-jar.sh downloads the pinned one), TLC_OUT (logs; default
-# .context/tlc), TLC_WORKERS (default: CPUs / configs run at once), TLC_TIMEOUT_S, TLC_JAVA_OPTS.
+# .context/tlc), TLC_WORKERS (default: CPUs / configs run at once), TLC_TIMEOUT_S, TLC_JAVA_OPTS, TLC_NIGHTLY (1 also runs
+# the *Nightly.cfg configs, which take too long for every pull request).
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 jar="$(bash "$root/scripts/spec/tla-jar.sh")"
@@ -28,7 +29,12 @@ jobs=()
 for dir in "${specs[@]}"; do
   [ -d "$dir" ] || { echo "TLC_ERROR: no spec directory $dir" >&2; exit 2; }
   module="$(cd "$dir" && ls *.tla | head -1)"; module="${module%.tla}"
-  if [ $# -ge 2 ]; then cfgs=("$2"); else cfgs=(); for c in "$dir"/"$module"*.cfg; do cfgs+=("$(basename "$c")"); done; fi
+  if [ $# -ge 2 ]; then cfgs=("$2"); else
+    cfgs=(); for c in "$dir"/"$module"*.cfg; do
+      case "$c" in *Nightly.cfg) [ "${TLC_NIGHTLY:-0}" = 1 ] || { echo "skip $(basename "$dir")/$(basename "$c") (nightly only; TLC_NIGHTLY=1 runs it)"; continue; } ;; esac
+      cfgs+=("$(basename "$c")")
+    done
+  fi
   for cfg in "${cfgs[@]}"; do [ -f "$dir/$cfg" ] || { echo "TLC_ERROR: no config $dir/$cfg" >&2; exit 2; }; jobs+=("$dir|$module|$cfg"); done
 done
 cpus="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"

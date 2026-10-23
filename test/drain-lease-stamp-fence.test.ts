@@ -16,7 +16,6 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { syncLockId } from '../src/core/db-lock.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
-import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
@@ -80,5 +79,48 @@ for (const backend of testBackends()) {
       expect(row!.state).not.toBe('committed');
       expect(await lastCommit(engine)).toBe(before);
     }), 180_000);
+
+    // Postgres only: PGLite is one connection, so nothing can try a takeover while the stamp's transaction is open.
+    if (backend === 'postgres') {
+      /** A takeover as tryAcquireDbLock's upsert or --break-lock writes it, from another connection, giving up after 1 s. */
+      const takeoverDuring = (engine: BrainEngine) => engine.transaction(async tx => {
+        await tx.executeRaw("SET LOCAL lock_timeout = '1s'");
+        return (await tx.executeRaw('UPDATE gbrain_cycle_locks SET acquisition_token=gen_random_uuid() WHERE id=$1 RETURNING id', [syncLockId('default')])).length;
+      }).catch((error: { code?: string }) => error.code ?? String(error));
+
+      test('a folded stamp holds the lease row FOR SHARE until its import commits, so a takeover waits', () => brain(async ({ engine, root }) => {
+        expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+        writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
+        const stamped = new Set<string>();
+        let during = null as unknown;
+        installFaultHook(async (point, detail) => {
+          if (point === 'consumer:prepared' && detail.requestId && (await kindOf(engine, detail.requestId))?.stamp) stamped.add(detail.requestId);
+          // The publication transaction is open here, after the folded stamp's proof read the lease row.
+          if (point === 'publication:before_commit' && during === null && detail.requestId && stamped.has(detail.requestId)) during = await takeoverDuring(engine);
+        });
+        await performManagedSync(engine, OPTS).catch(() => undefined);
+        installFaultHook(undefined);
+        const [row] = await engine.executeRaw<{ stamp: string | null }>("SELECT outcome->>'pass_stamp' AS stamp FROM persistence_requests WHERE request_id=$1::uuid", [[...stamped][0]]);
+        expect(row?.stamp).toBe('folded');
+        expect(during).toBe('55P03');
+      }), 180_000);
+
+      test('a checkpoint request holds the lease row FOR SHARE until it commits, so a takeover waits', () => brain(async ({ engine, root }) => {
+        expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
+        writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
+        const checkpoints = new Set<string>();
+        let during = null as unknown;
+        installFaultHook(async (point, detail) => {
+          if (point === 'sync:pass_fold') throw new Error('The test refuses the folded stamp.');
+          if (point === 'consumer:prepared' && detail.requestId && (await kindOf(engine, detail.requestId))?.kind === 'managed_sync_checkpoint') checkpoints.add(detail.requestId);
+          if (point === 'publication:before_commit' && during === null && detail.requestId && checkpoints.has(detail.requestId)) during = await takeoverDuring(engine);
+        });
+        await performManagedSync(engine, OPTS).catch(() => undefined);
+        installFaultHook(undefined);
+        const [row] = await engine.executeRaw<{ state: string }>("SELECT state FROM persistence_requests WHERE request_id=$1::uuid", [[...checkpoints][0]]);
+        expect(row?.state).toBe('committed');
+        expect(during).toBe('55P03');
+      }), 180_000);
+    }
   });
 }
