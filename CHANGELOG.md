@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.401.0] - 2026-10-23
+
+**Sync no longer turns a folder of hub `index.md` files with their own `slug:` line into one hold per file (#7341), an agreed reconcile clears a stalled write's hold (#7364), and a new switch, off by default, lets sync apply a held deletion it can prove.** Since 0.60.337.0, sync imports a nested `index.md` or `README.md` that has `type:` or `title:`. If that file's frontmatter `slug:` named another page (its folder, or just its leaf name), the import could only hold it as `frontmatter_slug_conflict`, so a folder of generated hubs produced hundreds of holds. Those files are scaffolding again, and the next sync releases their holds.
+
+### How to use it
+
+```bash
+gbrain sync --source <id>                                   # releases the #7341 holds; nothing else to run
+gbrain sources reconcile --source <id> --apply              # also clears a stalled write's hold once page and file agree
+gbrain sources retry-held <id> --dry-run --json             # hold_rows: the exact hold row each refusal reads
+gbrain config set sync.apply_held_deletions true            # opt in (off by default); per source: sync.apply_held_deletions.source.<id>
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `dir/x/index.md` with `type:` and `slug: x` or `slug: dir/x` | imported, then held `frontmatter_slug_conflict` | skipped as scaffolding, as before 0.60.337.0; an existing hold is released by the next sync |
+| A `preparation_stalled` or `write_interrupted` hold whose page and file agree after `sources reconcile --apply` | stayed until it ran out of retries | cleared by the reconcile |
+| A write refused because sync holds its file | named the hold code only | also names the hold row (source and incarnation, and locally the fingerprint) |
+| A held deletion of a file a commit removed, where the page equals the file's last committed bytes | held until `gbrain repair file-drift --held --provenance deleted_by_commit` | unchanged by default; with `sync.apply_held_deletions true`, sync soft-deletes it with a receipt |
+
+### What to watch for after you upgrade
+
+- `sync.apply_held_deletions` is off by default, so nothing deletes on upgrade. When it is on, sync deletes a held page only when the file's provenance is `deleted_by_commit`, the page equals the file's last committed blob, and the page's revision is file-backed (a page written in the database after the file is kept). Each deletion is an ordinary sync soft delete: restorable within the purge window, counted by `sync.max_deletes` and the mass-delete valve, and its write request carries `heldDeletion` (commit and blob). A refused page stays held, and `meta.held_deletion.refused` says why.
+- To make a skipped hub a page, remove its `slug:` line.
+
 ## [0.60.400.0] - 2026-10-23
 
 **Facts that a bulk import dated with the day it ran can now take the date their claim states, and out-of-order timelines can be put back in date order (#7247).** A bulk import that stamps the day it ran onto every fact makes hundreds of facts look like they all happened that day, so timelines and "as of" questions put them on one date. Doctor now spots those days, and an explicit repair moves each such fact to the one date its claim states. A second explicit repair fixes timelines that imports or hand edits left out of date order, with a copied bullet or a second timeline section.
