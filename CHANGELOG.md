@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.389.0] - 2026-10-23
+
+**Unmanaged atom extraction now replaces an origin's atoms only on a complete, non-empty result, versions what it drops first, and can undo it (GBRA-161 PR 1a).** A derived writer used to delete or keep atoms one statement at a time, so an empty model answer, a truncated read or a failed write could drop or orphan an origin's atoms with no way back. Atoms are the first writer on one generation-publish primitive with a ledger and a restore path. Managed atoms, facts and takes, chronicle and synthesis move onto it in later releases.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Unmanaged extract_atoms writes an origin's atoms | atoms, provenance edges and the completion stamp written separately; a failed write could leave a provisional atom | one generation: they land together or not at all, and the atoms a complete re-extraction no longer produces retire in the same transaction (versioned, stamped, restorable) |
+| A re-extraction returns nothing, keeps under half the atoms, changes more than 64, or a mass retirement runs | retired whatever the result dropped | held: nothing changes, doctor \`generation_held\` warns, and the held result records why (\`generations.shrink_floor\`, \`generations.max_items\`, the retirement valve); an empty result retires only with proof the input is gone |
+| A producer whose input or generation moved while it worked | wrote over the newer state | fenced (\`generation_fenced\`), nothing written |
+| An atom from before this release | retired when a re-extraction left it out | retired only when the extraction reproduces it or a retained page version the extractor wrote shows it unedited; a hand-written or hand-edited atom stays live |
+| Undoing a retirement | not possible after the purge | \`gbrain repair generations --kind atom --since 30d\` previews restoring what a generation replaced; \`--mode release-held --held\` previews publishing a held result once |
+
+### What to watch for after you upgrade
+
+- Migration v265 adds the ledger tables (\`derived_generations\`, \`derived_generation_items\`, \`derived_generation_valve\`, \`derived_generation_attempts\`). It writes no existing data.
+- \`gbrain repair generations\` is explicit-only and preview-bound: run it without \`--apply\`, show the preview, then \`--apply --expect <hash> --yes\`. A restore refuses a key whose items were edited since; a refused key exits non-zero and is listed.
+- Doctor adds \`generation_retirements\` and \`generation_held\`. Five \`generations.*\` settings are bounded at set time, and the derived purge hold now follows \`generations.restore_days\` (default 30).
+
+### Itemized changes
+
+- \`src/core/generations/\`: \`plan.ts\` (the pure replace-or-hold decision and typed empty-result proofs), \`publish.ts\` (page then key locks, replay, fence, one attributed activation that versions, stamps and retires), \`repair.ts\` (\`gbrain repair generations\`), \`proofs.ts\`, \`config.ts\` and the atom adapter.
+- Migration v265 (\`derived-generations\`); page and fact purges scrub ledger preimages in the same transaction.
+- \`bun run check:derived-census [--prune]\` (in verify) fails on a new retire or delete of derived rows outside the primitive.
+- Tests on PGLite and Postgres: \`test/pathological/g1-generations\`, \`g1-generation-probes\`, \`g1-atom-generations\` and \`g1-generation-crash\` (SIGKILL at each publish fault point).
+
 ## [0.60.388.0] - 2026-10-23
 
 **Four flaky CI tests now fail only for the defects they guard, with the same bounds as before.** Three yield-bound tests could read work earlier test files left in a shard process, one off-CPU probe could be charged a garbage-collection pause, and one doctor golden split its journal rows at midnight UTC. Nothing in gbrain itself changed.
