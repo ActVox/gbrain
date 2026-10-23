@@ -14,6 +14,9 @@
  * Only cells measured stable are gated: 25 runs on 5 fresh Ubicloud standard-4 VMs (the CI runner class) put every
  * serve-watch cell's p50 within a max/min ratio of 1.18, with no false failure in any of 600 baseline/candidate run
  * pairs at +25%. A manual managed sync was left out: its p50 moves with the VM (852 to 1254 ms, 52 of 600 pairs failed).
+ * Re-baselined 2026-10-23 on the PR 4b level pass with level reuse (GBRA-133), 5 fresh runners x 5 runs (dispatch with
+ * runs=5): the baseline is runner 1's first run and the other 24 pass against it. PGLite managed is the widest cell
+ * there (446.7 to 912.8 ms; a fresh runner's first run, the one the nightly makes, is the slow end: 659.5 to 912.8).
  *
  * --oracle (GBRA-133 wave 4, untimed): the two managed cells once more with GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1, so the
  * serve compares every level read it reused across passes with a whole read (persistence/sync-tree-reuse.ts) and logs
