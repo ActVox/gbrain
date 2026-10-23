@@ -2917,6 +2917,29 @@
         {
           "category": "brain",
           "details": {
+            "count": 0,
+            "docs": "docs/guides/repair.md#slug-path-mismatch",
+            "file_limit": 200,
+            "files": {
+              "file_missing": 0,
+              "no_checkout": 0,
+              "not_read": 0,
+              "stamped": 0,
+              "unstamped": 0
+            },
+            "inspected": 0,
+            "samples": [],
+            "scan_limit": 20000,
+            "truncated": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Every live page's slug is the one its recorded file path derives (0 candidate(s) inspected).",
+          "name": "slug_path_mismatch",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "by_source": [],
             "count": 0,
             "docs": "docs/guides/live-sync.md#renaming-a-page",
@@ -3483,6 +3506,7 @@
       "unknown_sections": []
     },
     "stderr": [
+      "[gbrain] reading doctor checks; large brains can take minutes. Progress prints here every 10 s; the result prints on stdout when it is ready.",
       "[gbrain doctor] non-interactive run: the check run (not connect or migrations) is capped at 90000 ms (doctor.default_budget_ms); checks past it report health unknown. Off for one run: --budget-ms 0; off for good: gbrain config set doctor.default_budget_ms 0. On PGLite a statement already running cannot be stopped, so a check can finish late."
     ],
     "stdout": "<json>"

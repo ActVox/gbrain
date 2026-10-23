@@ -705,12 +705,13 @@ const capture: Operation = {
   cliHints: { name: 'capture', hidden: true },
   handler: async (ctx, p) => {
     const { pageMutationSource, submitPageMutation } = await pageMutations();
-    pageMutationSource(ctx, p, 'capture');
+    const sourceId = pageMutationSource(ctx, p, 'capture');
     if (ctx.dryRun) {
       if (typeof p.slug === 'string') {
         validatePageSlug(p.slug);
         enforceClientSlugFence(ctx, p.slug, 'capture');
         enforceSubagentSlugFence(ctx, p.slug, 'capture');
+        await suffixedSlugDryRun(ctx, sourceId, p.slug, 'capture');
       }
       return { dry_run: true, action: 'capture', slug: p.slug };
     }

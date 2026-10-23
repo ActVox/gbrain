@@ -49,6 +49,7 @@ test/db-lock-reconnect.test.ts
 test/decide/conflict-proposals-managed.test.ts
 test/declared-lineage-visibility.test.ts
 test/derived-link-reconciliation.test.ts
+test/direct-pool-profile.test.ts
 test/doctor-frontmatter-holds.test.ts
 test/doctor-image-embedding-coverage.test.ts
 test/doctor-keyword-plan-6495.test.ts
@@ -72,6 +73,8 @@ test/fence-repair-receipts.test.ts
 test/forecast-journal.test.ts
 test/frontmatter-reserved-keys-6454.test.ts
 test/get-chunks-paging.test.ts
+test/google-connector-facts-fence-7292.test.ts
+test/grade-takes-window.test.ts
 test/graduation-copy.test.ts
 test/graduation-digest.test.ts
 test/graduation-drain.test.ts
@@ -231,6 +234,8 @@ test/managed-sync-stale-group-head.test.ts
 test/migration-persistence-request-id-index.test.ts
 test/migration-persistence-request-slug-index.test.ts
 test/on-commit-embedding.serial.test.ts
+test/oneshot-consumer-direct-route.test.ts
+test/oneshot-housekeeping-cli.test.ts
 test/origin-guard-6948.test.ts
 test/origin-twin-sequence-7150.test.ts
 test/origin-twins-6948.test.ts
@@ -315,6 +320,7 @@ test/pathological/d7-synthesize-reverse-write.test.ts
 test/pathological/d8-patterns-reverse-write.test.ts
 test/pathological/d9-dream-summary-overwrite.test.ts
 test/pathological/facts-mirror-failures.test.ts
+test/pathological/g0-derived-retirement-hold.test.ts
 test/pathological/h1-zero-yield-atom-reextract.test.ts
 test/pathological/h2-git-effect-moved-remote.test.ts
 test/pathological/h3-chronicle-partial-generation.test.ts
@@ -372,6 +378,7 @@ test/purge-global-marker.test.ts
 test/purge-missing-cache-6911.test.ts
 test/purge-read-surfaces.test.ts
 test/purge-sync-tombstone-hold-7130.test.ts
+test/read-meta-diag.test.ts
 test/recall-page-fill.test.ts
 test/receipt-compaction-newest-sync-gbra130.test.ts
 test/remediation-manual-only.test.ts
@@ -387,6 +394,7 @@ test/repair-file-drift-held-window-gbra133.test.ts
 test/repair-file-drift-provenance-gbra133.test.ts
 test/repair-frontmatter-keys-sweep-6454.test.ts
 test/repair-frontmatter.test.ts
+test/repair-ghost-database-ahead-gbra133.test.ts
 test/repair-receipt-compaction.test.ts
 test/repair-rename-identity-6729.test.ts
 test/retrieval-coverage-notices.test.ts
@@ -426,9 +434,11 @@ test/sync-full-cursor-slices-6349.test.ts
 test/sync-full-untracked-import-5459.test.ts
 test/sync-group-member-order.test.ts
 test/sync-handler-drain-6706.test.ts
+test/sync-holds-only-converge-7327.test.ts
 test/sync-import-provenance-disk.test.ts
 test/sync-inexact-rename-6729.test.ts
 test/sync-landing-gaps.test.ts
+test/sync-legacy-edit-import-7338.test.ts
 test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
 test/sync-legacy-slug-adoption-6727.test.ts
@@ -436,6 +446,7 @@ test/sync-legacy-sweep-resume-7189.test.ts
 test/sync-origin-live-wins-6517.test.ts
 test/sync-page-identity-hold-gbra130.test.ts
 test/sync-page-write-failed-gbra130.test.ts
+test/sync-pass-abandoned-7355.test.ts
 test/sync-pass-cost-grouping-gbra130.test.ts
 test/sync-pass-dirty-after-freeze-gbra130.test.ts
 test/sync-prescreen-both-delta-6712.test.ts
@@ -465,6 +476,7 @@ test/visibility-repair-scale.test.ts
 test/withdrawal-overlay-concurrency.test.ts
 test/withdrawal-publication-file.test.ts
 test/worktree-refresh-recovery-row-gbra130.test.ts
+test/write-roundtrips-gbra156.test.ts
 test/write-through-leak-guard-alias-7203.test.ts
 test/writer-status-movement-not-read-gbra130.test.ts
 test/writer-status-owner-backends.test.ts
