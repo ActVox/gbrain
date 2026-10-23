@@ -7292,6 +7292,7 @@
           "caller?: { remote?: boolean; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; minTrust?: TrustTier; } | undefined",
           "detail?: \"low\" | \"medium\" | \"high\" | undefined",
           "hits: FrozenHit[]",
+          "query?: string | undefined",
           "return_unit: \"auto\" | \"window\" | \"chunk\" | \"section\" | \"page\"",
           "return_window?: number | undefined"
         ],
@@ -7360,6 +7361,7 @@
         "members": [
           "liveHits?: boolean | undefined",
           "longPages?: LongPageSelection | undefined",
+          "query?: string | undefined",
           "timeoutMs?: number | undefined"
         ],
         "name": "DeliverOptions"
@@ -7410,6 +7412,7 @@
           "page_rank_cut?: PageRankCutMeta | undefined",
           "requested_unit: \"auto\" | \"window\" | \"chunk\" | \"section\" | \"page\"",
           "return_window: number",
+          "tail_trim?: TailTrimMeta | undefined",
           "tokenizer: \"cl100k\" | \"heuristic\"",
           "tokens_delivered: number"
         ],
@@ -7475,6 +7478,7 @@
           "packing: \"off\" | \"cap_only\" | \"breadth_capped\" | \"depth_first\"",
           "rankCut?: PageRankCut | undefined",
           "requestedUnit: \"auto\" | \"window\" | \"chunk\" | \"section\" | \"page\"",
+          "tailTrim?: true | undefined",
           "unit: \"auto\" | \"window\" | \"section\" | \"page\"",
           "window: number"
         ],
@@ -7484,6 +7488,7 @@
         "kind": "interface",
         "members": [
           "chunk_id: number",
+          "score?: number | undefined",
           "slug: string",
           "source_id: string"
         ],
