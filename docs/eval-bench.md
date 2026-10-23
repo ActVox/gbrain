@@ -31,7 +31,7 @@ Before repeating an approach, read its measured outcome and limitations:
   retrieval quality. The [experiment guide](eval/ANSWER_PACKET.md) records the
   reproducible setup and spending safeguards.
 
-- [Relative dates in evidence, reranker fusion and titled reranker documents: not adopted](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-10-21-external-ideas-wave-a.md).
+- [Relative dates, reranker fusion, titled reranker documents, rank labels and tail trim: not adopted](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-10-21-external-ideas-wave-a.md).
   Each was preregistered in gbrain-evals and run against the release default
   on LongMemEval-S. Absolute date brackets beside relative phrases in
   delivered conversation turns, with retrieval frozen: Sonnet 5.5 scored 460.5
@@ -42,7 +42,13 @@ Before repeating an approach, read its measured outcome and limitations:
   out of 470, and ranking-shapes hit@1 fell from 91.4% to 65.7%
   ([wave B](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-10-21-external-ideas-wave-b-results.md)).
   A page title and date in the reranker document: 450 vs 451 out of 470, with
-  no gain shown. None of these shipped.
+  no gain shown. Rank labels with blocks in date order: 462.5 vs 463
+  (inconclusive). None of these shipped. Trimming low-scoring blocks behind a
+  protected top 3 was non-inferior on Sonnet 5.5, GPT-6.1 Sol and Opus 5.5,
+  and cut delivered evidence by 36.6% on affected questions. It broke one
+  knowledge-update question, where the earlier value sat in a trimmed block
+  ([wave A2](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-10-21-external-ideas-wave-a2.md)).
+  It's a candidate, not shipped.
 
 - [What actually helps an AI use its memory?](research/answer-evidence/compendium.md)
   explains the relevant research in plain English, separates published findings
