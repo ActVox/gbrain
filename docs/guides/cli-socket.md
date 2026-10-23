@@ -95,7 +95,9 @@ The CLI falls back to its normal path, silently, when:
   Connection sizing and driver settings (`GBRAIN_POOL_SIZE`,
   `GBRAIN_DIRECT_POOL_SIZE`, `GBRAIN_PREPARE`, ...), the database URL
   variables and `GBRAIN_SOURCE` (which every request carries and the serve
-  resolves for that call) may differ. Editing `config.json`, changing a listed
+  resolves for that call) may differ. `GBRAIN_HOME` and `GBRAIN_BRAIN_ID`
+  count by the config home and brain they resolve to, so a serve that exports
+  `GBRAIN_HOME` matches a CLI that reaches the same home through `HOME`. Editing `config.json`, changing a listed
   variable or upgrading gbrain while a serve runs sends CLI calls to the normal
   path until the serve restarts with the same settings. The refusal names the
   part that differed, never its value: `refused (identity_mismatch): database
@@ -104,7 +106,9 @@ The CLI falls back to its normal path, silently, when:
 - the CLI targets a mount brain (`--brain <mount>` and the other mount tiers).
 
 `GBRAIN_DEBUG=1` prints one `[cli-socket] cold path: <reason>` line on stderr
-whenever a call falls back. `GBRAIN_CLI_SOCKET=0` makes a CLI call skip the
+whenever a call falls back, including when no socket exists (`no socket at
+<path>`, with how to start one), and one `[cli-socket] warm: <command>
+answered by the serve socket at <path>` line when the serve answers. `GBRAIN_CLI_SOCKET=0` makes a CLI call skip the
 socket entirely, for comparisons and benchmarks.
 
 ## Security

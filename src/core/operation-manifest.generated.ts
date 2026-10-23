@@ -237,7 +237,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)"
     },
-    "description": "Read a page by slug. To edit: include_content:true, send `content` to put_page; or edit_page. >256 KB: outline+window, then `next`.",
+    "description": "Read a page; `section` or `grep` reads one part. Edit: include_content:true, `content` to put_page, or edit_page. >256 KB: outline+window, then `next`.",
     "params": {
       "slug": {
         "type": "string",
@@ -246,15 +246,15 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "fuzzy": {
         "type": "boolean",
-        "description": "Fuzzy slug match."
+        "description": "Fuzzy match."
       },
       "include_content": {
         "type": "boolean",
-        "description": "Markdown + revision, to edit."
+        "description": "Markdown + revision."
       },
       "content_only": {
         "type": "boolean",
-        "description": "Round-trip fields only."
+        "description": "Round-trip fields."
       },
       "body": {
         "type": "string",
@@ -270,6 +270,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "lines": {
         "type": "object",
+        "cliRange": [
+          "from",
+          "count"
+        ],
         "description": "Window: 1-based lines.",
         "properties": {
           "from": {
@@ -285,6 +289,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "bytes": {
         "type": "object",
+        "cliRange": [
+          "offset",
+          "length"
+        ],
         "description": "Window: UTF-8 bytes of size.total_bytes, not body_bytes (snapped to a line start).",
         "properties": {
           "offset": {
@@ -332,13 +340,28 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "description": "Outline next_from_index.",
         "fullSurfaceOnly": true
       },
+      "section": {
+        "type": "string",
+        "description": "Only the section under this heading (case-insensitive, first match), with its heading_path.",
+        "fullSurfaceOnly": true
+      },
+      "grep": {
+        "type": "string",
+        "description": "Only the paragraphs containing this text (case-insensitive substring, not a regex), with line numbers and total_matches.",
+        "fullSurfaceOnly": true
+      },
+      "context": {
+        "type": "number",
+        "description": "With grep: paragraphs of context either side (default 1, max 5).",
+        "fullSurfaceOnly": true
+      },
       "include_deleted": {
         "type": "boolean",
         "description": "Soft-deleted too."
       },
       "include_timeline_entries": {
         "type": "boolean",
-        "description": "Timeline rows too."
+        "description": "Timeline rows."
       },
       "grammar_diagnostics": {
         "type": "boolean",
@@ -1149,6 +1172,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "string",
         "required": true,
         "description": "The id you sent, or the receipt's."
+      },
+      "applied": {
+        "type": "boolean",
+        "fullSurfaceOnly": true,
+        "description": "Also return applied: searchable yet, the gap, the write watermark."
       }
     },
     "scope": "write",
@@ -1659,6 +1687,72 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "description": "Semantic query-cache introspection: resolved knobs (enabled, similarity threshold, TTL) plus row counts and total hits. Read-only; clearing/pruning the cache stays on the CLI.",
     "params": {},
     "scope": "admin",
+    "area": "search"
+  },
+  {
+    "name": "search_exact",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "retrieval",
+    "scope": "read",
+    "description": "Find every page containing a literal phrase or identifier, exhaustively: use instead of grep. Unranked; returns every match in page order with snippets, and complete: true only when every page you can read was scanned. Literal: words in order with any whitespace between them, case-insensitive unless case_sensitive; no stemming, punctuation literal (ranked search treats quotes as a stemmed phrase). When complete is false, incomplete_reasons says why: deadline or limit (call again with after: resume_after), or unreadable_pages (pages whose text is not indexed yet, listed under unreadable).",
+    "params": {
+      "phrase": {
+        "type": "string",
+        "required": true,
+        "description": "The literal text, e.g. 'INV-2024-0042' or 'quarterly board pack'."
+      },
+      "case_sensitive": {
+        "type": "boolean",
+        "description": "Match case exactly (default false)."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "Only this source; '__all__' spans every source you can read."
+      },
+      "types": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Only these page types, e.g. ['meeting']."
+      },
+      "slug_prefix": {
+        "type": "string",
+        "description": "Only slugs starting with this, e.g. 'meetings/'."
+      },
+      "limit": {
+        "type": "number",
+        "description": "Matching pages to return (default 100, max 1000)."
+      },
+      "after": {
+        "type": "number",
+        "description": "Resume a bounded scan: the resume_after of the previous call."
+      },
+      "max_seconds": {
+        "type": "number",
+        "description": "Scan budget in seconds (default 30, max 120)."
+      },
+      "min_trust": {
+        "type": "string",
+        "enum": [
+          "user_confirmed",
+          "operator_curated",
+          "tool_observed",
+          "agent_written",
+          "unknown",
+          "external_untrusted"
+        ],
+        "description": "Lowest trust tier to return (the connection floor still applies).",
+        "fullSurfaceOnly": true
+      }
+    },
+    "cliHints": {
+      "name": "search-exact",
+      "positional": [
+        "phrase"
+      ]
+    },
     "area": "search"
   },
   {
@@ -3546,7 +3640,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "limit": {
         "type": "number",
-        "description": "Max results (default: 50)"
+        "description": "Max results (default 50); MCP callers are capped at 500 per call."
+      },
+      "cursor": {
+        "type": "string",
+        "description": "next_cursor from the last job of the previous page (it carries truncated: true): returns the next older jobs."
       },
       "fields": {
         "type": "array",
@@ -3809,11 +3907,15 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "limit": {
         "type": "number",
-        "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan and next_offset names the next page."
+        "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan, complete says whether this page holds the rest, and next_cursor (or next_offset) names the next page."
       },
       "offset": {
         "type": "number",
         "description": "Skip the first N orphans (ordered by source_id, then slug)."
+      },
+      "cursor": {
+        "type": "string",
+        "description": "next_cursor from the previous page, with the same filters (instead of offset)."
       },
       "count_only": {
         "type": "boolean",
