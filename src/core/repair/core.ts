@@ -292,12 +292,17 @@ function embeddingUsd(chars: number, model: string | undefined): number | null {
  * Deterministic per-item request id: a rerun after a crash replays the same
  * admission (and waits for it if still pending). An attempt that ended in a
  * terminal failure is not replayed forever; the next attempt gets a new id.
+ * An item's cursor is part of the id, so two items that write the same page at
+ * the same revision (two facts of one page) never share one: the second item
+ * of a run is admitted while the first is still pending, and reusing the
+ * first's id for a different write is refused as idempotency_conflict.
  */
-export async function repairRequestId(ctx: OperationContext, kind: RepairKind, item: Pick<RepairItem, 'source_id' | 'slug'>, revision: string): Promise<string> {
+export async function repairRequestId(ctx: OperationContext, kind: RepairKind, item: Pick<RepairItem, 'source_id' | 'slug'> & { cursor?: RepairCursor }, revision: string): Promise<string> {
   await initializeLocalPersistence(ctx);
   const principal = await requestPrincipalForContext(ctx);
   for (let attempt = 0; ; attempt++) {
-    const h = digest(['repair-request-v1', kind, item.source_id, item.slug, revision, attempt]);
+    const h = digest(item.cursor ? ['repair-request-v2', kind, item.source_id, item.slug, revision, item.cursor.phase, item.cursor.id, attempt]
+      : ['repair-request-v1', kind, item.source_id, item.slug, revision, attempt]);
     const id = `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
     const prior = await getWriteRequest(ctx.engine, principal, id);
     if (!prior || !isTerminal(prior) || prior.state === 'committed') return id;
