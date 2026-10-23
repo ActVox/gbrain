@@ -74,7 +74,7 @@ export function publicationOf(records: StatementRecord[]): StatementRecord[] {
 }
 
 /** The folded stamp's first statement (its lease check) and its last when it publishes (the pass row write). */
-export const FOLD_LEASE_READ = 'SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE';
+export const FOLD_LEASE_READ = 'SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR KEY SHARE';
 export const FOLD_PASS_ROW_WRITE = /^INSERT INTO op_checkpoints\(op,fingerprint,completed_keys,updated_at\) VALUES\(\$1,\$2,jsonb_build_array\(\$3::text::jsonb\),now\(\)\)/;
 
 /**

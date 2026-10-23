@@ -72,6 +72,7 @@ describe('#7442: the drain-lease fence lets the renewal through and still holds 
     const assignments: string[] = [];
     for (const file of readdirSync('src', { recursive: true }) as string[]) {
       if (!file.endsWith('.ts')) continue;
+      // test-reads-source-ok[structural]: the guard is a census of every token assignment in src/; a mutant that moves the token write out of the keyed upsert has no runtime symptom until a fence races it.
       const lines = readFileSync(join('src', file), 'utf8').split('\n');
       lines.forEach((line, i) => {
         if (!/(^|[\s,(])acquisition_token\s*=(?!=)/.test(line) || /\b(WHERE|AND|OR)\b[^,]*acquisition_token\s*=/i.test(line)) return;
