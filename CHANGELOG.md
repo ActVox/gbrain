@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.390.0] - 2026-10-23
+
+**Managed atom extraction now publishes through the same generation primitive as unmanaged brains, and an origin's old and new atoms can both be live in between, never neither (GBRA-161 PR 1b).** On a managed brain a re-extraction used to overwrite and retire atoms page by page, so a crash between requests could leave an origin with neither its old atoms nor its new ones. Transcript-derived atoms were also keyed by file name, so two same-named transcripts in different folders shared one key.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed re-extraction replaces an origin's atoms | per-page overwrites and retirements as they came | new identities first; one \`managed_generation_activate\` request checks every successor is live and flips the ledger; the superseded atoms stay live and are marked pending, then each member request versions, stamps \`managed-reextract\` and overwrites or retires |
+| A crash between the activation and its member requests | an origin could be left with neither generation | old and new stay live; the next extraction run finishes the remaining members once (doctor \`generation_pending\` lists them) |
+| A member an activation never claimed | could be retired | listed as an orphan candidate, never retired automatically |
+| Two transcripts with the same name in different folders, or a moved transcript | one shared key by file name | keyed by source and source-relative path; a moved file whose content pin matches keeps its key |
+| A pre-ledger atom with no retained producer evidence | retired by a re-extraction that left it out | stays live and is reported as protected |
+| \`gbrain repair stale-atoms\` | its own retirement | retires through the primitive |
+
+### What to watch for after you upgrade
+
+- Migration v266 adds \`derived_generation_activations\`, the \`locator\` and \`activation_id\` columns on \`derived_generations\` and a \`pending\` column on \`derived_generation_items\`. New columns default to the old behavior and no existing row changes.
+- Pending members resume on the next extraction run, not through repair. On a managed brain, \`gbrain repair generations --mode restore\` is refused and points to \`gbrain repair atoms-restore\`, and \`--mode release-held\` covers atom page keys only.
+
+### Itemized changes
+
+- \`src/core/generations/managed.ts\`: the managed publication (create, activate, member overwrites and retirements) and the \`managed_generation_activate\` maintenance request (trusted local only).
+- Transcript keys are \`transcript:<root>/<path>\` with a rename map; identity hashing ignores \`source_kind\`, \`ingested_via\` and ephemeral frontmatter keys; the shrink floor is strictly below.
+- Migration v266 (\`derived-generation-activations\`); doctor \`generation_pending\`.
+- Tests on PGLite and Postgres: the managed #7013 shape, a kill between activation and members, a two-file retirement after resume, managed and unmanaged contention on one key, same-name transcripts and a rename, and a legacy atom without evidence.
+
 ## [0.60.389.0] - 2026-10-23
 
 **Unmanaged atom extraction now replaces an origin's atoms only on a complete, non-empty result, versions what it drops first, and can undo it (GBRA-161 PR 1a).** A derived writer used to delete or keep atoms one statement at a time, so an empty model answer, a truncated read or a failed write could drop or orphan an origin's atoms with no way back. Atoms are the first writer on one generation-publish primitive with a ledger and a restore path. Managed atoms, facts and takes, chronicle and synthesis move onto it in later releases.
