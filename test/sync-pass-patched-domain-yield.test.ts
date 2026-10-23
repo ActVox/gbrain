@@ -42,6 +42,5 @@ isolatedTest(import.meta.path, 'a confirm round that patches every page yields; 
   finally { ({ maxLag } = lag.stop()); }
   expect(patched!.touched!.size).toBe(PAGES);
   expect({ domain: [...patched!.domain].sort(), byOrigin: [...patched!.byOrigin].sort() }).toEqual(expected);
-  console.error('ZZWORST isolated', Math.round(maxLag));
   expect(Math.round(maxLag)).toBeLessThan(MAX_LAG_MS);
 }, 60_000);
