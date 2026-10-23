@@ -148,6 +148,8 @@ export interface GitHoldMeta {
   page_revision?: string;
   /** #6712 PR 1 `file_drift`: which side moved since the page's last recorded import (`unknown`: no usable record); `page_revision` is the page's revision when held. */
   sides?: 'database' | 'both' | 'unknown';
+  /** GBRA-133 `file_drift`: the drift screen that held it; an unknown-side hold from an older screen is re-screened (#7340). */
+  drift_version?: number;
   /**
    * #6712 PR 4b `file_drift`: which side a Decision is about (design v3.2 §4): `both` (the file and the page moved), `unknown`
    * (no import record says which), `deleted` (one side is a deletion, named by `state`). Absent on holds an older gbrain
@@ -583,6 +585,9 @@ export async function holdBasisMoved(engine: Pick<BrainEngine, 'executeRaw'>, so
  * under the same blob id), so it re-screens on every sync; a `page_write_failed` hold of a freeze fault (origin `freeze`,
  * S-63) is re-tested by every sync until it has been held `HOLD_ATTEMPTS_NEEDS_HUMAN` times, so a transient fault clears.
  */
+/** GBRA-133: the `file_drift` screen version; 1 is #7340's rule (a page with no import record compares its file at the baseline commit). */
+export const FILE_DRIFT_VERSION = 1;
+
 export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, retried: boolean): boolean {
   return retried || ['frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression', 'content_rejected', 'write_gate_rejected', 'purged_content', 'legacy_slug_conflict', 'origin_conflict', 'page_identity_changed', 'git_object_missing'].includes(record.code)
     // #6712: a transient hold (the write owner stalled, not the file) is retried by every sync until it has been held HOLD_ATTEMPTS_NEEDS_HUMAN times.
@@ -590,6 +595,9 @@ export function holdRescreenDue(record: Pick<GitHoldRecord, 'code' | 'meta'>, re
     || (record.code === 'managed_image_sync_unsupported' && isMultimodalEnabled())
     || record.meta.recovery_version < RECOVERY_VERSION
     || (record.code === 'invalid_fence' && (record.meta.fence_version ?? 0) < FENCE_VERSION)
+    // GBRA-133: an unknown-side drift held before #7340's baseline rule (a Git edit to a page with no import record) imports
+    // now when the page still holds its file at the baseline commit, so it is screened once more.
+    || (record.code === 'file_drift' && fileDriftSide(record.meta) === 'unknown' && (record.meta.drift_version ?? 0) < FILE_DRIFT_VERSION)
     || (outOfAttemptsHold(record.code) && record.meta.stall?.gbrain_version !== VERSION)
     // GBRA-130 A-6: an owner fault is the writer's, not the file's: an upgrade re-tests the path.
     || (record.code === 'page_write_failed' && record.meta.write_failure?.gbrain_version !== VERSION)
