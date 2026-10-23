@@ -10,6 +10,32 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.399.0] - 2026-10-23
+
+**The dream summary, the `think --save` page and the drift report keep an edit made while they were being composed, and every overwrite is restorable; the timeline, mention and concept-provenance writers act only on the page revision they read (GBRA-161 PR 5).** These writers used to overwrite or delete against whatever the page held when they finished, so an edit made in between was lost and an overwritten page had no saved copy.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page is edited while the dream summary, `think --save` or the drift report composes it | the writer overwrote the edit | the write is refused with `generation_fenced` and the edit stays; the summary and drift report note it on stderr and `think --save` exits non-zero |
+| One of those pages is overwritten | the earlier page was gone | it is saved to `page_versions` first, and `gbrain repair generations --kind dream_summary\|think_synthesis\|drift_report --mode restore` or `gbrain restore <slug>` brings it back |
+| Orphan pruning, `extract timeline --source db` or `extract --stale` retracts removed timeline entries | deleted against the current page | deletes only while the page row is locked at the revision its caller read |
+| `extract links --by-mention --rebuild` meets a page that moved since it read it | rebuilt and checkpointed it | skips it without a checkpoint, so a resume retries it |
+| A concept is republished | its provenance edges were replaced edge by edge | the new edges are written and the edges of atoms that left its group retire in one transaction, only while the concept is at the revision its publication produced |
+
+### What to watch for after you upgrade
+
+- No migration. Managed brains keep their maintenance page request for these pages, and their summary and drift report still read the revision at publish time.
+- A segmented summary, think or drift page is held `segmented_unsupported` instead of written.
+- File-source timeline extraction is unchanged (it belongs to sync).
+
+### Itemized changes
+
+- `src/core/generations/adapters/single-page.ts`: single-item generations for `dream_summary`, `think_synthesis` and `drift_report`, keyed `page:<slug>`, pinned to the revision read before composing.
+- Revision fences in `retractRemovedTimelineEntries`, the mention rebuild and `replaceConceptProvenanceLinks` (coordinated on managed brains).
+- Tests on PGLite and Postgres, red on the base: `g5-single-page-generations`, `g6-fence-only-writers` and `g7-concept-provenance-edges`; their Postgres arms run through `test/e2e/` `registerPostgresTests` wrappers, not `test/postgres-unit-arms.txt`. The summary-page rendering tests now write through a real PGLite brain with the same assertions.
+
 ## [0.60.398.0] - 2026-10-23
 
 **Hot memory is injected once per session in Claude Code: assistant-attributed and external facts no longer come back on every prompt, and the first prompt no longer repeats the session-start block.** The per-prompt block wrote its own fact line, which dropped the `(assistant said)` prefix, so an assistant suggestion read as your own claim and never matched the dedupe key built from the shared line; an external fact's `<external-data>` wrapper broke the match the same way. Separately, Claude Code records `gbrain hook session-start` output as a SessionStart `hook_success` entry, which the user-prompt hook did not read, so every fact the session-start block showed came back on the first prompt. And `gbrain facts relink` attached the assistant's own report about a page, which the SessionEnd corpus sweep saves as an assistant-attributed fact, to that page as an entity fact on every run, core pages included.
