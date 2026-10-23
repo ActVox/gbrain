@@ -10,6 +10,31 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.396.0] - 2026-10-23
+
+**A fact you replace now stops being current at the moment its replacement starts, and facts imported from a dated page take the page's date instead of the day you imported it (#7214, #7247).** Before this release, telling the brain "my address changed" saved the new fact but left the old one open-ended, so a question about any date after the change could still get the old answer. Facts read from a page's facts table with no date of their own were dated the day sync or import ran, so a meeting note from last March imported today looked like it happened today.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `remember` with `replaces`, a near-duplicate that supersedes an older fact, or a published facts batch that supersedes | the old fact was marked replaced but its `valid_until` stayed empty | the old fact's `valid_until` is closed at the new fact's `valid_from`, in the database row and in its struck facts-fence row |
+| An "as of" question for a date between the two facts | could return both facts as current | returns only the fact that was true then |
+| A replacement dated on or before the fact it replaces | n/a | leaves the old fact's interval as it was |
+| A facts-fence row with no `valid_from` cell on a page that states a date (`event_date`, `date`, `published`, or a dated filename) | `put_page`, sync and import stored the write time; `extract_facts` used the page's creation or import time | every write path stores the page's stated date |
+| The same row on a page with no stated date | the write time | the write time, as before |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade. Facts already stored keep the dates and intervals they have.
+- No migration.
+
+### Itemized changes
+
+- `src/core/facts/supersede-interval.ts`: `supersededValidUntil` picks the retired fact's `valid_until` (the replacement's `valid_from`, unless the replacement is backdated to or before the retired fact). `engine-sql/facts.ts` `insertFact`, `persistence/memory-prepare.ts`, `persistence/facts-prepare.ts` and the `facts-fence.ts` strike use it.
+- `src/core/facts/extract-from-fence.ts`: `pageFactDate` reads the page's stated date (`FACT_DATE_SOURCES`), used by `persistence/canonical-projections.ts` and `cycle/extract-facts.ts` when a fence row has no `valid_from`.
+- Tests: `test/remember-replaces-valid-until-7214.test.ts` and `test/fence-valid-from-page-date-7247.test.ts`, on PGLite and on Postgres through `test/e2e/` `registerPostgresTests` wrappers.
+
 ## [0.60.395.0] - 2026-10-23
 
 **Re-synthesis now retires an earlier output it fully covers, and a model change no longer rewrites every deterministic concept page (GBRA-161 PR 4, #7065, #7269).** Re-synthesizing a transcript used to leave the earlier run's pages live beside the new ones, and switching the synthesis model rewrote every T3 concept page even though T3 pages never call the model.
