@@ -180,6 +180,8 @@ export interface GitHoldMeta {
   write_failure?: PageWriteFailureMeta;
   /** #6278: the held entry is a deletion (the file is gone); discovery re-screens it on request or a gbrain change, not on its absence. */
   deleted?: true;
+  /** GBRA-133 `file_drift` `file_gone`: `sync.apply_held_deletions` refused this deletion (sync-held-deletions.ts) while the page was at `page_revision`. */
+  held_deletion?: { refused: string; page_revision: string };
   /**
    * #6712 dependency edge: the path of an earlier entry of the same sync, sharing this entry's slug or page id, that was
    * held in that sync; this entry waits on it with the same code, and discovery re-screens it once that hold is gone.

@@ -1081,6 +1081,51 @@ It drops generated bullets that carry markup (yours are left alone), deletes
 markup-only rows and strips the rest, under the page lock. A second apply finds
 nothing, and a timeline-only rewrite queues no facts extraction.
 
+<a id="timeline-order"></a>
+### Timeline order
+
+Bulk imports and hand edits appended timeline bullets at the end of a page,
+copied one bullet twice, or started a second `## Timeline` section (#7247).
+`add_timeline_entry` already inserts in date order; this explicit-only,
+preview-bound kind fixes pages written before that. It never runs from
+`--all`, doctor's remediation plan, the maintenance cycle or an upgrade.
+
+**Say to your agent:** *"Preview which timelines are out of order, show me the
+list and the pages it would leave alone, then apply after I agree."*
+
+```bash
+gbrain repair timeline-order --source <id> [--slug <slug>]...                      # preview: reorder / needs_human
+gbrain repair timeline-order --source <id> --apply --expect <hash> --yes           # rewrites exactly the previewed pages
+```
+
+It sorts `- **YYYY-MM-DD** | source — summary` bullets, each with its indented
+lines and the materialized marker above it, in the direction the page already
+uses (ascending unless most neighbouring bullets descend), keeping equal dates
+in their order. Prose, sub-headings, comments and code blocks stay where they
+are, so bullets are sorted only between them. A later exact copy of a bullet in
+the same run is dropped; bullets with one date whose summaries differ only in
+case and punctuation are counted as `near_duplicates` and kept. A later
+timeline section joins the first one, under its heading, when it holds nothing
+but bullets and the first holds one run of them.
+
+The preview counts `pages_to_reorder`, `duplicates_to_merge`,
+`sections_to_join`, `needs_human` and `near_duplicates`. A page is listed
+`needs_human` and kept when a line could belong to a bullet (a line right under
+it, odd indentation, an indented paragraph after a blank line), when dated
+bullets in another format sit among them, when a fence or comment never closes,
+when the sections cannot be joined without moving prose, or when the result
+would not read back with the same text order and timeline rows. A page whose
+database-only timeline rows the write would also put into the page
+(`pending_materialization`) waits for `gbrain repair timeline` (or
+`gbrain extract timeline --prune-orphans` for rows an edit removed).
+
+Each page is one revision-bound `put_page`: a managed source publishes its file
+through the Git effect and the database is projected from it. No timeline row
+is added, removed or rewritten (a dropped copy shared its row with the one that
+stays). An apply refuses `preview_changed` when a previewed page moved since the
+preview; preview again. Undo a page on a managed source with `git revert` of its
+commit, or `gbrain revert`.
+
 ### Timeline history scan coverage
 
 Doctor's `timeline_history` check classifies at most 2,000 pages or 10
@@ -1602,6 +1647,17 @@ gbrain repair generations --kind synthesis --mode cleanup --since <ISO-8601> --a
 gbrain repair generations --kind synthesis --mode restore --since 30d --json
 ```
 
+The dream summary, the `think` synthesis page and the drift report publish as
+single-page generations (`--kind dream_summary`, `think_synthesis`,
+`drift_report`, key `page:<slug>`): a writer whose page changed while it
+composed writes nothing and the edit stays, and every overwrite keeps the
+earlier page, so `--mode restore` puts it back (`gbrain restore <slug>` reads
+the same copy from page history).
+
+```bash
+gbrain repair generations --kind drift_report --mode restore --since 7d --json
+```
+
 #### Fence absent
 
 A page written without its `## Facts` (or takes) section keeps its rows: the
@@ -2020,6 +2076,59 @@ touched. A row that changed since the preview reports `changed_since_preview`
 and is kept. To keep the backfill from extracting one source at all, set
 `gbrain config set cycle.conversation_facts_backfill.exclude_sources '["source-a"]'`.
 
+<a id="fact-claim-dates"></a>
+### Facts dated with the day a bulk load ran
+
+A bulk import that writes the day it ran into every facts-fence row's
+`valid_from` cell makes those facts look as if they all happened that day, so
+timelines and as-of reads put them on one date. Those dates record when the
+facts were loaded, not when they happened (#7247). Doctor `fact_bulk_dates`
+warns when one UTC calendar day holds 200 or more of a source's active facts,
+at least a quarter of them, across 20 or more entities. It reports each such
+day with its fact and entity counts, the most frequent source tags, and how
+many of those claims state exactly one earlier ISO date of their own ("Acme
+Example closed a seed round on 2025-03-14"). A remote caller sees only its
+permitted sources. `gbrain repair fact-claim-dates` moves those facts to the
+date their claim states. It is explicit-only, preview-bound and destructive,
+and it never runs on upgrade.
+
+**Say to your agent:** *"Preview which bulk-dated facts can take the date their
+claim states, then move them after I agree."* The agent runs the preview and,
+after you agree, the printed apply command.
+
+```bash
+gbrain doctor --only fact_bulk_dates                                   # the loaded days per source
+gbrain repair fact-claim-dates --source <id>                           # preview: one line per page, residual counts
+gbrain repair fact-claim-dates --source <id> --day 2026-01-15          # preview a loaded day the rule does not detect
+gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes
+```
+
+A candidate is an active fact whose `valid_from` falls on a loaded day and
+whose claim holds exactly one `YYYY-MM-DD` date, a real calendar date from
+1900 up to the day before. Facts with no date (`no_date`), several dates
+(`several_dates`), or one out of range (`date_not_earlier`) keep the load
+day and are counted, and so is a fact whose `valid_until` falls before its
+claim's date (`ends_before_claim_date`).
+
+A fact held by a page's facts fence is moved in the page: only that row's
+`valid_from` cell changes, and the page is published through a revision-bound
+`put_page`, so on a managed brain the canonical file changes and the facts row
+is re-projected from it. A page is listed and kept when its fence does not
+parse (`unparsed`, preview `gbrain repair fences`), it has a fence on both
+sides of the timeline sentinel (`split_fences`, run `gbrain repair
+split-facts` first), it is stored in segments (`segmented_page`), or the
+rewritten fence would not read back as exactly the planned rows
+(`not_conserved`). A row whose cell no longer reads the loaded day is
+`fence_mismatch`. A fact with no fence row is updated in place on an unmanaged
+brain; on a managed brain it is counted `database_only_managed` and kept.
+
+The hash covers each page's revision, row numbers and new dates. The apply
+recomputes the plan first and refuses `preview_changed` when anything moved,
+then changes exactly the previewed rows; a page edited during the run reports
+`changed_since_preview` and is kept. A second preview lists nothing. On a
+managed brain `git revert` of the repair commit undoes it, and page history
+keeps the earlier revision.
+
 <a id="failed-writes"></a>
 ### Failed writes
 
@@ -2384,6 +2493,27 @@ the only copy of that content. Recreate its file with
 `gbrain repair file-drift --source <id> --slug <slug> --prefer database`, or
 keep it. `gbrain repair ghost-pages` lists such a page apart the same way, and
 the soft-delete itself refuses one (`refused`, `database_ahead_of_file`).
+
+<a id="apply-held-deletions"></a>**Letting sync apply proven deletions (`sync.apply_held_deletions`, off by
+default).** `gbrain config set sync.apply_held_deletions true` (or
+`sync.apply_held_deletions.source.<id> true` for one source; a per-source value
+wins) lets a managed sync delete a held `file_gone` page itself, and only when
+every check passes: the file's provenance is `deleted_by_commit`, the page at
+its current revision equals the file's last committed bytes (the blob in the
+first parent of the newest deleting commit, compared the way sync compares a
+file with a page before replacing it), and the page's revision is file-backed
+by the test above. The deletion is an ordinary sync deletion: a soft delete
+with the same restore window (`gbrain restore <slug> --force`), counted by the
+mass-delete valve and the `sync.max_deletes` / `sync.max_delete_ratio` caps,
+and its write request carries `heldDeletion` (the deleting commit and the blob)
+as the page's receipt. Any other held page stays held, and its hold records why
+(`meta.held_deletion.refused`: `content_differs`, `database_ahead_of_file`,
+`not_deleted_by_commit` or `page_changed`) at the page's revision, so it is not
+screened again until the page changes. A file deleted, committed again with
+other bytes and deleted again is judged against its last committed bytes.
+Turning the switch on makes the next sync read the whole source once; a sync
+screens at most 200 held deletions, and the rest wait for a later sync that
+reads the source (a new commit, or the daily full round).
 
 `--provenance never_committed --prefer file` is refused: it would soft-delete
 the only copy of each page. A database-only page is no longer screened against
@@ -3260,6 +3390,7 @@ walk me through it before changing anything."*
 | Doctor `google_file_modes` warns, or the upgrade printed `[google] Google source <id> keeps its files in <dir>, outside ~/.gbrain` | `gbrain repair google-file-modes --source <id>` | `gbrain repair google-file-modes --source <id> --apply` | `gbrain doctor --only google_file_modes --json` (`google_file_modes` ok) | brain host, after the user agrees | none |
 | Recall or hot memory returns facts from gbrain's own claude-cli sessions or from pasted text; doctor `captured_facts_active` warns; the upgrade banner prints `captured_facts_active: N (explicit_kind_required; …)` | `gbrain repair captured-facts` (add `--include-ambiguous` to include paste candidates) | `gbrain repair captured-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only captured_facts_active --json` (`captured_facts_active` ok) | brain host, after the user agrees | `destructive` (quarantines facts) |
 | A stored fact reads `[redacted](…)` where a word such as "System" belongs; doctor `facts_redaction_marker` warns; `trust scan` flags the marker | `gbrain repair redacted-facts` | `gbrain repair redacted-facts --apply --expect <hash>` with the hash that preview printed | `gbrain doctor --only facts_redaction_marker --json` (ok, or only facts the preview listed as `ambiguous` or `unproven`) | brain host, after the user agrees | none |
+| Timelines put hundreds of facts on one day; doctor `fact_bulk_dates` warns that a day holds a bulk-loaded share of a source's facts | `gbrain repair fact-claim-dates --source <id>` | `gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes` with the hash that preview printed | `gbrain repair fact-claim-dates --source <id>` lists nothing to move (doctor keeps warning while facts without a date in the claim keep the load day) | brain host, after the user agrees | none |
 | A finished promise still shows on entity cards and in recall after its loop was closed; doctor `loop_facts_drift` warns; the upgrade banner prints `loop_facts_drift: N (explicit_kind_required; …)` | `gbrain repair loop-facts` | `gbrain repair loop-facts --apply --expect <hash>` | `gbrain doctor --only loop_facts_drift --json` (`loop_facts_drift` ok) | brain host, after the user agrees | `destructive` (retires facts) |
 | `gbrain upgrade` refuses with `requires Bun >=<floor>` (exit 78), or doctor `self_upgrade_health` says `Auto-upgrade to <target> held` | `bun --version` | `bun upgrade`, then `gbrain upgrade` ([Bun floor](upgrades-auto-update.md#bun-floor)) | `gbrain --version` shows the target; `gbrain doctor --only self_upgrade_health --json` (`self_upgrade_health` ok) | user | `persistent_install` |
 

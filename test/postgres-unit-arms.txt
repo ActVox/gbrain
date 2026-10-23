@@ -385,6 +385,7 @@ test/purge-sync-tombstone-hold-7130.test.ts
 test/read-meta-diag.test.ts
 test/recall-page-fill.test.ts
 test/receipt-compaction-newest-sync-gbra130.test.ts
+test/reconcile-clears-stalled-hold-7364.test.ts
 test/remediation-manual-only.test.ts
 test/repair-apply-pending-6543.test.ts
 test/repair-database-stop-gbra133.test.ts
@@ -421,6 +422,7 @@ test/sources-resolve-path.test.ts
 test/stats-health-source-scope.test.ts
 test/sync-absent-from-worktree-s27.test.ts
 test/sync-admission-6712.test.ts
+test/sync-apply-held-deletions-gbra133.test.ts
 test/sync-capacity-preflight.test.ts
 test/sync-checkpoint-moved-6834.test.ts
 test/sync-discovery-legacy-origin-7130.test.ts
@@ -448,6 +450,7 @@ test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
 test/sync-legacy-slug-adoption-6727.test.ts
 test/sync-legacy-sweep-resume-7189.test.ts
+test/sync-metafile-foreign-slug-7341.test.ts
 test/sync-origin-live-wins-6517.test.ts
 test/sync-page-identity-hold-gbra130.test.ts
 test/sync-page-write-failed-gbra130.test.ts
