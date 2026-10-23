@@ -75,6 +75,23 @@ identifiers and attribution are available in the pre-removal Git revision
 
 Duplicate facts reported by @mikez93 (#7043). Hot-memory dedupe reported by @benswinney (#7023). Session-start re-injection reported by @benswinney (#7026). Assistant facts relinked onto core pages reported by @andrew-agents-bot (#7270).
 
+## [0.60.397.0] - 2026-10-23
+
+**A managed sync on a large, remote brain no longer loses its own drain lease while it writes holds, so new commits become searchable instead of waiting behind a pass that ends `drain_lease_held` (GBRA-133).** In a 600k-page synthetic soak at 65 ms round trips, a pass wrote a round's holds in one transaction that first locked the lease row. That transaction stayed open for 14 minutes. The lease's own renewal waited on the same row, timed out three times, and the lease lapsed under the pass, which then applied nothing. Its release waited on that row until the connection was killed. Those writes now commit in slices of at most 5 seconds, so a renewal waits for one slice at most. The same soak showed two smaller faults, fixed here: a pass told to stop (a 30-second first slice) kept reading its level for minutes, and a file whose history read did not finish was reported as one Git never committed.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A pass writes many holds (or retires many deletion markers) under its drain lease | one transaction held the lease row locked for the whole batch, blocking the lease's renewal and release | the writes commit in slices of at most 5 s, each re-checking the lease; a lapsed lease stops them at the next slice |
+| A pass's job deadline passes, or its lease lapses, while its level is read | the read and the Git history walk ran to the end before the pass looked | the read checks the pass at every pause and while the history walk runs, and stops there; the walk keeps running for the next pass to reuse |
+| A file is missing and the read of its Git history did not finish | held with `meta.reason` `never_committed`, saying "Git never committed it" | held with `meta.reason` `origin_unknown`, saying Git could not show whether a commit held it; the page is still kept |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade, and there's no migration. Holds written before this release keep their reason until a pass re-writes them.
+- `gbrain repair file-drift --held --side deleted --state file_gone` still reads the whole history and names each file's provenance, whatever the hold's reason.
+
 ## [0.60.396.0] - 2026-10-23
 
 **A fact you replace now stops being current at the moment its replacement starts, and facts imported from a dated page take the page's date instead of the day you imported it (#7214, #7247).** Before this release, telling the brain "my address changed" saved the new fact but left the old one open-ended, so a question about any date after the change could still get the old answer. Facts read from a page's facts table with no date of their own were dated the day sync or import ran, so a meeting note from last March imported today looked like it happened today.
