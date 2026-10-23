@@ -47,7 +47,7 @@ test/bootstrap-adopted-connection.serial.test.ts	R1	R1: mutates process.env (GBR
 test/bootstrap-dispatcher.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, CODEX_HOME, HOME, CLAUDE_CONFIG_DIR)
 test/bootstrap-harness-lifecycle.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/bootstrap-harness.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
-test/bootstrap-hook-under-serve.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_SOURCE, GBRAIN_DATABASE_URL, DATABASE_URL (+3 more))
+test/bootstrap-hook-under-serve.serial.test.ts	exclusive	exclusive: pins a REAL serve's answer inside the hook's 1 s IPC client timeout (Pin 3 and Pin 3b need an ok round trip); pooled beside heavy files the serve's main thread is starved past it (Pin 3b timed out at 1,008 ms in #7409's full gate). Also mutates process.env (GBRAIN_HOME, GBRAIN_SOURCE, GBRAIN_DATABASE_URL, DATABASE_URL (+3 more))
 test/bootstrap-interview.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/bootstrap-opencode-door.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, XDG_CONFIG_HOME)
 test/bootstrap-plugin-lane.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, CODEX_HOME, CLAUDE_CONFIG_DIR, HOME)
