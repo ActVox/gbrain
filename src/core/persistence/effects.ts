@@ -37,7 +37,7 @@ import { prepareFileTarget, unreadPageFile } from './page-prepare.ts';
 import { isStreamedContent, type StreamedFileContent } from './large-file.ts';
 import { atomicStagingPath } from '../atomic-write.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
-import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, effectClaimKeeper, failEffect, hasRearmableTargets, mirrorGates, parkEffect, rearmWithheldTargets, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
+import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, effectClaimStamp, effectClaimKeeper, failEffect, hasRearmableTargets, mirrorGates, parkEffect, rearmWithheldTargets, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
 import { commitGitTargets, DURABILITY_NOT_ENABLED, gitRootAhead, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
 import { retryIndexLockParks } from './effect-retry.ts';
@@ -86,6 +86,8 @@ export interface EffectWorkerOptions {
   /** Failure boundary injection; production never supplies this. */
   boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit') => Promise<void>;
   embedding?: { signature: string; model: string; embed: typeof embedBatch };
+  /** GBRA-133: owner keys the consumer proved dead (`deadOwnerClaims`); their running effects are claimed before the lease lapses. */
+  deadOwners?: readonly string[];
 }
 
 export async function selectedEffectPage(engine: BrainEngine, effect: PersistenceEffect): Promise<PageSnapshot | null> {
@@ -763,8 +765,9 @@ export async function claimAndRecoverEffect(engine: BrainEngine, id: string | nu
   hooks: Parameters<typeof recoverEffectPublication>[3] = {}): Promise<PersistenceEffect | undefined> {
   let claimed: PersistenceEffect | undefined;
   try {
-    [claimed] = await engine.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
-      claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 AND recovery IS NOT NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING *`, [id, randomUUID()]);
+    const token = randomUUID();
+    [claimed] = await engine.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,claim_owner=$3::text::jsonb,
+      claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 AND recovery IS NOT NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE} RETURNING *`, [id, token, effectClaimStamp(token)]);
     if (claimed) await recoverEffectPublication(engine, claimed, hostId, { ...hooks, between: hooks.between ?? effectClaimKeeper(engine, claimed, effectRenewalIntervalMs) });
   } catch (error) { if (claimed) await recordFailure(engine, claimed, error); }
   return claimed;
@@ -984,7 +987,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
   // or work unblocked by an earlier effect) is claimable again after the flush.
   for (;;) {
     while (attempted < limit && !opts.signal?.aborted) {
-      const effect = await claimPersistenceEffect(engine, opts.hostId);
+      const effect = await claimPersistenceEffect(engine, opts.hostId, opts.deadOwners);
       if (!effect) break;
       attempted++;
       touched.add(effect.request_id);
@@ -997,7 +1000,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
         // #5182: the binding's recorded setting decides; the legacy hook probe only when nothing is recorded (fail-closed).
         if (!probes.has(root)) probes.set(root, gitDurabilityPolicy(binding, root).then(policy => ({ durable: policy.durable }), error => ({ error })));
         const group = singleFileGitEffect(effect) && effect.worktree_id
-          ? [effect, ...await claimCoalescedGitEffects(engine, opts.hostId, effect.worktree_id, GIT_GROUP_SIZE - 1)] : [effect];
+          ? [effect, ...await claimCoalescedGitEffects(engine, opts.hostId, effect.worktree_id, GIT_GROUP_SIZE - 1, opts.deadOwners)] : [effect];
         for (const member of group) touched.add(member.request_id);
         deferred.push({ effects: group, binding, hardened: probes.get(root)! });
       } else await run(effect, binding);

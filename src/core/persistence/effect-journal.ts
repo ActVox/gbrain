@@ -13,7 +13,7 @@ import { isFactsExtractionEnabled } from '../facts/extract.ts';
 import { loadConfig } from '../config.ts';
 import { resolveDefaultVisibility } from '../facts/visibility.ts';
 import { declarePersistenceProtocol, isPersistenceDeclaration, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
-import { EXPIRED_PREPARING_CHARGE_SQL } from './claim-phase.ts';
+import { claimOwner, EXPIRED_PREPARING_CHARGE_SQL } from './claim-phase.ts';
 import { refreshFenceClear } from './worktree-refresh-schema.ts';
 import { pageBatchChildRequestIds } from './page-batch-id.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
@@ -124,13 +124,31 @@ async function embeddingDisabled(tx: BrainEngine): Promise<boolean> {
   return (await tx.getConfig('embedding_disabled')) === 'true';
 }
 
-/** Claims release their database connection before waiting for a filesystem lock/provider. Nothing on a refresh-fenced worktree is claimed. */
-export async function claimPersistenceEffect(engine: BrainEngine, hostId: string): Promise<PersistenceEffect | null> {
+/** GBRA-133: the `pid:nonce:start` key of the owner an effect's `claim_owner` stamp names (the request side's key, consumer.ts). */
+export const EFFECT_OWNER_KEY_SQL = (e: string) =>
+  `concat_ws(':',${e}.claim_owner->'owner'->>'pid',${e}.claim_owner->'owner'->>'nonce',${e}.claim_owner->'owner'->>'start')`;
+/**
+ * GBRA-133: a running effect with no recovery record whose stamp of its current token names an owner in `param`, the
+ * owners the consumer proved dead (`claimOwnerProvablyDead`). It is claimable now, not when its 2-minute lease runs out:
+ * the takeover mints a new token, so the dead owner's outcome writes (each a compare-and-set on the token) cannot land, and
+ * the Git and mirror kinds still take the worktree's native lock first. An effect holding a recovery record keeps its own
+ * path (`selectEffectRecoveries` under the native lock).
+ */
+const DEAD_OWNER_EFFECT_SQL = (e: string, param: string) => `${e}.state='running' AND ${e}.recovery IS NULL
+  AND ${e}.claim_owner->>'token'=${e}.execution_token::text AND ${EFFECT_OWNER_KEY_SQL(e)}=ANY(${param}::text[])`;
+/** The `claim_owner` stamp of the claim minting `token`: this process (`claimOwner`). */
+export const effectClaimStamp = (token: string) => JSON.stringify({ token, owner: claimOwner() });
+
+/**
+ * Claims release their database connection before waiting for a filesystem lock/provider. Nothing on a refresh-fenced worktree is claimed.
+ * `deadOwners` (GBRA-133): owner keys the consumer proved dead, whose running effects are claimable before their lease lapses.
+ */
+export async function claimPersistenceEffect(engine: BrainEngine, hostId: string, deadOwners: readonly string[] = []): Promise<PersistenceEffect | null> {
   return engine.transactionDirect(async tx => {
     await declarePersistenceProtocol(tx);
     const [candidate] = await tx.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e
       LEFT JOIN persistence_worktrees w ON w.id=e.worktree_id
-      WHERE (e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
+      WHERE (e.state='queued' OR e.state='running' AND e.claim_expires_at<now() OR ${DEAD_OWNER_EFFECT_SQL('e', '$2')}) AND e.next_attempt_at<=now()
       AND (e.worktree_id IS NULL OR w.owner_host_id=$1::uuid) AND (e.worktree_id IS NULL OR ${refreshFenceClear('e')})
       AND e.recovery IS NULL AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked
         WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
@@ -138,10 +156,11 @@ export async function claimPersistenceEffect(engine: BrainEngine, hostId: string
         WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
       AND (e.kind='withdrawal-mirror' OR NOT EXISTS (SELECT 1 FROM persistence_effects mirror
         WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state IN ('queued','running')))
-      ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId]);
+      ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId, [...deadOwners]]);
     if (!candidate) return null;
-    const [claimed] = await tx.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
-      claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 RETURNING *`, [candidate.id, randomUUID()]);
+    const token = randomUUID();
+    const [claimed] = await tx.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,claim_owner=$3::text::jsonb,
+      claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 RETURNING *`, [candidate.id, token, effectClaimStamp(token)]);
     return claimed;
   }, { pipelineFirst: isPersistenceDeclaration });
 }
@@ -227,28 +246,30 @@ export async function rearmWithheldTargets(engine: SqlEngine, requestIds: readon
  * worktree, under the same readiness, recovery and withdrawal-mirror ordering
  * rules as claimPersistenceEffect, so the runner commits them together.
  */
-export async function claimCoalescedGitEffects(engine: BrainEngine, hostId: string, worktreeId: string, limit: number): Promise<PersistenceEffect[]> {
+export async function claimCoalescedGitEffects(engine: BrainEngine, hostId: string, worktreeId: string, limit: number,
+  deadOwners: readonly string[] = []): Promise<PersistenceEffect[]> {
   if (limit <= 0) return [];
   const rows = await engine.transactionDirect(async tx => {
     await declarePersistenceProtocol(tx);
     // The worktree-wide conditions (owner, refresh fence, recovery blocks) are one
     // InitPlan, so the claim walks persistence_effects_pending in order and stops at
     // $3 rows instead of probing every ready effect of the worktree.
-    return tx.executeRaw<PersistenceEffect>(`WITH ready AS (SELECT e.id FROM persistence_effects e
+    return tx.executeRaw<PersistenceEffect>(`WITH ready AS (SELECT e.id,gen_random_uuid() AS token FROM persistence_effects e
       WHERE EXISTS (SELECT 1 FROM persistence_worktrees w WHERE w.id=$2::uuid AND w.owner_host_id=$1::uuid
         AND ${refreshFenceClear('w', 'id')}
         AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked WHERE blocked.worktree_id=w.id AND blocked.recovery IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM persistence_requests blocked WHERE blocked.worktree_id=w.id AND blocked.recovery IS NOT NULL))
       AND e.worktree_id=$2::uuid AND e.kind='git' AND e.data ? 'relative_path'
       AND NOT (e.data ? 'targets') AND NOT (e.data ? 'source_scan') AND NOT (e.data ? 'version')
-      AND (e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
+      AND (e.state='queued' OR e.state='running' AND e.claim_expires_at<now() OR ${DEAD_OWNER_EFFECT_SQL('e', '$4')}) AND e.next_attempt_at<=now()
       AND e.recovery IS NULL
       AND NOT EXISTS (SELECT 1 FROM persistence_effects mirror
         WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state IN ('queued','running'))
       ORDER BY e.next_attempt_at,e.id LIMIT $3 FOR UPDATE OF e SKIP LOCKED)
-      UPDATE persistence_effects p SET state='running',execution_token=gen_random_uuid(),
+      UPDATE persistence_effects p SET state='running',execution_token=ready.token,
+      claim_owner=jsonb_build_object('token',ready.token::text,'owner',$5::text::jsonb),
       claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now()
-      FROM ready WHERE p.id=ready.id RETURNING p.*`, [hostId, worktreeId, limit]);
+      FROM ready WHERE p.id=ready.id RETURNING p.*`, [hostId, worktreeId, limit, [...deadOwners], JSON.stringify(claimOwner())]);
   }, { pipelineFirst: isPersistenceDeclaration });
   return rows.sort((a, b) => Number(a.id) - Number(b.id));
 }
