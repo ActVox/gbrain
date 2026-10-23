@@ -10,6 +10,34 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.407.0] - 2026-10-23
+
+**A long-running sync process (the serve, `gbrain sync --watch`) no longer reads the whole Git tree and the whole pages-and-import-records join on every pass: it patches the last pass's reads with what changed. A remote `list_jobs` call is capped at 500 jobs, so `jobs list --limit 100000` on a thin client can no longer run the serve out of memory.** Both reuses fail closed to a whole read on any doubt, and `gbrain config set sync.level_reuse false` turns them off.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed pass at a new commit in the same process | listed the whole tree (`git ls-tree`) | patches the last listing with one `git diff-tree` between the two commits; every path is still judged |
+| The next pass's first round after a pass that ended synced | re-read every page and import record | re-reads only rows that any writer changed since the kept read, proven in its own snapshot, with page and record counts checked so a deletion is caught |
+| A new process, another source, a failed or unsynced pass, a kept read older than 10 minutes, a change over a quarter of the tree or source (and over 2,000), a count that does not add up, a Git error | — | reads whole |
+| `list_jobs` from an MCP client or thin client with a large `limit` | loaded the whole job table for one request | at most 500 jobs per call; the last job of a cut page carries `truncated: true` and `next_cursor`, and `gbrain jobs list` follows it |
+| `list_jobs` `limit` that is not a positive integer | fell back to 50 | `invalid_params` |
+
+### What to watch for after you upgrade
+
+- `sync.level_reuse` is on by default. Set it to `false` to read the whole tree and join on every pass, as before.
+- `GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1` compares every reused read with a whole read and fails the pass on any difference. The tests and a new untimed nightly `--oracle` step run under it.
+- The sync freshness gate is re-baselined on the PR 4b level pass with level reuse (5 fresh runners x 5 runs; the other 24 runs hold at +25%). Its PGLite managed cell gates on the median of 3 runs.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- `src/core/persistence/sync-tree-reuse.ts`: the kept tree listing and kept `I⋈P` read, keyed by source and incarnation, with the verify oracle.
+- `src/core/persistence/sync-pass-confirm.ts`: an `across` mode that proves the kept read against the current snapshot.
+- `src/core/minions/job-list-page.ts`, `src/core/ops/read-paging.ts`: keyset paging of `list_jobs` on `(created_at, id)`.
+- `scripts/bench/sync-freshness-gate.ts`, `.github/workflows/sync-freshness-gate.yml`, `scripts/bench/sync-freshness-baseline.json`: the new baseline, the median-of-3 cell, the `runs` dispatch input and the `--oracle` step.
+
 ## [0.60.406.0] - 2026-10-23
 
 **`gbrain repair <kind> --apply` no longer stops with `idempotency_conflict` when two of its items write the same page while the first write is still pending, and every fact of a page with many facts now applies in one run.**
