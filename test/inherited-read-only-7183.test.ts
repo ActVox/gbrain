@@ -20,17 +20,19 @@ const readOnly = (statement = 'INSERT') => Object.assign(new Error(`cannot execu
 /** A pool double: `begin(options, fn)` records its options and runs `fn` on a transaction handle. */
 function fakePool(opts: { beginError?: unknown } = {}) {
   const begins: string[] = [];
+  const raw: unknown[] = [];
   const tx = { tag: 'tx' };
   const pool = {
     reserve: () => { throw new Error('unused'); },
     begin: async (options: unknown, fn?: (tx: unknown) => Promise<unknown>) => {
       const run = typeof options === 'function' ? options as (tx: unknown) => Promise<unknown> : fn!;
       begins.push(typeof options === 'string' ? options : '');
+      raw.push(options);
       if (opts.beginError && typeof options === 'string') throw opts.beginError;
       return run(tx);
     },
   };
-  return { pool: pool as never, begins, tx };
+  return { pool: pool as never, begins, raw, tx };
 }
 
 describe('#7183 read-write transaction seams', () => {
@@ -45,6 +47,14 @@ describe('#7183 read-write transaction seams', () => {
     const { pool, begins } = fakePool({ beginError: refusal });
     expect(await beginReadWrite(pool, async () => 'read')).toBe('read');
     expect(begins).toEqual(['read write', '']);
+  });
+
+  test('a pipelined-first transaction (GBRA-156 `{ first }`) keeps its first-statement test and opens READ WRITE', async () => {
+    const { pool, raw, tx } = fakePool();
+    const first = (text: string) => text.startsWith('select');
+    const begin = readWriteTransactions(pool).begin as unknown as (options: unknown, fn: (handle: unknown) => Promise<unknown>) => Promise<unknown>;
+    expect(await begin({ first }, async handle => handle)).toBe(tx);
+    expect(raw).toEqual([{ first, mode: 'read write' }]);
   });
 
   test('a transaction or reserved handle is not wrapped (a savepoint keeps its parent transaction)', () => {

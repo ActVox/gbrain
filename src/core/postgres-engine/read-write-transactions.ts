@@ -43,20 +43,23 @@ function standbyRefusal(error: unknown): boolean {
   return codeOf(error) === '0A000' && /read-write mode during recovery/i.test(String((error as { message?: unknown }).message ?? ''));
 }
 
-export async function beginReadWrite<T>(pool: Sql, fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
+/** `options.first` is the pipelined-first-statement test (GBRA-156), kept beside the read-write mode. */
+export async function beginReadWrite<T>(pool: Sql, fn: (tx: postgres.TransactionSql) => Promise<T>, options?: { first?: unknown }): Promise<T> {
   let entered = false;
+  const run = (tx: postgres.TransactionSql) => { entered = true; return fn(tx); };
   try {
-    return await pool.begin('read write', tx => { entered = true; return fn(tx); }) as T;
+    return await (options ? pool.begin({ ...options, mode: 'read write' } as never, run) : pool.begin('read write', run)) as T;
   } catch (error) {
     if (entered || !standbyRefusal(error)) throw error;
-    return await pool.begin(fn) as T;
+    return await (options ? pool.begin(options as never, fn) : pool.begin(fn)) as T;
   }
 }
 
-/** A pool whose `begin` opens read-write transactions; a transaction or reserved handle is returned unchanged. */
+/** A pool whose `begin` (with or without options) opens read-write transactions; a transaction or reserved handle is returned unchanged. */
 export function readWriteTransactions(conn: Sql): Sql {
   if (!isPool(conn)) return conn;
-  return { begin: (fn: (tx: postgres.TransactionSql) => Promise<unknown>) => beginReadWrite(conn, fn) } as unknown as Sql;
+  type Body = (tx: postgres.TransactionSql) => Promise<unknown>;
+  return { begin: (options: Body | { first?: unknown }, fn?: Body) => typeof options === 'function' ? beginReadWrite(conn, options) : beginReadWrite(conn, fn!, options) } as unknown as Sql;
 }
 
 export async function retryReadOnlyAutocommit<T>(conn: Sql, run: (conn: Sql) => Promise<T>): Promise<T> {
