@@ -16,7 +16,7 @@
  * imports the file (`replayImportedRemembers`, repair/failed-writes.ts); any other write
  * is resubmitted by its caller after that sync.
  */
-import { spawn } from 'node:child_process';
+import { spawn } from '../spawn.ts';
 import { relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
