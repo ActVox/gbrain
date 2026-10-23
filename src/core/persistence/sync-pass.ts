@@ -38,6 +38,7 @@ import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { sameSyncOrigin, selectOriginClaimant, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
 import { hashWorkingLevel, probeDirtiness, readBlobs, readIndexDelta, readIndexLevel, readTreeLevel, workingChanged, type GitIndexEntry, type GitTreeEntry, type WorkingStatCache } from './sync-git-stream.ts';
 import { readOriginEvidence } from './sync-origin-evidence.ts';
+import { readTreeLevelReusing, type TreeReuse } from './sync-tree-reuse.ts';
 import { classifySyncPath, syncPassKind, type SyncClassified, type SyncIdleBlocker, type SyncPathState } from './sync-classify.ts';
 import { buildConvergenceReceipt, readOnlySameContentScreen, type ConvergenceReceipt, type ConvergenceScreen } from './sync-convergence.ts';
 import { readManagedMode } from './ownership.ts';
@@ -70,6 +71,8 @@ export interface PassLevelInput {
   slugMode?: 'git-root' | 'source-root';
   /** The pass's own cache (it dies with the pass): the eligible tree of the commit and selection its last round read. */
   cache?: PassLevelCache;
+  /** `sync.level_reuse` (read once per pass): the round may patch the `T` listing the last pass of this process kept (sync-tree-reuse.ts). */
+  levelReuse?: boolean;
   /** The pass's id: a round after the first reuses the cached `I⋈P` when its writes are all the database changed (sync-pass-confirm.ts). */
   passId?: string;
   /** The pages whose import record the pass's previous round wrote (sync-pass-apply.ts `recorded`). */
@@ -276,6 +279,8 @@ export interface ShadowLevel {
     narrow?: string };
   /** A taken confirm round: the paths whose previous-round classification it kept (`reusableMatched`). */
   reused?: number;
+  /** How a round that listed `T` got it (sync-tree-reuse.ts): read whole, the last pass's listing at the same commit, or that listing patched. */
+  treeReuse?: TreeReuse;
 }
 
 /** A page of the source with the import-record fields the classifier reads; `arm1` / `attested_hash` (`A`) are filled for the pages that need a proof. */
@@ -643,16 +648,14 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   let priorClassified = cache?.classified?.treeKey === treeKey ? cache.classified : undefined;
   const priorDomain = cache?.domain;
   if (cache) { cache.classified = undefined; cache.domain = undefined; }
+  let treeReuse: TreeReuse | undefined;
   // The tree's ':' paths (#5032) are kept apart: they are refused, never part of the level.
   const eligibleTree = async (): Promise<{ tree: Map<string, GitTreeEntry>; colon: string[] }> => {
     if (cache?.tree?.key === treeKey) return cache.tree;
     if (cache) cache.tree = undefined;
-    const tree = new Map<string, GitTreeEntry>(), colon: string[] = [];
-    for (const [path, entry] of levelMetafiles.primeTree(await readTreeLevel(gitRoot, head, scope, step))) {
-      if (isWindowsColonTarget(path)) colon.push(path);
-      else if (eligible(path)) tree.set(path, entry);
-      if (step.due()) await step.pause();
-    }
+    const { tree, colon, reuse } = await eligibleListing(gitRoot, head, scope, { key: [sourceId, incarnation], allowed: input.pass?.levelReuse === true, step, eligible,
+      prime: listing => levelMetafiles.primeTree(listing) });
+    treeReuse = reuse;
     if (cache) cache.tree = { key: treeKey, tree, colon };
     return { tree, colon };
   };
@@ -889,7 +892,7 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
     releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
-    ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), pack: pack?.identity ?? null,
+    ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), ...(treeReuse ? { treeReuse } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
     rescreenDue: holds.filter(hold => holdRescreenDue(hold, retry.has(hold.path))).map(hold => toGit(hold.path)), workingCache: hashed?.cache ?? null };
 }
@@ -903,6 +906,20 @@ function scopedPageOrigin(recorded: string, slug: string, originScope: SyncOrigi
 }
 
 /** The level's settings, one round trip each and all in flight together; null for a company-brain source. */
+/** `T`'s eligible entries and its ':' paths (#5032: refused, never part of the level), walked from the listing the last pass may have kept (sync-tree-reuse.ts). */
+async function eligibleListing(gitRoot: string, head: string, scope: string, opts: { key: string[]; allowed: boolean; step: LoopYield; eligible: (path: string) => boolean;
+  prime: (listing: Map<string, GitTreeEntry>) => Map<string, GitTreeEntry> }): Promise<{ tree: Map<string, GitTreeEntry>; colon: string[]; reuse: TreeReuse }> {
+  const listed = await readTreeLevelReusing(gitRoot, head, scope, { key: opts.key, allowed: opts.allowed, shared: opts.step });
+  const tree = new Map<string, GitTreeEntry>(), colon: string[] = [];
+  for (const [path, entry] of opts.prime(listed.tree)) {
+    if (isWindowsColonTarget(path)) colon.push(path);
+    else if (opts.eligible(path)) tree.set(path, entry);
+    if (opts.step.due()) await opts.step.pause();
+  }
+  listed.keep();
+  return { tree, colon, reuse: listed.reuse };
+}
+
 async function readLevelSettings(engine: BrainEngine, context: ManagedSyncContext, scope: string, input: { workingTree?: boolean; pass?: PassLevelInput }) {
   const { sourceId, root } = context;
   const [company, slugModeRead, excludeRead, includeHiddenRead, workingRead, packRead, mirrorRead, metafilePagesRead] = await Promise.allSettled([

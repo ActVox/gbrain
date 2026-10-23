@@ -6984,6 +6984,21 @@ Timing knobs the drain uses:
 | `GBRAIN_SYNC_BULK_MAX_TXN_MS` (was `sync.bulk_max_txn_ms`, retired in 0.60.266.0) | Target time per bulk group; sizes the next group from the last one's time per page. | 15000 | A smaller next group. |
 | `sync.bulk_size` / `GBRAIN_SYNC_BULK_SIZE` | Largest bulk group. | 16 | — |
 
+### Level reuse
+
+A pass in a long-running process (the serve, or `gbrain sync --watch`) keeps
+the tree listing of the commit it read. The next pass at a new commit lists
+only what changed between the two commits (`git diff-tree`) and patches that
+listing instead of listing the whole tree; it still judges every path. Any
+doubt reads the tree whole: a new process, another source or incarnation, a
+pass that failed before it walked the listing, a listing unused for 10
+minutes, a diff larger than a quarter of the tree (and over 2,000 paths), a
+scope with pathspec characters, or a Git error. `gbrain config set
+sync.level_reuse false` turns reuse off and every pass reads the whole tree;
+`true` or unset keeps it on. `GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1` also reads
+every reused listing whole and fails the pass on any difference (tests and the
+nightly freshness cell use it).
+
 ### Sync config keys
 
 `gbrain config` keeps three kinds of `sync.*` keys (`src/core/sync-config-keys.ts`):
@@ -6991,7 +7006,7 @@ Timing knobs the drain uses:
 - **Tunables** you set and keep: `sync.bulk_size`, `sync.lanes`, `sync.exclude`, `sync.include_hidden`,
   `sync.include_working_tree`, `sync.holds`, `sync.write_through`, `sync.cost_gate_min_usd`, `sync.on_commit`,
   `sync.freshness_target_seconds` ([on-commit sync](on-commit-sync.md)), `sync.metafile_pages`
-  ([what gets synced](#what-gets-synced)).
+  ([what gets synced](#what-gets-synced)), `sync.level_reuse` ([level reuse](#level-reuse)).
 - **Rollback keys**, the way back a notice or migration promised: `sync.job_drain`, `sync.foreground_priority`,
   `sync.federated_v2`, `sync.waive_batch`, `sync.bulk`. Each one set to `false` restores the earlier behavior, and
   stays honored until at least 2027-01-14 (`CONFIG_ROLLBACK_WINDOWS` in `src/core/wire-skew.ts`). They are not

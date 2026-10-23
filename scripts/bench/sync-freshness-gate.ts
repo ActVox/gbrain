@@ -4,6 +4,7 @@
  *
  *   bun scripts/bench/sync-freshness-gate.ts [--cells a,b] [--baseline scripts/bench/sync-freshness-baseline.json]
  *     [--work-dir DIR] [--out run.json] [--write-baseline FILE --machine-class NAME]
+ *   bun scripts/bench/sync-freshness-gate.ts --oracle [--work-dir DIR]
  *
  * Procedure per cell: one sync-freshness.ts run of 11 reps with a 50 ms probe; rep 0 is a discarded warm-up and the
  * gate value is the p50 of commit -> keyword-visible over reps 1..10. A cell fails when that p50 exceeds the committed
@@ -13,9 +14,14 @@
  * Only cells measured stable are gated: 25 runs on 5 fresh Ubicloud standard-4 VMs (the CI runner class) put every
  * serve-watch cell's p50 within a max/min ratio of 1.18, with no false failure in any of 600 baseline/candidate run
  * pairs at +25%. A manual managed sync was left out: its p50 moves with the VM (852 to 1254 ms, 52 of 600 pairs failed).
+ *
+ * --oracle (GBRA-133 wave 4, untimed): the two managed cells once more with GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1, so the
+ * serve compares every level read it reused across passes with a whole read (persistence/sync-tree-reuse.ts) and logs
+ * one `[level_reuse]` line per check. A cell fails when a rep never became visible, the serve logged a mismatch, or it
+ * verified no reuse at all (the oracle checked nothing).
  */
 import { join, resolve } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { machineInfo, pct } from './sync-freshness-lib.ts';
 
 const REPO = resolve(import.meta.dir, '../..');
@@ -37,6 +43,33 @@ const WRITE = argv.includes('--write-baseline') ? resolve(flag('write-baseline',
 mkdirSync(WORK, { recursive: true });
 
 interface CellResult { cell: string; p50_ms: number | null; counted: Array<number | null>; warmup_ms: number | null; limit_ms?: number; baseline_ms?: number; pass?: boolean; reason?: string }
+if (argv.includes('--oracle')) process.exit(await levelReuseOracle());
+
+/** --oracle: see the header. 6 reps per managed cell, 120 s each at most; the verdict comes from the serve logs. */
+async function levelReuseOracle(): Promise<number> {
+  const rows: string[] = [];
+  let ok = true;
+  for (const engine of ['pglite', 'postgres']) {
+    const started = Date.now();
+    const p = Bun.spawn([process.execPath, join(REPO, 'scripts/bench/sync-freshness.ts'), '--engine', engine, '--mode', 'managed', '--commit', 'single', '--trigger', 'serve',
+      '--detection', 'watch', '--pages', '10000', '--reps', '6', '--probe-ms', '50', '--timeout', '120', '--work-dir', WORK, '--label', 'oracle', '--json'],
+      { cwd: REPO, stdout: 'pipe', stderr: 'inherit', env: { ...process.env, GBRAIN_SYNC_LEVEL_REUSE_VERIFY: '1' } });
+    const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+    const line = out.trim().split('\n').reverse().find(l => l.startsWith('{'));
+    const reps = line ? (JSON.parse(line).reps as Array<{ search_ms: number | null }>).map(r => r.search_ms) : [];
+    const logs = join(WORK, 'results', 'logs');
+    const text = existsSync(logs) ? readdirSync(logs).filter(f => f.startsWith(`${engine}-managed-10000-single-serve-oracle-`) && statSync(join(logs, f)).mtimeMs >= started)
+      .map(f => readFileSync(join(logs, f), 'utf8')).join('\n') : '';
+    const verified = text.match(/level_reuse_verified/g)?.length ?? 0, mismatches = text.match(/level_reuse_mismatch/g)?.length ?? 0;
+    const reason = code !== 0 || !line ? 'bench exited ' + code : reps.some(r => r === null) ? 'a rep never became visible'
+      : mismatches ? mismatches + ' mismatch(es) in the serve log' : verified === 0 ? 'no reused level read was verified' : null;
+    if (reason) ok = false;
+    rows.push('| ' + [engine + '-managed', reps.length, verified, mismatches, reason ? 'FAIL: ' + reason : 'pass'].join(' | ') + ' |');
+  }
+  console.log('| oracle cell | reps | reused reads verified | mismatches | verdict |\n|---|---|---|---|---|\n' + rows.join('\n'));
+  return ok ? 0 : 1;
+}
+
 const results: CellResult[] = [];
 for (const name of names) {
   const p = Bun.spawn([process.execPath, join(REPO, 'scripts/bench/sync-freshness.ts'), ...CELLS[name]!, '--pages', '10000', '--reps', String(REPS), '--probe-ms', '50',

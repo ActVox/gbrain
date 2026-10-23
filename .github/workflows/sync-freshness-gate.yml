@@ -6,7 +6,8 @@ name: Sync freshness gate
 # 10k synthetic pages, on Postgres managed, PGLite managed and Postgres classic. The gate
 # value is the p50 of 10 reps after one discarded warm-up; a cell fails above the committed
 # baseline (scripts/bench/sync-freshness-baseline.json) + 25%. The baseline is valid only
-# on this runner class (Ubicloud standard-4). Nightly and on dispatch; never in the PR tier.
+# on this runner class (Ubicloud standard-4). Then the untimed level-reuse oracle (--oracle):
+# the managed cells with GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1. Nightly and on dispatch; never in the PR tier.
 
 on:
   schedule:
@@ -41,6 +42,12 @@ jobs:
           git config --global user.email bench@example.invalid
           bun scripts/bench/sync-freshness-gate.ts --work-dir .context/bench/sync-freshness-gate --out .context/bench/sync-freshness-gate/run.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Level-reuse oracle (every reused level read compared with a whole read; untimed)
+        if: always()
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          bun scripts/bench/sync-freshness-gate.ts --oracle --work-dir .context/bench/sync-freshness-gate | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Stop harness containers and processes
         if: always()
         run: |
