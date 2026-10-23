@@ -29,6 +29,7 @@ test/autopilot-pause-marker.test.ts	pause marker fences minion job pickup	1	read
 test/autopilot-self-upgrade.test.ts	autopilot self-upgrade static-shape regressions	4	source-surface-helper
 test/autopilot-shutdown-engine-close.test.ts	autopilot.ts graceful engine shutdown (#1872)	6	source-surface-helper
 test/autopilot-supervisor-wiring.test.ts	autopilot.ts ↔ ChildWorkerSupervisor wiring	7	source-surface-helper
+test/autopilot-tick-health-7236.test.ts	#7236 autopilot tick health read (${kind})	5	source-surface-helper
 test/backup-cli.serial.test.ts	runBackupCli — PGLite lock fallback	3	readFileSync,source-surface-helper
 test/backup-invalidation.serial.test.ts	bootstrap repo — recordRepoInReceipt contract (source-text pin)	2	readFileSync
 test/backup-private-path-text-5312.test.ts	(file-level)	3	readFileSync
