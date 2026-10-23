@@ -10,6 +10,28 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.409.0] - 2026-10-23
+
+**A page write onto a file that differs from the database no longer freezes the write owner while Git runs, and a stall in that check now says `waiting_on=git`.** Before such a write is refused as an uncoordinated edit, gbrain checks whether the file holds a committed Git change that sync hasn't imported yet. That check ran its Git commands synchronously, each with a 30 s timeout. On a slow checkout, `serve` (the managed write owner) stopped for as long as Git took: lease renewals and every other preparation waited. The stall line then blamed the database: `step=link_resolution waiting_on=db last_sql=SELECT_sources@25s`. That reproduces exactly with a delayed `git hash-object`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| The pending-import check on a drifted page's file | four synchronous Git calls that blocked the whole process | the same Git calls, awaited; the process keeps serving while they run; the answers are unchanged |
+| A preparation stalled in that check, or in the new-page `.gitignore` check | `waiting_on=db`, and `last_sql` naming the last statement sent before Git started | `waiting_on=git` for the length of the Git call; the step keeps its name |
+
+### What to watch for after you upgrade
+
+- A write onto a drifted file still ends with the drift refusal (`source_changed`, `file_database_drift`), and with `pending_import` when the file holds an unimported commit. A Git call longer than the preparation budget still ends the preparation, with the stall line naming `git`.
+
+### Itemized changes
+
+- `src/core/persistence/pending-import.ts`: `committedPendingImport` uses `syncGitAsync`.
+- `src/core/persistence/claim-phase.ts`: `waitingOnWhile`, a non-database wait inside a step.
+- `src/core/persistence/page-prepare.ts`: `prepareFileTarget` takes the preparation clock; its Git checks run under `waiting_on=git`.
+- Tests: `test/pending-import-async-git-7436.test.ts` (a delayed `git` shim, an event-loop tick counter, and the stamped wait).
+
 ## [0.60.408.0] - 2026-10-23
 
 **Warm hybrid search on a large brain behind a transaction-mode pooler spends about 500 ms less on the server.** On a synthetic 600k-page brain at a 66 ms round trip (mock embed 200 ms, mock rerank 300 ms), warm p50 went from 1,995 ms wall / 1,891 ms server total to 1,436 / 1,356 ms. Search reads no longer wait a round trip for BEGIN, the title arm reads a small weight-A index, search arms take pool slots ahead of background work, and two reads that only depend on fusion's inputs start beside it. Results are unchanged: the new title predicate returned identical rows and scores to the old one on 405 strict and relaxed queries at 600k.
