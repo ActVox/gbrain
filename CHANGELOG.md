@@ -10,6 +10,133 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.400.0] - 2026-10-23
+
+**Facts that a bulk import dated with the day it ran can now take the date their claim states, and out-of-order timelines can be put back in date order (#7247).** A bulk import that stamps the day it ran onto every fact makes hundreds of facts look like they all happened that day, so timelines and "as of" questions put them on one date. Doctor now spots those days, and an explicit repair moves each such fact to the one date its claim states. A second explicit repair fixes timelines that imports or hand edits left out of date order, with a copied bullet or a second timeline section.
+
+### How to use it
+
+```bash
+gbrain doctor --only fact_bulk_dates                                      # the loaded days per source
+gbrain repair fact-claim-dates --source <id>                              # preview
+gbrain repair fact-claim-dates --source <id> --apply --expect <hash> --yes
+gbrain repair timeline-order --source <id> [--slug <slug>]...             # preview
+gbrain repair timeline-order --source <id> --apply --expect <hash> --yes
+```
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| One day holds 200 or more of a source's active facts, at least a quarter of them, across 20 or more entities | nothing reported it | doctor `fact_bulk_dates` warns with the day, its fact and entity counts and how many claims state one earlier date |
+| A fact on such a day whose claim states exactly one earlier date ("closed a seed round on 2025-03-14") | kept the load day | `gbrain repair fact-claim-dates` moves it to that date, in the page's facts table and the database |
+| A fact on such a day with no date, several dates or a later one | kept the load day | still keeps it, and the preview counts it |
+| A timeline with bullets out of date order, an exact copy of a bullet, or a second `## Timeline` section | stayed that way | `gbrain repair timeline-order` sorts the bullets in the direction the page uses, drops the later exact copy and joins the sections |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade. Both repairs run only when named, preview first, and apply exactly the previewed set (`--apply --expect <hash> --yes`). They refuse `preview_changed` when anything moved since the preview.
+- Pages are rewritten through revision-bound `put_page`. On a managed brain, `git revert` of the repair commit undoes it.
+- A page that `timeline-order` cannot safely rearrange is listed as `needs_human` and kept. Near-duplicate bullets are only counted.
+
+### Itemized changes
+
+- `src/commands/doctor/checks/fact-bulk-dates.ts` and `src/core/facts/bulk-days.ts`: the `fact_bulk_dates` check and the shared `findBulkFactDays` rule.
+- `src/core/repair/fact-claim-dates.ts`: the `fact-claim-dates` repair kind (`--day` names a loaded day the rule does not detect).
+- `src/core/timeline-order.ts` and `src/core/repair/timeline-order.ts`: the `timeline-order` repair kind (`--slug` limits it to named pages).
+- Tests: `test/repair-fact-claim-dates-7247.test.ts`, `test/repair-timeline-order.test.ts`, `test/timeline-order.test.ts`; Postgres arms through `test/e2e/` `registerPostgresTests` wrappers.
+
+## [0.60.399.0] - 2026-10-23
+
+**The dream summary, the `think --save` page and the drift report keep an edit made while they were being composed, and every overwrite is restorable; the timeline, mention and concept-provenance writers act only on the page revision they read (GBRA-161 PR 5).** These writers used to overwrite or delete against whatever the page held when they finished, so an edit made in between was lost and an overwritten page had no saved copy.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page is edited while the dream summary, `think --save` or the drift report composes it | the writer overwrote the edit | the write is refused with `generation_fenced` and the edit stays; the summary and drift report note it on stderr and `think --save` exits non-zero |
+| One of those pages is overwritten | the earlier page was gone | it is saved to `page_versions` first, and `gbrain repair generations --kind dream_summary\|think_synthesis\|drift_report --mode restore` or `gbrain restore <slug>` brings it back |
+| Orphan pruning, `extract timeline --source db` or `extract --stale` retracts removed timeline entries | deleted against the current page | deletes only while the page row is locked at the revision its caller read |
+| `extract links --by-mention --rebuild` meets a page that moved since it read it | rebuilt and checkpointed it | skips it without a checkpoint, so a resume retries it |
+| A concept is republished | its provenance edges were replaced edge by edge | the new edges are written and the edges of atoms that left its group retire in one transaction, only while the concept is at the revision its publication produced |
+
+### What to watch for after you upgrade
+
+- No migration. Managed brains keep their maintenance page request for these pages, and their summary and drift report still read the revision at publish time.
+- A segmented summary, think or drift page is held `segmented_unsupported` instead of written.
+- File-source timeline extraction is unchanged (it belongs to sync).
+
+### Itemized changes
+
+- `src/core/generations/adapters/single-page.ts`: single-item generations for `dream_summary`, `think_synthesis` and `drift_report`, keyed `page:<slug>`, pinned to the revision read before composing.
+- Revision fences in `retractRemovedTimelineEntries`, the mention rebuild and `replaceConceptProvenanceLinks` (coordinated on managed brains).
+- Tests on PGLite and Postgres, red on the base: `g5-single-page-generations`, `g6-fence-only-writers` and `g7-concept-provenance-edges`; their Postgres arms run through `test/e2e/` `registerPostgresTests` wrappers, not `test/postgres-unit-arms.txt`. The summary-page rendering tests now write through a real PGLite brain with the same assertions.
+
+## [0.60.398.0] - 2026-10-23
+
+**Hot memory is injected once per session in Claude Code: assistant-attributed and external facts no longer come back on every prompt, and the first prompt no longer repeats the session-start block.** The per-prompt block wrote its own fact line, which dropped the `(assistant said)` prefix, so an assistant suggestion read as your own claim and never matched the dedupe key built from the shared line; an external fact's `<external-data>` wrapper broke the match the same way. Separately, Claude Code records `gbrain hook session-start` output as a SessionStart `hook_success` entry, which the user-prompt hook did not read, so every fact the session-start block showed came back on the first prompt. And `gbrain facts relink` attached the assistant's own report about a page, which the SessionEnd corpus sweep saves as an assistant-attributed fact, to that page as an entity fact on every run, core pages included.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| An assistant-attributed hot fact in the per-prompt block | rendered without `(assistant said)`, and injected again on every prompt | rendered with `(assistant said)`, injected once per session |
+| An `external_untrusted` hot fact | injected again on every prompt | injected once per session |
+| The first prompt after session start in Claude Code | repeated every hot fact the session-start block showed | skips them; core memory printed before the gbrain envelope does not hide page pointers |
+| Another tool's SessionStart output | ignored | still ignored |
+| A fact the assistant or a third party said that names a page, at `gbrain facts relink` (plain or `--conversation`) | attached to that page as an entity fact, core pages included, on every run | left where it was saved and counted as `not_user_attributed`; recall still finds it |
+| Doctor `unlinked_facts` | counted those facts as waiting for a link | does not count them |
+
+### What to watch for after you upgrade
+
+- Nothing runs on upgrade. A session already open when you upgrade sees each assistant fact once more, because its earlier blocks were rendered without the prefix.
+- Assistant or third-party facts a relink already attached to a page stay attached. Remove one with `gbrain forget <fact-id>`.
+
+### Itemized changes
+
+- `render()` in `src/core/context/turn-context.ts` uses `renderFactLine`, and the cross-turn dedupe key is that rendered line (or its unlabeled form) without the confidence.
+- `entryToInjectedBlock` in `src/core/transcripts/claude-code-jsonl.ts` accepts a SessionStart `hook_success` attachment whose `content` holds the gbrain envelope, keeping the text from the envelope on.
+- `entityLinkable` / `ENTITY_LINKABLE_SQL` in `src/core/facts/attribution.ts` gate `gbrain facts relink` (new skip reason `not_user_attributed`), `gbrain facts relink --conversation` (page pick, plan and the locked update) and doctor `unlinked_facts`.
+
+### Duplicate facts
+
+**Recall stops returning the same fact many times, and conversation extraction stops saving it again.** A standing prompt or instruction repeated in every session was extracted and stored once per session, and recall, the entity card and search `saved_facts` returned every copy, so a few copies could fill the whole `limit` and push distinct facts out.
+
+#### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Recall, entity card, search `saved_facts` over stored copies of one claim | one row per copy; copies counted against `limit` | one row per claim (newest copy) with `collapsed_count`, and `entity_slugs` when the merged copies sit on several entities; collapsed before `limit` and after visibility filters |
+| Conversation extraction of a claim the source already holds | stored again for every page or session | skipped (`skipped N fact(s) an active fact of the source already states`); re-extracting a page still replaces its own facts |
+| Copies already stored | no way to retire them | `gbrain repair duplicate-facts` (explicit, preview-bound) supersedes every copy with the oldest row; cross-entity groups only with `--include-cross-entity` |
+| One source the backfill should leave alone | turn the whole phase off | `cycle.conversation_facts_backfill.exclude_sources` |
+
+#### What to watch for after you upgrade
+
+- Nothing runs on upgrade and nothing stored changes. Recall output adds two optional fields; every existing field keeps its meaning.
+- Preview with `gbrain repair duplicate-facts`, then run the printed `--apply --expect <hash> --yes` after you agree. Retired copies get `expired_at` and `superseded_by`; they are never deleted or withdrawn.
+- Near duplicates (different wording) are never merged or retired.
+
+### Opt-in session-only hot memory and chronicle diagnostics
+
+**Two small fixes: hot memory can stay inside the current session, and a refused chronicle answer says which check failed (#7026, #7234).**
+
+#### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A session with no facts of its own asks for hot memory (turn hook, session-start pack) | it gets the source's newest facts from the last 24 hours, which can come from other sessions | unchanged by default; with `gbrain config set context.hot_memory.session_only true` it gets none, and a session with facts of its own gets only those |
+| The chronicle phase refuses a judge answer as `malformed_proposal` | only the reason code, so nobody could tell which check failed without the proposal itself | one warning line and a `malformed` field on the outcome name a fixed code (`missing_field`, `wrong_type`, `when_unparseable`, ...), the schema field, the JSON type found and counts; never a value, the prompt or the raw response |
+
+**Spend effect:** none. No new model calls, no default or cap changes. Nothing is rewritten on upgrade.
+
+#### Itemized changes
+
+- New DB-plane key `context.hot_memory.session_only` (default false), read per request by the `turn_context` and `context_pack` IPC handlers and passed to both hot-fact reads; it is part of the hot-memory cache key, so the fallback and session-only answers never share an entry. MCP `_meta.brain_hot_memory` and the IPC wire format are unchanged. Guide: [ambient writeback](docs/guides/ambient-writeback.md#hot-memory-and-other-sessions). Reported by @benswinney in #7026.
+- Chronicle `malformed_proposal` refusals carry bounded diagnostics (`src/core/chronicle/proposal-diagnostics.ts`): at most 50 proposals, 50 `who` entries and 256 characters per string are inspected, nested values are typed and never walked, and a defect past those bounds reads `beyond_bounds`. Refusal, retry/backoff, writes and admission are unchanged. Reported by @Masashi-Ono0611 in #7234.
+
+Duplicate facts reported by @mikez93 (#7043). Hot-memory dedupe reported by @benswinney (#7023). Session-start re-injection reported by @benswinney (#7026). Assistant facts relinked onto core pages reported by @andrew-agents-bot (#7270).
+
 ## [0.60.397.0] - 2026-10-23
 
 **A managed sync on a large, remote brain no longer loses its own drain lease while it writes holds, so new commits become searchable instead of waiting behind a pass that ends `drain_lease_held` (GBRA-133).** In a 600k-page synthetic soak at 65 ms round trips, a pass wrote a round's holds in one transaction that first locked the lease row. That transaction stayed open for 14 minutes. The lease's own renewal waited on the same row, timed out three times, and the lease lapsed under the pass, which then applied nothing. Its release waited on that row until the connection was killed. Those writes now commit in slices of at most 5 seconds, so a renewal waits for one slice at most. The same soak showed two smaller faults, fixed here: a pass told to stop (a 30-second first slice) kept reading its level for minutes, and a file whose history read did not finish was reported as one Git never committed.
