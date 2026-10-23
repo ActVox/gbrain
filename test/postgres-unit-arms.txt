@@ -202,6 +202,7 @@ test/link-cross-source.test.ts
 test/link-preparation-shared-index.test.ts
 test/links-attendance-blocked.test.ts
 test/links-extraction-yield.test.ts
+test/list-jobs-row-bound.test.ts
 test/managed-cycle-pull-upstream.test.ts
 test/managed-facts-withdrawal-recovery-6506.test.ts
 test/managed-facts-withdrawn-skip-6506.test.ts
@@ -450,6 +451,7 @@ test/sync-legacy-holds.test.ts
 test/sync-legacy-retry-actions-6696.test.ts
 test/sync-legacy-slug-adoption-6727.test.ts
 test/sync-legacy-sweep-resume-7189.test.ts
+test/sync-level-reuse-across-gbra133.test.ts
 test/sync-metafile-foreign-slug-7341.test.ts
 test/sync-origin-live-wins-6517.test.ts
 test/sync-page-identity-hold-gbra130.test.ts
@@ -463,6 +465,7 @@ test/sync-prescreen-drift-6712.test.ts
 test/sync-slug-root-mode-6694.test.ts
 test/sync-staged-catchup.test.ts
 test/sync-status-failure-detail-6513.test.ts
+test/sync-tree-reuse-gbra133.test.ts
 test/sync-unblock-repair-error-gbra130.test.ts
 test/sync-uncommitted-origin-7130.test.ts
 test/sync-unreadable-file-gbra130.test.ts
