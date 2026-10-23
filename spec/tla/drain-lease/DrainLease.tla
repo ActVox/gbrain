@@ -196,8 +196,11 @@ FenceSignal(p) == ~aborted[p]
 FenceToken(p)  == rowTok = tok[p]
 FenceExpiry    == rowExp > now
 FencePasses(p) == FenceSignal(p) /\ FenceToken(p) /\ FenceExpiry
-\* A FOR SHARE that arrives while the holder's renewal waits queues behind it (RenewalWinsGap).
-FenceQueue(p)  == RenewalWinsGap => ~Renewing(p)
+\* Postgres lets a new FOR SHARE in beside the share locks already held, even while an UPDATE waits on the row; once
+\* every share lock is gone the waiting UPDATE goes first (measured on Postgres 16). So a waiting renewal lands
+\* between serial fenced transactions but can starve under overlapping ones (Lanes > 1). RenewalWinsGap = FALSE drops
+\* even the serial guarantee.
+FenceQueue(p)  == RenewalWinsGap => (~Renewing(p) \/ Sharers # {})
 
 BeginFenced(p, l) ==
   /\ pc[p] = "holding" /\ txAt[p][l] = None /\ cursor < MaxCursor

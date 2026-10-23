@@ -1,10 +1,11 @@
 {
-  "$comment": "Each mutant removes one guard. `spec` edits the model and TLC must report `expect` (or nothing, for `survives`). `code` makes the same edit to the implementation and the named test must fail under it and pass without it. Run: bun scripts/spec/mutants.ts [--spec-only|--code-only] [--only <id>]. See spec/tla/README.md.",
+  "$comment": "Each mutant removes one guard (kind guard), breaks one timing or lock assumption (kind assumption), or removes a guard that is defense in depth at these bounds (kind survivor, expect survives). `spec` edits a copy of the model and TLC must report `expect`. `code` makes the same edit to the implementation; the named test must fail under it and pass without it. Run: bun scripts/spec/mutants.ts [--spec-only|--code-only] [--only <id>]. See spec/tla/README.md.",
   "module": "DrainLease",
   "config": "DrainLease.cfg",
   "mutants": [
     {
       "id": "fence-ignores-token",
+      "kind": "guard",
       "title": "the fence admits a transaction whose token is not the row's",
       "expect": "FencedTxnsMatchRow",
       "spec": {
@@ -13,15 +14,24 @@
         "after": "FenceToken(p)  == TRUE"
       },
       "code": {
-        "file": "src/core/persistence/sync-lease.ts",
-        "before": "WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
-        "after": "WHERE id=$1 AND $2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE",
-        "test": "test/persistence-sync-lease.test.ts",
-        "filter": "taken over after its TTL"
+        "edits": [
+          {
+            "file": "src/core/persistence/sync-lease.ts",
+            "before": "WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
+            "after": "WHERE id=$1 AND $2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/persistence-sync-lease.test.ts",
+            "filter": "taken over after its TTL"
+          }
+        ]
       }
     },
     {
       "id": "fence-without-share-lock",
+      "kind": "guard",
       "title": "the fence reads the row without FOR SHARE, so a takeover proceeds under an open transaction",
       "expect": "FencedTxnsMatchRow",
       "spec": {
@@ -30,16 +40,25 @@
         "after": "Sharers == {}"
       },
       "code": {
-        "file": "src/core/persistence/sync-lease.ts",
-        "before": "AND ttl_expires_at > now() FOR SHARE'",
-        "after": "AND ttl_expires_at > now()'",
-        "test": "test/e2e/drain-lease-fence-postgres.test.ts",
-        "filter": "blocks a takeover",
-        "postgres": true
+        "edits": [
+          {
+            "file": "src/core/persistence/sync-lease.ts",
+            "before": "AND ttl_expires_at > now() FOR SHARE'",
+            "after": "AND ttl_expires_at > now()'"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/e2e/drain-lease-fence-postgres.test.ts",
+            "filter": "blocks a takeover",
+            "postgres": true
+          }
+        ]
       }
     },
     {
       "id": "takeover-ignores-ttl",
+      "kind": "guard",
       "title": "the upsert takes over a row whose TTL has not expired",
       "expect": "NoSpuriousLapse",
       "spec": {
@@ -48,15 +67,34 @@
         "after": "TakeoverAllowed == TRUE"
       },
       "code": {
-        "file": "src/core/db-lock.ts",
-        "before": "         WHERE gbrain_cycle_locks.ttl_expires_at < NOW()\n           AND (gbrain_cycle_locks.last_refreshed_at IS NULL\n                OR gbrain_cycle_locks.last_refreshed_at < NOW() - $5 * INTERVAL '1 second')",
-        "after": "         WHERE $5::int IS NOT NULL",
-        "test": "test/db-lock-auto-takeover.test.ts",
-        "filter": "does NOT reclaim a live same-host holder"
+        "edits": [
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "        WHERE gbrain_cycle_locks.ttl_expires_at < NOW()\n          AND (gbrain_cycle_locks.last_refreshed_at IS NULL\n               OR gbrain_cycle_locks.last_refreshed_at < NOW() - ${stealGraceSeconds} * INTERVAL '1 second')",
+            "after": "        WHERE ${stealGraceSeconds}::int IS NOT NULL"
+          },
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "         WHERE gbrain_cycle_locks.ttl_expires_at < NOW()\n           AND (gbrain_cycle_locks.last_refreshed_at IS NULL\n                OR gbrain_cycle_locks.last_refreshed_at < NOW() - $5 * INTERVAL '1 second')",
+            "after": "         WHERE $5::int IS NOT NULL"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/drain-lease-guards.test.ts",
+            "filter": "takeover-ignores-ttl"
+          },
+          {
+            "test": "test/e2e/drain-lease-guards-postgres.test.ts",
+            "filter": "takeover-ignores-ttl",
+            "postgres": true
+          }
+        ]
       }
     },
     {
       "id": "release-ignores-token",
+      "kind": "guard",
       "title": "release deletes the row whatever its token, so a former holder frees its successor's lease",
       "expect": "NoSpuriousLapse",
       "spec": {
@@ -65,15 +103,34 @@
         "after": "ReleaseMatches(p) == TRUE"
       },
       "code": {
-        "file": "src/core/db-lock.ts",
-        "before": "      release: async () => {\n        deregister();\n        await db.query(\n          `DELETE FROM gbrain_cycle_locks WHERE id = $1 AND holder_pid = $2 AND acquisition_token = $3::uuid`,",
-        "after": "      release: async () => {\n        deregister();\n        await db.query(\n          `DELETE FROM gbrain_cycle_locks WHERE id = $1 AND $2::int IS NOT NULL AND $3::uuid IS NOT NULL`,",
-        "test": "test/db-lock-fencing.test.ts",
-        "filter": "release\\(\\) after a steal is a fenced no-op"
+        "edits": [
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "      release: async () => {\n        deregister();\n        await (maybePG.sql as any)`\n          DELETE FROM gbrain_cycle_locks\n          WHERE id = ${lockId} AND holder_pid = ${pid} AND acquisition_token = ${acquisitionToken}::uuid",
+            "after": "      release: async () => {\n        deregister();\n        await (maybePG.sql as any)`\n          DELETE FROM gbrain_cycle_locks\n          WHERE id = ${lockId} AND holder_pid = ${pid} AND ${acquisitionToken}::uuid IS NOT NULL"
+          },
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "      release: async () => {\n        deregister();\n        await db.query(\n          `DELETE FROM gbrain_cycle_locks WHERE id = $1 AND holder_pid = $2 AND acquisition_token = $3::uuid`,",
+            "after": "      release: async () => {\n        deregister();\n        await db.query(\n          `DELETE FROM gbrain_cycle_locks WHERE id = $1 AND holder_pid = $2 AND $3::uuid IS NOT NULL`,"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/drain-lease-guards.test.ts",
+            "filter": "release-ignores-token"
+          },
+          {
+            "test": "test/e2e/drain-lease-guards-postgres.test.ts",
+            "filter": "release-ignores-token",
+            "postgres": true
+          }
+        ]
       }
     },
     {
       "id": "pid-probe-calls-live-holder-dead",
+      "kind": "guard",
       "title": "the dead-pid takeover reclaims a live holder (EPERM read as dead, or --force-break-lock)",
       "expect": "NoSpuriousLapse",
       "spec": {
@@ -82,15 +139,24 @@
         "after": "UnsafeSteals = TRUE"
       },
       "code": {
-        "file": "src/core/db-lock.ts",
-        "before": "if (probeResult === 'alive' || probeResult === 'eperm') return 'alive';",
-        "after": "if (probeResult === 'alive') return 'alive';",
-        "test": "test/db-lock-auto-takeover.test.ts",
-        "filter": "same-host \\+ EPERM"
+        "edits": [
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "if (probeResult === 'alive' || probeResult === 'eperm') return 'alive';",
+            "after": "if (probeResult === 'alive') return 'alive';"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/db-lock-auto-takeover.test.ts",
+            "filter": "same-host \\+ EPERM"
+          }
+        ]
       }
     },
     {
       "id": "fenced-transaction-outlives-renewal-timeout",
+      "kind": "guard",
       "title": "#7415: back-to-back fenced transactions that each outlive the renewal timeout starve the renewal until the lease lapses",
       "expect": "NoSpuriousLapse",
       "spec": {
@@ -99,16 +165,25 @@
         "after": "MaxTxMs = 30000"
       },
       "code": {
-        "file": "src/core/persistence/sync-lease.ts",
-        "before": "export const FENCED_SLICE_MS = 5_000;",
-        "after": "export const FENCED_SLICE_MS = Number.POSITIVE_INFINITY;",
-        "test": "test/sync-fenced-slices-gbra133.test.ts",
-        "filter": "fenced slices"
+        "edits": [
+          {
+            "file": "src/core/persistence/sync-lease.ts",
+            "before": "export const FENCED_SLICE_MS = 5_000;",
+            "after": "export const FENCED_SLICE_MS = Number.POSITIVE_INFINITY;"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/sync-fenced-slices-gbra133.test.ts",
+            "filter": "fenced slices"
+          }
+        ]
       }
     },
     {
       "id": "fence-skips-queued-renewal",
-      "title": "a new fenced transaction overtakes a renewal waiting on the row (the RenewalWinsGap assumption fails)",
+      "kind": "assumption",
+      "title": "a new fenced transaction overtakes a renewal waiting on the row even between serial transactions (RenewalWinsGap fails)",
       "expect": "NoSpuriousLapse",
       "spec": {
         "file": "DrainLease.cfg",
@@ -118,6 +193,7 @@
     },
     {
       "id": "renewal-ignores-token",
+      "kind": "guard",
       "title": "the renewal extends whatever row exists, so a late renewal from a former holder rewinds its successor's expiry",
       "expect": "NoSpuriousLapse",
       "spec": {
@@ -126,15 +202,45 @@
         "after": "RenewMatches(p) == rowTok # None"
       },
       "code": {
-        "file": "src/core/db-lock.ts",
-        "before": "            WHERE id = $2 AND holder_pid = $3 AND acquisition_token = $4::uuid\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n        );\n        return res.rows.length > 0;",
-        "after": "            WHERE id = $2 AND holder_pid = $3 AND $4::uuid IS NOT NULL\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n        );\n        return res.rows.length > 0;",
-        "test": "test/db-lock-fencing.test.ts",
-        "filter": "after a steal, the old handle refresh\\(\\) returns false"
+        "edits": [
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "            WHERE id = $2 AND holder_pid = $3 AND acquisition_token = $4::uuid\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n          refreshOpts,",
+            "after": "            WHERE id = $2 AND holder_pid = $3 AND $4::uuid IS NOT NULL\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n          refreshOpts,"
+          },
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "            WHERE id = $2 AND holder_pid = $3 AND acquisition_token = $4::uuid\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n        );\n        return res.rows.length > 0;",
+            "after": "            WHERE id = $2 AND holder_pid = $3 AND $4::uuid IS NOT NULL\n            RETURNING id`,\n          [ttl, lockId, pid, acquisitionToken],\n        );\n        return res.rows.length > 0;"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/drain-lease-guards.test.ts",
+            "filter": "renewal-ignores-token"
+          },
+          {
+            "test": "test/e2e/drain-lease-guards-postgres.test.ts",
+            "filter": "renewal-ignores-token",
+            "postgres": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "overlapping-fenced-transactions",
+      "kind": "assumption",
+      "title": "a holder keeps the row FOR SHARE from overlapping transactions (sync lanes), so new share locks keep overtaking the waiting renewal until the lease lapses",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.cfg",
+        "before": "Lanes = 1",
+        "after": "Lanes = 2"
       }
     },
     {
       "id": "fence-ignores-signal",
+      "kind": "survivor",
       "title": "the fence ignores an aborted lease signal",
       "expect": "survives",
       "reason": "Defense in depth: every abort is also visible to the fence's token or expiry check (the local deadline never outlasts the row's expiry, and a refused renewal means the token moved).",
@@ -146,6 +252,7 @@
     },
     {
       "id": "fence-ignores-expiry",
+      "kind": "survivor",
       "title": "the fence admits under an expired row that nobody took over",
       "expect": "survives",
       "reason": "Defense in depth: FOR SHARE blocks a takeover while the transaction is open, and the token check refuses after one. test/persistence-sync-lease.test.ts still pins the refusal (\"expired untaken\").",
