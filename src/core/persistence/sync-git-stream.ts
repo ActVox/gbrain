@@ -134,6 +134,35 @@ export async function walkTreeLevel(gitRoot: string, commit: string, scope: stri
   }, shared);
 }
 
+/** One `diff-tree -r` change of a `T` path: its entry at the new commit, or null where the new commit has none. */
+export interface GitTreeChange { path: string; entry: GitTreeEntry | null }
+/** The modes `readTreeLevel` keeps (blob and gitlink entries); a change to anything else is not a `T` change it can apply. */
+const TREE_ENTRY_MODE = /^(?:10[0-7]{4}|120000|160000)$/;
+
+/**
+ * The changes of `T` under `scope` from commit `from` to `to` (one `diff-tree -r -z --no-renames`, raw: full OIDs),
+ * or null when a record names an entry `readTreeLevel` would not list the same way: the caller reads `T` whole then.
+ */
+export async function readTreeChanges(gitRoot: string, from: string, to: string, scope: string, shared?: LoopYield): Promise<GitTreeChange[] | null> {
+  const changes: GitTreeChange[] = [];
+  let meta: string | null = null, foreign = false;
+  await readRecords(gitRoot, ['diff-tree', '-r', '-z', '--no-renames', from, to, ...(scope ? ['--', scope] : [])], 'diff-tree', bytes => {
+    if (meta === null) {
+      meta = bytes.toString('latin1');
+      if (!meta.startsWith(':')) throw malformed('diff-tree', meta);
+      return;
+    }
+    const [, dstMode = '', , dstOid = '', status = ''] = meta.slice(1).split(' ');
+    meta = null;
+    const path = bytes.toString('utf8');
+    if (status === 'D') changes.push({ path, entry: null });
+    else if ((status === 'A' || status === 'M' || status === 'T') && TREE_ENTRY_MODE.test(dstMode) && OID.test(dstOid)) changes.push({ path, entry: { mode: dstMode, oid: dstOid } });
+    else foreign = true;
+  }, shared);
+  if (meta !== null) throw new SyncTreeReadIncomplete('diff-tree', 'a status record had no path');
+  return foreign ? null : changes;
+}
+
 /** `X`: the index (never the worktree), keyed by Git-root-relative path; a conflicted path keeps its highest stage. */
 export async function readIndexLevel(gitRoot: string, shared?: LoopYield): Promise<Map<string, GitIndexEntry>> {
   const index = new Map<string, GitIndexEntry>();

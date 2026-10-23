@@ -1740,6 +1740,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'sync.federated_v2',
   'sync.include_working_tree',
   'sync.metafile_pages', // GBRA-150: typed (default) | off, whether a nested folder-scaffolding file with type:/title: frontmatter is a page (core/sync.ts)
+  'sync.level_reuse', // GBRA-133 wave 4: true (default) | false, whether a resident pass patches the tree listing its last pass read (persistence/sync-tree-reuse.ts)
   // #5984: managed Postgres sync publishes pages in bulk groups (on by default; each page keeps its own request).
   'sync.bulk',
   'sync.bulk_size',

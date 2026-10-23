@@ -63,7 +63,7 @@ describe('generator', () => {
   test('the cross-boundary sequences are always generated', () => {
     expect(crossBoundarySequences(ROBOT_TOPOLOGY).map(s => s.label)).toEqual(['withdrawal_then_stale_publication',
       'overlapping_slugs_two_sources', 'competing_writers_one_page', 'caller_bound_replay', 'authority_change_pending_effects',
-      'sync_and_connector_race_direct_write']);
+      'sync_and_connector_race_direct_write', 'fence_dropped_then_restored']);
   });
   test('a random schedule is a function of its seed and covers every write op', () => {
     expect(JSON.stringify(randomSchedule(ROBOT_TOPOLOGY, 9))).toBe(JSON.stringify(randomSchedule(ROBOT_TOPOLOGY, 9)));

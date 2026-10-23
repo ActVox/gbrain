@@ -4143,6 +4143,7 @@
       {
         "kind": "interface",
         "members": [
+          "pipelineEarly?: ((statement: string) => boolean) | undefined",
           "pipelineFirst?: ((statement: string) => boolean) | undefined",
           "signal?: AbortSignal | undefined"
         ],
