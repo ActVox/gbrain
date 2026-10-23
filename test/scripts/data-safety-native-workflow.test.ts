@@ -7,6 +7,8 @@ import { load } from 'js-yaml';
 
 type Step = {
   name?: string;
+  uses?: string;
+  'timeout-minutes'?: number;
   if?: string;
   shell?: string;
   run?: string;
@@ -35,7 +37,6 @@ describe('data-safety native CI coverage', () => {
   test('the opt-in console diagnostic has an isolated Windows matrix without filtering the acceptance suites', () => {
     const job = workflow.jobs['windows-backup-console'];
     expect(job['runs-on']).toBe('${{ matrix.runner }}');
-    expect(job['timeout-minutes']).toBe(5);
     expect(job.strategy['fail-fast']).toBe(false);
     expect(job.strategy.matrix.runner).toEqual(['windows-2022', 'windows-11-arm']);
     expect(job.strategy.matrix.bun).toEqual(['1.4.0', '1.4.4']);
@@ -70,7 +71,6 @@ describe('data-safety native CI coverage', () => {
   test('the direct dotnet program comparison has its own four-cell opt-in Windows job', () => {
     const job = workflow.jobs['windows-backup-dotnet'];
     expect(job['runs-on']).toBe('${{ matrix.runner }}');
-    expect(job['timeout-minutes']).toBe(5);
     expect(job.strategy['fail-fast']).toBe(false);
     expect(job.strategy.matrix.runner).toEqual(['windows-2022', 'windows-11-arm']);
     expect(job.strategy.matrix.bun).toEqual(['1.4.0', '1.4.4']);
@@ -90,6 +90,20 @@ describe('data-safety native CI coverage', () => {
     expect(fixture).toContain("for (const kind of ['directory', 'file'] as const) test.skipIf(process.platform !== 'win32' || process.env.GBRAIN_TEST_BACKUP_DOTNET_PROBE !== '1')(`private ${kind} ACL setup compares cmdlet and direct dotnet calls`");
     expect(workflow.jobs.native.steps.some(entry => entry.env?.GBRAIN_TEST_BACKUP_DOTNET_PROBE !== undefined)).toBe(false);
     expect(workflow.jobs['windows-backup-console'].steps.some(entry => entry.env?.GBRAIN_TEST_BACKUP_DOTNET_PROBE !== undefined)).toBe(false);
+  });
+
+  // GitHub counts "Set up job" against timeout-minutes: one windows-11-arm job spent 218 s there and the old 5-minute
+  // limit cancelled its passed probe. A stalled step must fail at its own bound, never as a job cancel after it passed.
+  for (const [name, probe, tests] of [['windows-backup-console', 'Compare native hidden-window launch behavior', 1],
+    ['windows-backup-dotnet', 'Compare cmdlet and direct dotnet ACL programs', 2]] as const) test(`${name}: every step is bounded, and the job limit is the step bounds plus 5 minutes of runner setup`, () => {
+    const job = workflow.jobs[name];
+    for (const step of job.steps) expect([step.name ?? step.uses ?? step.run, step['timeout-minutes']]).toEqual([step.name ?? step.uses ?? step.run, expect.any(Number)]);
+    const bounds = job.steps.map(step => step['timeout-minutes']!);
+    expect(job['timeout-minutes']).toBe(5 + bounds.reduce((sum, minutes) => sum + minutes, 0));
+    // The probe step outlasts bun's own per-test timeout for each of its tests, so a stuck test is reported by bun first.
+    const step = job.steps.find(entry => entry.name === probe)!;
+    const perTest = Number(/--timeout=(\d+)/.exec(step.run!)![1]) / 1000;
+    expect(step['timeout-minutes']! * 60).toBeGreaterThan(perTest * tests);
   });
 
   test('the cmdlet arm retains the exact original encoded protection program', () => {

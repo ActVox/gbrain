@@ -180,7 +180,11 @@ jobs:
     # Named exception: PR scope reduction, covered by scope=full runs (docs/TESTING.md#event-parity).
     if: ${{ inputs.scope != 'smoke' }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+    # Every step carries its own bound (p99.9 over 541 windows-11-arm jobs: checkout 45 s, setup-bun 21 s,
+    # install 59 s, verify 2 s, probe 43 s), so a stalled step fails by name. The job limit is those bounds plus
+    # 5 minutes for runner setup, which GitHub counts against the job ("Set up job" p95 2 s, p99.9 16 s; one ARM
+    # job spent 218 s there and the old 5-minute limit cancelled its passed probe).
+    timeout-minutes: 22
     strategy:
       fail-fast: false
       matrix:
@@ -190,14 +194,18 @@ jobs:
         exclude: ${{ fromJSON(inputs.scope == 'full' && '[]' || '[{"bun":"1.4.0"}]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 2
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        timeout-minutes: 2
         with:
           bun-version: ${{ matrix.bun }}
       - name: Install dependencies (bounded, retried once)
         timeout-minutes: 8
         run: bun scripts/ci-bun-install.ts --frozen-lockfile --ignore-scripts
       - run: bun scripts/native/verify.ts
+        timeout-minutes: 1
       - name: Compare native hidden-window launch behavior
+        timeout-minutes: 4
         shell: bash
         env:
           GBRAIN_CI_DISABLE_TEST_ENV_FILE: '1'
@@ -211,7 +219,8 @@ jobs:
     # Named exception: PR scope reduction, covered by scope=full runs (docs/TESTING.md#event-parity).
     if: ${{ inputs.scope != 'smoke' }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+    # As above (probe p99.9 97 s over 267 windows-11-arm jobs; two tests at 180 s each): step bounds plus 5 minutes of setup.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -221,14 +230,18 @@ jobs:
         exclude: ${{ fromJSON(inputs.scope == 'full' && '[]' || '[{"bun":"1.4.0"}]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        timeout-minutes: 2
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        timeout-minutes: 2
         with:
           bun-version: ${{ matrix.bun }}
       - name: Install dependencies (bounded, retried once)
         timeout-minutes: 8
         run: bun scripts/ci-bun-install.ts --frozen-lockfile --ignore-scripts
       - run: bun scripts/native/verify.ts
+        timeout-minutes: 1
       - name: Compare cmdlet and direct dotnet ACL programs
+        timeout-minutes: 7
         shell: bash
         env:
           GBRAIN_CI_DISABLE_TEST_ENV_FILE: '1'
