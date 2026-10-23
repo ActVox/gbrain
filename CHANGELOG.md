@@ -10,6 +10,21 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.404.0] - 2026-10-23
+
+**The managed Gmail recent-first test no longer fails depending on which test files share its bun process.** A provider key that one file set for its own scope leaked into the AI gateway of every later file, so chat looked available and the Gmail loops catch-up ran where the test expects it skipped. No product code changes; the catch-up's thread read was correct behavior.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A test calls `resetGateway()` inside a `withEnv` scope that sets a provider key | the preload's reset baseline kept that key after the scope ended, for every later test and file in the process (`test (13, 14)`: g5-single-page-generations, then google-gmail-recent-first saw `17aa00000000b001` fetched again by the loops catch-up) | before each test, the preload re-applies its baseline when the installed baseline's env no longer matches `process.env` |
+
+### Itemized changes
+
+- `test/helpers/legacy-embedding-preload.ts`: the reset baseline remembers the env it snapshotted; `beforeEach` re-applies the baseline when that snapshot is the live gateway env and differs from `process.env`. A config a file installed itself is left alone.
+- `test/gateway-reset-baseline-scope.test.ts`: forced probe. A scoped reset sees its key, and the next test sees chat unavailable (failed before the fix).
+
 ## [0.60.403.0] - 2026-10-23
 
 **A Windows backup whose PowerShell starts too slowly now says so instead of blaming the destination's permissions, and a post-compaction SessionStart whose serve did not answer in time now says so in its heartbeat.** Three CI flakes behind these are fixed without loosening any bound, and the nightly race hunt runs every file again.
