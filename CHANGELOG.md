@@ -18,24 +18,25 @@ identifiers and attribution are available in the pre-removal Git revision
 
 | Situation | Before | Now |
 |---|---|---|
-| A managed re-extraction replaces an origin's atoms | per-page overwrites and retirements as they came | new identities first; one \`managed_generation_activate\` request checks every successor is live and flips the ledger; the superseded atoms stay live and are marked pending, then each member request versions, stamps \`managed-reextract\` and overwrites or retires |
-| A crash between the activation and its member requests | an origin could be left with neither generation | old and new stay live; the next extraction run finishes the remaining members once (doctor \`generation_pending\` lists them) |
+| A managed re-extraction replaces an origin's atoms | per-page overwrites and retirements as they came | new identities first; one `managed_generation_activate` request checks every successor is live and flips the ledger; the superseded atoms stay live and are marked pending, then each member request versions, stamps `managed-reextract` and overwrites or retires |
+| A crash between the activation and its member requests | an origin could be left with neither generation | old and new stay live; the next extraction run finishes the remaining members once (doctor `generation_pending` lists them) |
 | A member an activation never claimed | could be retired | listed as an orphan candidate, never retired automatically |
 | Two transcripts with the same name in different folders, or a moved transcript | one shared key by file name | keyed by source and source-relative path; a moved file whose content pin matches keeps its key |
 | A pre-ledger atom with no retained producer evidence | retired by a re-extraction that left it out | stays live and is reported as protected |
-| \`gbrain repair stale-atoms\` | its own retirement | retires through the primitive |
+| `gbrain repair stale-atoms` | its own retirement | retires through the primitive |
 
 ### What to watch for after you upgrade
 
-- Migration v266 adds \`derived_generation_activations\`, the \`locator\` and \`activation_id\` columns on \`derived_generations\` and a \`pending\` column on \`derived_generation_items\`. New columns default to the old behavior and no existing row changes.
-- Pending members resume on the next extraction run, not through repair. On a managed brain, \`gbrain repair generations --mode restore\` is refused and points to \`gbrain repair atoms-restore\`, and \`--mode release-held\` covers atom page keys only.
+- Migration v266 adds `derived_generation_activations`, the `locator` and `activation_id` columns on `derived_generations` and a `pending` column on `derived_generation_items`. New columns default to the old behavior and no existing row changes.
+- Pending members resume on the next extraction run, not through repair. On a managed brain, `gbrain repair generations --mode restore` is refused and points to `gbrain repair atoms-restore`, and `--mode release-held` covers atom page keys only.
 
 ### Itemized changes
 
-- \`src/core/generations/managed.ts\`: the managed publication (create, activate, member overwrites and retirements) and the \`managed_generation_activate\` maintenance request (trusted local only).
-- Transcript keys are \`transcript:<root>/<path>\` with a rename map; identity hashing ignores \`source_kind\`, \`ingested_via\` and ephemeral frontmatter keys; the shrink floor is strictly below.
-- Migration v266 (\`derived-generation-activations\`); doctor \`generation_pending\`.
+- `src/core/generations/managed.ts`: the managed publication (create, activate, member overwrites and retirements) and the `managed_generation_activate` maintenance request (trusted local only).
+- Transcript keys are `transcript:<root>/<path>` with a rename map; identity hashing ignores `source_kind`, `ingested_via` and ephemeral frontmatter keys; the shrink floor is strictly below.
+- Migration v266 (`derived-generation-activations`); doctor `generation_pending`.
 - Tests on PGLite and Postgres: the managed #7013 shape, a kill between activation and members, a two-file retirement after resume, managed and unmanaged contention on one key, same-name transcripts and a rename, and a legacy atom without evidence.
+- CI: the unit-lane PostgreSQL arms job runs 12 shards instead of 11 (`ARM_SHARDS`). With the three new arm files, each counted at the p75 fallback weight until it is measured, every Bun 1.4.0 shard went past the 570 s two-worker budget. With 12 shards the largest makespan is 526 s.
 
 ## [0.60.389.0] - 2026-10-23
 
