@@ -13,6 +13,7 @@ import { loadConfig, configDir, configPath, isThinClient } from '../core/config.
 import { getCliOptions } from '../core/cli-options.ts';
 import { resolveBrainId } from '../core/brain-resolver.ts';
 import { VERSION } from '../version.ts';
+import type { OperationMeta } from '../core/ops/contract.ts';
 import { cliSocketDir, cliSocketPath, connectProblem } from '../core/cli-socket/fs-guard.ts';
 import { cliSocketIdentity } from '../core/cli-socket/identity.ts';
 import { peerCredSupport, peerUid, type PeerCredSupport } from '../core/cli-socket/peer-cred.ts';
@@ -26,6 +27,10 @@ const SOCKET_OPS: Record<string, CliSocketOp> = { search: 'search', query: 'quer
 
 function debug(reason: string): void {
   if (process.env.GBRAIN_DEBUG === '1') process.stderr.write(`[cli-socket] cold path: ${reason}\n`);
+}
+
+function debugWarm(command: string, path: string): void {
+  if (process.env.GBRAIN_DEBUG === '1') process.stderr.write(`[cli-socket] warm: ${command} answered by the serve socket at ${path}\n`);
 }
 
 type Exchange = { frame: ResultFrame } | { reason: string };
@@ -104,13 +109,11 @@ async function replay(frame: { output: OutputChunk[] }): Promise<void> {
   }
 }
 
-async function opRequest(command: string, args: string[]): Promise<{ op: import('../core/operations.ts').Operation; params: Record<string, unknown> } | string> {
+async function opRequest(command: string, args: string[]): Promise<{ op: OperationMeta; params: Record<string, unknown> } | string> {
   const { cliOps } = await import('./op-manifest.ts');
   const { cliAliases, parseOpArgs } = await import('./main.ts');
-  const meta = cliOps.get(command) ?? cliAliases.get(command);
-  if (!meta || !SOCKET_OPS[meta.name]) return 'not_a_socket_op';
-  const { loadOperation } = await import('../core/operation-load.ts');
-  const op = (await loadOperation(meta.name))!;
+  const op = cliOps.get(command) ?? cliAliases.get(command);
+  if (!op || !SOCKET_OPS[op.name]) return 'not_a_socket_op';
   const params = parseOpArgs(op, args);
   if (op.cliHints?.stdin && !params[op.cliHints.stdin]) return 'stdin_input';
   if (typeof params.image === 'string' && params.image.length > 0) return 'image_query';
@@ -158,7 +161,7 @@ function renderFailed(error: unknown): false {
 }
 
 /** Prints an answered op frame the way the cold path would; false (nothing printed) when the frame cannot be rendered. */
-export async function renderOp(command: string, op: import('../core/operations.ts').Operation, params: Record<string, unknown>, frame: Exclude<ResultFrame, { kind: 'fallback' }>): Promise<boolean> {
+export async function renderOp(command: string, op: OperationMeta, params: Record<string, unknown>, frame: Exclude<ResultFrame, { kind: 'fallback' }>): Promise<boolean> {
   const { formatResult, captureRetrievalMeta, maybePrintConceptNudge } = await import('./main.ts');
   const { applyCliOpNotices, captureOpNotice } = await import('./op-notices.ts');
   const { setCliExitVerdict, writeStdoutFinal } = await import('../core/cli-force-exit.ts');
@@ -204,15 +207,16 @@ export async function renderOp(command: string, op: import('../core/operations.t
 export async function maybeServeFromCliSocket(command: string, args: string[]): Promise<boolean> {
   if (!CLI_SOCKET_COMMANDS.includes(command) || process.env.GBRAIN_CLI_SOCKET === '0') return false;
   const config = loadConfig();
-  if (!config || config.engine !== 'postgres' || !config.database_url || isThinClient(config)) return false;
+  if (!config || config.engine !== 'postgres' || !config.database_url || isThinClient(config)) { debug('not a local postgres brain'); return false; }
   const cliOpts = getCliOptions();
-  if (cliOpts.explain) return false;
+  if (cliOpts.explain) { debug('--explain runs locally'); return false; }
   const home = configDir();
   const path = cliSocketPath(home);
   const problem = connectProblem(path, cliSocketDir(home));
-  if (problem) { if (problem !== 'missing') debug(`socket refused before connect (${problem})`); return false; }
+  if (problem === 'missing') { debug(`no socket at ${path}; start the serve with gbrain serve --cli-socket or set serve.cli_socket true`); return false; }
+  if (problem) { debug(`socket refused before connect (${problem})`); return false; }
   let brainId: string;
-  try { brainId = resolveBrainId(cliOpts.brain); } catch { return false; }
+  try { brainId = resolveBrainId(cliOpts.brain); } catch { debug('brain did not resolve'); return false; }
   if (brainId !== 'host') { debug(`mount brain ${brainId}`); return false; }
 
   const base = {
@@ -235,6 +239,7 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
     if ('reason' in outcome) { debug(outcome.reason); return false; }
     if (outcome.frame.kind === 'fallback') { debug(outcome.frame.reason); return false; }
     const frame = outcome.frame;
+    debugWarm(command, path);
     await noteSource(frame);
     if (frame.kind === 'error' && !recall.isOneShotRecall(flags)) { await replay(frame); throw reviveOperationError(frame.error); }
     const { writeCliNotices } = await import('../core/interop-notices.ts');
@@ -254,5 +259,6 @@ export async function maybeServeFromCliSocket(command: string, args: string[]): 
   const outcome = await exchangeCliSocket(path, { ...base, kind: 'op', op: SOCKET_OPS[prepared.op.name]!, params: prepared.params }, resultTimeoutMs);
   if ('reason' in outcome) { debug(outcome.reason); return false; }
   if (outcome.frame.kind === 'fallback') { debug(outcome.frame.reason); return false; }
+  debugWarm(command, path);
   return renderOp(command, prepared.op, prepared.params, outcome.frame);
 }

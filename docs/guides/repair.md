@@ -319,10 +319,12 @@ the schema. If the brain schema is newer than this gbrain client, upgrade
 gbrain first; the repair refuses rather than build an older table shape.
 
 Purges that failed on the missing cache before this fix may have been parked
-after five failures, and the nightly purge skips parked pages. After the
-upgrade, preview them with `gbrain pages purge-deleted --retry-parked
---dry-run` and run it without `--dry-run` after the user agrees; doctor
-`purge_parked_pages` lists them.
+after five failures. A park records the gbrain version that wrote it, and the
+first purge run after an upgrade tries a park an older version wrote once more,
+so these clear by themselves. One that fails again is parked under the new
+version: doctor `purge_parked_pages` lists it; preview
+`gbrain pages purge-deleted --retry-parked --dry-run` and run it without
+`--dry-run` after the user agrees.
 
 A missing table that holds user data is listed under `user_data_tables`; this
 repair never recreates it, because an empty table would hide that its rows are
@@ -1260,6 +1262,13 @@ the same in one transaction):
    database 72 h later without refusing it as a page whose file another page
    records.
 
+A twin soft-deleted by hand while the legacy page records the file (receipt
+`write_through.skipped: shared_origin`) keeps its recorded file, and the
+retention purge removes it database-only too: the file and the legacy page stay
+and no content tombstone is written. A tombstone an older release parked after
+refusing it gets one automatic attempt from the first purge run after the
+upgrade (a park another gbrain version wrote is retried once) and is purged then.
+
 The legacy page keeps its slug: that is also the slug sync gives a never-forked
 file whose legacy page it takes over (#6727), and the folded slug resolves to it
 through the alias. The twin's import-owned tags, chunks, versions and the facts and takes its
@@ -1359,6 +1368,24 @@ job, with an unfinished sync cursor, or above the mass valve. `gbrain sync --jso
 origin; `CREATE UNIQUE INDEX CONCURRENTLY` on Postgres) only when the brain has no twins. With twins the migration
 changes nothing and succeeds, and doctor's `origin_twins` check reports "Index pending". Once the last group is
 resolved, the repair's apply builds the index.
+
+### Slug path mismatch
+
+Doctor's `slug_path_mismatch` check (#7305) counts live pages whose slug their recorded file path does not derive. The
+usual case is a hyphen run or a segment-final hyphen: `notes/x-1900---2000-ab.md` imports as `notes/x-1900-2000-ab`,
+because the path rule folds every hyphen run to one hyphen. Import and sync keep such a page on its own slug only
+through the `slug:` line every render stamps into its file (#5966). A file without that line, such as one an
+older gbrain rendered or another tool rewrote, imports as the folded slug and forks a duplicate-origin twin, which sync
+holds [`origin_conflict`](write-refusals.md#origin_conflict).
+
+The check is read-only. It reads at most 20,000 candidate pages and 200 recorded files per run, and reports `Unknown`
+when either bound stops it. It warns only when a file read on this host lacks the stamp, naming
+`gbrain repair frontmatter --source <id>`, whose preview proposes the stamp as a safe repair. A twin that already forked
+is reported by `origin_twins` and resolved with [`gbrain repair origin-twins`](#origin-twins).
+
+`put_page` and `capture` refuse a new slug with a hyphen run or a segment-final hyphen (`invalid_params`, detail
+`slug_hyphen_run`) and name the folded slug. A page that already holds such a slug keeps updating under it, and its
+response carries `slug_advisory`. To move it, put its content under the folded slug, then delete the old page.
 
 ### Rename identity
 
@@ -2179,16 +2206,19 @@ committing the file again clears the hold.
 
 <a id="file-drift-provenance"></a>**Provenance: who deleted each gone file.** Every page of a
 `--held --side deleted --state file_gone` preview names where its file went
-(JSON: `details.pages[].provenance`, counted in `details.provenance`), read from
-HEAD's full history with `--full-history`, so a deletion on a branch a merge
-kept is found (a plain `git log --diff-filter=D -- <path>` simplifies it away):
+(JSON: `details.pages[].provenance`, counted in `details.provenance` with every
+kind listed, zeros included), read from HEAD's full history with `--full-history`,
+so a deletion on a branch a merge kept is found (a plain
+`git log --diff-filter=D -- <path>` simplifies it away). The history is walked
+once and cached per commit, so a long history costs one walk per preview, and
+the preview reports the commits read on stderr while it walks:
 
 | Provenance | Meaning |
 |---|---|
 | `deleted_by_commit` | The newest commit that deleted the file, with its sha, author, date and subject (a merge only when its resolution dropped the file). |
 | `never_committed` | No commit ever held the file, so the page holds the only copy. |
-| `deletion_uncommitted` | HEAD still holds the file; only the worktree lost it. |
-| `unknown` | Git could not answer. |
+| `deletion_uncommitted` | HEAD still holds the file (even one an older commit deleted and a later one restored); only the worktree lost it. |
+| `unknown` | Git could not answer, or the history touched the file without a deletion it can name. |
 
 `--provenance <kind>` keeps only the held files of one provenance, so each
 population gets its own decision:
@@ -2200,6 +2230,16 @@ gbrain repair file-drift --source <id> --held --side deleted --state file_gone -
 # Files a commit deleted on purpose: accept the deletions (soft-deletes those pages).
 gbrain repair file-drift --source <id> --held --side deleted --state file_gone --provenance deleted_by_commit --prefer file
 ```
+
+A `deleted_by_commit` page whose revision is not file-backed (written in the
+database after its file last held it: not the revision sync last imported from
+the file, and not one a committed sync or Git-published write produced; for a
+page no import record covers, written after the commit that deleted its file) is
+listed apart as `database_ahead_of_file` and not soft-deleted, since it holds
+the only copy of that content. Recreate its file with
+`gbrain repair file-drift --source <id> --slug <slug> --prefer database`, or
+keep it. `gbrain repair ghost-pages` lists such a page apart the same way, and
+the soft-delete itself refuses one (`refused`, `database_ahead_of_file`).
 
 `--provenance never_committed --prefer file` is refused: it would soft-delete
 the only copy of each page. A database-only page is no longer screened against
