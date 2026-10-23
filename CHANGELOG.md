@@ -12,24 +12,6 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.405.0] - 2026-10-23
 
-**Writes on Postgres no longer fail because a transaction-mode pooler handed gbrain a server connection that another client left read-only, and a job whose phase failed no longer ends `completed`.**
-
-### What changed
-
-| Situation | Before | Now |
-|---|---|---|
-| A pooled server connection defaults to read-only (another client's session-level `SET default_transaction_read_only = on`, or a role or database default) | sync, page writes, leases and the jobs queue failed with SQLSTATE 25006, reported as `storage_error` or `internal_error` | every transaction gbrain opens declares `READ WRITE`, an autocommit statement refused with 25006 runs once more inside a read-write transaction, and a refusal that persists (a read-only server) is `connection_inherited_read_only` in write receipts, `gbrain sync status` and the error envelope |
-| A job handler's result reports a failed phase, or a `failed` / `blocked_by_failures` status | the job ended `completed` | it ends `failed` (no retry); its error names the phase, and its result keeps `job_outcome` (`phase_failed` with `failed_phase`, or `failed`) |
-| An `autopilot-cycle` job ends `phase_failed` | n/a | it does not count toward the source failure cooldown; a thrown handler, a timeout or stall and `blocked_by_failures` still do |
-
-### What to watch for after you upgrade
-
-- A persistent `connection_inherited_read_only` means the database operator must act: reset the pooler's server connections, stop the client that issues session-level `SET` through the pooler, and check role and database defaults. gbrain never issues a session-level `SET` of its own to undo it.
-- Jobs that used to end `completed` with a failed phase now end `failed`; dashboards counting completed jobs can drop.
-- Deliberately read-only transactions stay read-only, a hot standby still serves reads, nothing is rewritten on upgrade, and there is no schema migration.
-
-## [0.60.404.0] - 2026-10-23
-
 **`gbrain doctor` no longer scores a large brain at 0 because its checks did not finish within the budget, and `derived_visibility` runs as its own entry.** An unfinished check used to count as a warning at 5 points each, so a brain where the default 90 s budget left most checks unfinished scored 0 whatever its real state.
 
 ### What changed
@@ -50,6 +32,21 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - `src/commands/doctor/budget.ts` (`scoredChecks`), the report's scores and text headline: unknowns left out of the scores (#7276; `test/doctor-unknown-score-7276.test.ts`).
 - The doctor registry: `derived_visibility` as its own entry. Doctor goldens differ from before only in line order.
+
+## [0.60.404.0] - 2026-10-23
+
+**The managed Gmail recent-first test no longer fails depending on which test files share its bun process.** A provider key that one file set for its own scope leaked into the AI gateway of every later file, so chat looked available and the Gmail loops catch-up ran where the test expects it skipped. No product code changes; the catch-up's thread read was correct behavior.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A test calls `resetGateway()` inside a `withEnv` scope that sets a provider key | the preload's reset baseline kept that key after the scope ended, for every later test and file in the process (`test (13, 14)`: g5-single-page-generations, then google-gmail-recent-first saw `17aa00000000b001` fetched again by the loops catch-up) | before each test, the preload re-applies its baseline when the installed baseline's env no longer matches `process.env` |
+
+### Itemized changes
+
+- `test/helpers/legacy-embedding-preload.ts`: the reset baseline remembers the env it snapshotted; `beforeEach` re-applies the baseline when that snapshot is the live gateway env and differs from `process.env`. A config a file installed itself is left alone.
+- `test/gateway-reset-baseline-scope.test.ts`: forced probe. A scoped reset sees its key, and the next test sees chat unavailable (failed before the fix).
 
 ## [0.60.403.0] - 2026-10-23
 
