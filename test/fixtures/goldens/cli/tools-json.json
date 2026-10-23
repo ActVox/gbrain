@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 258655,
-    "stdoutSha256": "ad14c32a587d230a1eb8b6d47bab0cf1da4193be6cc1c7e645bc459dbbc6db6d",
+    "stdoutBytes": 262439,
+    "stdoutSha256": "3a6a696129b534029d14fb5301ff3f6874724ad5e1983980f13f88d26ace18b9",
     "toolNames": [
       "remember",
       "entity",
@@ -36,6 +36,7 @@
       "search_modes",
       "search_tune",
       "cache_stats",
+      "search_exact",
       "rate_answer",
       "search_by_image",
       "add_tag",
@@ -418,7 +419,7 @@
         "scope": "write"
       },
       {
-        "description": "Read a page by slug. To edit: include_content:true, send `content` to put_page; or edit_page. >256 KB: outline+window, then `next`.",
+        "description": "Read a page; `section` or `grep` reads one part. Edit: include_content:true, `content` to put_page, or edit_page. >256 KB: outline+window, then `next`.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,
@@ -428,10 +429,12 @@
           "body": "string?",
           "bytes": "object?",
           "content_only": "boolean?",
+          "context": "number?",
           "context_lines": "number?",
           "cursor": "string?",
           "fuzzy": "boolean?",
           "grammar_diagnostics": "boolean?",
+          "grep": "string?",
           "include_content": "boolean?",
           "include_deleted": "boolean?",
           "include_quarantined": "boolean?",
@@ -441,6 +444,7 @@
           "max_bytes": "number?",
           "min_trust": "string?",
           "outline_from": "number?",
+          "section": "string?",
           "slug": "string",
           "source_id": "string?",
           "view": "string?"
@@ -481,8 +485,12 @@
               "type": "object"
             },
             "content_only": {
-              "description": "Round-trip fields only.",
+              "description": "Round-trip fields.",
               "type": "boolean"
+            },
+            "context": {
+              "description": "With grep: paragraphs of context either side (default 1, max 5).",
+              "type": "number"
             },
             "context_lines": {
               "description": "Lines around around_chunk_id (20).",
@@ -493,15 +501,19 @@
               "type": "string"
             },
             "fuzzy": {
-              "description": "Fuzzy slug match.",
+              "description": "Fuzzy match.",
               "type": "boolean"
             },
             "grammar_diagnostics": {
               "description": "Also return every line-grammar finding for the page.",
               "type": "boolean"
             },
+            "grep": {
+              "description": "Only the paragraphs containing this text (case-insensitive substring, not a regex), with line numbers and total_matches.",
+              "type": "string"
+            },
             "include_content": {
-              "description": "Markdown + revision, to edit.",
+              "description": "Markdown + revision.",
               "type": "boolean"
             },
             "include_deleted": {
@@ -513,7 +525,7 @@
               "type": "boolean"
             },
             "include_timeline_entries": {
-              "description": "Timeline rows too.",
+              "description": "Timeline rows.",
               "type": "boolean"
             },
             "known_as_of": {
@@ -556,6 +568,10 @@
             "outline_from": {
               "description": "Outline next_from_index.",
               "type": "number"
+            },
+            "section": {
+              "description": "Only the section under this heading (case-insensitive, first match), with its heading_path.",
+              "type": "string"
             },
             "slug": {
               "description": "Page slug.",
@@ -1476,11 +1492,16 @@
         "mutating": false,
         "name": "get_write_request",
         "parameters": {
+          "applied": "boolean?",
           "request_id": "string"
         },
         "required_scopes": [],
         "schema": {
           "properties": {
+            "applied": {
+              "description": "Also return applied: searchable yet, the gap, the write watermark.",
+              "type": "boolean"
+            },
             "request_id": {
               "description": "The id you sent, or the receipt's.",
               "type": "string"
@@ -2076,6 +2097,81 @@
           "type": "object"
         },
         "scope": "admin"
+      },
+      {
+        "description": "Find every page containing a literal phrase or identifier, exhaustively: use instead of grep. Unranked; returns every match in page order with snippets, and complete: true only when every page you can read was scanned. Literal: words in order with any whitespace between them, case-insensitive unless case_sensitive; no stemming, punctuation literal (ranked search treats quotes as a stemmed phrase). When complete is false, incomplete_reasons says why: deadline or limit (call again with after: resume_after), or unreadable_pages (pages whose text is not indexed yet, listed under unreadable).",
+        "idempotent": true,
+        "local_only": false,
+        "mutating": false,
+        "name": "search_exact",
+        "parameters": {
+          "after": "number?",
+          "case_sensitive": "boolean?",
+          "limit": "number?",
+          "max_seconds": "number?",
+          "min_trust": "string?",
+          "phrase": "string",
+          "slug_prefix": "string?",
+          "source_id": "string?",
+          "types": "array?"
+        },
+        "required_scopes": [],
+        "schema": {
+          "properties": {
+            "after": {
+              "description": "Resume a bounded scan: the resume_after of the previous call.",
+              "type": "number"
+            },
+            "case_sensitive": {
+              "description": "Match case exactly (default false).",
+              "type": "boolean"
+            },
+            "limit": {
+              "description": "Matching pages to return (default 100, max 1000).",
+              "type": "number"
+            },
+            "max_seconds": {
+              "description": "Scan budget in seconds (default 30, max 120).",
+              "type": "number"
+            },
+            "min_trust": {
+              "description": "Lowest trust tier to return (the connection floor still applies).",
+              "enum": [
+                "user_confirmed",
+                "operator_curated",
+                "tool_observed",
+                "agent_written",
+                "unknown",
+                "external_untrusted"
+              ],
+              "type": "string"
+            },
+            "phrase": {
+              "description": "The literal text, e.g. 'INV-2024-0042' or 'quarterly board pack'.",
+              "type": "string"
+            },
+            "slug_prefix": {
+              "description": "Only slugs starting with this, e.g. 'meetings/'.",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "Only this source; '__all__' spans every source you can read.",
+              "type": "string"
+            },
+            "types": {
+              "description": "Only these page types, e.g. ['meeting'].",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "phrase"
+          ],
+          "type": "object"
+        },
+        "scope": "read"
       },
       {
         "description": "Rate how useful an answer's retrieved evidence was, so this brain ranks better next time (zero LLM calls). Pass the answer_id from a query/search/think/synthesize/recall response and rating 1-5, or rate single pages with pages: [{ ref: \"source_id:slug\", rating }]. Example: { answer_id: \"ans_01J…\", pages: [{ ref: \"default:people/alice-example\", rating: 1 }] }. Returns a receipt with each weight before/after; it never edits stored facts.",
@@ -4582,6 +4678,7 @@
         "name": "find_orphans",
         "parameters": {
           "count_only": "boolean?",
+          "cursor": "string?",
           "include_pseudo": "boolean?",
           "limit": "number?",
           "mode": "string?",
@@ -4595,12 +4692,16 @@
               "description": "Return the totals with no rows.",
               "type": "boolean"
             },
+            "cursor": {
+              "description": "next_cursor from the previous page, with the same filters (instead of offset).",
+              "type": "string"
+            },
             "include_pseudo": {
               "description": "Include auto-generated and pseudo pages (default: false)",
               "type": "boolean"
             },
             "limit": {
-              "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan and next_offset names the next page.",
+              "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan, complete says whether this page holds the rest, and next_cursor (or next_offset) names the next page.",
               "type": "number"
             },
             "mode": {
