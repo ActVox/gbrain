@@ -89,14 +89,14 @@ export class ReferenceModel {
   toJSON(): Record<string, unknown> {
     return { pages: [...this.pages].map(([k, p]) => [k, { ...p, markers: [...p.markers] }]), facts: [...this.facts],
       committedMarkers: [...this.committedMarkers], refusedMarkers: [...this.refusedMarkers], reasserted: [...this.reasserted],
-      revoked: [...this.revoked], violations: this.violations, pending: [...this.pending] };
+      revoked: [...this.revoked], violations: this.violations, pending: [...this.pending], projected: [...this.projected] };
   }
   static fromJSON(world: World, state: Record<string, any>): ReferenceModel {
     const m = new ReferenceModel(world);
     m.pages = new Map(state.pages.map(([k, p]: [string, any]) => [k, { ...p, markers: new Set(p.markers) }]));
     m.facts = new Map(state.facts); m.committedMarkers = new Map(state.committedMarkers);
     m.refusedMarkers = new Set(state.refusedMarkers); m.reasserted = new Set(state.reasserted);
-    m.revoked = new Set(state.revoked); m.violations = state.violations; m.pending = new Map(state.pending ?? []);
+    m.revoked = new Set(state.revoked); m.violations = state.violations; m.pending = new Map(state.pending ?? []); m.projected = new Map(state.projected ?? []);
     return m;
   }
   /** An interrupted op whose outcome is unknown: its marker may legally be visible, in its own source only. */
