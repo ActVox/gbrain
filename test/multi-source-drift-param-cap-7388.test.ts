@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { batchProbeExistence } from '../src/core/multi-source-drift.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { testBackends } from './helpers/test-backends.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 const OVER_THE_CAP = 65_600;
@@ -25,17 +26,18 @@ async function probeOverTheCap(engine: BrainEngine) {
   expect(map.get('notes/file-65599')!.size).toBe(0);
 }
 
-describe('multi_source_drift probe past the bind-parameter cap (#7388)', () => {
-  let engine: PGLiteEngine;
-  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
-  afterAll(async () => { await engine.disconnect(); });
+for (const kind of testBackends()) {
+  describe(`multi_source_drift probe past the bind-parameter cap (#7388; ${kind})`, () => {
+    let engine: BrainEngine;
+    let close: () => Promise<void>;
+    beforeAll(async () => {
+      if (kind === 'postgres') ({ engine, close } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
+      else { const pglite = new PGLiteEngine(); await pglite.connect({}); await pglite.initSchema(); engine = pglite; close = () => pglite.disconnect(); }
+    }, 120_000);
+    afterAll(async () => { await close?.(); });
 
-  test('PGLite: every slug answers, the misroute and the page at home included', async () => {
-    await probeOverTheCap(engine);
-  }, 120_000);
-
-  test.skipIf(!process.env.DATABASE_URL)('Postgres: every slug answers, the misroute and the page at home included', async () => {
-    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL!);
-    try { await probeOverTheCap(pg.engine); } finally { await pg.close(); }
-  }, 120_000);
-});
+    test('every slug answers, the misroute and the page at home included', async () => {
+      await probeOverTheCap(engine);
+    }, 120_000);
+  });
+}
