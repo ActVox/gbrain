@@ -10,6 +10,41 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.406.0] - 2026-10-23
+
+**`gbrain repair <kind> --apply` no longer stops with `idempotency_conflict` when two of its items write the same page while the first write is still pending, and every fact of a page with many facts now applies in one run.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Two items of one run write the same page at the same revision (two facts of one page in `repair visibility`, two duplicate groups or two takes on one page) | both got one request id; while the first write was pending, the second reused it for different content, admission refused it as `idempotency_conflict`, and an apply bound to `--expect` ended rc 1 with nothing applied | each item has its own request id |
+| An item's page has a pending write from the same run | the item wrote against the old revision | it waits for that write (up to the write wait, then the run stops resumable as `write_pending`) and writes the page's new revision |
+
+### What to watch for after you upgrade
+
+- A rerun of the same approved set still replays its own pending writes.
+- A page with many facts to repair now takes one run instead of stopping or leaving facts for the next full scan.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+## [0.60.405.0] - 2026-10-23
+
+**The crash robot's reference model now knows about PR 2's `fence_absent` hold, so a page whose Facts or takes section a full overwrite dropped no longer reports `projection_drift` (GBRA-161).** No product code changed. Since v0.60.402.0 such a write keeps the page's fact and take rows and records a held generation instead of retiring them. The model still required the fence to list exactly the stored rows, so random schedules that added a fact or take and then overwrote that page failed the full-ci crash-robot job.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A page has no fence block, a `fence_absent` hold is recorded, and its rows are the ones that last matched its fence | `projection_drift` | passes |
+| Rows change while that page is held, or the page has a fence that doesn't list its rows | `projection_drift` | still `projection_drift` |
+| A parsed fence comes back but the `fence_absent` hold is still recorded | not checked | `projection_drift` (a hold can't outlive the fence that answers it) |
+
+### Itemized changes
+
+- `scripts/persistence/model.ts`: `checkFence` applies the rule above to the facts and takes fences of every live page.
+- `scripts/persistence/generator.ts`: a new fixed sequence, `fence_dropped_then_restored`, adds a fact and a take, overwrites the page without either section, tries a supersede on the held page, then republishes the fenced bytes.
+- `test/fixtures/crash-robot/fence-absent-hold-keeps-rows.json`: replays seeds 5108, 5109, 5113, 5115 and 5116 (two of them crashed) and the new sequence. All 7 failing runs failed on master before this fix and pass after it.
+
 ## [0.60.404.0] - 2026-10-23
 
 **The managed Gmail recent-first test no longer fails depending on which test files share its bun process.** A provider key that one file set for its own scope leaked into the AI gateway of every later file, so chat looked available and the Gmail loops catch-up ran where the test expects it skipped. No product code changes; the catch-up's thread read was correct behavior.

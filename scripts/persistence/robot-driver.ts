@@ -1,6 +1,6 @@
 /**
  * Driver for the crash robot phase of the persistence gate. For each
- * schedule (the five cross-boundary sequences first, then seeded random
+ * schedule (the cross-boundary sequences first, then seeded random
  * sequences until the time budget runs out) it runs a counting pass that
  * finds every seam the schedule reaches, then one process-separated run per
  * chosen crash point: a worker freezes at the seam, the driver SIGKILLs it,
