@@ -94,8 +94,8 @@ async function plannedChange(engine: BrainEngine, snapshot: PageSnapshot): Promi
 
 function holdDetail(hold: Hold, rows: number | undefined, scope: RepairScope): string {
   const source = scope.source_ids.length === 1 ? ` --source ${scope.source_ids[0]}` : '';
-  if (hold === 'pending_materialization') return `${rows} ${HOLD_TEXT[hold]}; run gbrain repair timeline${source} (or gbrain extract timeline --prune-orphans for rows `
-    + 'an edit removed), then preview again';
+  if (hold === 'pending_materialization') return `${rows} ${HOLD_TEXT[hold]}; run gbrain repair timeline${source}; for rows an edit removed, run `
+    + 'gbrain extract timeline --prune-orphans; then preview again';
   return `${HOLD_TEXT[hold]}; fix the timeline by hand, then preview again`;
 }
 
