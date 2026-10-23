@@ -438,6 +438,17 @@ export async function clearGitHold(tx: Exec, input: { sourceId: string; incarnat
   return true;
 }
 
+/**
+ * GBRA-133: clears the deleted-side `file_drift` hold at `path` (a page whose file is gone, a tombstone whose file was
+ * edited, a purged page whose file came back) once the page is soft-deleted, the decision it waited for. False when the
+ * path has no such hold.
+ */
+export async function clearDeletionHold(tx: Exec, input: { sourceId: string; incarnation: string; path: string }): Promise<boolean> {
+  const hold = await readRow(tx, input.sourceId, input.incarnation, input.path);
+  if (!hold || hold.code !== 'file_drift' || fileDriftSide(hold.meta) !== 'deleted') return false;
+  return clearGitHold(tx, { ...input, observedAt: hold.observed_at });
+}
+
 /** #5984: which of these paths have a hold row (one indexed read), so a batched waiver run clears only those. */
 export async function heldGitPaths(tx: Exec, sourceId: string, incarnation: string, paths: readonly string[]): Promise<Set<string>> {
   if (!paths.length) return new Set();

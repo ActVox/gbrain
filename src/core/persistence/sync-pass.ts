@@ -32,7 +32,7 @@ import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGitAsync, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
 import { confirmedSyncDelta } from '../sync-rename-identity.ts';
-import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
+import { fileDriftSide, holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
   type GitHoldRecord, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { sameSyncOrigin, selectOriginClaimant, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
@@ -894,7 +894,11 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   }
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
-    releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
+    releasableHolds: holds.filter(hold => {
+      const path = toGit(hold.path), at = byOrigin.get(path);
+      return !domain.has(path) || deletionSettled(hold, tree.has(path) || (mode === 'working' && (untracked.has(path) || index.has(path))),
+        at !== undefined && !pages.deleted(at), () => readPresent(root, path, scope));
+    }).map(hold => hold.path),
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
     ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), ...(treeReuse ? { treeReuse } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },
@@ -1157,6 +1161,14 @@ async function windowsColonRefusals(engine: BrainEngine, input: { sourceId: stri
 function readPresent(root: string, gitPath: string, scope: string): boolean {
   const path = scope ? gitPath.slice(scope.length + 1) : gitPath;
   try { return readSyncFile(root, path) !== null; } catch { return true; }
+}
+
+/**
+ * GBRA-133: a deleted-side `file_drift` hold whose two sides agree again (no file at `L` or on disk, no live page at the
+ * origin) waits for nothing: a soft delete, a purge or the file's removal decided it, so the stamp releases it.
+ */
+function deletionSettled(hold: GitHoldRecord, inLevel: boolean, live: boolean, present: () => boolean): boolean {
+  return hold.code === 'file_drift' && fileDriftSide(hold.meta) === 'deleted' && !inLevel && !live && !present();
 }
 
 /** Whether a hold still describes the path at level `L`, in the hold's own domain (a pinned blob, working bytes, or a deletion). */
