@@ -10,7 +10,10 @@
  * - release-held: publishes a held result once (shrunk, valve, attempts_exhausted; oversize after the operator raised
  *   `generations.max_items`). no_proof, fence_absent, tie and segmented_unsupported are refused: releasing them would
  *   manufacture the proof they lack.
- * - cleanup: the synthesis unmatched-predecessor retire (PR 4); no kind in this release has it.
+ * - cleanup: lists what a managed source's activations left behind (GBRA-161 PR 1b): items an activated generation still
+ *   waits on a member request for (resumed by the next extraction run) and orphan candidates (pages a `create` member
+ *   wrote for an activation that never happened), each with its activation id. It is preview-only: an orphan is never
+ *   retired automatically. The synthesis unmatched-predecessor retire joins this mode in PR 4.
  *
  * Explicit-only, preview-bound, destructive consent: the preview saves the set under its hash and `--apply --expect <hash>
  * --yes` applies exactly that set, rechecking each key under its locks (`changed_since_preview` otherwise).
@@ -19,12 +22,15 @@ import type { BrainEngine } from '../engine.ts';
 import { opError, OperationError, type OperationContext } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
+import { managedPersistenceEnabled } from '../persistence/ownership.ts';
+import { assertInlineBody } from '../page-body/page-shape.ts';
 import { stableJson } from '../persistence/digest.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from '../repair/core.ts';
 import { generationAdapter, generationKinds } from './adapters/index.ts';
 import { readGenerationsConfig, restoreDaysHint } from './config.ts';
 import { RELEASABLE_HELD_REASONS, type GenerationAdapter, type GenerationKey, type HeldReason, type ProposedItem } from './contract.ts';
+import { listOrphanCandidates, listPendingMembers } from './managed.ts';
 import { activateGeneration, assertItemsLive, itemSetHash, lockGeneration, publishGeneration, readLiveGeneration, type LedgerItem } from './publish.ts';
 
 export const GENERATION_MODES = ['restore', 'release-held', 'cleanup'] as const;
@@ -41,7 +47,7 @@ export function generationsSelectionArgv(selection: GenerationsSelection): strin
 }
 
 /** The read-only preview a notice prints for a kind (and optionally one key): the restore window, or the held set. */
-export function generationsPreviewArgv(target: { kind: string; ownerKey?: string; sourceId?: string }, mode: 'restore' | 'release-held' = 'restore'): string[] {
+export function generationsPreviewArgv(target: { kind: string; ownerKey?: string; sourceId?: string }, mode: GenerationMode = 'restore'): string[] {
   return ['gbrain', 'repair', 'generations', '--kind', target.kind, '--mode', mode, ...(target.sourceId ? ['--source', target.sourceId] : []),
     ...(target.ownerKey ? ['--key', target.ownerKey] : mode === 'release-held' ? ['--held'] : ['--since', `${restoreDaysHint()}d`]), '--json'];
 }
@@ -58,9 +64,8 @@ export function generationsSelectionRefusal(selection: Partial<GenerationsSelect
   if (!generationAdapter(selection.kind)) return usage(`--kind ${selection.kind} is not a generation kind this brain publishes (${kinds}).`, `Pass --kind ${generationKinds()[0] ?? 'atom'}.`, selection);
   if (!selection.mode || !GENERATION_MODES.includes(selection.mode)) {
     return usage(`--mode must be restore, release-held or cleanup (got "${selection.mode ?? ''}").`,
-      'restore republishes the generation a key replaced; release-held publishes a held result once.', selection);
+      'restore republishes the generation a key replaced; release-held publishes a held result once; cleanup lists pending members and orphan candidates.', selection);
   }
-  if (selection.mode === 'cleanup') return usage(`--mode cleanup retires unmatched synthesis predecessors; --kind ${selection.kind} has none.`, 'Use --mode restore or --mode release-held for this kind.', selection);
   if (!selection.run && !selection.since && !selection.key && selection.generation === undefined && !selection.held) {
     return usage('gbrain repair generations needs a selector: --run, --since, --key, --generation or --held.', `Bound the set, e.g. ${example(selection.mode === 'release-held' ? 'release-held' : 'restore')}.`, selection);
   }
@@ -76,7 +81,10 @@ interface ReleaseEntry {
   mode: 'release-held'; id: number; source_id: string; owner_key: string; reason: HeldReason; hold_id: string; input_pin: string | null;
   attempts: number; proposal_bytes: number | null; items: number; refused: string[];
 }
-type Entry = RestoreEntry | ReleaseEntry;
+interface CleanupEntry {
+  mode: 'cleanup'; id: number; source_id: string; owner_key: string; slug: string; activation_id: string; state: 'pending_overwrite' | 'retire_pending' | 'orphan_candidate'; refused: string[];
+}
+type Entry = RestoreEntry | ReleaseEntry | CleanupEntry;
 interface EntryItem extends RepairItem { entry: Entry; hash: string; last: boolean; selection: GenerationsSelection }
 
 function selectorSql(selection: GenerationsSelection, params: unknown[], alias: string): string {
@@ -123,6 +131,19 @@ async function planRestore(db: BrainEngine, adapter: GenerationAdapter<unknown>,
 
 async function selectEntries(db: BrainEngine, adapter: GenerationAdapter<unknown>, sources: string[], selection: GenerationsSelection, id?: number): Promise<Entry[]> {
   const params: unknown[] = [sources, adapter.kind];
+  if (selection.mode === 'cleanup') {
+    const since = selection.since ? Date.parse(selection.since) : null;
+    const keyed = (row: { owner_key: string }) => !selection.key || row.owner_key === selection.key;
+    const pending = (await listPendingMembers(db, sources, adapter.kind)).filter(keyed)
+      .filter(row => selection.generation === undefined || row.generation_id === selection.generation);
+    const orphans = selection.generation !== undefined ? [] : (await listOrphanCandidates(db, sources, adapter.kind)).filter(keyed)
+      .filter(row => since === null || Date.parse(row.created_at) >= since);
+    return [
+      ...pending.map(row => ({ source_id: row.source_id, owner_key: row.owner_key, slug: row.slug, activation_id: row.activation_id,
+        state: row.action === 'retire' ? 'retire_pending' as const : 'pending_overwrite' as const })),
+      ...orphans.map(row => ({ source_id: row.source_id, owner_key: row.owner_key, slug: row.slug, activation_id: row.activation_id, state: 'orphan_candidate' as const })),
+    ].map((row, index) => ({ mode: 'cleanup' as const, id: index + 1, ...row, refused: [] }));
+  }
   if (selection.mode === 'restore') {
     const where = id === undefined ? selectorSql(selection, params, 'g') : (params.push(id), ` AND g.id = $${params.length}`);
     const rows = await db.executeRaw<{ id: number; source_id: string; owner_key: string; generation: number; prev_id: number; prev_generation: number }>(
@@ -155,6 +176,7 @@ async function selectEntries(db: BrainEngine, adapter: GenerationAdapter<unknown
 
 function describeEntry(entry: Entry): string {
   const refused = entry.refused.length ? `; refused: ${entry.refused.join(', ')}` : '';
+  if (entry.mode === 'cleanup') return `${entry.state.replace('_', ' ')} ${entry.slug} (activation ${entry.activation_id})${entry.state === 'orphan_candidate' ? ', never retired automatically' : ', resumed by the next extraction run'}`;
   if (entry.mode === 'release-held') return `held ${entry.reason}, ${entry.items} item(s), ${entry.attempts} attempt(s)${refused}`;
   return `generation ${entry.generation} back to ${entry.restore_to}: revive ${entry.revive.length}, retire ${entry.retire.length}${refused}`;
 }
@@ -184,15 +206,22 @@ export const generationsRepair: RepairHandler = {
   async plan(engine, scope, after, opts): Promise<RepairPlan> {
     const { adapter, selection } = requireAdapter(opts?.generations);
     const command = previewCommand(scope, selection);
-    const item = (entry: Entry, hash: string, last: boolean): EntryItem => ({ cursor: { phase: entry.mode === 'restore' ? 1 : 2, id: entry.id }, source_id: entry.source_id,
-      slug: entry.owner_key, chars: 0, action: entry.mode === 'restore' ? 'restore' : 'release', entry, hash, last, selection });
+    const item = (entry: Entry, hash: string, last: boolean): EntryItem => ({ cursor: { phase: entry.mode === 'restore' ? 1 : entry.mode === 'release-held' ? 2 : 3, id: entry.id },
+      source_id: entry.source_id, slug: entry.mode === 'cleanup' ? entry.slug : entry.owner_key, chars: 0, action: entry.mode === 'restore' ? 'restore' : entry.mode === 'release-held' ? 'release' : 'list',
+      entry, hash, last, selection });
     if (!opts?.apply) {
       const entries = await selectEntries(engine, adapter, scope.source_ids, selection);
       const hash = previewHash(await hashParts(engine, scope, selection, entries));
       if (entries.length) await saveApprovedSet<Approved>(engine, { command: 'generations', hash }, entries.map(entry => ({ ...entry, selection, sources: scope.source_ids })));
       return { items: entries.map((entry, index) => item(entry, hash, index === entries.length - 1)), preview_hash: hash,
         residuals: { keys: entries.length, refused: entries.filter(entry => entry.refused.length).length },
-        listing: entries.map(entry => ({ item: `${entry.source_id}:${entry.owner_key}`, class: entry.refused.length ? 'refused' : entry.mode, detail: describeEntry(entry) })) };
+        listing: entries.map(entry => ({ item: `${entry.source_id}:${entry.mode === 'cleanup' ? entry.slug : entry.owner_key}`,
+          class: entry.mode === 'cleanup' ? entry.state : entry.refused.length ? 'refused' : entry.mode, detail: describeEntry(entry) })) };
+    }
+    if (selection.mode === 'cleanup') {
+      throw new OperationError('invalid_params', `gbrain repair generations --mode cleanup only lists pending members and orphan candidates for --kind ${selection.kind}; there is nothing to apply.`,
+        `Pending members resume on the next extraction run of their source. An orphan candidate is never retired automatically: show the user ${command} and delete one only if they decide to.`,
+        'docs/guides/repair.md#generations');
     }
     if (!opts.expect) {
       throw new OperationError('invalid_params', 'gbrain repair generations --apply applies only the set a preview printed.',
@@ -223,15 +252,20 @@ export const generationsRepair: RepairHandler = {
 
 async function applyEntry(ctx: OperationContext, adapter: GenerationAdapter<unknown>, approved: Entry, selection: GenerationsSelection): Promise<RepairItemOutcome> {
   const changed = (reason: string): RepairItemOutcome => ({ applied: false, outcome: 'changed_since_preview', reason });
+  if (approved.mode === 'cleanup') return { applied: false, outcome: 'refused', reason: `${approved.slug}: cleanup entries are listed, never applied` };
   if (approved.refused.length) return { applied: false, outcome: 'refused', reason: approved.refused.join(', ') };
   const key = keyOf(adapter.kind, approved.source_id, approved.owner_key);
   if (approved.mode === 'release-held') {
     const [row] = await ctx.engine.executeRaw<{ proposal: ProposedItem[] | null; hold_id: string }>(
       `SELECT proposal, hold_id FROM derived_generations WHERE id=$1 AND state='held'`, [approved.id]);
     if (!row || row.hold_id !== approved.hold_id || !row.proposal) return changed('the held result changed or was released since the preview');
+    if (await managedPersistenceEnabled(ctx.engine)) return releaseManaged(ctx.engine, adapter, key, approved, row.proposal);
     const outcome = await publishGeneration(ctx.engine, adapter, { key, items: row.proposal, runId: `release:${approved.hold_id}`, release: { holdId: approved.hold_id, reason: approved.reason } });
     if (outcome.state === 'held') return { applied: false, outcome: 'refused', reason: `${approved.owner_key}: still held (${outcome.reason})` };
     return { applied: true, outcome: 'released', detail: { generation: outcome.generation, ...(outcome.state === 'published' ? { retired: outcome.retired.length } : {}) } };
+  }
+  if (await managedPersistenceEnabled(ctx.engine)) {
+    return { applied: false, outcome: 'refused', reason: `${approved.owner_key}: a managed source restores retired atoms with gbrain repair atoms-restore; a generation restore here runs on unmanaged brains only` };
   }
   const restored = await maintenanceTransaction(ctx.engine, async tx => {
     const live = await readLiveGeneration(tx, key);
@@ -257,4 +291,28 @@ async function applyEntry(ctx: OperationContext, adapter: GenerationAdapter<unkn
   if (restored === 'changed') return changed('the live generation or its items changed since the preview');
   if (Array.isArray(restored)) return { applied: false, outcome: 'refused', reason: restored.join(', ') };
   return { applied: true, outcome: 'restored', detail: { generation: restored.generation, restore_of: approved.restore_to, revived: approved.revive.length, retired: approved.retire.length } };
+}
+
+/**
+ * GBRA-161 PR 1b: a managed source publishes a released held result through its writer (generations/managed.ts): the
+ * retained proposal is admitted as one activation batch against the origin's current input. Atom page keys only; a
+ * transcript key's held result clears when its next extraction lands on a different result.
+ */
+async function releaseManaged(engine: BrainEngine, adapter: GenerationAdapter<unknown>, key: GenerationKey, approved: ReleaseEntry, proposal: ProposedItem[]): Promise<RepairItemOutcome> {
+  const refused = (reason: string): RepairItemOutcome => ({ applied: false, outcome: 'refused', reason: `${approved.owner_key}: ${reason}` });
+  if (adapter.kind !== 'atom' || !key.ownerKey.startsWith('source_slug:')) return refused('a managed release publishes atom page keys only');
+  const atoms = await import('../persistence/atom-maintenance.ts');
+  const session = await atoms.managedAtomSession(engine, key.sourceId);
+  if (!session) return refused('the source is no longer managed; preview again');
+  const slug = key.ownerKey.slice('source_slug:'.length);
+  const page = await engine.getPage(slug, { sourceId: key.sourceId });
+  if (!page?.content_hash) return refused(`origin page ${slug} is gone; the held result cannot publish`);
+  assertInlineBody(page, 'repair generations release-held');
+  const origin = await atoms.readAtomOrigin(engine, session, { kind: 'page', slug, content: page.compiled_truth, contentHash: page.content_hash });
+  const outcome = await atoms.publishManagedAtomGeneration(engine, session, origin, proposal.map(item => ({ slug: item.key, content: item.content, links: [] })),
+    { key, content: page.compiled_truth, runId: `release:${approved.hold_id}`, release: { holdId: approved.hold_id, reason: approved.reason } });
+  if (outcome.state === 'held') return refused(`still held (${outcome.reason})`);
+  const failed = outcome.receipts.filter(receipt => receipt.state !== 'committed');
+  if (failed.length) return refused(`${failed.length} request(s) of the release did not commit (${failed.map(receipt => receipt.request_id).join(', ')})`);
+  return { applied: true, outcome: 'released', detail: { requests: outcome.receipts.length } };
 }
