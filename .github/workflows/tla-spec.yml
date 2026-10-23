@@ -73,7 +73,9 @@ jobs:
         run: bun scripts/ci-bun-install.ts --frozen-lockfile --ignore-scripts
       # TLA_JAR_DOWNLOAD_FAILED is a network failure (rerun the job); TLA_JAR_SHA_MISMATCH is never rerun.
       - name: Fetch TLC (pinned in scripts/spec/tla-tools.env, checked against its sha256)
-        run: echo "TLA2TOOLS=$(bash scripts/spec/tla-jar.sh)" >> "$GITHUB_ENV"
+        run: |
+          jar="$(bash scripts/spec/tla-jar.sh)" || exit "$?"
+          printf 'TLA2TOOLS=%s\n' "$jar" >> "$GITHUB_ENV"
       - name: The configs match the code
         run: bun test test/spec-drain-lease-constants.test.ts
       - name: Model-check every config

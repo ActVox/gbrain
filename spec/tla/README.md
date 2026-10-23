@@ -27,17 +27,24 @@ spec, its runner, the code a spec models, or a test a mutant names.
 
 ### When it fails
 
+Nothing here writes product files or data: TLC runs on copies under `TLC_OUT`, and code mutants run in a scratch
+copy of the tree there. A failed or interrupted run leaves only partial logs in `TLC_OUT`.
+
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| `TLC_VIOLATION` | A property is violated. | Read the trace in the log; the action table below maps each step to code. Fix the code, or fix the spec when it is wrong and say why in the PR. |
-| `TLC_TIMEOUT` | TLC did not finish within `TLC_TIMEOUT_S` (600 s). | The state space grew: shrink the config's bounds, or find the action that multiplies states. |
-| `TLC_ERROR` | TLC stopped: a parse or semantic error, or out of memory. | The log names the line. |
-| `TLA_JAR_DOWNLOAD_FAILED` | The jar did not download. | Rerun. |
-| `TLA_JAR_SHA_MISMATCH` | The jar is not the reviewed release. | Never rerun; a new pin needs review. |
-| `MUTANT_STALE` | A mutant's `before` text is not found exactly once. | The spec or code moved: update the mutant's text in `mutants.json`. |
+| `TLC_VIOLATION` | A property is violated. | Read the trace in the log; the action table below maps each step to code. Fix the code, or fix the spec when it is wrong and say why in the PR. Never rerun to make it pass. |
+| `TLC_TIMEOUT` | TLC did not finish within `TLC_TIMEOUT_S` (600 s). | If the spec or a config changed, find the action that multiplies states. Shrinking a config's bounds reduces what is checked: that needs review in the PR. If nothing changed, the runner was slow: rerun once, then report it. |
+| `TLC_ERROR` | TLC stopped without a result: a parse or semantic error (the log names the line), out of memory, or killed. | Fix the error the log names; for memory, raise `-Xmx` in `TLC_JAVA_OPTS`. A killed run may be rerun once. |
+| `TLA_JAVA_MISSING` | No `java` on `PATH`. | Install Java 11 or later. |
+| `TLA_JAR_MISSING` | `TLA2TOOLS` names a file that does not exist. | Point it at the jar, or unset it to download the pinned one. |
+| `TLA_JAR_DOWNLOAD_FAILED` | The jar did not download. | A network failure: rerun once. |
+| `TLA_JAR_SHA_MISMATCH` | The jar is not the reviewed release. | Never rerun or bypass it; a new pin in `tla-tools.env` needs review. |
+| `MUTANT_USAGE` | An unknown flag, or `--spec-only` with `--code-only`. | Fix the command. |
+| `MUTANT_STALE` | A mutant's `before` text is not found exactly once. | The spec or code moved: update the mutant's text in `mutants.json` to the new line that implements the same guard. |
 | `MUTANT_SURVIVED` | No property caught a model mutant, or the named test passed with the guard removed from the code. | A property or a test stopped pinning the guard. Restore it; never delete the mutant to go green. |
 | `MUTANT_WRONG_PROPERTY` | A different property caught it, or a survivor became load-bearing. | Read the trace; update `expect`, and give a new load-bearing guard a code edit and a test. |
-| `MUTANT_INCOMPLETE` | TLC did not finish, or a named test failed without the edit, matched no test, or did not load with it. | Fix the test or the filter first; a failure that is not the test's own assertion proves nothing. |
+| `MUTANT_INCOMPLETE` | TLC did not finish or did not start; a named test failed without the edit or matched no test; or with the edit the test did not end in a clean assertion failure (a signal, a timeout, a load error, an error between tests). | Read the log the message names. Fix the test or filter first; a run that did not fail on the test's own assertion proves nothing. An interrupted run may be rerun once with the printed command. |
+| `MUTANT_NOTHING_CHECKED` | Every check the selection asked for was skipped (a Postgres test without `DATABASE_URL`). | Point `DATABASE_URL` at a test database (`GBRAIN_TEST_ALLOW_DATABASE_URL=1`). |
 
 ## drain-lease: the managed-sync drain lease
 
@@ -120,8 +127,10 @@ Postgres only: PGLite is one connection and serializes everything. Also left out
 `LEASE_BEACON_QUEUE` holder record older binaries see (`test/persistence-sync-lease.test.ts`,
 `test/minions-lease-beacon-sweeps-7261.test.ts`); a follower's wait and `drain_stalled` (`test/persistence-sync-lease.test.ts`);
 reentrant passes under one lease; older binaries that take no lock; side effects outside the database; how the
-local monotonic clock behaves across a machine suspend; and a coordinator in another process that keeps a pass-stamp
-transaction open after the holder crashed (its share lock delays a takeover; its token check still holds).
+local monotonic clock behaves across a machine suspend; a coordinator in another process that keeps a pass-stamp
+transaction open after the holder crashed (its share lock delays a takeover; its token check still holds); and table
+locks on `gbrain_cycle_locks` (writer activation, admin intents, skill activation), which hold every renewal for the
+length of their transaction, so they count against the renewal timeout like a long fenced transaction.
 
 ### Known gaps
 
