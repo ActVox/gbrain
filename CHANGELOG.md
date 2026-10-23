@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.406.0] - 2026-10-23
+
+**`gbrain repair <kind> --apply` no longer stops with `idempotency_conflict` when two of its items write the same page while the first write is still pending, and every fact of a page with many facts now applies in one run.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Two items of one run write the same page at the same revision (two facts of one page in `repair visibility`, two duplicate groups or two takes on one page) | both got one request id; while the first write was pending, the second reused it for different content, admission refused it as `idempotency_conflict`, and an apply bound to `--expect` ended rc 1 with nothing applied | each item has its own request id |
+| An item's page has a pending write from the same run | the item wrote against the old revision | it waits for that write (up to the write wait, then the run stops resumable as `write_pending`) and writes the page's new revision |
+
+### What to watch for after you upgrade
+
+- A rerun of the same approved set still replays its own pending writes.
+- A page with many facts to repair now takes one run instead of stopping or leaving facts for the next full scan.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
 ## [0.60.404.0] - 2026-10-23
 
 **The managed Gmail recent-first test no longer fails depending on which test files share its bun process.** A provider key that one file set for its own scope leaked into the AI gateway of every later file, so chat looked available and the Gmail loops catch-up ran where the test expects it skipped. No product code changes; the catch-up's thread read was correct behavior.
