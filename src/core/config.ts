@@ -39,6 +39,8 @@ export interface GBrainConfig {
    * `gbrain config set` routes these two dotted keys here, not to the DB. */
   push?: { allow_unverified_remote?: boolean };
   hooks?: { stop_push_debounce_min?: number | string };
+  /** #7242 terminal hook (minions/terminal-hook.ts): file plane only, read by `gbrain jobs work`. */
+  minions?: { terminal_hook?: string[] | { argv: string[]; timeout_ms?: number } };
   /** Ambient-writeback MIRROR of the DB-plane `memory.*` keys — `gbrain
    * config set memory.*` dual-writes both planes so the engine-free Stop-hook
    * child and the stdio boot resolve see the same truth the serve does. The
@@ -1513,7 +1515,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // didn't specify one: 'private' (default) | 'world'. Resolved by
   // src/core/facts/visibility.ts; explicit caller values always win.
   'facts.default_visibility',
-  'visibility.honor_aliases', // remote page reads honor `access`/`confidentiality` aliases on pages without `visibility`; default off (search/private-visibility.ts)
+  'visibility.honor_aliases', // remote page reads honor `access`/`confidentiality` aliases on pages without `visibility`; default on, false opts out (search/private-visibility.ts)
   'facts.entity_inference', // #5836: write-time subject inference kill switch (subject-infer.ts)
   'facts.candidate_fusion', // C2: 'rrf_free' (default, cosine arm) | 'interleave' (cosine + keyword; facts/single-prepare.ts)
   'facts.supersession_thresholds', // JSON {"provider:model@dims": number | "off"} (facts/supersession-threshold.ts)
@@ -1649,6 +1651,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'mcp.strict_params',
   'mcp.result_rows', // C1 row shape, read dual-plane by src/mcp/result-rows.ts
   'mcp.allow_session_widen', // stdio request_tools session widening (default on), read dual-plane by src/mcp/surface.ts
+  'entity.name_variants', // #7160 entity card name-variant arm and possible_duplicates (default on; verbs/entity-variants.ts)
   'entity.names_references', 'entity.record_types', 'entity.row_page_status', // names-row referenced_by_count + card `next` (default on); canonical page types listed as `records` (default empty); F3 page_status on context_pack/get_backlinks rows (default on); src/core/entity-references-config.ts
   'mcp.instructions_governing_rule', // instruction 7: in_effect (default: the record in effect on the date asked about governs) | newest (the earlier recency sentence); src/mcp/instructions.ts
   // Skill-nag suppression (#2180): brain-resident pack install nag off-switch.
@@ -1732,7 +1735,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'orphans.exclude_slugs',
   'sync.cost_gate_min_usd',
   'sync.admission', // #6712 PR 4b: normal | imports_only | classify_only, what a managed pass admits (persistence/sync-admission.ts)
-  'sync.max_deletes', 'sync.max_delete_ratio', // #7130: absolute caps on one managed pass's deletes (sync-reconcile.ts); per source: <key>.source.<id>
+  'sync.max_deletes', 'sync.max_delete_ratio', 'sync.apply_held_deletions', // #7130 delete caps (sync-reconcile.ts), GBRA-133 held-deletion switch (persistence/sync-held-deletions.ts); per source: <key>.source.<id>
   'purge.retention_hours', // #7130: hours a soft-deleted page waits before the autopilot purge phase may purge it (default 72)
   'sync.federated_v2',
   'sync.include_working_tree',
@@ -1763,6 +1766,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'fences.normalize', // #6188: inline Tier 1 fence normalization (fence-repair/config.ts); default on
   'fences.repair.enabled', 'fences.repair.llm', // #6188: the fence_repair cycle phase and its Tier 3 model step (fence-repair/config.ts); default on
   'fences.repair.max_usd_per_page', 'fences.repair.max_usd_per_day', // #6188: Tier 3 fence repair caps; 0 = no model spend
+  // GBRA-161: the generation primitive's restore window, shrink floor, item cap and retirement valve (generations/config.ts); PR 4 (#7065): synthesis retire_previous, default on
+  'generations.restore_days', 'generations.shrink_floor', 'generations.max_items', 'generations.valve.max_per_run', 'generations.valve.max_ratio', 'generations.synthesis.retire_previous',
   // #2179: clamp window for DCR-requested per-client token TTLs. Read by
   // `gbrain serve --http` at startup; unset min defaults to 300s, unset max
   // defaults fail-closed to max(--token-ttl, min).
@@ -1801,7 +1806,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'shared_skills.inventory.max_files', 'shared_skills.inventory.max_total_bytes', 'shared_skills.inventory.max_file_bytes', 'shared_skills.inventory.max_entries', 'shared_skills.migration.enabled', // #6466: false declines the 0.53.0 migration (commands/migrations/opt-out.ts)
   'persistence.write_wait_ms', // #5232: file plane, persistence/write-wait.ts
   'migrate.graduation', // file plane, src/commands/migrate-graduation.ts (engine graduation opt-out)
-  'doctor.default_budget_ms', 'doctor.entry_budget_ms', 'doctor.orphan_ratio.full_scan_max_pages', // #6803: file plane (commands/doctor/default-budget.ts); DB plane (doctor/budget.ts, checks/orphan-estimate.ts)
+  'doctor.default_budget_ms', 'doctor.entry_budget_ms', 'doctor.orphan_ratio.full_scan_max_pages', 'doctor.background_refresh', // #6803: file plane (commands/doctor/default-budget.ts); DB plane (doctor/budget.ts, checks/orphan-estimate.ts)
   'consent.preapprove.paid.max_usd_per_run', 'consent.preapprove.persistent_install', // A4: file plane, core/consent.ts
   // F4b: PGLite row-delta ANALYZE (src/core/planner-stats.ts); F4a: get_health memo TTL (src/core/health-memo.ts, 0 disables).
   'planner.auto_analyze', 'planner.first_read_budget_ms', 'import.analyze_every_pages', 'health.cache_ttl_ms',
@@ -1837,7 +1842,7 @@ export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'minions.',
   'pace.',              // pace.mode + PACE_MODE_CONFIG_KEYS (src/core/pace-mode.ts)
   'decide.',            // System One decide.* (validated by src/core/ai/decide/config.ts DECIDE_CONFIG_KEYS)
-  'sync.max_deletes.source.', 'sync.max_delete_ratio.source.', // #7130: per-source delete caps (sync-reconcile.ts readSyncDeleteCaps)
+  'sync.max_deletes.source.', 'sync.max_delete_ratio.source.', 'sync.apply_held_deletions.source.', // #7130 per-source delete caps, GBRA-133 per-source held-deletion switch
   'connectors.',        // chat-connectors: source_id, sync_floor_min, embed_kickoff_min_pages, doctor_stale_hours, <provider>.{auto_sync,last_sync_at,auth_error_at,watermark_iso} (no secrets — creds are file-plane)
 ];
 
