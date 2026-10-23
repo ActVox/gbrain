@@ -224,8 +224,6 @@ type ChangeText = string | ((chain: ChainDisclosure | null, remote: boolean) => 
 
 /** Every disclosed behavior change, with the release that introduced it. Append new rows; never edit a shipped `since`. */
 export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; id?: string }> = [
-  // #7236 (GBRA-151). `since` is stamped at the merge slot.
-  { since: '0.60.414.0', text: 'An autopilot tick reads the brain health aggregate once (it used to read it twice), and on Postgres the read is bounded at 120 s. A read that runs out reports `health_degraded` (an NDJSON event under `--json`) and the tick runs with an unknown score: no healthy sleep, no score-forced full cycle before the hourly floor, the base interval, and `brain_score: null`. The timeout is not counted as a failed cycle.' },
   { since: '0.60.68.0', text: (chain, remote) => {
     if (!chain) return null;
     if (remote) return 'A chat fallback chain is configured on this brain host: when a chat call\'s own model fails it is retried on other models. Its entries and providers are visible to the brain host operator in gbrain doctor --only chat_fallback_chain.';
@@ -1190,6 +1188,8 @@ export const BEHAVIOR_CHANGES: ReadonlyArray<{ since: string; text: ChangeText; 
   // #7436 (GBRA-151). `since` is restamped at the merge slot.
   { since: '0.60.410.0', text: 'A page write onto a file that differs from the database no longer stops the write owner (`serve`) while gbrain checks, with Git, whether the file holds a committed change sync has not imported yet: the Git commands are awaited instead of run synchronously, so lease renewals and other preparations keep going, and the preparation deadline now ends the check, killing its Git process group (SIGTERM, then SIGKILL after 2 s) instead of letting the preparation run on. A preparation stalled in that check, or in the new-page `.gitignore` check, now reports `waiting_on=git` instead of `waiting_on=db` with the last statement before Git started (`last_sql=SELECT_sources`). The refusals are unchanged (#7436).' },
   { since: '0.60.411.0', text: '`gbrain doctor` no longer counts a check that did not finish within the run\'s budget as a warning in `health_score` or the category scores. The report counts those checks in `unknown_count`, a category with no finished check is listed in `unknown_scores` instead of scoring 100, and the status stays at warnings, never healthy. `derived_visibility` now runs as its own check right after the cheap incident checks, so it no longer waits on the wave checks\' budget.' },
+  // #7236 (GBRA-151). `since` is stamped at the merge slot.
+  { since: '0.60.414.0', text: 'An autopilot tick reads the brain health aggregate once (it used to read it twice), and on Postgres the read is bounded at 120 s. A read that runs out reports `health_degraded` (an NDJSON event under `--json`) and the tick runs with an unknown score: no healthy sleep, no score-forced full cycle before the hourly floor, the base interval, and `brain_score: null`. The timeout is not counted as a failed cycle.' },
 ];
 
 /** The newest disclosed change's release: the notice id moves only when a release adds rows. */
