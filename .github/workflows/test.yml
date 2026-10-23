@@ -273,6 +273,13 @@ jobs:
       # on this row once a Bun release carries that change.
       - name: Teardown bounds that used to park the Windows unit run (#5332)
         run: bun test --timeout 120000 test/postgres-disconnect-bounded.test.ts
+      # Every earlier step runs under PowerShell 7, so Windows PowerShell 5.1, which the backup's owner-only protection
+      # launches, is still cold here: on #7409 its first starts outlasted the warm-up's 30 s and the protection's 15 s
+      # bounds. The cold path itself is covered by test/backup-powershell-warmup.serial.test.ts.
+      - name: Start Windows PowerShell once before the backup steps
+        if: runner.os == 'Windows'
+        timeout-minutes: 3
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -Command "exit 0"
       - name: Backup archive round trip on this host (#5312)
         run: bun test --timeout 60000 test/backup-archive-roundtrip-5312.test.ts
       # The stale-socket sweep's native AF_UNIX reparse-point path exists only on Windows; macOS runs the POSIX cases

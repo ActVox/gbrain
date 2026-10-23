@@ -36,7 +36,7 @@ isolatedTest(import.meta.path, 'a confirm round that patches every page yields; 
   const full = await levelDomain(input());
   const expected = { domain: [...full.domain].sort(), byOrigin: [...full.byOrigin].sort() };
   costly = true;
-  const lag = watchLoopLag();
+  const lag = watchLoopLag({ reportAtMs: MAX_LAG_MS });
   let patched: Awaited<ReturnType<typeof levelDomain>>, maxLag = 0;
   try { patched = await levelDomain(input({ cache: domainCache(full, 'tree'), changed: { rewritten: [], from: 0 }, oldKey: sourcePath => sourcePath })); }
   finally { ({ maxLag } = lag.stop()); }
