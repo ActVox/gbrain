@@ -62,7 +62,7 @@ export function publicationOf(records: StatementRecord[]): StatementRecord[] {
   for (const record of [...records].sort((a, b) => a.t - b.t)) {
     if (!isStatement(record)) continue;
     const text = flat(record.sql).toLowerCase();
-    if (text === 'begin') { open.set(record.conn, [record]); continue; }
+    if (text === 'begin' || text === 'begin read write') { open.set(record.conn, [record]); continue; }
     const group = open.get(record.conn);
     if (!group) continue;
     group.push(record);
