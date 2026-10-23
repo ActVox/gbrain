@@ -6998,7 +6998,9 @@ than 10 minutes, a change over a quarter of the tree or source (and over
 2,000), counts that do not add up (a deletion leaves no other trace), a wide
 transaction-id span, pathspec characters in scope, or any error. Holds,
 markers, open work and the Git level are read every round.
-`gbrain config set sync.level_reuse false` turns both off.
+Clean dirtiness probes are kept on this machine (`~/.gbrain/persistence/clean-probes`),
+so a new process rereads only files whose stat or tree entry moved.
+`gbrain config set sync.level_reuse false` turns all three off.
 `GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1` also reads whole and fails the pass on any
 difference (tests and the nightly freshness cell).
 

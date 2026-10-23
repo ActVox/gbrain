@@ -852,7 +852,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     t = timer();
     const candidateIndex = new Map<string, GitIndexEntry>();
     for (const path of candidates) { if (step.due()) await step.pause(); const entry = indexed(path); if (entry) candidateIndex.set(path, entry); }
-    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex, { step });
+    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex, { step, persist: input.pass?.levelReuse === true,
+      ...(levelReuseVerify() ? { verify: (reused: number, differs: string | null) => { if (reused) reportLevelReuseCheck('dirtiness probes', `${reused} reused`, differs); } } : {}) });
     timings.Dp = (timings.Dp ?? 0) + t();
     t = timer();
     for (const [k, path] of candidates.entries()) {
