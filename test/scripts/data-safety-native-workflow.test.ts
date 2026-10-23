@@ -324,7 +324,7 @@ describe('data-safety native CI coverage', () => {
     }
   });
 
-  test('the crash robot runs a fixed list beside the soak: scope pr under 820 s on pull requests, full under 1200/1800 s elsewhere, exploration nightly, Postgres through PgBouncer', () => {
+  test('the crash robot runs a fixed list beside the soak: scope pr under 820/1020 s on pull requests, full under 1200/1800 s elsewhere, exploration nightly, Postgres through PgBouncer', () => {
     const persistence = load(readFileSync(join(import.meta.dir, '../../.github/workflows/persistence-validation.yml'), 'utf8')) as {
       jobs: { 'crash-robot': { steps: Step[]; services: Record<string, { env?: Record<string, string> }> } };
     };
@@ -332,7 +332,7 @@ describe('data-safety native CI coverage', () => {
     expect(job.services.pgbouncer?.env?.POOL_MODE).toBe('transaction');
     const step = job.steps.find(entry => entry.run?.includes('scripts/persistence/validate.ts'));
     expect(step?.env?.ROBOT_SCOPE).toBe("${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'pr' || 'full' }}");
-    expect(step?.env?.ROBOT_SECONDS).toBe("${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && '820' || (matrix.engine == 'postgres' && '1800' || '1200') }}");
+    expect(step?.env?.ROBOT_SECONDS).toBe("${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (matrix.engine == 'postgres' && '1020' || '820') || (matrix.engine == 'postgres' && '1800' || '1200') }}");
     expect(step?.env?.ROBOT_EXPLORE).toBe("${{ github.event_name == 'schedule' && 'nightly' || '' }}");
     expect(step?.env?.GBRAIN_PGBOUNCER_URL).toContain(':55433/');
     const argv = (env: Record<string, string>) => Bun.spawnSync(['bash', '-e', '-o', 'pipefail', '-c', `
