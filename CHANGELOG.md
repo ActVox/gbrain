@@ -26,6 +26,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - Dashboards that read `brain_score` from autopilot `--json` output can see `null` on a tick whose health read timed out; any other health read error still fails the cycle.
 - Nothing is rewritten on upgrade, and there is no schema migration.
+- A new `undici` override, `^6.29.1` (6.29.0 → 6.29.1 in `bun.lock`), is the fixed version for advisories GHSA-xjj6-f33q-929c (high) and GHSA-4qv8-2p9j-2685 (medium).
 
 ## [0.60.413.0] - 2026-10-23
 
