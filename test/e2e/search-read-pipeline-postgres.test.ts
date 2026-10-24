@@ -48,8 +48,10 @@ run('search read transactions pipeline their body behind BEGIN (direct pool)', (
     });
     await Bun.sleep(1200);
     const records = readSqlTrace(trace).filter(r => (r as { label?: string }).label === 'search-read-direct' && r.kind !== 'connect').sort((a, b) => a.t - b.t);
-    const measured = records.slice(records.findLastIndex(r => /^begin read write$/i.test(r.sql)));
+    // GBRA-156: a search read transaction opens read-only, so no write can commit inside it.
+    const measured = records.slice(records.findLastIndex(r => /^begin read only$/i.test(r.sql)));
     const begin = measured[0]!;
+    expect(begin.sql).toMatch(/^begin read only$/i);
     const settings = measured.find(r => /^SELECT set_config\('jit'/.test(r.sql))!;
     const title = measured.find(r => /WITH top_pages AS/.test(r.sql))!;
     expect(rows).toBeGreaterThan(0);

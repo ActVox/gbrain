@@ -95,6 +95,7 @@ import { grantNewOpsEntry } from './checks/grant-new-ops.ts';
 import { linksExtractionLagEntry, syncFreshnessEntry, searchModeEntry } from './checks/sync-search.ts';
 import { persistenceConsumersEntry, serveBuildDriftEntry } from './checks/persistence-consumers.ts';
 import { runtimeBuildSkewEntry } from './checks/runtime-build-skew.ts';
+import { cliSocketRefusalsEntry } from './checks/cli-socket-refusals.ts';
 import { gitConvergenceEntry } from './checks/git-convergence.ts';
 import { gitWriterEntry } from './checks/git-writer.ts';
 import { retrievalFeedbackEntry } from './checks/retrieval-feedback.ts';
@@ -267,6 +268,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   coreMemoryEntry,
   persistenceConsumersEntry,
   runtimeBuildSkewEntry,
+  cliSocketRefusalsEntry,
   atomHeldFailedEntry,
   extractionInputTruncatedEntry,
   ghostPagesEntry,

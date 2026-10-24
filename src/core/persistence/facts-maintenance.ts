@@ -306,8 +306,9 @@ export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
     batchKey, inputDigest, origin, originalRequestId: ctx.persistenceRequestId ?? null,
     completionRequestId: ctx.requestId ? requireUuid(ctx.requestId) : managedFactRequestId(batchKey, '__managed_facts_complete__'),
     // #7439: a page-triggered job keeps its write's batch identity on retry, so its retained file refusal is
-    // rechecked once the hold clears instead of replayed forever.
-    fileRefusalRetry: !!ctx.persistenceRequestId || ctx.reAdmitFileRefusals === true && seed === inputDigest,
+    // rechecked once the hold clears instead of replayed forever. #7402: a caller's explicit request_id keeps
+    // returning its own recorded outcome, so it never rechecks.
+    fileRefusalRetry: !ctx.requestId && (!!ctx.persistenceRequestId || ctx.reAdmitFileRefusals === true && seed === inputDigest),
     inputKeyed: seed === inputDigest,
     wait: new MaintenanceWriteWait(ctx.deadlineAtMs ?? null), ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}),
     ...(captureGateLaneForSource(ctx.source) ? { captureSource: ctx.source } : {}),
