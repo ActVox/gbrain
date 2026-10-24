@@ -3404,6 +3404,17 @@
             "status": "ok"
           },
           {
+            "category": "ops",
+            "details": {
+              "docs": "docs/guides/cli-socket.md",
+              "refusals": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "The warm CLI socket refused no CLI call in the last 24 hours.",
+            "name": "cli_socket_refusals",
+            "status": "ok"
+          },
+          {
             "category": "brain",
             "details": {
               "code": "held_failed",
@@ -8028,6 +8039,17 @@
             "elapsed_ms": "<volatile>",
             "message": "No long-running gbrain process (serve, jobs supervisor, worker) is running on this host.",
             "name": "runtime_build_skew",
+            "status": "ok"
+          },
+          {
+            "category": "ops",
+            "details": {
+              "docs": "docs/guides/cli-socket.md",
+              "refusals": 0
+            },
+            "elapsed_ms": "<volatile>",
+            "message": "The warm CLI socket refused no CLI call in the last 24 hours.",
+            "name": "cli_socket_refusals",
             "status": "ok"
           },
           {

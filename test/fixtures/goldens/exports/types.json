@@ -4145,6 +4145,7 @@
         "members": [
           "pipelineEarly?: ((statement: string) => boolean) | undefined",
           "pipelineFirst?: ((statement: string) => boolean) | undefined",
+          "readOnly?: boolean | undefined",
           "signal?: AbortSignal | undefined"
         ],
         "name": "TransactionOptions"
