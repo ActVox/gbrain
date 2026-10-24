@@ -12,7 +12,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.425.0] - 2026-10-24
 
-**A darwin-x64 native-locks cell that wedges now leaves a record of what it was running: its last suite, how long it had run, and the machine's memory, swap, load and busiest processes.**
+**A darwin-x64 native-locks cell that wedges now leaves a record of what it was running: its last suite, how long it had run, and the machine's memory, swap, load and busiest processes. Two timing flakes in the test suite are fixed.**
 
 ### What changed
 
@@ -20,6 +20,8 @@ identifiers and attribution are available in the pre-removal Git revision
 |---|---|---|
 | A darwin-x64 native-locks cell wedges until the job timeout | GitHub stored no job log and dropped the step annotations, so nothing showed which suite hung or why | the cell posts the commit status `diag/native-heartbeat` every 30 s and on each suite change, naming the suite, its elapsed seconds, free memory, swap, load and the top three process names; GitHub keeps every status, so the last one before the wedge survives |
 | A darwin-x64 cell that ends, passed, failed or cancelled | nothing posted | a terminal `success` status names the job result, so nothing is left pending |
+| The large-brain sync deadline test on a loaded runner | it required `still progressing`, which prints only when a page commits within the 1 s deadline, so it failed whenever the first commit came later | it asserts the watchdog branch that ran, forces each order once, and still requires exit 0, no `sync_deadline_stop` and all 150 files imported |
+| The `ci:ubicloud` teardown test | it sent the signal once the third VM's create started, so under load the second VM's create had not gone out yet | it waits for both creates before the signal |
 
 The status is posted only from this repository's own branches and pull requests, never from a fork's pull request. It needs `statuses: write` on the native job alone. It never includes the environment or the token.
 
