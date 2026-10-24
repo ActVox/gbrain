@@ -32,11 +32,13 @@
  *              queue; the CLI layer also fail-fast validates at startup).
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from '../spawn.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSpawnInvocation } from './spawn-helpers.ts';
+import { SpendEnforcementUnavailableError, childSpendEnforcementReady } from './spend-authorization.ts';
+import { CHILD_PARENT_BUILD_ENV, parentBuildEnvValue } from './child-readiness.ts';
 import { LocalConfigurationError, isLocalConfigurationError } from './configuration-error.ts';
 import {
   UnrecoverableError,
@@ -58,6 +60,7 @@ import {
   killProcessGroup,
   observeTiniChildProcessGroups,
   captureChildCleanup,
+  childTreeRss,
   confirmChildCleanup,
   validateChildExecutable,
   type ChildCleanupSnapshot,
@@ -79,6 +82,21 @@ export class ChildWorkerShutdownError extends Error {
   constructor(message: string, readonly executionStopped = false) {
     super(message);
     this.name = 'ChildWorkerShutdownError';
+  }
+}
+
+/** How often the worker measures a job child's tree against --max-rss. */
+export const CHILD_RSS_CHECK_MS = 5_000;
+
+/**
+ * GBRA-133: the job child's process tree passed the worker's --max-rss, so the worker stopped it (group SIGTERM, then
+ * SIGKILL after the grace). The job's own memory ran away, so the attempt counts: the queue's backoff and max_attempts
+ * bound a job that grows the same way on every retry instead of letting it restart the host.
+ */
+export class ChildRssLimitError extends Error {
+  constructor(readonly rssMb: number, readonly maxRssMb: number) {
+    super(`job child used ${rssMb} MB (RssAnon+RssShmem over its process tree), past the worker's --max-rss ${maxRssMb} MB; the worker stopped it`);
+    this.name = 'ChildRssLimitError';
   }
 }
 
@@ -109,6 +127,8 @@ const PER_JOB_ABORT_REASONS = new Set<string>([
 
 export interface RunJobInChildOpts {
   jobId: number;
+  /** The row carries a spend authorization: only a child with `spend-enforcement-v1` may run it. */
+  spendAuthorized?: boolean;
   jobName: string;
   lockToken: string;
   /** Per-job abort (timeout / cancel / lock-lost / lock-renewal-failed). */
@@ -126,6 +146,12 @@ export interface RunJobInChildOpts {
   signalProcessGroup?: typeof killProcessGroup;
   onConfigurationError?: (error: LocalConfigurationError) => void;
   onExecutionStopped?: () => void;
+  /** GBRA-133: the worker's --max-rss in MB, applied to the child's process tree (0 or absent: no cap). */
+  maxRssMb?: number;
+  /** Injectable for tests. Default CHILD_RSS_CHECK_MS. */
+  rssCheckIntervalMs?: number;
+  /** Injectable for tests. Default childTreeRss (Linux /proc). */
+  readChildRss?: (pid: number, groups: Set<number>) => number | null;
 }
 
 interface ChildExit {
@@ -141,6 +167,7 @@ interface ChildExit {
  * them verbatim).
  */
 export async function runJobInChild(opts: RunJobInChildOpts): Promise<unknown> {
+  if (opts.spendAuthorized && !childSpendEnforcementReady()) throw new SpendEnforcementUnavailableError();
   let executionStopped = false;
   let configurationError: LocalConfigurationError | undefined;
   try {
@@ -159,11 +186,35 @@ export async function runJobInChild(opts: RunJobInChildOpts): Promise<unknown> {
     if (configurationError) throw configurationError;
     if (isLocalConfigurationError(error)) throw error;
     const abortReason = opts.abortSignal.reason instanceof Error ? opts.abortSignal.reason.message : String(opts.abortSignal.reason ?? '');
-    if (opts.shutdownSignal.aborted && (isLocalConfigurationError(opts.shutdownSignal.reason) || !PER_JOB_ABORT_REASONS.has(abortReason))) {
+    // An UnrecoverableError from a child whose stop is confirmed dead-letters
+    // (W9F Decision 7); an unconfirmed stop keeps the claim off the queue.
+    if (opts.shutdownSignal.aborted && !(error instanceof UnrecoverableError && executionStopped)
+      && (isLocalConfigurationError(opts.shutdownSignal.reason) || !PER_JOB_ABORT_REASONS.has(abortReason))) {
       throw new ChildWorkerShutdownError('Job child stopped reporting during worker shutdown; cleanup evidence determines whether its claim can be released.', executionStopped);
     }
     throw error;
   }
+}
+
+/**
+ * GBRA-133: measures the child's process tree every `rssCheckIntervalMs` and calls `stop` once it passes `maxRssMb`
+ * (no timer without a cap, a pid or a readable process table).
+ */
+function watchChildRss(opts: RunJobInChildOpts, pid: number | undefined, groups: Set<number>, stopping: () => boolean,
+  stop: (error: ChildRssLimitError) => void): ReturnType<typeof setInterval> | null {
+  const maxRssMb = opts.maxRssMb ?? 0;
+  if (maxRssMb <= 0 || pid == null) return null;
+  const timer = setInterval(() => {
+    if (stopping()) return;
+    const bytes = (opts.readChildRss ?? childTreeRss)(pid, groups);
+    if (bytes === null) return;
+    const rssMb = Math.round(bytes / (1024 * 1024));
+    if (rssMb <= maxRssMb) return;
+    console.warn(`[watchdog] job ${opts.jobId} (${opts.jobName}) child pid ${pid} rss=${rssMb}MB threshold=${maxRssMb}MB — stopping the child`);
+    stop(new ChildRssLimitError(rssMb, maxRssMb));
+  }, opts.rssCheckIntervalMs ?? CHILD_RSS_CHECK_MS);
+  timer.unref();
+  return timer;
 }
 
 async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
@@ -201,6 +252,7 @@ async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
     [CHILD_ENV.resultPath]: resultPath,
     [CHILD_ENV.isChild]: '1',
     [CHILD_ENV.parentPid]: String(process.pid),
+    [CHILD_PARENT_BUILD_ENV]: parentBuildEnvValue(opts.spendAuthorized === true),
     GBRAIN_POOL_SIZE: String(childPoolSize),
     GBRAIN_DIRECT_POOL_SIZE: '1',
   };
@@ -334,6 +386,8 @@ async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
   else opts.abortSignal.addEventListener('abort', onAbort, { once: true });
   if (opts.shutdownSignal.aborted) onShutdown();
   else opts.shutdownSignal.addEventListener('abort', onShutdown, { once: true });
+  let rssStop: ChildRssLimitError | null = null;
+  const rssTimer = watchChildRss(opts, child.pid, processGroups, () => termed, error => { rssStop = error; terminate(); });
 
   console.log(
     `[isolation] job ${opts.jobId} (${opts.jobName}) child pid ${child.pid ?? '?'} spawned`,
@@ -395,6 +449,7 @@ async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
       }
       // No usable outcome. Classify by WHY the child died.
       if (decodeErr instanceof UnrecoverableError) throw decodeErr; // oversize cap — dead on attempt 1
+      if (rssStop) throw rssStop;
       if (isShutdownClass) {
         throw new ChildWorkerShutdownError(
           `job child terminated by worker shutdown before reporting (exit code=${exit.code} signal=${exit.signal})`,
@@ -429,6 +484,7 @@ async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
     }
 
     if (outcome.outcome === 'success') return outcome.result;
+    if (rssStop) throw rssStop;
     const handlerError = reconstructHandlerError(outcome);
     if (isLocalConfigurationError(handlerError)) {
       opts.onConfigurationError?.(handlerError);
@@ -441,8 +497,9 @@ async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
     // and report an error): release with no attempt burned rather than
     // punishing exactly the well-behaved handlers on every deploy
     // (adversarial-review P2). Worst case a genuinely-failing job that
-    // coincided with a deploy gets one free retry — bounded and benign.
-    if (isShutdownClass) {
+    // coincided with a deploy gets one free retry — bounded and benign. An
+    // UnrecoverableError is deterministic, so it dead-letters as usual.
+    if (isShutdownClass && !(handlerError instanceof UnrecoverableError)) {
       throw new ChildWorkerShutdownError(
         'Job child reported an error during worker shutdown; execution stop is unconfirmed, so lease expiry remains the fallback.',
       );
@@ -453,6 +510,7 @@ async function runJobChildProcess(opts: RunJobInChildOpts): Promise<unknown> {
     if (naturalCleanupConfirmed) publishExecutionStopped();
     if (killTimer != null) clearTimeout(killTimer);
     if (groupObserver != null) clearInterval(groupObserver);
+    if (rssTimer != null) clearInterval(rssTimer);
     opts.abortSignal.removeEventListener('abort', onAbort);
     opts.shutdownSignal.removeEventListener('abort', onShutdown);
     rmSync(dir, { recursive: true, force: true });

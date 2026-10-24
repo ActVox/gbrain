@@ -5,7 +5,7 @@
  *   - chat() resolves provider:model strings + aliases
  *   - assertTouchpoint surfaces chat-only providers correctly
  *   - getChatModel() default + override
- *   - chat_fallback_chain plumbing (config plumbing only — chatWithFallback ships in commit 3)
+ *   - chat_fallback_chain plumbing (the fallback loop itself: test/ai/gateway-chat-fallback.test.ts)
  *   - new openai-compat recipes (deepseek, groq, together) parse + resolve
  *   - new ChatTouchpoint shape: supports_subagent_loop, supports_prompt_cache
  *   - mapStopReason via the chat() boundary (mocked client) — refusal / content_filter / tool_calls / end / length
@@ -401,6 +401,52 @@ describe('chat touchpoint — provider_chat_options passthrough', () => {
 
     expect(providerOptions).toEqual({
       deepseek: { thinking: { type: 'disabled' } },
+    });
+  });
+
+  test('anthropic call-scoped thinking override wins without dropping configured siblings (#5331)', async () => {
+    // From @kvnloo's #5972: the generic providerOptions merge is a per-call
+    // seam where call-scoped leaves win and configured siblings survive.
+    const providerOptions = await captureProviderOptions({
+      chat_model: 'anthropic:claude-sonnet-4-6',
+      provider_chat_options: {
+        anthropic: {
+          thinking: { type: 'adaptive' },
+          cacheControl: { type: 'ephemeral', ttl: '1h' },
+        },
+      },
+      env: { ANTHROPIC_API_KEY: 'fake' },
+    }, {
+      providerOptions: { anthropic: { thinking: { type: 'disabled' } } },
+    });
+
+    expect(providerOptions).toEqual({
+      anthropic: {
+        thinking: { type: 'disabled' },
+        cacheControl: { type: 'ephemeral', ttl: '1h' },
+      },
+    });
+  });
+
+  test("thinking: 'off' replaces a configured thinking object instead of merging into it (#5331)", async () => {
+    // A deep merge of { type: 'disabled' } into { type: 'enabled', budgetTokens }
+    // keeps budgetTokens; the switch replaces the whole thinking object.
+    const providerOptions = await captureProviderOptions({
+      chat_model: 'anthropic:claude-sonnet-4-6',
+      provider_chat_options: {
+        anthropic: {
+          thinking: { type: 'enabled', budgetTokens: 4000 },
+          cacheControl: { type: 'ephemeral', ttl: '1h' },
+        },
+      },
+      env: { ANTHROPIC_API_KEY: 'fake' },
+    }, { thinking: 'off' });
+
+    expect(providerOptions).toEqual({
+      anthropic: {
+        thinking: { type: 'disabled' },
+        cacheControl: { type: 'ephemeral', ttl: '1h' },
+      },
     });
   });
 

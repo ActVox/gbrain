@@ -1,19 +1,25 @@
 import { registerManagedFilesystemEngine } from './persistence/filesystem-guard.ts';
-import { replaceDerivedLinks, type DerivedLinkOrigin, type DerivedLinkReplacementOptions } from './derived-links.ts';
+import { writerStamp } from './persistence/writer-versions.ts';
+import { noteRequestConfigWrite, requestConfigRows, requestConfigValue } from './config-snapshot.ts';
+import { replaceDerivedLinks, replaceDerivedLinksBatch, type DerivedLinkBatchItem, type DerivedLinkOrigin, type DerivedLinkReplacementOptions } from './derived-links.ts';
 import { trackPgliteDatabase, PgliteClosingError, notifyPgliteOpened } from './pglite-lifecycle.ts';
 import { mutatePageTag } from './page-state/tags.ts';
 import type { PageKey, PageSnapshot, PageSnapshotOptions, PageWriteOptions } from './page-state/types.ts';
+import type { GetVersionsOpts, PageVersionRows } from './page-state/version-types.ts';
 import { assertPageRevision } from './page-state/types.ts';
+import { assertOriginUnclaimed, assertRevivalUnclaimed, classifyOriginUniqueViolation } from './persistence/origin-guard.ts';
 import { lockUnheldPageKeys, withHeldPageKeys, type HeldPageKeys } from './page-state/guards.ts';
 import { readPageSnapshot as readCanonicalPageSnapshot } from './page-state/snapshot.ts';
+import { readPageSnapshotsBatch } from './page-snapshot-batch.ts';
 import { createPageVersion } from './page-state/versions.ts';
 import { moveSlugBindings, recordRenameAlias } from './page-state/rename-alias.ts';
-import { composablePgliteTransaction } from './page-state/transactions.ts';
-import { dropRowTypeArrayParsers, PgliteStatementCache } from './pglite-statements.ts';
+import { dropPhantomMigrationDuplicates } from './facts/ontology-rekey.ts';
+import { composablePgliteTransaction, transactionMemo } from './page-state/transactions.ts';
+import { configurePgliteCodecs, PgliteStatementCache } from './pglite-statements.ts';
 import { snapshotSchemaInputs } from './snapshot-schema-inputs.ts';
 import type { PageReadScope } from './types.ts';
 import type { PageReadPolicy } from './types.ts';
-import { readRelationalFanout, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
+import { readRelationalFanout, readChainHop, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
 import { PGlite } from '@electric-sql/pglite';
 import type { Transaction } from '@electric-sql/pglite';
 // Engine-live path: static top-level imports (scratch probe, #2674) — the
@@ -25,7 +31,7 @@ import { join as joinPath, resolve as resolvePath, sep as pathSep } from 'node:p
 // PGLite's WASM/fsBundle/extension assets embedded via `with { type: 'file' }`
 // so a `bun build --compile` binary can serve a PGLite brain (Bun vfs #1340).
 // The embedded `extensions` REPLACE the stock `{ vector, pg_trgm }` imports.
-import { getEmbeddedPgliteOptions } from './pglite-embedded-assets.ts';
+import { getEmbeddedPgliteOptions, withSharedBuffers } from './pglite-embedded-assets.ts';
 import {
   drainBackgroundWorkBeforeDisconnect,
   backgroundWorkSinkCount,
@@ -44,14 +50,15 @@ import type {
   ReservedConnection,
   DreamVerdict, DreamVerdictInput,
   FileSpec, FileRow,
-  TakeBatchInput, Take, TakesListOpts, TakeHit, StaleTakeRow, TakeEmbeddingInput,
+  TakeBatchInput, Take, TakesListOpts, TakeHit, StaleTakeRow, StaleTakeOpts, TakeEmbeddingInput,
   TakeResolution, SynthesisEvidenceInput,
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactInsertStatus,
-  NewFact, FactListOpts, FactsHealth,
+  NewFact, FactListOpts, RecallFactReadOpts, FactsHealth,
   SourceRow,
 } from './engine.ts';
-import { DREAM_VERDICT_TTL_SECONDS, clampSearchLimit } from './engine.ts';
+import { DREAM_VERDICT_TTL_SECONDS, clampSearchLimit, type TransactionOptions } from './engine.ts';
+import { transactionAborted } from './postgres-engine/transaction-abort.ts';
 import { searchLimitCap } from './search/eval-pool-depth.ts';
 // Engine-path imports stay static unless a call site carries an explicit
 // engine-dynamic-import-ok justification. The gateway is the only current
@@ -67,24 +74,25 @@ import {
 import {
   valueHash,
   normalizeDimension,
-  isNovelDimension, isBackdatedObservation,
+  isNovelDimension, isBackdatedObservation, ONTOLOGY_SUPERSEDE_GUARD,
 } from './chronicle/ontology.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
-import { runMigrations } from './migrate.ts';
 import { supportsHnswIterativeScan } from './vector-index.ts';
-import { searchVectorPool, readVectorPool } from './search/vector-pool.ts';
-import { buildVectorSearchStatement, VECTOR_EXTENSION_VERSION_SQL } from './search/vector-statement.ts';
+import { searchIndexWalk, searchVectorPool, readVectorPool, type VectorPoolAttempt } from './search/vector-pool.ts';
+import { beforePlannerRead, plannerRead } from './planner-stats.ts';
+import { buildVectorSearchStatement, PAGE_SOURCE_STATS_SQL, SCOPE_CHUNKS_SQL, VECTOR_EXTENSION_VERSION_SQL, vectorScopeLoader, type PageSourceStats, type ScopeChunkCount } from './search/vector-statement.ts';
 import { withVectorSettings } from './search/vector-settings.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { readStoredEmbeddingIdentity } from './stored-embedding-identity.ts';
 import { DELETE_BATCH_SIZE, TRAVERSE_PATH_ROW_CAP, TRAVERSE_WALK_ROW_CAP } from './engine-constants.ts';
 import { PageMissingError } from './engine-errors.ts';
-import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, chunkWriteInvalidation, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
-import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
+import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
+import { acquireLock, pgliteLockDirFor, releaseLock, type LockHandle } from './pglite-lock.ts';
+import { assertPgliteGraduationOpenable } from './persistence/graduation-custody.ts';
 // Engine-live path (#3596): static import, never a lazy `import()` in the
 // connect() catch. No cycle: pglite-repair.ts imports nothing from this file.
-import { attemptWalRepairAndRetry, closeRepairEpisodeIfOpen, type WalRepairReceipt } from './pglite-repair.ts';
+import { attemptWalRepairAndRetry, closeRepairEpisodeIfOpen, readRepairFailedMarker, recordFailedAutoRepair, type WalRepairReceipt } from './pglite-repair.ts';
 import { getFtsLanguage } from './fts-language.ts';
 import { splitEmbeddingSignature, currentSpaceChunkPredicate, lockEmbeddingSources } from './embedding-invalidation.ts';
 import type {
@@ -111,15 +119,12 @@ import type {
 import { validateSlug, contentHash, isBlankBody, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { executeRawJsonb, type SqlValue } from './sql-query.ts';
 import { sanitizeForJsonb, sanitizeText, buildLinkRows, buildTimelineRows } from './batch-rows.ts';
-import { PAGE_SORT_SQL, MIN_ENTITY_PAGES_FOR_COVERAGE } from './types.ts';
+import { PAGE_SORT_SQL } from './types.ts';
 import { finalizeLastSeen } from './chronicle/last-seen.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
-import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery, boundWebsearchQuery } from './search/sql-ranking.ts';
+import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery, boundWebsearchQuery, collapseWebsearchDashRuns } from './search/sql-ranking.ts';
 import { privatePagesFilterFragment, privateSnapshotFilterFragment, privateLinkOriginFilterFragment, privateTimelineEventFilterFragment, privateProvenanceFilterFragment } from './search/private-visibility.ts';
-import { shouldExcludeFromOrphanReporting, loadOrphanPolicyOverrides } from './orphan-policy.ts';
-import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from './embed-skip.ts';
-import { QUARANTINE_FILTER_FRAGMENT, quarantineFilterFragment } from './quarantine.ts';
 import {
   vectorCastSuffix,
   resolveActiveEmbeddingColumnFromEngine,
@@ -131,13 +136,15 @@ import {
 import { hasCJK } from './cjk.ts';
 import * as factsImpl from './engine-sql/facts.ts';
 import * as takesImpl from './engine-sql/takes.ts';
-import { PgliteCheckpointGuard } from './pglite-engine/checkpoint-guard.ts';
+import { PgliteCheckpointGuard, guardedHandle, writesWal } from './pglite-engine/checkpoint-guard.ts';
 import { pgliteExecutor } from './engine-sql/dialect-pglite.ts';
 import type { SqlExecutor } from './engine-sql/executor.ts';
 import { scopedRead, unscopedExecutor } from './engine-sql/brands.ts';
 import * as codeEdgesImpl from './engine-sql/code-edges.ts';
 import { getEdgesByChunk as getEdgesByChunkPglite, type PgliteCodeEdgesDeps } from './pglite-engine/code-edges.ts';
 import * as salienceImpl from './engine-sql/salience.ts';
+import * as healthImpl from './engine-sql/health.ts';
+import { resolveEntityTypes } from './schema-pack/entity-types.ts';
 import * as pagesImpl from './engine-sql/pages.ts';
 import * as tagsImpl from './engine-sql/tags.ts';
 import * as linksImpl from './engine-sql/links.ts';
@@ -145,10 +152,18 @@ import * as timelineImpl from './engine-sql/timeline.ts';
 import * as sourcesImpl from './engine-sql/sources.ts';
 import * as filesImpl from './engine-sql/files.ts';
 import type { ChunkWindowRequest, ChunkWindowOpts, ChunkWindowPage } from './search/chunk-windows.ts';
+import type { KeywordPageWindow } from './search/keyword-statement.ts';
+import { frontmatterWhereSql } from './search/frontmatter-where.ts';
+import type { EmbeddingState, EmbeddingStateCounts, EmbeddingStateRow } from './embedding-state.ts';
 import * as chunksImpl from './engine-sql/chunks.ts';
+import * as pageBodyImpl from './engine-sql/page-body.ts';
+import type { BodyFlipInput, BodyFlipResult, BodyRegion, BodyStagingInput, BodyStagingState, ManifestRow, ManifestRowInput, SegmentChunkInput,
+  SegmentedPageMeta, SegmentSweepOptions, SegmentSweepResult, SegmentTextInput } from './page-body/types.ts';
 import { searchKeywordCJK } from './engine-sql/cjk-search.ts';
 import * as titlesImpl from './engine-sql/titles.ts';
+import * as keywordPagesImpl from './engine-sql/keyword-pages.ts';
 import { applyForwardReferenceBootstrap, pgliteBootstrapTarget } from './engine-sql/bootstrap.ts';
+import { wellFormedJson } from './text-safe.ts';
 
 /**
  * #4284 — opt-in out-of-band watchdog for a PGLite disconnect with a live
@@ -526,11 +541,10 @@ export function buildPgliteInitErrorMessage(
         '  https://github.com/garrytan/gbrain/issues/223.\n' +
         repairContextLine(ctx ?? { repair: 'not-attempted' }) + '\n' +
         '  Recovery ladder:\n' +
-        '    1. gbrain pglite-repair --dry-run   (diagnose, mutates nothing)\n' +
-        '       gbrain pglite-repair --yes       (in-place WAL repair, data preserved)\n' +
-        '    2. Rebuild from your brain repo: `gbrain reinit-pglite` (or manually:\n' +
-        '       back up ~/.gbrain, move brain.pglite aside, `gbrain init --pglite`,\n' +
-        '       re-add sources + `gbrain sync` + `gbrain embed`).\n' +
+        '    1. gbrain pglite-repair --dry-run   (diagnose, mutates nothing; prints the\n' +
+        '       in-place WAL repair command to run once the user agrees, data preserved)\n' +
+        '    2. Last resort, only with the user\'s agreement: `gbrain reinit-pglite`\n' +
+        '       (rebuilds from the brain repo; DB-only pages and facts are not carried over).\n' +
         '    3. Switch engines (docs/ENGINES.md): `gbrain init --supabase` or\n' +
         '       native Postgres.\n' +
         '  Run `gbrain doctor` for a full diagnosis.';
@@ -706,12 +720,15 @@ export async function probePgliteScratchStore(
 
 export class PGLiteEngine implements BrainEngine {
   private vectorIterativeScan?: Promise<boolean>;
+  private readonly vectorScope = vectorScopeLoader(() => this.executeRaw<PageSourceStats>(PAGE_SOURCE_STATS_SQL), ids => this.executeRaw<ScopeChunkCount>(SCOPE_CHUNKS_SQL, [ids]));
   /** Transaction clones keep chunk invalidation and replacement atomic. */
   private _chunkWritesInTransaction = false;
   private _checkpointGuard: PgliteCheckpointGuard | undefined;
   readonly kind = 'pglite' as const;
   private _db: PGLiteDB | null = null;
   private _lock: LockHandle | null = null;
+  /** Graduation custody: a kernel lock this process already holds, adopted by the next open instead of acquired. */
+  private _adoptedLock: LockHandle | null = null;
   private _dbWork: ReturnType<typeof trackPgliteDatabase<PGLiteDB>> | null = null;
   private _connectPromise: Promise<void> | null = null;
   private _closingWork: Promise<void> | null = null;
@@ -758,7 +775,7 @@ export class PGLiteEngine implements BrainEngine {
    * returns the tx handle) runs migrated domain SQL inside its transaction.
    */
   private get engineSql(): SqlExecutor {
-    return pgliteExecutor(this.db);
+    return pgliteExecutor(this._pageTransaction || this._dbWork === null ? this.db : guardedHandle(this.db, this._checkpointGuard ??= new PgliteCheckpointGuard()));
   }
 
   // Lifecycle
@@ -782,11 +799,11 @@ export class PGLiteEngine implements BrainEngine {
     this.vectorIterativeScan = undefined;
     const opening = this._connectInternal(config).then(async () => {
       try {
-        await dropRowTypeArrayParsers(this.db);
+        await configurePgliteCodecs(this.db);
         if (registerRoots) await registerManagedFilesystemEngine(this, config.database_path);
       }
       catch (error) {
-        try { await this._closeInternal(); }
+        try { await this._closeInternal({ retainLock: this._lock !== null && this._lock === this._adoptedLock }); }
         catch (closeError) {
           this._closePoison = new PgliteClosingError(`PGLite registry failure cleanup did not close; lock retained: ${String(closeError)}`);
           throw this._closePoison;
@@ -799,12 +816,55 @@ export class PGLiteEngine implements BrainEngine {
     try { await opening; }
     catch (error) {
       if (!this._db && !this._closePoison && this._lock?.acquired) {
-        await releaseLock(this._lock);
+        if (this._lock !== this._adoptedLock) await releaseLock(this._lock);
         this._lock = null;
       }
       throw error;
     }
-    finally { if (this._connectPromise === opening) this._connectPromise = null; }
+    finally {
+      if (this._connectPromise === opening) this._connectPromise = null;
+      this._adoptedLock = null;
+    }
+  }
+
+  /**
+   * Engine graduation: open a persistent datastore under a kernel lock this
+   * process already holds (the rollback move-back), so ownership never gaps.
+   * A failed open hands the lock back to the caller unreleased.
+   */
+  async connectWithHeldLock(config: EngineConfig, lock: LockHandle): Promise<void> {
+    if (!config.database_path || !lock.acquired) throw new Error('A held-lock open needs a persistent datastore and its held kernel lock');
+    if (lock.lockDir !== pgliteLockDirFor(config.database_path)) throw new Error('The held kernel lock does not belong to this datastore');
+    if (this._db || this._connectPromise) throw new Error('PGLite engine is already connected or connecting');
+    this._adoptedLock = lock;
+    return this._connectWithRootRegistration(config, true);
+  }
+
+  /**
+   * Engine graduation: drain admitted statements, checkpoint and close the
+   * database, then hand the kernel lock back to the caller instead of
+   * releasing it. The caller owns the handle (move-aside, then releaseLock).
+   * Call the engine's ordinary disconnect afterwards to drop its wrappers.
+   */
+  async closeRetainingLock(): Promise<LockHandle> {
+    if (this._closePoison) throw this._closePoison;
+    if (this._disconnectCall || this._closingWork || this._connectPromise) throw new PgliteClosingError();
+    const lock = this._lock;
+    if (!this._db || !lock?.acquired || !this._savedConfig?.database_path) {
+      throw new Error('closeRetainingLock needs an open persistent datastore that holds its kernel lock');
+    }
+    this.vectorIterativeScan = undefined;
+    this._disconnectRequested = true;
+    const work = this._closeInternal({ retainLock: true });
+    this._closingWork = work;
+    try { await work; }
+    catch (error) {
+      this._closePoison = new PgliteClosingError(`PGLite shutdown failed; datastore ownership is retained until process exit: ${String(error)}`);
+      this._db = null;
+      throw this._closePoison;
+    }
+    finally { this._closingWork = null; this._disconnectRequested = false; }
+    return lock;
   }
 
   private async _connectInternal(config: EngineConfig): Promise<void> {
@@ -813,11 +873,21 @@ export class PGLiteEngine implements BrainEngine {
     this.walRepairReceipt = null; // per-connect: stale receipts must not survive reconnect()
     const dataDir = config.database_path || undefined; // undefined = in-memory
 
+    // Automatic repair failed earlier: never open (lock + create write the data dir); refuse with the consented repair.
+    const failedRepair = dataDir ? readRepairFailedMarker(dataDir) : null;
+    if (dataDir && failedRepair) throw (await import('./pglite-repair-consent.ts')).repairFailedRefusal(dataDir, failedRepair); // engine-dynamic-import-ok: refusal path only, keeps the consent graph off every open
+
+    // Engine graduation: a tombstone, a stray datastore or a live run stops the open before the lock.
+    if (dataDir) assertPgliteGraduationOpenable(dataDir, 'pre_lock');
     // Acquire file lock to prevent concurrent PGLite access (crashes with Aborted())
-    this._lock = await acquireLock(dataDir);
+    this._lock = this._adoptedLock ?? await acquireLock(dataDir);
 
     if (!this._lock.acquired) {
       throw new Error('Could not acquire PGLite lock. Another gbrain process is using the database.');
+    }
+    if (dataDir && this._lock !== this._adoptedLock) {
+      try { assertPgliteGraduationOpenable(dataDir, 'locked'); }
+      catch (error) { await releaseLock(this._lock); this._lock = null; throw error; }
     }
 
     // Tier 3: optional snapshot fast-restore. Only applies to in-memory
@@ -843,7 +913,7 @@ export class PGLiteEngine implements BrainEngine {
     // Embedded WASM/fsBundle/extension assets (Bun vfs #1340). Resolved once
     // here so both the initial create and the WAL-repair retry below share the
     // same compiled modules. Its `extensions` replaces the stock vector/pg_trgm.
-    const embedded = await getEmbeddedPgliteOptions();
+    const embedded = withSharedBuffers(await getEmbeddedPgliteOptions(), config.pglite_shared_buffers);
     try {
       this._db = this._attachDatabase(await preservingProcessExitCode(() =>
         PGlite.create({
@@ -852,17 +922,17 @@ export class PGLiteEngine implements BrainEngine {
           ...embedded,
         }),
       ));
-      // Snapshot-timezone parity: dumpDataDir bakes the BUILD process's
-      // TimeZone into the restored cluster's defaults, so a snapshot-loaded
-      // engine would run sessions in the build machine's zone while a
-      // cold-init engine follows this process (bun test pins TZ=UTC; bun run
-      // follows the host). That divergence shifted every naive-timestamp
-      // day-boundary comparison by the offset — date-dependent tests failed
-      // only in the evening, only under the snapshot. Pin the session to the
-      // RUNTIME zone so restored engines behave exactly like cold ones.
+      // Snapshot parity: dumpDataDir bakes the BUILD process's TimeZone into
+      // the cluster defaults (date-dependent tests failed only in the evening,
+      // only under the snapshot) and the BUILD time into the seeded sources'
+      // created_at (a CI-cached snapshot over an hour old made every fresh
+      // test brain fail the behavior_changes fresh-install grace, which reads
+      // MIN(sources.created_at)). Pin the RUNTIME zone and stamp now(), so
+      // restored engines behave like cold ones (bun test pins TZ=UTC).
       if (this._snapshotLoaded && this._db) {
         const runtimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
         await this._db.query(`SELECT set_config('TimeZone', $1, false)`, [runtimeZone]);
+        await this._db.query(`UPDATE sources SET created_at = now()`);
       }
       // Healthy open: close any repair episode left open by a prior failed
       // attempt (red-team: episodes otherwise stayed open forever — doctor
@@ -943,17 +1013,19 @@ export class PGLiteEngine implements BrainEngine {
 
       const wrapped = new Error(buildPgliteInitErrorMessage(verdict, original, process.platform, ctx) +
         (retryError === undefined ? '' : `\n  Cold retry error: ${retryError}`));
+      const repairFailed = dataDir ? recordFailedAutoRepair(dataDir, ctx.repair, ctx.backupPath, original) : null;
       if (this._db) {
-        try { await this._closeInternal(); }
+        try { await this._closeInternal({ retainLock: this._lock !== null && this._lock === this._adoptedLock }); }
         catch (closeError) {
           this._db = null;
           this._closePoison = new PgliteClosingError(`PGLite initialization cleanup failed; lock retained: ${String(closeError)}`);
           throw this._closePoison;
         }
       } else if (this._lock?.acquired) {
-        await releaseLock(this._lock);
+        if (this._lock !== this._adoptedLock) await releaseLock(this._lock);
         this._lock = null;
       }
+      if (dataDir && repairFailed) throw (await import('./pglite-repair-consent.ts')).repairFailedRefusal(dataDir, repairFailed, original, wrapped.message); // engine-dynamic-import-ok: refusal path only
       throw wrapped;
     }
   }
@@ -996,7 +1068,7 @@ export class PGLiteEngine implements BrainEngine {
     return call;
   }
 
-  private async _closeInternal(): Promise<void> {
+  private async _closeInternal(opts: { retainLock?: boolean } = {}): Promise<void> {
     const db = this._db;
     const lock = this._lock;
     const work = this._dbWork;
@@ -1023,7 +1095,7 @@ export class PGLiteEngine implements BrainEngine {
         catch (error) { warnOncePerProcess('pglite-checkpoint-failed', `[pglite] checkpoint failed; retaining ownership through close: ${String(error)}`); }
         await db.close();
       }
-      if (lock?.acquired) await releaseLock(lock);
+      if (lock?.acquired && !opts.retainLock) await releaseLock(lock);
       this._lock = null;
       this._dbWork = null;
       this._statements = null;
@@ -1082,7 +1154,7 @@ export class PGLiteEngine implements BrainEngine {
     await this.applyForwardReferenceBootstrap();
     await this.db.exec(getPGLiteSchema(dims, model));
 
-    const { applied } = await runMigrations(this);
+    const { applied } = await (await import('./migrate.ts')).runMigrations(this); // engine-dynamic-import-ok: initSchema only, keeps the ~220 migration modules off every connect
     if (applied > 0) {
       process.stderr.write(`  ${applied} migration(s) applied\n`);
     }
@@ -1110,7 +1182,8 @@ export class PGLiteEngine implements BrainEngine {
     return fn(conn);
   }
 
-  async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+  async transaction<T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions): Promise<T> {
+    if (opts?.signal?.aborted) throw transactionAborted(opts.signal);
     const run = (db = this.db) => withHeldPageKeys(this._pageTransaction ? this._heldPageKeys : null, held => db.transaction(async handle => {
       const tx = composablePgliteTransaction(this._statements?.attach(handle, true) ?? handle);
       const txEngine = Object.create(this) as PGLiteEngine;
@@ -1125,8 +1198,8 @@ export class PGLiteEngine implements BrainEngine {
     return this._dbWork.admit(db => guard.runOutermost(sql => db.query(sql), () => run(db)));
   }
 
-  async transactionDirect<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
-    return this.transaction(fn);
+  async transactionDirect<T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions): Promise<T> {
+    return this.transaction(fn, opts);
   }
 
   // Pages CRUD
@@ -1136,6 +1209,10 @@ export class PGLiteEngine implements BrainEngine {
 
   async readPageSnapshot(slug: string, opts?: PageSnapshotOptions): Promise<PageSnapshot | null> {
     return readCanonicalPageSnapshot(this.executeRaw.bind(this), slug, opts);
+  }
+
+  async readPageSnapshotsBatch(refs: ReadonlyArray<{ slug: string; sourceId: string }>, opts?: { maxBytes?: number; includeDeleted?: boolean; absentIsNull?: boolean }) {
+    return readPageSnapshotsBatch(this.executeRaw.bind(this), refs, opts);
   }
 
   async lockPageKeys(keys: readonly PageKey[]): Promise<void> {
@@ -1154,19 +1231,22 @@ export class PGLiteEngine implements BrainEngine {
   ): Promise<{ slug: string; id: number } | null> {
     return pagesImpl.findDuplicatePage(scopedRead(this.engineSql), sourceId, opts);
   }
+  async findDuplicatePages(sourceId: string, inputs: Parameters<typeof pagesImpl.findDuplicatePages>[2]) { return pagesImpl.findDuplicatePages(scopedRead(this.engineSql), sourceId, inputs); }
 
   private _pageTransaction = false;
 
   async putPage(slug: string, page: PageInput, opts?: PageWriteOptions): Promise<Page> {
     slug = validateSlug(slug);
-    return this.transaction(async tx => {
+    const write = async (tx: BrainEngine) => {
       const sourceId = opts?.sourceId ?? 'default';
       await tx.lockPageKeys([{ sourceId, slug }]);
       if (opts?.expectedRevision !== undefined || opts?.force !== undefined) {
         assertPageRevision(await tx.readPageSnapshot(slug, { sourceId, includeDeleted: true }), opts);
       }
-      return pagesImpl.putPage((tx as PGLiteEngine).engineSql, slug, page, opts, (s, src) => tx.getPage(s, { sourceId: src }));
-    });
+      await assertOriginUnclaimed(tx, { sourceId, slug, sourcePath: page.source_path ?? null, revive: true });
+      return pagesImpl.putPage((tx as PGLiteEngine).engineSql, slug, page, opts, (s, src) => tx.getPage(s, { sourceId: src })).catch(error => { throw classifyOriginUniqueViolation(error) ?? error; });
+    };
+    return opts?.inline && this._pageTransaction ? write(this) : this.transaction(write);
   }
 
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
@@ -1212,12 +1292,12 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async restorePage(slug: string, opts?: { sourceId?: string }): Promise<boolean> {
-    return pagesImpl.restorePage(this.engineSql, slug, opts);
+    return this.transaction(async tx => { await assertRevivalUnclaimed(tx, slug, opts?.sourceId); return pagesImpl.restorePage((tx as PGLiteEngine).engineSql, slug, opts); });
   }
 
   async purgeDeletedPages(
     olderThanHours: number,
-    opts?: { dryRun?: boolean },
+    opts?: { dryRun?: boolean; excludeIds?: number[] },
   ): Promise<{ slugs: string[]; count: number; pages?: { slug: string; deleted_at: Date }[] }> {
     return pagesImpl.purgeDeletedPages(this.engineSql, olderThanHours, opts);
   }
@@ -1238,7 +1318,7 @@ export class PGLiteEngine implements BrainEngine {
     mode: string,
     corpusGeneration: string | null,
   ): Promise<void> {
-    return pagesImpl.updatePageContextualRetrievalState(this.engineSql, slug, sourceId, mode, corpusGeneration);
+    return pagesImpl.updatePageContextualRetrievalState(this.engineSql, slug, sourceId, mode, corpusGeneration, (key, read) => transactionMemo(this, key, read));
   }
 
   async migrateFactsToCanonical(
@@ -1246,12 +1326,11 @@ export class PGLiteEngine implements BrainEngine {
     canonicalSlug: string,
     sourceId: string,
   ): Promise<{ migrated: number }> {
-    // Parity with PostgresEngine.migrateFactsToCanonical. UPDATE preserves
-    // every column except entity_slug + source_markdown_slug + row_num,
-    // which is offset past canonical's current MAX(row_num) (#4558; NULL
-    // stays NULL, expired rows count — see the Postgres twin). Active rows
-    // only (expired_at IS NULL) so we don't disturb the supersession audit
-    // trail.
+    // Parity with PostgresEngine.migrateFactsToCanonical: only entity_slug, source_markdown_slug and row_num change
+    // (row_num offset past canonical's MAX(row_num), #4558; NULL stays NULL, expired rows count — see the Postgres twin),
+    // on active rows only (expired_at IS NULL) so the supersession audit trail stays. B-10: first drop an observation
+    // the canonical page already holds, which would collide on idx_facts_ontology_stint_dedup.
+    await dropPhantomMigrationDuplicates(this, sourceId, canonicalSlug, phantomSlug);
     const { rows } = await this.db.query(
       `UPDATE facts
          SET entity_slug = $1,
@@ -1272,7 +1351,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async listPages(filters?: PageFilters): Promise<Page[]> {
-    return pagesImpl.listPages(scopedRead(this.engineSql), filters);
+    return plannerRead(this, this._pageTransaction, () => pagesImpl.listPages(scopedRead(this.engineSql), filters));
   }
 
   async getAllSlugs(opts?: { sourceId?: string }): Promise<Set<string>> {
@@ -1322,6 +1401,7 @@ export class PGLiteEngine implements BrainEngine {
   // than direct window function + GROUP BY. Fetch more chunks than the
   // page limit (3x) to ensure N dedup'd pages survive; bounded and fast.
   async searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
+    const settle = await beforePlannerRead(this, this._pageTransaction);
     const limit = clampSearchLimit(opts?.limit, 20, searchLimitCap());
     const offset = opts?.offset || 0;
     const detailFilter = opts?.detail === 'low' ? `AND cc.chunk_source = 'compiled_truth'` : '';
@@ -1340,7 +1420,7 @@ export class PGLiteEngine implements BrainEngine {
     const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
 
     // v0.26.5: visibility filter (soft-deleted + archived-source).
-    const visibilityClause = buildVisibilityClause('p', 's', opts);
+    const visibilityClause = buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' });
 
     // v0.32.7: CJK query branch. PGLite uses websearch_to_tsquery('english')
     // which can't tokenize CJK; queries return empty. Switch to ILIKE on
@@ -1351,11 +1431,11 @@ export class PGLiteEngine implements BrainEngine {
         limit, offset, innerLimit, sourceFactorCase,
         hardExcludeClause, visibilityClause, detailFilter, opts,
         dedup: true,
-      });
+      }).finally(settle);
     }
 
     // v0.20.0 Cathedral II Layer 10 C1/C2: language + symbol-kind filters.
-    const params: unknown[] = [query, innerLimit, limit, offset];
+    const params: unknown[] = [collapseWebsearchDashRuns(query), innerLimit, limit, offset];
     let extraFilter = '';
     if (opts?.language) {
       params.push(opts.language);
@@ -1370,6 +1450,7 @@ export class PGLiteEngine implements BrainEngine {
       params.push(opts.types);
       extraFilter += ` AND p.type = ANY($${params.length}::text[])`;
     }
+    extraFilter += frontmatterWhereSql('p', opts?.where, json => `$${params.push(json)}`);
     // Postgres parity: single-type filter and exact-slug excludes.
     if (opts?.type) {
       params.push(opts.type);
@@ -1403,10 +1484,11 @@ export class PGLiteEngine implements BrainEngine {
     // FTS config name (e.g. 'english', 'pt_br'). Validated by getFtsLanguage()
     // — safe to interpolate into raw SQL.
     const ftsLang = getFtsLanguage();
+    const rankParam = opts?.rankQuery ? `$${params.push(opts.rankQuery)}` : '$1';
 
     const keywordSql =
       `WITH ranked AS (
-         SELECT
+         SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY page_id ORDER BY score DESC, chunk_id ASC) AS page_rank FROM (SELECT
            p.slug, p.id as page_id, p.title, p.type, p.source_id,
            p.effective_date, p.effective_date_source,
            CASE WHEN NULLIF(regexp_replace(p.frontmatter->>'message_id', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL
@@ -1414,7 +1496,7 @@ export class PGLiteEngine implements BrainEngine {
            CASE WHEN NULLIF(regexp_replace(p.frontmatter->>'message_id', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL
              THEN NULLIF(p.frontmatter->>'subject', '') END AS source_subject,
            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-           ts_rank(cc.search_vector, websearch_to_tsquery('${ftsLang}', $1)) * ${sourceFactorCase} AS score,
+           ts_rank(cc.search_vector, websearch_to_tsquery('${ftsLang}', ${rankParam})) * ${sourceFactorCase} AS score,
            CASE WHEN p.updated_at < (
              SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
            ) THEN true ELSE false END AS stale
@@ -1425,7 +1507,7 @@ export class PGLiteEngine implements BrainEngine {
            -- v0.27.1: hide image rows from default text-keyword search so
            -- OCR text doesn't drown text-page hits. Image-similarity queries
            -- run a separate vector path on embedding_image.
-           AND cc.modality = 'text'
+           AND cc.modality = 'text') matched) per_page WHERE page_rank = 1
          ORDER BY score DESC, page_id ASC, chunk_id ASC
          LIMIT $2
        ),
@@ -1448,6 +1530,7 @@ export class PGLiteEngine implements BrainEngine {
         const fallbackParams = [...params];
         fallbackParams[0] = orQuery;
         ({ rows } = await this.db.query(keywordSql, fallbackParams));
+        settle();
         // 2026-09 (#3617 follow-up): relaxed rows are TAGGED so hybrid's
         // fusion can demote them — an OR-of-common-terms match must not
         // outvote a healthy vector arm (SearchResult.keyword_relaxed doc).
@@ -1455,6 +1538,7 @@ export class PGLiteEngine implements BrainEngine {
       }
     }
 
+    settle();
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
   }
 
@@ -1465,6 +1549,14 @@ export class PGLiteEngine implements BrainEngine {
    * query CAN exact-match a single-token CJK title); the richer CJK ILIKE
    * fallback stays keyword-arm-only.
    */
+  /** Cat 40 Hard F2 strict keyword count and keyword-mode pages; SQL in engine-sql/keyword-pages.ts. */
+  async countKeywordPages(query: string, opts?: SearchOpts & { timeoutMs?: number }): Promise<number> {
+    return keywordPagesImpl.countKeywordPages(async (read) => read(scopedRead(this.engineSql)), query, opts, {});
+  }
+  async searchKeywordPages(query: string, opts: SearchOpts | undefined, page: KeywordPageWindow): Promise<SearchResult[]> {
+    return keywordPagesImpl.searchKeywordPages(async (read) => read(scopedRead(this.engineSql)), query, opts, page, {});
+  }
+
   async searchTitles(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
     return titlesImpl.searchTitles(async (read) => read(scopedRead(this.engineSql)), query, opts, { relaxedPrefersIndex: false, staleProbe: true });
   }
@@ -1510,7 +1602,7 @@ export class PGLiteEngine implements BrainEngine {
       dedup: boolean;
     },
   ): Promise<SearchResult[]> {
-    return searchKeywordCJK(async (read) => read(scopedRead(this.engineSql)), query, ctx);
+    return searchKeywordCJK(async (read) => read(scopedRead(this.engineSql)), query, ctx, 'pglite');
   }
 
   /**
@@ -1540,7 +1632,7 @@ export class PGLiteEngine implements BrainEngine {
     const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
     const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
     const hardExcludeClause = buildHardExcludeClause('p.slug', hardExcludePrefixes);
-    const visibilityClause = buildVisibilityClause('p', 's', opts);
+    const visibilityClause = buildVisibilityClause('p', 's', { ...opts, chunkAlias: 'cc' });
 
     // v0.32.7: CJK branch (same as searchKeyword but without page-dedup).
     if (hasCJK(query)) {
@@ -1553,7 +1645,7 @@ export class PGLiteEngine implements BrainEngine {
       });
     }
 
-    const params: unknown[] = [query, limit, offset];
+    const params: unknown[] = [collapseWebsearchDashRuns(query), limit, offset];
     let extraFilter = '';
     if (opts?.language) {
       params.push(opts.language);
@@ -1614,13 +1706,14 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async searchVector(embedding: Float32Array, opts?: SearchOpts): Promise<SearchResult[]> {
+    const settle = await beforePlannerRead(this, this._pageTransaction);
     const limit = clampSearchLimit(opts?.limit, 20, searchLimitCap());
     if (opts?.limit && opts.limit > searchLimitCap()) {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${searchLimitCap()}`);
     }
     // Same statement as postgres-engine (search/vector-statement.ts); the
     // PGLite dialect adds the timeline `stale` flag and has no exact fallback.
-    const stmt = buildVectorSearchStatement({ dialect: 'pglite', embedding, limit, offset: opts?.offset || 0, opts });
+    const stmt = buildVectorSearchStatement({ dialect: 'pglite', embedding, limit, offset: opts?.offset || 0, opts, scope: await this.vectorScope(opts) });
     this.vectorIterativeScan ??= this.executeRaw<{ extversion: string }>(VECTOR_EXTENSION_VERSION_SQL)
       .then(rows => supportsHnswIterativeScan(rows[0]?.extversion));
     const probe = this.vectorIterativeScan;
@@ -1630,20 +1723,21 @@ export class PGLiteEngine implements BrainEngine {
       if (this.vectorIterativeScan === probe) this.vectorIterativeScan = undefined;
       throw error;
     }
-    const rows = await searchVectorPool(limit, stmt.innerLimit, iterative, stmt.indexed, 'pglite',
-      async ({ innerLimit: requested, maxScanTuples }) => this.db.transaction(async tx => {
-        return withVectorSettings(async (sql, values) => (await tx.query<Record<string, unknown>>(sql, values)).rows, iterative, requested, maxScanTuples, async () => {
-          const bound = [...stmt.params];
-          bound[stmt.innerLimitIdx] = requested;
-          return readVectorPool((await tx.query<Record<string, unknown>>(stmt.sql, bound)).rows);
-        });
-      }),
+    const attempt = ({ innerLimit: requested, maxScanTuples, indexWalk, scopeScan }: VectorPoolAttempt) => this.db.transaction(async tx => withVectorSettings(
+      async (sql, values) => (await tx.query<Record<string, unknown>>(sql, values)).rows, iterative, requested, maxScanTuples, async () => {
+        const bound = [...stmt.params];
+        bound[stmt.innerLimitIdx] = requested;
+        return readVectorPool((await tx.query<Record<string, unknown>>(scopeScan && stmt.scopeScanSql || indexWalk && stmt.indexWalkSql || stmt.sql, bound)).rows);
+      }, undefined, opts?.hnswIterativeScan, indexWalk && stmt.indexWalkSql ? stmt.indexWalkOverfetch : undefined, !!stmt.indexWalkSql && !indexWalk && !(scopeScan && stmt.scopeScanSql)));
+    const rows = await searchIndexWalk(stmt, limit, attempt) ?? await searchVectorPool(limit, stmt.innerLimit, iterative, stmt.indexed, 'pglite',
+      attempt,
       async pool => {
         const { rows } = await this.db.query<{ eligible: number }>(stmt.hasMoreSql, [...stmt.params.slice(0, stmt.innerLimitIdx), pool + 1]);
         return Number(rows[0].eligible) > pool;
       },
       opts?.onVectorPoolMeta,
     );
+    settle();
     return rows.map(rowToSearchResult);
   }
 
@@ -1697,16 +1791,17 @@ export class PGLiteEngine implements BrainEngine {
   // Chunks SQL lives once in ./engine-sql/chunks.ts (refactor wave 1, W1-extended).
   // The engine keeps the retry + transaction wrapper, the RLS scope
   // transaction and the source-scope / active-column resolution.
-  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string } & BatchOpts): Promise<void> {
+  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string; sealChunkerVersion?: number; pageId?: number; deferSeal?: true } & BatchOpts): Promise<void> {
     if (this._chunkWritesInTransaction) return this._upsertChunksOnce(slug, chunks, opts);
     return this.batchRetry(opts?.auditSite ?? 'upsertChunks', opts?.signal,
       () => this.transaction(tx => (tx as PGLiteEngine)._upsertChunksOnce(slug, chunks, opts)), chunks.length);
   }
 
-  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string }): Promise<void> {
+  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn; expectedRevision?: string; sealChunkerVersion?: number; pageId?: number; deferSeal?: true }): Promise<void> {
     return chunksImpl.upsertChunksOnce(this.engineSql, {
       lockPageKeys: (keys) => this.lockPageKeys(keys),
       readPageSnapshot: (pageSlug, snapshotOpts) => this.readPageSnapshot(pageSlug, snapshotOpts),
+      memo: (key, read) => transactionMemo(this, key, read),
     }, slug, chunks, opts);
   }
 
@@ -1717,6 +1812,12 @@ export class PGLiteEngine implements BrainEngine {
     const sourceId = opts?.sourceId ?? 'default';
     const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
     return chunksImpl.getChunks(scopedRead(this.engineSql), column, slug, { sourceIds, sourceId }, opts);
+  }
+
+  async getChunkPage(slug: string, opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; requireSafeChunks?: boolean; fromIndex: number; limit: number }) {
+    const sourceIds = opts.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
+    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    return chunksImpl.getChunkPage(scopedRead(this.engineSql), column, slug, { sourceIds, sourceId: opts.sourceId ?? 'default' }, opts);
   }
 
   /** S2: quoted identifier of the registry-ACTIVE embedding column for the
@@ -1772,11 +1873,21 @@ export class PGLiteEngine implements BrainEngine {
     return chunksImpl.listChunklessPagesWithContent(scopedRead(this.engineSql), opts);
   }
 
+  async readEmbeddingStateCounts(opts: { mode: 'ops' | 'full'; sourceIds?: string[]; purgeWindowHours: number }): Promise<EmbeddingStateCounts> {
+    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    return chunksImpl.readEmbeddingStateCounts(scopedRead(this.engineSql), column, opts);
+  }
+
+  async listEmbeddingStateRows(opts: { sourceIds?: string[]; slugs?: string[]; states: readonly EmbeddingState[]; limit: number; purgeWindowHours: number }): Promise<EmbeddingStateRow[]> {
+    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    return chunksImpl.listEmbeddingStateRows(scopedRead(this.engineSql), column, opts);
+  }
+
   async deleteChunks(slug: string, opts?: { sourceId?: string }): Promise<void> {
     return chunksImpl.deleteChunks(this.engineSql, slug, opts);
   }
 
-  async countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }): Promise<number> {
+  async countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; held?: 'exclude' | 'only' }): Promise<number> {
     return pagesImpl.countStalePagesForExtraction(scopedRead(this.engineSql), opts);
   }
 
@@ -1785,6 +1896,7 @@ export class PGLiteEngine implements BrainEngine {
     afterPageId?: number;
     sourceId?: string;
     versionTs?: string;
+    held?: 'exclude';
   }): Promise<StalePageRow[]> {
     return pagesImpl.listStalePagesForExtraction(scopedRead(this.engineSql), opts);
   }
@@ -1796,6 +1908,9 @@ export class PGLiteEngine implements BrainEngine {
   async markPagesAttendanceBlocked(refs: Array<{ slug: string; source_id: string; revision: string }>): Promise<number> {
     return pagesImpl.markPagesAttendanceBlocked(this.engineSql, refs);
   }
+  async countStaleFrontmatterKeyPages(opts: { sourceIds: string[] }) { return pagesImpl.countStaleFrontmatterKeyPages(scopedRead(this.engineSql), opts); }
+  async listStaleFrontmatterKeyPages(opts: { sourceId: string; afterId: number; limit: number }) { return pagesImpl.listStaleFrontmatterKeyPages(scopedRead(this.engineSql), opts); }
+  async stripStaleFrontmatterKeys(opts: { sourceId: string; ids: number[] }) { return pagesImpl.stripStaleFrontmatterKeys(this.engineSql, opts); }
 
   // Links
   async addLink(
@@ -1818,6 +1933,10 @@ export class PGLiteEngine implements BrainEngine {
 
   async replaceDerivedLinks(origin: DerivedLinkOrigin, links: LinkBatchInput[], opts?: DerivedLinkReplacementOptions) {
     return replaceDerivedLinks(this, origin, links, opts);
+  }
+
+  async replaceDerivedLinksBatch(items: readonly DerivedLinkBatchItem[]) {
+    return replaceDerivedLinksBatch(this, items);
   }
 
   // #3674 — see BrainEngine.removeLinksByPagesAndSource JSDoc. Identical SQL
@@ -1846,12 +1965,12 @@ export class PGLiteEngine implements BrainEngine {
     return linksImpl.removeLink(this.engineSql, from, to, linkType, linkSource, opts);
   }
 
-  async getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<Link[]> {
+  async getLinks(slug: string, opts?: import("./link-validity.ts").LinkReadScope): Promise<Link[]> {
     return linksImpl.getLinks(scopedRead(this.engineSql), slug, opts);
   }
 
-  async getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<Link[]> {
-    return linksImpl.getBacklinks(scopedRead(this.engineSql), slug, opts);
+  async getBacklinks(slug: string, opts?: import("./link-validity.ts").LinkReadScope): Promise<Link[]> {
+    return plannerRead(this, this._pageTransaction, () => linksImpl.getBacklinks(scopedRead(this.engineSql), slug, opts));
   }
 
   async listLinkSources(
@@ -1874,7 +1993,7 @@ export class PGLiteEngine implements BrainEngine {
     depth: number = 5,
     opts?: import('./engine.ts').TraverseGraphOpts,
   ): Promise<GraphNode[]> {
-    return linksImpl.traverseGraph(unscopedExecutor(this.engineSql, 'links: unscoped on master (EO4 inventory)'), slug, depth, opts);
+    return plannerRead(this, this._pageTransaction, () => linksImpl.traverseGraph(unscopedExecutor(this.engineSql, 'links: unscoped on master (EO4 inventory)'), slug, depth, opts));
   }
 
   async traversePaths(
@@ -1888,7 +2007,7 @@ export class PGLiteEngine implements BrainEngine {
     slug: string,
     opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both'; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean },
   ): Promise<{ paths: GraphPath[]; truncated: boolean }> {
-    return linksImpl.traversePathsDetailed(unscopedExecutor(this.engineSql, 'links: unscoped on master (EO4 inventory)'), slug, opts);
+    return plannerRead(this, this._pageTransaction, () => linksImpl.traversePathsDetailed(unscopedExecutor(this.engineSql, 'links: unscoped on master (EO4 inventory)'), slug, opts));
   }
 
   async relationalFanout(
@@ -1896,6 +2015,10 @@ export class PGLiteEngine implements BrainEngine {
     opts?: import('./types.ts').RelationalFanoutOpts,
   ): Promise<import('./types.ts').RelationalFanoutRow[]> {
     return readRelationalFanout(this.executeRaw.bind(this), seeds, opts);
+  }
+
+  async relationalChainHop(frontierPageIds: number[], opts: import('./types.ts').ChainHopOpts): Promise<import('./types.ts').ChainHopEdge[]> {
+    return readChainHop(this.executeRaw.bind(this), frontierPageIds, opts);
   }
 
   async getBacklinkCounts(pageIds: number[], opts?: PageReadScope): Promise<Map<number, number>> {
@@ -1932,7 +2055,7 @@ export class PGLiteEngine implements BrainEngine {
     excludePrivate?: boolean;
     mode?: 'inbound' | 'islanded';
   }): Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string }>> {
-    return linksImpl.findOrphanPages(unscopedExecutor(this.engineSql, 'links: unscoped on master (EO4 inventory)'), opts);
+    return plannerRead(this, this._pageTransaction, () => linksImpl.findOrphanPages(unscopedExecutor(this.engineSql, 'links: unscoped on master (EO4 inventory)'), opts));
   }
 
   // Tags
@@ -2045,11 +2168,11 @@ export class PGLiteEngine implements BrainEngine {
       const forward = validFrom == null || current.valid_from == null
         || new Date(validFrom).getTime() >= new Date(current.valid_from).getTime();
       if (forward) {
-        await this.db.query(
-          `UPDATE facts SET valid_until = COALESCE($1::timestamptz, now()), superseded_by = $2 WHERE id = $3 AND valid_until IS NULL`,
+        const closed = await this.db.query(
+          `UPDATE facts SET valid_until = COALESCE($1::timestamptz, now()), superseded_by = $2 WHERE id = $3 AND valid_until IS NULL${ONTOLOGY_SUPERSEDE_GUARD} RETURNING id`,
           [validFrom, newId, current.id],
         );
-        supersededId = current.id;
+        supersededId = closed.rows.length ? current.id : null;
       }
     }
     return { action: supersededId ? 'superseded_prior' : 'inserted', factId: newId, supersededId };
@@ -2258,6 +2381,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async putDreamVerdict(filePath: string, contentHash: string, verdict: DreamVerdictInput): Promise<void> {
+    verdict = wellFormedJson(verdict);
     // $N::jsonb + JSON.stringify is legal ONLY on PGLite (its db.query parses
     // text→jsonb natively); the postgres.js twin must use sql.json().
     // Expiry is computed server-side (now() + TTL) so it lives on the same
@@ -2339,9 +2463,17 @@ export class PGLiteEngine implements BrainEngine {
   async listFactsSince(
     source_id: string,
     since: Date,
-    opts?: FactListOpts & { entitySlug?: string; sessionId?: string },
+    opts?: RecallFactReadOpts,
   ): Promise<FactRow[]> {
     return factsImpl.listFactsSince(unscopedExecutor(this.engineSql, 'facts: unscoped on master (EO4 inventory)'), source_id, since, opts);
+  }
+
+  async listFactsKeyset(
+    source_id: string,
+    after: { createdAt: string; id: number | null } | null,
+    opts?: RecallFactReadOpts,
+  ): Promise<FactRow[]> {
+    return factsImpl.listFactsKeyset(unscopedExecutor(this.engineSql, 'facts: unscoped on master (EO4 inventory)'), source_id, after, opts);
   }
 
   async listFactsBySession(
@@ -2354,7 +2486,7 @@ export class PGLiteEngine implements BrainEngine {
 
   async listSupersessions(
     source_id: string,
-    opts?: { since?: Date; limit?: number; visibility?: ('private' | 'world')[] },
+    opts?: { since?: Date; limit?: number; visibility?: ('private' | 'world')[]; eligibility?: import('./engine.ts').FactListOpts['eligibility']; excludePrivate?: boolean },
   ): Promise<FactRow[]> {
     return factsImpl.listSupersessions(unscopedExecutor(this.engineSql, 'facts: unscoped on master (EO4 inventory)'), source_id, opts);
   }
@@ -2367,7 +2499,7 @@ export class PGLiteEngine implements BrainEngine {
     source_id: string,
     entitySlug: string,
     factText: string,
-    opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null },
+    opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; arm?: 'keyword'; attributedTo?: import('./engine.ts').FactAttribution | null },
   ): Promise<FactRow[]> {
     return factsImpl.findCandidateDuplicates(unscopedExecutor(this.engineSql, 'facts: unscoped on master (EO4 inventory)'), source_id, entitySlug, factText, opts);
   }
@@ -2383,6 +2515,25 @@ export class PGLiteEngine implements BrainEngine {
   async getFactsHealth(source_id: string): Promise<FactsHealth> {
     return factsImpl.getFactsHealth(unscopedExecutor(this.engineSql, 'facts: unscoped on master (EO4 inventory)'), source_id);
   }
+
+  // Segmented page storage (Wave B): SQL in ./engine-sql/page-body.ts.
+  async allocateBodyOccurrenceIds(count: number): Promise<number[]> { return pageBodyImpl.allocateBodyOccurrenceIds(this.engineSql, count); }
+  async stageSegmentTexts(sourceId: string, texts: readonly SegmentTextInput[], opts?: { stagingId?: string }): Promise<{ inserted: number }> { return pageBodyImpl.stageSegmentTexts(this.engineSql, sourceId, texts, opts); }
+  async readSegmentTexts(sourceId: string, sha256s: readonly Uint8Array[]): Promise<Map<string, Uint8Array>> {
+    return pageBodyImpl.readSegmentTexts(unscopedExecutor(this.engineSql, 'page-body: page-id keyed internal read'), sourceId, sha256s);
+  }
+  async stageManifestRows(rows: readonly ManifestRowInput[]): Promise<void> { return pageBodyImpl.stageManifestRows(this.engineSql, rows); }
+  async readManifest(pageId: number, opts?: { generation?: number; stagingId?: string; region?: BodyRegion; lastN?: number }): Promise<ManifestRow[]> {
+    return pageBodyImpl.readManifest(unscopedExecutor(this.engineSql, 'page-body: page-id keyed internal read'), pageId, opts);
+  }
+  async stageSegmentChunks(pageId: number, generation: number, chunks: readonly SegmentChunkInput[], opts?: { embeddingColumn?: ResolvedColumn }): Promise<number[]> {
+    return pageBodyImpl.stageSegmentChunks(this.engineSql, pageId, generation, chunks, opts);
+  }
+  async createSegmentedPageShell(slug: string, meta: SegmentedPageMeta, opts: { sourceId: string }): Promise<{ id: number }> { return pageBodyImpl.createSegmentedPageShell(this.engineSql, slug, meta, opts); }
+  async flipBodyGeneration(input: BodyFlipInput): Promise<BodyFlipResult> { return pageBodyImpl.flipBodyGeneration(this.engineSql, input); }
+  async openBodyStaging(input: BodyStagingInput): Promise<void> { return pageBodyImpl.openBodyStaging(this.engineSql, input); }
+  async setBodyStagingState(id: string, state: BodyStagingState, opts?: { commitRequestId?: string | null }): Promise<void> { return pageBodyImpl.setBodyStagingState(this.engineSql, id, state, opts); }
+  async sweepSegments(opts?: SegmentSweepOptions): Promise<SegmentSweepResult> { return pageBodyImpl.sweepSegments(this.engineSql, opts); }
 
   // ============================================================
   // v0.28: Takes (typed/weighted/attributed claims) + synthesis_evidence
@@ -2470,14 +2621,14 @@ export class PGLiteEngine implements BrainEngine {
 
   async searchTakes(
     query: string,
-    opts: SearchOpts & { takesHoldersAllowList?: string[] } = {},
+    opts: SearchOpts & { takesHoldersAllowList?: string[]; eligibility?: import('./eligibility/policy.ts').ReadEligibility } = {},
   ): Promise<TakeHit[]> {
     return takesImpl.searchTakes(unscopedExecutor(this.engineSql, 'takes: unscoped on master (EO4 inventory)'), query, opts);
   }
 
   async searchTakesVector(
     embedding: Float32Array,
-    opts: SearchOpts & { takesHoldersAllowList?: string[] } = {},
+    opts: SearchOpts & { takesHoldersAllowList?: string[]; eligibility?: import('./eligibility/policy.ts').ReadEligibility } = {},
   ): Promise<TakeHit[]> {
     return takesImpl.searchTakesVector(unscopedExecutor(this.engineSql, 'takes: unscoped on master (EO4 inventory)'), embedding, opts);
   }
@@ -2486,12 +2637,12 @@ export class PGLiteEngine implements BrainEngine {
     return takesImpl.getTakeEmbeddings(unscopedExecutor(this.engineSql, 'takes: unscoped on master (EO4 inventory)'), ids);
   }
 
-  async countStaleTakes(): Promise<number> {
-    return takesImpl.countStaleTakes(unscopedExecutor(this.engineSql, 'takes: unscoped on master (EO4 inventory)'));
+  async countStaleTakes(opts?: StaleTakeOpts): Promise<number> {
+    return takesImpl.countStaleTakes(unscopedExecutor(this.engineSql, 'takes: unscoped on master (EO4 inventory)'), opts);
   }
 
-  async listStaleTakes(): Promise<StaleTakeRow[]> {
-    return takesImpl.listStaleTakes(unscopedExecutor(this.engineSql, 'takes: unscoped on master (EO4 inventory)'));
+  async listStaleTakes(opts?: StaleTakeOpts): Promise<StaleTakeRow[]> {
+    return takesImpl.listStaleTakes(unscopedExecutor(this.engineSql, 'takes: unscoped on master (EO4 inventory)'), opts);
   }
 
   async updateTakeEmbeddings(rowsIn: TakeEmbeddingInput[], opts?: BatchOpts): Promise<number> { return takesImpl.updateTakeEmbeddings(() => this.engineSql, (site, signal, fn, size) => this.batchRetry(site, signal, fn, size), rowsIn, opts); }
@@ -2529,11 +2680,11 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Versions
-  async createVersion(slug: string, opts?: { sourceId?: string }): Promise<PageVersion> {
-    return createPageVersion(this, slug, opts?.sourceId ?? 'default');
+  async createVersion(slug: string, opts?: { sourceId?: string; preimage?: PageSnapshot }): Promise<PageVersion> {
+    return createPageVersion(this, slug, opts?.sourceId ?? 'default', opts?.preimage);
   }
 
-  async getVersions(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<PageVersion[]> {
+  async getVersions<B extends boolean = true>(slug: string, opts?: GetVersionsOpts<B>): Promise<PageVersionRows<B>> {
     return pagesImpl.getVersions(unscopedExecutor(this.engineSql, 'pages: unscoped on master (EO4 inventory)'), slug, opts);
   }
 
@@ -2601,211 +2752,12 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async getHealth(opts?: { sourceId?: string; sourceIds?: string[] }): Promise<BrainHealth> {
-    // Combined metrics from master (brain_score components: dead_links, link_count,
-    // pages_with_timeline) and v0.10.3 graph layer (link_coverage, timeline_coverage,
-    // most_connected). Both coexist: master's brain_score is the composite
-    // dashboard, v0.10.3 metrics give entity-page-level granularity.
-    // #1305: every page-scoped count here excludes soft-deleted rows — same
-    // posture as getStats — so brain_score moves when the user deletes pages.
-    // Chunk/link counts stay raw (storage until the purge phase), matching
-    // getStats, and destructive-removal counts elsewhere deliberately stay raw.
-    // S2: coverage + missing_embeddings key on the registry-ACTIVE column.
-    // #4592: optional source scope — parity with postgres-engine.getHealth
-    // (bound as $1, never interpolated; both-endpoint rule for link-derived
-    // numbers; out-of-scope endpoints can't rescue a page from orphan-hood).
-    const scope: string[] | null = opts?.sourceIds ?? (opts?.sourceId ? [opts.sourceId] : null);
-    const colId = await this.activeEmbeddingColId({ fallbackToLegacy: true });
-    const { rows: [h] } = await this.db.query(`
-      WITH scoped_pages AS (
-        SELECT id, slug, frontmatter, deleted_at, source_id FROM pages p
-        WHERE ($1::text[] IS NULL OR p.source_id = ANY($1))
-      ),
-      entity_pages AS (
-        -- #4280: quarantined entity shells are not served memory — keep them
-        -- out of the link/timeline coverage denominators (parity with
-        -- onboard's VISIBLE_ENTITY_PREDICATE).
-        SELECT id, slug FROM scoped_pages WHERE id IN (
-          SELECT id FROM pages WHERE type IN ('entity', 'person', 'company') AND deleted_at IS NULL
-            AND ${quarantineFilterFragment('pages')}
-        )
-      )
-      SELECT
-        (SELECT count(*) FROM scoped_pages WHERE deleted_at IS NULL) as page_count,
-        -- Parity with postgres-engine: stored-VECTOR truth over ELIGIBLE
-        -- chunks (embedding, not embedded_at; embed_skip excluded from BOTH
-        -- sides; zero eligible = vacuous 100%).
-        (SELECT CASE
-           WHEN count(*) FILTER (WHERE NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip')) = 0
-           THEN 1.0
-           ELSE count(*) FILTER (WHERE cc.${colId} IS NOT NULL
-                                   AND NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip'))::float
-              / count(*) FILTER (WHERE NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip'))::float
-         END
-         FROM content_chunks cc
-         JOIN scoped_pages p ON p.id = cc.page_id) as embed_coverage,
-        0 as stale_pages,
-        -- Bug 11 — orphan = islanded (no inbound AND no outbound). The raw
-        -- list is filtered in TS using the shared orphan-reporting policy.
-        0 as orphan_pages,
-        (SELECT count(*) FROM links l
-         WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)
-           AND ($1::text[] IS NULL
-                OR EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.from_page_id))
-        ) as dead_links,
-        -- Parity with postgres-engine.ts: same predicate as
-        -- buildStaleChunkWhere / countStaleChunks, i.e. what 'embed --stale'
-        -- actually processes. 'embedding IS NULL' (not embedded_at, which can
-        -- be non-NULL while embedding is NULL) and embed_skip excluded, so the
-        -- count can reach zero and the embed.stale remediation can converge.
-        (SELECT count(*) FROM content_chunks cc
-           JOIN scoped_pages p ON p.id = cc.page_id
-          WHERE cc.${colId} IS NULL AND p.deleted_at IS NULL
-            AND NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip')
-        ) as missing_embeddings,
-        (SELECT count(*) FROM links l
-          WHERE ($1::text[] IS NULL
-             OR (EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.from_page_id)
-                 AND EXISTS (SELECT 1 FROM scoped_pages sp WHERE sp.id = l.to_page_id)))) as link_count,
-        (SELECT count(*) FROM entity_pages) as entity_page_count,
-        -- gbrain#4153 consistency: an inbound link counts toward coverage
-        -- only when its SOURCE page is live — the same endpoint-liveness rule
-        -- the islanded predicate below applies, so an entity whose only
-        -- inbound link comes from a soft-deleted page can't read as covered
-        -- AND islanded in one payload.
-        (SELECT count(*) FROM entity_pages e
-         WHERE EXISTS (SELECT 1 FROM links l
-                       JOIN scoped_pages src ON src.id = l.from_page_id
-                       WHERE l.to_page_id = e.id AND src.deleted_at IS NULL))::float /
-          GREATEST((SELECT count(*) FROM entity_pages), 1)::float as link_coverage,
-        (SELECT count(*) FROM entity_pages e
-         WHERE EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = e.id))::float /
-          GREATEST((SELECT count(*) FROM entity_pages), 1)::float as timeline_coverage
-    `, [scope]);
-
-    // Top 5 most connected entities by total link count (in + out).
-    // X8 (#4592): a degree counts an edge only when its FAR endpoint is in
-    // scope too — parity with postgres-engine's rule and comment.
-    const { rows: connected } = await this.db.query(`
-      SELECT p.slug,
-             (SELECT count(*) FROM links l
-               WHERE (l.from_page_id = p.id
-                      AND ($1::text[] IS NULL
-                           OR EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.to_page_id AND fp.source_id = ANY($1))))
-                  OR (l.to_page_id = p.id
-                      AND ($1::text[] IS NULL
-                           OR EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = ANY($1))))
-             )::int as link_count
-      FROM pages p
-      WHERE p.type IN ('entity', 'person', 'company') AND p.deleted_at IS NULL
-        AND ${QUARANTINE_FILTER_FRAGMENT}
-        AND ($1::text[] IS NULL OR p.source_id = ANY($1))
-      ORDER BY link_count DESC
-      LIMIT 5
-    `, [scope]);
-
-    // Per-page flags for the linkable scope: orphan_pages and the
-    // no-orphans / timeline-coverage DENOMINATORS are all computed over
-    // pages the shared orphan-reporting policy considers linkable (the same
-    // scope `gbrain orphans` and doctor's orphan_ratio use), so one doctor
-    // report cannot carry two contradictory orphan/coverage numbers.
-    // Archive (raw/), generated, and daily-log pages are not expected to
-    // participate in the curated graph. Filtered in TS because the policy
-    // includes per-brain config overrides.
-    // gbrain#4153: endpoint liveness in BOTH directions — an inbound link
-    // only counts when its SOURCE page is live (the invariant
-    // findOrphanPages documents), and an outbound link only counts when its
-    // TARGET is live. Without this, get_health's orphan_pages disagreed with
-    // `gbrain orphans` whenever a soft-deleted page still linked to (or was
-    // linked from) a live one.
-    // #4592: out-of-scope endpoints cannot rescue a page from orphan-hood.
-    // #4280: quarantined pages drop out of the linkable scope in SQL;
-    // machine leaf types (atom/conversation/source) drop out through the
-    // shared policy below via p.type.
-    const { rows: pageScopeRows } = await this.db.query(`
-      SELECT p.slug, p.type,
-             (NOT EXISTS (SELECT 1 FROM links l
-                          JOIN pages src ON src.id = l.from_page_id
-                          WHERE l.to_page_id = p.id AND src.deleted_at IS NULL
-                            AND ($1::text[] IS NULL OR src.source_id = ANY($1)))
-              AND NOT EXISTS (SELECT 1 FROM links l
-                          JOIN pages tgt ON tgt.id = l.to_page_id
-                          WHERE l.from_page_id = p.id AND tgt.deleted_at IS NULL
-                            AND ($1::text[] IS NULL OR tgt.source_id = ANY($1)))) as islanded,
-             EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id) as has_timeline
-      FROM pages p
-      WHERE p.deleted_at IS NULL
-        AND ${QUARANTINE_FILTER_FRAGMENT}
-        AND ($1::text[] IS NULL OR p.source_id = ANY($1))
-    `, [scope]);
-
-    const r = h as Record<string, unknown>;
-    const pageCount = Number(r.page_count);
-    const embedCoverage = Number(r.embed_coverage);
-    // Scoped: sum the scalar-sourceId counter per grant (parity with
-    // postgres-engine; the unmatchable __all__ scalar fail-closes to 0).
-    const stalePages = scope === null
-      ? await this.countStalePagesForExtraction({ versionTs: LINK_EXTRACTOR_VERSION_TS })
-      : (await Promise.all(scope.map(sid =>
-          this.countStalePagesForExtraction({ sourceId: sid, versionTs: LINK_EXTRACTOR_VERSION_TS }),
-        ))).reduce((a, b) => a + b, 0);
-    const orphanOverrides = await loadOrphanPolicyOverrides(this);
-    const linkablePages = (pageScopeRows as { slug: string; type: string; islanded: boolean; has_timeline: boolean }[])
-      .filter(row => !shouldExcludeFromOrphanReporting(row.slug, orphanOverrides, { type: row.type }));
-    const linkablePageCount = linkablePages.length;
-    const orphanPages = linkablePages.filter(row => row.islanded).length;
-    const linkableTimelinePages = linkablePages.filter(row => row.has_timeline).length;
-    const deadLinks = Number(r.dead_links);
-    const linkCount = Number(r.link_count);
-
-    const linkDensity = pageCount > 0 ? Math.min(linkCount / pageCount, 1) : 0;
-    // linkablePageCount === 0 gets full marks for the orphan / timeline
-    // components (same vacuous-truth rule as the empty-brain fix below):
-    // an all-archive brain has no curated graph to penalize.
-    const timelineCoverageDensity =
-      linkablePageCount > 0 ? Math.min(linkableTimelinePages / linkablePageCount, 1) : 1;
-    const noOrphans = linkablePageCount > 0 ? 1 - (orphanPages / linkablePageCount) : 1;
-    const noDeadLinks = pageCount > 0 ? 1 - Math.min(deadLinks / pageCount, 1) : 1;
-    // Bug 11 — per-component points. Sum equals brainScore by construction
-    // so `doctor` can render a breakdown that adds up to the total.
-    //
-    // v0.37.10.0: empty brains (pageCount === 0) get FULL marks (100/100),
-    // not 0. Semantically an empty brain has no coverage problem to penalize
-    // — there's nothing to embed, nothing to link, nothing to orphan. The
-    // pre-fix "empty = 0" caused fresh-init brains to score as critically
-    // unhealthy on `gbrain doctor`, which was a structural surprise to users
-    // who'd just successfully run init.
-    const embedCoverageScore = pageCount === 0 ? 35 : Math.round(embedCoverage * 35);
-    const linkDensityScore = pageCount === 0 ? 25 : Math.round(linkDensity * 25);
-    const timelineCoverageScore = pageCount === 0 ? 15 : Math.round(timelineCoverageDensity * 15);
-    const noOrphansScore = pageCount === 0 ? 15 : Math.round(noOrphans * 15);
-    const noDeadLinksScore = pageCount === 0 ? 10 : Math.round(noDeadLinks * 10);
-    const brainScore = embedCoverageScore + linkDensityScore + timelineCoverageScore + noOrphansScore + noDeadLinksScore;
-
-    return {
-      page_count: pageCount,
-      linkable_page_count: linkablePageCount,
-      embed_coverage: embedCoverage,
-      stale_pages: stalePages,
-      orphan_pages: orphanPages,
-      missing_embeddings: Number(r.missing_embeddings),
-      brain_score: brainScore,
-      dead_links: deadLinks,
-      entity_page_count: Number(r.entity_page_count),
-      // gbrain#4147: below the small-N floor the ratio is statistically
-      // meaningless (0/0 used to read as a hard 0%), so it reports null and
-      // consumers suppress both the percentage and its remediation actions.
-      link_coverage: Number(r.entity_page_count) >= MIN_ENTITY_PAGES_FOR_COVERAGE ? Number(r.link_coverage) : null,
-      timeline_coverage: Number(r.entity_page_count) >= MIN_ENTITY_PAGES_FOR_COVERAGE ? Number(r.timeline_coverage) : null,
-      most_connected: (connected as { slug: string; link_count: number }[]).map(c => ({
-        slug: c.slug,
-        link_count: Number(c.link_count),
-      })),
-      embed_coverage_score: embedCoverageScore,
-      link_density_score: linkDensityScore,
-      timeline_coverage_score: timelineCoverageScore,
-      no_orphans_score: noOrphansScore,
-      no_dead_links_score: noDeadLinksScore,
-    };
+    return plannerRead(this, this._pageTransaction, () => healthImpl.getHealth(unscopedExecutor(this.engineSql, 'health: unscoped on master (EO4 inventory)'), opts, {
+      embeddingColumn: async () => (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name,
+      countStalePagesForExtraction: (o) => this.countStalePagesForExtraction(o),
+      getConfig: (key) => this.getConfig(key),
+      entityTypes: (scope) => resolveEntityTypes(this, scope),
+    }));
   }
 
   // Ingest log
@@ -2813,10 +2765,12 @@ export class PGLiteEngine implements BrainEngine {
     // v0.31.2 (codex P1 #3): source_id threaded so multi-source brains can
     // scope ingest_log queries. Default 'default' matches the column DEFAULT.
     const sourceId = entry.source_id ?? 'default';
+    // v254: the writer's version, host and segment-reader mark (writer-versions.ts writerStamp).
+    const stamp = writerStamp({ mint: false });
     await this.db.query(
-      `INSERT INTO ingest_log (source_id, source_type, source_ref, pages_updated, summary)
-       VALUES ($1, $2, $3, $4::jsonb, $5)`,
-      [sourceId, entry.source_type, entry.source_ref, JSON.stringify(entry.pages_updated), entry.summary]
+      `INSERT INTO ingest_log (source_id, source_type, source_ref, pages_updated, summary, writer_version, writer_host_id, writer_segment_reader)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::uuid, true)`,
+      [sourceId, entry.source_type, entry.source_ref, JSON.stringify(entry.pages_updated), entry.summary, stamp.version, stamp.hostId]
     );
   }
 
@@ -2827,8 +2781,8 @@ export class PGLiteEngine implements BrainEngine {
     const scoped = opts?.sourceIds && opts.sourceIds.length > 0;
     const { rows } = await this.db.query(
       scoped
-        ? `SELECT * FROM ingest_log WHERE source_id = ANY($2::text[]) ORDER BY created_at DESC LIMIT $1`
-        : `SELECT * FROM ingest_log ORDER BY created_at DESC LIMIT $1`,
+        ? `SELECT id, source_id, source_type, source_ref, pages_updated, summary, created_at FROM ingest_log WHERE source_id = ANY($2::text[]) ORDER BY created_at DESC LIMIT $1`
+        : `SELECT id, source_id, source_type, source_ref, pages_updated, summary, created_at FROM ingest_log ORDER BY created_at DESC LIMIT $1`,
       scoped ? [limit, opts?.sourceIds] : [limit]
     );
     // Belt-and-suspenders source_id fallback for any pre-v50 row that
@@ -2874,12 +2828,15 @@ export class PGLiteEngine implements BrainEngine {
     return readAliases(this.executeRaw.bind(this), aliasNorms, opts);
   }
 
-  async setPageAliases(slug: string, sourceId: string, aliasNorms: string[]): Promise<void> {
+  async setPageAliases(slug: string, sourceId: string, aliasNorms: string[], opts?: { inline?: boolean }): Promise<void> {
+    if (opts?.inline && this._pageTransaction) return pagesImpl.setPageAliases(this.engineSql, this, slug, sourceId, aliasNorms);
     return this.transaction(tx => pagesImpl.setPageAliases((tx as PGLiteEngine).engineSql, tx, slug, sourceId, aliasNorms));
   }
 
   // Config
   async getConfig(key: string): Promise<string | null> {
+    const held = await requestConfigValue(this, key);
+    if (held !== undefined) return held;
     const { rows } = await this.db.query('SELECT value FROM config WHERE key = $1', [key]);
     return rows.length > 0 ? (rows[0] as { value: string }).value : null;
   }
@@ -2890,6 +2847,7 @@ export class PGLiteEngine implements BrainEngine {
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
       [key, value]
     );
+    noteRequestConfigWrite(this, key, value);
   }
 
   async unsetConfig(key: string): Promise<number> {
@@ -2897,6 +2855,7 @@ export class PGLiteEngine implements BrainEngine {
       'DELETE FROM config WHERE key = $1',
       [key],
     ) as { affectedRows?: number };
+    noteRequestConfigWrite(this, key, null);
     return affectedRows ?? 0;
   }
 
@@ -2911,6 +2870,8 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async getAllConfig(): Promise<Record<string, string>> {
+    const held = await requestConfigRows(this);
+    if (held) return held;
     const { rows } = await this.db.query('SELECT key, value FROM config');
     const out: Record<string, string> = {};
     for (const row of rows as { key: string; value: string }[]) out[row.key] = row.value;
@@ -2940,7 +2901,11 @@ export class PGLiteEngine implements BrainEngine {
     if (opts?.signal?.aborted) {
       throw new DOMException('aborted', 'AbortError');
     }
-    const queryPromise = this.db.query(sql, params).then((r) => r.rows as T[]);
+    // #5449: an autocommit write is its own outermost transaction, so it takes the WAL checkpoint guard.
+    const queryPromise = !this._pageTransaction && this._dbWork !== null && writesWal(sql)
+      ? (this._checkpointGuard ??= new PgliteCheckpointGuard())
+        .runStatement(q => this.db.query(q), () => this.db.query(sql, params)).then((r) => r.rows as T[])
+      : this.db.query(sql, params).then((r) => r.rows as T[]);
     if (!opts?.signal) return queryPromise;
     const abortPromise = new Promise<T[]>((_resolve, reject) => {
       opts.signal!.addEventListener('abort', () => {
@@ -2948,6 +2913,11 @@ export class PGLiteEngine implements BrainEngine {
       }, { once: true });
     });
     return Promise.race([queryPromise, abortPromise]);
+  }
+
+  /** No statement timeout on PGLite (BrainEngine.keywordBoundedRead): `read` runs on the engine itself. */
+  async keywordBoundedRead<T>(read: (db: Pick<BrainEngine, 'executeRaw'>) => Promise<T>): Promise<T> {
+    return read(this);
   }
 
   /**
@@ -2991,14 +2961,14 @@ export class PGLiteEngine implements BrainEngine {
 
   async getCallersOf(
     qualifiedName: string,
-    opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number; chunkId?: number },
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
     return codeEdgesImpl.getCallersOf(unscopedExecutor(this.engineSql, 'code-edges: unscoped on master (EO4 inventory)'), qualifiedName, opts);
   }
 
   async getCalleesOf(
     qualifiedName: string,
-    opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean },
+    opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean; chunkId?: number },
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
     return codeEdgesImpl.getCalleesOf(unscopedExecutor(this.engineSql, 'code-edges: unscoped on master (EO4 inventory)'), qualifiedName, opts);
   }

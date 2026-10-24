@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api';
 import { Dialog } from '../components/Dialog';
+import { startVisibilityPoll } from '../lib/visibility-poll';
 
 interface FeedEvent {
   agent: string; operation: string; scopes: string; latency_ms: number; status: string; timestamp: string;
@@ -34,8 +35,9 @@ export function DashboardPage() {
       finally { pending = false; }
     }
     void refresh();
-    const interval = setInterval(refresh, 30000);
-    return () => { active = false; clearInterval(interval); };
+    // #5061: both calls are full-table aggregates on Postgres; a background tab stops polling.
+    const stopPoll = startVisibilityPoll(refresh, 30000, document);
+    return () => { active = false; stopPoll(); };
   }, [retry]);
 
   useEffect(() => {

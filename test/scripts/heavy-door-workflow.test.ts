@@ -1,15 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { runInNewContext } from 'node:vm';
-import { safeLoad } from 'js-yaml';
+import { load } from 'js-yaml';
 
 type Step = { name?: string; id?: string; if?: string; run?: string; env?: Record<string, string>; with?: Record<string, string> };
-type Job = { name: string; if?: string; env: Record<string, string>; strategy?: { 'fail-fast': boolean; matrix: { lane: string } }; steps: Step[] };
+type Job = { name: string; env: Record<string, string>; strategy?: { 'fail-fast': boolean; matrix: { lane: string } }; steps: Step[] };
 const root = join(import.meta.dir, '../..');
-const workflow = safeLoad(readFileSync(join(root, '.github/workflows/heavy-tests.yml'), 'utf8')) as {
+const workflow = load(readFileSync(join(root, '.github/workflows/heavy-tests.yml'), 'utf8')) as {
   on: { workflow_dispatch: { inputs: Record<string, { default: boolean }> } };
   jobs: Record<string, Job>;
 };
@@ -17,54 +16,6 @@ const hermes = workflow.jobs['hermes-door'];
 const opencode = workflow.jobs['opencode-door'];
 
 describe('heavy door supply chain and coverage gates', () => {
-  test('ActVox paid and live coverage is opt-in without suppressing free corpus jobs', () => {
-    const e2e = safeLoad(readFileSync(join(root, '.github/workflows/e2e.yml'), 'utf8')) as typeof workflow;
-    const evaluate = (expression: string, event: string, paid: boolean, vars: Record<string, string> = {}) =>
-      runInNewContext(expression.replace(/^\$\{\{\s*|\s*\}\}$/g, '').replaceAll('github.event.pull_request.labels.*.name', 'labels'), {
-        github: { event_name: event }, inputs: { run_paid_e2e: paid, run_opencode_paid: false, run_grok_door: false }, vars,
-        labels: [], contains: (values: string[], value: string) => values.includes(value), secrets: { OPENAI_API_KEY: 'synthetic', ZEROENTROPY_API_KEY: 'synthetic', ANTHROPIC_API_KEY: 'synthetic' },
-      }, { timeout: 100 });
-    expect(workflow.on.workflow_dispatch.inputs.run_paid_e2e.default).toBe(false);
-    expect(e2e.on.workflow_dispatch.inputs.run_paid_e2e.default).toBe(false);
-    for (const event of ['pull_request', 'schedule', 'workflow_dispatch']) {
-      for (const name of ['real-agent-e2e', 'hermes-door', 'grok-door', 'opencode-door', 'opencode-door-canary']) {
-        expect(Boolean(evaluate(workflow.jobs[name].if!, event, false)), `${event}/${name}`).toBe(false);
-      }
-      expect(Boolean(evaluate(e2e.jobs.tier2.if!, event, false))).toBe(false);
-    }
-    for (const job of [workflow.jobs['real-agent-e2e'], workflow.jobs['hermes-door'], e2e.jobs.tier2]) {
-      expect(evaluate(job.if!, 'workflow_dispatch', true)).toBe(true);
-      expect(evaluate(job.if!, 'schedule', false, { GBRAIN_PAID_E2E: '1' })).toBe(true);
-    }
-    expect(evaluate(workflow.jobs.heavy.if!, 'schedule', false)).toBe(true);
-    expect(evaluate(e2e.jobs['coverage-full-e2e'].if!, 'schedule', false)).toBe(true);
-    for (const job of [workflow.jobs.heavy, e2e.jobs['coverage-full-e2e']]) {
-      const keys = job.steps.flatMap(step => Object.entries(step.env ?? {}).filter(([key]) => key.endsWith('_API_KEY')));
-      expect(keys.length).toBeGreaterThan(0);
-      for (const [, value] of keys) {
-        expect(evaluate(value, 'schedule', false)).toBe('');
-        expect(evaluate(value, 'workflow_dispatch', true)).toBe('synthetic');
-      }
-    }
-    const aggregate = e2e.jobs['e2e-status'].steps.find(step => step.name === 'Aggregate result')!;
-    for (const [paid, result, expected] of [[false, 'skipped', 0], [false, 'failure', 1], [true, 'success', 0], [true, 'skipped', 1], [true, 'failure', 1]] as const) {
-      const script = aggregate.run!.replace(/\$\{\{ needs\.([a-z0-9-]+)\.result \}\}/g, (_match, job) => job === 'tier2' ? result : 'success')
-        .replace('${{ github.event_name }}', 'workflow_dispatch');
-      const run = spawnSync('bash', ['-eu', '-c', script], { encoding: 'utf8', env: { PATH: process.env.PATH, PAID_E2E: String(paid), FULL_CORPUS: 'false' } });
-      expect(run.status, run.stderr).toBe(expected);
-    }
-    const tier2 = e2e.jobs.tier2.steps.find(step => step.name === 'Run Tier 2 skill tests')!;
-    const temporary = mkdtempSync(join(tmpdir(), 'gbrain-paid-gate-'));
-    try {
-      for (const [output, code, expected] of [['5 pass', 0, 0], ['Skip reason: no provider key', 0, 1], ['fixture failure', 3, 3]] as const) {
-        const run = spawnSync('bash', ['-euo', 'pipefail', '-c', `bun() { printf '%s\\n' "$FIXTURE_OUTPUT"; return "$FIXTURE_CODE"; }\n${tier2.run}`], {
-          encoding: 'utf8', env: { PATH: process.env.PATH, RUNNER_TEMP: temporary, FIXTURE_OUTPUT: output, FIXTURE_CODE: String(code) },
-        });
-        expect(run.status, run.stderr).toBe(expected);
-      }
-    } finally { rmSync(temporary, { recursive: true, force: true }); }
-  });
-
   test('isolated sync logs are retained in heavy artifacts', () => {
     const steps = workflow.jobs.heavy.steps;
     expect(steps.find(step => step.name === 'Run heavy tests')?.env?.GBRAIN_HEAVY_LOG_DIR)
@@ -96,7 +47,8 @@ describe('heavy door supply chain and coverage gates', () => {
 
   test('OpenCode defaults to keyless and explicitly requests a separate credentialed lane', () => {
     expect(workflow.on.workflow_dispatch.inputs.run_opencode_paid.default).toBe(false);
-    expect(opencode.strategy?.matrix.lane).toBe('${{ fromJSON((inputs.run_opencode_paid || vars.GBRAIN_OPENCODE_PAID_E2E == \'1\') && \'["keyless","credentialed"]\' || \'["keyless"]\') }}');
+    // The credentialed lane is requested per dispatch or by GBRAIN_OPENCODE_PAID_E2E, and the repository-wide switch GBRAIN_PAID_LANES=0 keeps it off either way (#5903).
+    expect(opencode.strategy?.matrix.lane).toBe('${{ fromJSON((inputs.run_opencode_paid || vars.GBRAIN_OPENCODE_PAID_E2E == \'1\') && format(\'{0}\', vars.GBRAIN_PAID_LANES) != \'0\' && \'["keyless","credentialed"]\' || \'["keyless"]\') }}');
     expect(opencode.strategy?.['fail-fast']).toBe(false);
     expect(opencode.env.ANTHROPIC_API_KEY).toBeUndefined();
     const keyless = opencode.steps.find(step => step.name?.startsWith('Run opencode door tests (keyless'))!;
@@ -122,5 +74,68 @@ describe('heavy door supply chain and coverage gates', () => {
       expect(result.stderr).toContain('No paid turn ran');
       expect(result.stdout).not.toContain('paid=true');
     }
+  });
+
+  test('Docker bootstrap e2e has no existence guard that could turn a missing script green', () => {
+    const step = workflow.jobs.heavy.steps.find(s => s.name === 'Bootstrap offline Docker e2e')!;
+    expect(step.run!.trim()).toBe('bash tests/docker/bootstrap-e2e.sh');
+  });
+
+  test('the Claude plugin door reports even when the Codex door failed', () => {
+    const claude = workflow.jobs['plugin-doors'].steps.find(s => s.name?.startsWith('Claude plugin door'))!;
+    expect(claude.if).toBe('${{ !cancelled() }}');
+  });
+
+  test('Hermes with an empty ANTHROPIC_API_KEY is a visible, tracked skip on a scheduled run', () => {
+    const gate = hermes.steps.find(step => step.id === 'paidgate')!;
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-hermes-gate-test-'));
+    try {
+      const bin = join(home, 'bin');
+      mkdirSync(bin);
+      writeFileSync(join(bin, 'hermes'), `#!/bin/sh\necho 'Hermes Agent v${hermes.env.HERMES_VERSION} (2026.8.3)'\n`, { mode: 0o755 });
+      const output = join(home, 'output');
+      const summary = join(home, 'summary');
+      const result = spawnSync('bash', ['-euo', 'pipefail', '-c', gate.run!], {
+        env: {
+          PATH: `${bin}:${process.env.PATH}`, ...hermes.env, ANTHROPIC_API_KEY: '',
+          GITHUB_EVENT_NAME: 'schedule', GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary,
+        },
+        encoding: 'utf8',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(output, 'utf8')).toContain('paid=false');
+      expect(result.stderr).toContain('Fix (owner-only): gh secret set ANTHROPIC_API_KEY');
+      expect(readFileSync(summary, 'utf8')).toContain('known-skipped');
+      expect(hermes.steps.find(step => step.name === 'Run hermes door tests')!.if).toBe("steps.paidgate.outputs.paid == 'true'");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('real-agent e2e without provider secrets warns that 0 live tests ran and names the fix', () => {
+    const job = workflow.jobs['real-agent-e2e'];
+    const gate = job.steps.find(step => step.id === 'keys')!;
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-real-agent-gate-test-'));
+    try {
+      const output = join(home, 'output');
+      const summary = join(home, 'summary');
+      const result = spawnSync('bash', ['-euo', 'pipefail', '-c', gate.run!], {
+        env: { PATH: process.env.PATH, ANTHROPIC_API_KEY: 'set', OPENAI_API_KEY: '', GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary },
+        encoding: 'utf8',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(output, 'utf8')).toContain('keyed=false');
+      expect(result.stderr).toContain('::warning::Real-agent door e2e executed 0 live claude/codex tests');
+      expect(result.stderr).toContain('gh secret set OPENAI_API_KEY');
+      expect(result.stderr).toContain('gh workflow run heavy-tests.yml');
+      expect(result.stderr).toContain('real-agent-e2e');
+      expect(readFileSync(summary, 'utf8')).toContain('0 live tests executed');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+    const run = job.steps.find(step => step.name === 'Run real-agent door tests')!;
+    expect(run.env?.GBRAIN_TEST_KEEP_PROVIDER_KEYS).toContain("'1'");
+    expect(run.env?.CODEX_API_KEY).toContain('secrets.OPENAI_API_KEY');
+    expect(run.run).toContain("'bootstrap real Claude Code door' 'bootstrap real-codex door'");
   });
 });

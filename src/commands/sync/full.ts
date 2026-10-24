@@ -22,8 +22,11 @@ import {
   isEmbeddingInfraCode,
   DEFAULT_SOURCE_ID,
   RENAME_SENTINEL_PREFIX,
+  readMetafilePagesMode,
+  type MetafilePagesMode,
 } from '../../core/sync.ts';
-import { CHUNKER_VERSION } from '../../core/chunkers/code.ts';
+import { diskMetafileHeads, firstMetafileHead, gitMetafileHeads, metafilePagePredicate, recordMetafilePagesApplied } from '../../core/sync-metafile-pages.ts';
+import { chunkerStamp } from '../../core/chunkers/code.ts';
 import { autoConcurrency } from '../../core/sync-concurrency.ts';
 import { slog, serr } from '../../core/console-prefix.ts';
 import { newestCommitMs } from '../../core/source-health.ts';
@@ -35,14 +38,21 @@ import {
   type SlugRootMode,
 } from '../../core/sync-anchor.ts';
 import { buildPartialResult } from '../../core/sync-lock.ts';
+import { noteCommittedProgress } from '../../core/forward-progress.ts';
 import {
   MASS_RECONCILE_RATIO,
   planReconcileDeletes,
   listEverCommittedPaths,
   massReconcileAllowed,
+  readSyncDeleteCaps,
+  syncDeleteTrip,
+  syncDeleteTripText,
 } from '../../core/sync-reconcile.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
+import { heldRenameOrigins, holdRefusedImport, moveHeldRenames, noteScreenedImport, settleFullSyncHolds, wouldHoldFields, type LegacyHolds } from './holds.ts';
 import { sweepOrphanedRenameSentinels } from './rename-reconcile.ts';
+import { classifyItemFailure } from '../../core/item-failure.ts';
+import { OperationError } from '../../core/ops/contract.ts';
 
 export async function performFullSync(
   engine: BrainEngine,
@@ -55,6 +65,7 @@ export async function performFullSync(
   roots: { gitContextRoot: string; syncScopeRoot: string; anchorPath: string; slugRootMode: SlugRootMode },
   headCommit: string,
   opts: SyncOpts,
+  holds: LegacyHolds | null = null,
 ): Promise<SyncResult> {
   const { gitContextRoot, syncScopeRoot, anchorPath, slugRootMode } = roots;
   const company = currentCompanyBrainSync(opts.sourceId);
@@ -72,7 +83,13 @@ export async function performFullSync(
   // default-markdown `isSyncable(rel)`, so `gbrain sync --strategy
   // code --dry-run` always reported zero files even when ~1500 code
   // files were waiting.
-  if (opts.dryRun) return fullSyncDryRun(syncScopeRoot, headCommit, opts);
+  // #5988: paths are relative to the slug base, the same keys holds and the ledger use.
+  const holdRoot = slugRoot ?? syncScopeRoot;
+  // GBRA-150: one sync.metafile_pages read for every walk below; the commit a gone file was last synced at is read
+  // before the bookmark advances, so the reconcile judges a deleted typed metafile by its last synced bytes.
+  const metafilePages = await readMetafilePagesMode(engine);
+  const previousCommit = await readSyncAnchor(engine, opts.sourceId, 'last_commit');
+  if (opts.dryRun) return fullSyncDryRun(engine, syncScopeRoot, headCommit, { ...opts, metafilePages }, { holds, holdRoot });
 
   // v0.22.13 (PR #490 A1 + Q5): full sync is always "large" by definition
   // (entire working tree). Auto-concurrency fires unconditionally for Postgres;
@@ -95,6 +112,7 @@ export async function performFullSync(
   const _fullImportT0 = Date.now();
   serr(`[gbrain phase] sync.fullsync.import start strategy=${opts.strategy ?? 'markdown'}`);
   opts.onProgress?.({ phase: 'full_import' });
+  await moveHeldRenames(engine, holds, holdRoot);
   let result: import('../import.ts').RunImportResult;
   try {
     result = await runImport(engine, importArgs, {
@@ -109,6 +127,16 @@ export async function performFullSync(
       // issue #1939: performFullSync owns the failure ledger + bookmark via the
       // shared gate below; don't let runImport double-record or write its own.
       managedBookmark: true,
+      // #5988: a held rename destination whose old page changed is held, never imported as a new page.
+      heldPaths: new Set(holds?.heldPaths),
+      // #5988: content refusals are held, not failed (never gating the bookmark).
+      onFileResult: async (path, filePath, fileResult) => {
+        noteScreenedImport(holds, path, fileResult);
+        if (await holdRefusedImport(engine, holds, path, filePath, fileResult)) return 'held';
+        // GBRA-133 PR 3a: an imported page is committed work, so the sync deadline extends while a full import lands pages.
+        if (fileResult.status === 'imported') noteCommittedProgress();
+        return undefined;
+      },
     });
     if (opts.signal?.aborted) throw new ImportAbortError('interrupted', 1, result);
   } catch (error) {
@@ -134,6 +162,11 @@ export async function performFullSync(
   // failures still climb their attempts.
   const fullSourceId = opts.sourceId ?? DEFAULT_SOURCE_ID;
   const fullFailureSet = new Set(result.failures.map(f => f.path));
+  if (holds?.existing.size || holds?.retryPaths.size) {
+    const walked = new Set(collectSyncableFiles(syncScopeRoot, { strategy: opts.strategy ?? 'markdown', includeGitignored: opts.includeGitignored,
+      includeHidden: opts.includeHidden, metafilePages }).map(abs => relative(holdRoot, abs)));
+    await settleFullSyncHolds(engine, holds, { root: holdRoot, walked, failed: fullFailureSet });
+  }
   const fullSucceeded = loadSyncFailures()
     .filter(e => e.source_id === fullSourceId && isSkippablePath(e.path) && !fullFailureSet.has(e.path))
     .map(e => e.path);
@@ -143,7 +176,8 @@ export async function performFullSync(
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit, newestCommitMs(gitContextRoot), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
-    await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
+    await writeChunkerVersion(engine, opts.sourceId, chunkerStamp());
+    await recordMetafilePagesApplied(engine, fullSourceId, metafilePages);
   };
 
   const fullGate = await applySyncFailureGate({
@@ -173,7 +207,7 @@ export async function performFullSync(
     );
   }
 
-  const reconciledDeletes = await reconcileFullSyncDeletes(engine, opts, { company, gitContextRoot, syncScopeRoot, slugRoot });
+  const reconciledDeletes = await reconcileFullSyncDeletes(engine, opts, { company, gitContextRoot, syncScopeRoot, slugRoot, metafilePages, previousCommit });
 
   // #3479 blocker 2 — the post-gate sweep above ran BEFORE this reconcile,
   // so a `<rename:…>` sentinel whose stale row the reconcile just removed
@@ -202,6 +236,10 @@ export async function performFullSync(
     }
   }
 
+  // #6722: a full sync walked every page of the source, so its large and embed_skip pages are all reported.
+  const { readPageSizeStates, addSizeState } = await import('../../core/page-embedding-budget.ts');
+  const sizeStates = (await readPageSizeStates(engine, fullSourceId, null))
+    .reduce<import('../../core/page-embedding-budget.ts').SyncSizeStates | undefined>((tally, state) => addSizeState(tally, state), undefined);
   return {
     status: 'first_sync',
     fromCommit: null,
@@ -213,6 +251,7 @@ export async function performFullSync(
     chunksCreated: result.chunksCreated,
     embedded,
     pagesAffected: [],
+    ...(sizeStates ? { size_states: sizeStates } : {}),
     // Warning aggregates ride the result for worker/JSON consumers — a full
     // sync that only prints to a daemon's stderr hides them from cron
     // topologies (codex re-review; same rationale as the incremental path).
@@ -222,13 +261,15 @@ export async function performFullSync(
   };
 }
 
-function fullSyncDryRun(syncScopeRoot: string, headCommit: string, opts: SyncOpts): SyncResult {
+async function fullSyncDryRun(engine: BrainEngine, syncScopeRoot: string, headCommit: string, opts: SyncOpts & { metafilePages: MetafilePagesMode },
+  hold: { holds: LegacyHolds | null; holdRoot: string }): Promise<SyncResult> {
   const dryRunMalformed: string[] = [];
   let allFiles = collectSyncableFiles(syncScopeRoot, {
     strategy: opts.strategy ?? 'markdown',
     includeGitignored: opts.includeGitignored,
     onExcluded: (rel) => { dryRunMalformed.push(rel); },
     includeHidden: opts.includeHidden,
+    metafilePages: opts.metafilePages,
   });
   if (opts.exclude && opts.exclude.length > 0) {
     allFiles = allFiles.filter(abs => !matchesAnyGlob(relative(syncScopeRoot, abs), opts.exclude));
@@ -257,6 +298,7 @@ function fullSyncDryRun(syncScopeRoot: string, headCommit: string, opts: SyncOpt
     chunksCreated: 0,
     embedded: 0,
     pagesAffected: [],
+    ...(await wouldHoldFields(engine, hold.holds, hold.holdRoot, allFiles.map(abs => relative(hold.holdRoot, abs)))),
   };
 }
 
@@ -333,9 +375,10 @@ async function reportBlockedFullSync(
 async function reconcileFullSyncDeletes(
   engine: BrainEngine,
   opts: SyncOpts,
-  input: { company: ReturnType<typeof currentCompanyBrainSync>; gitContextRoot: string; syncScopeRoot: string; slugRoot: string | undefined },
+  input: { company: ReturnType<typeof currentCompanyBrainSync>; gitContextRoot: string; syncScopeRoot: string; slugRoot: string | undefined;
+    metafilePages: MetafilePagesMode; previousCommit: string | null },
 ): Promise<number> {
-  const { company, gitContextRoot, syncScopeRoot, slugRoot } = input;
+  const { company, gitContextRoot, syncScopeRoot, slugRoot, metafilePages, previousCommit } = input;
   // #1970 (F-A): runImport is import-only — it never purges pages whose backing
   // file was deleted since the last sync. A full re-import is authoritative for
   // the whole tree, so reconcile deletes here too (this is what makes the
@@ -358,7 +401,15 @@ async function reconcileFullSyncDeletes(
   let reconciledDeletes = 0;
   if (opts.sourceId) {
     const sid = opts.sourceId;
-    const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
+    // GBRA-150: a metafile-named row is reconcilable exactly when the walk would collect its file: its bytes on disk, or,
+    // for a file gone since the last sync, its blob at that commit. A bare or root one keeps its page (#1433).
+    const scopeGitPath = gitRelativePath(gitContextRoot, syncScopeRoot);
+    const rowRoot = slugRoot ?? syncScopeRoot;
+    const lastSynced = gitMetafileHeads(gitContextRoot, [previousCommit]);
+    const metafilePage = metafilePagePredicate(metafilePages,
+      firstMetafileHead(diskMetafileHeads(rowRoot), path => lastSynced.read(slugRoot || !scopeGitPath ? path : `${scopeGitPath}/${path}`)),
+      path => slugRoot && scopeGitPath && path.startsWith(`${scopeGitPath}/`) ? path.slice(scopeGitPath.length + 1) : path);
+    const reconcileSyncOpts = { ...(opts.strategy ? { strategy: opts.strategy } : {}), metafilePage };
     // collectSyncableFiles returns ABSOLUTE paths; source_path is stored
     // repo-relative (importFile uses `relative(dir, filePath)`), so relativize
     // to the same form before membership-testing — otherwise every page looks
@@ -380,12 +431,16 @@ async function reconcileFullSyncDeletes(
       strategy: opts.strategy ?? 'markdown',
       includeGitignored: opts.includeGitignored,
       includeHidden: opts.includeHidden,
+      metafilePages,
     })
-      .map(abs => relative(slugRoot ?? syncScopeRoot, abs));
-    const rows = await engine.executeRaw<{ slug: string; source_path: string | null }>(
-      `SELECT slug, source_path FROM pages WHERE source_id = $1 AND source_path IS NOT NULL AND deleted_at IS NULL`,
+      .map(abs => relative(rowRoot, abs));
+    // #5988 (E13): the old page of a held rename keeps its origin until the
+    // renamed file imports; its file being gone does not make it stale.
+    const heldOrigins = await heldRenameOrigins(engine, sid);
+    const rows = (await engine.executeRaw<{ slug: string; source_path: string | null; body_storage: string }>(
+      `SELECT slug, source_path, body_storage FROM pages WHERE source_id = $1 AND source_path IS NOT NULL AND deleted_at IS NULL`,
       [sid],
-    );
+    )).filter(row => !heldOrigins.has(row.source_path!));
     // #774: a scoped full sync is authoritative ONLY for its scope — pages
     // whose source_path lives outside the subpath (e.g. from an earlier
     // root-level sync of this source) are out of this walk's sight and must
@@ -436,6 +491,7 @@ async function reconcileFullSyncDeletes(
       // history (i.e. was genuinely deleted) are reconcile-deleted.
       const everCommitted = company ? null : listEverCommittedPaths(gitContextRoot);
       const pathBySlug = new Map(rows.map(r => [r.slug, r.source_path]));
+      const segmentedSlugs = new Set(rows.filter(r => r.body_storage === 'segmented').map(r => r.slug));
       let deletableSlugs = plan.staleSlugs;
       const dbOnlySlugs: string[] = [];
       if (everCommitted) {
@@ -445,20 +501,47 @@ async function reconcileFullSyncDeletes(
           if (sp && !everCommitted.has(sp.replace(/\\/g, '/'))) dbOnlySlugs.push(slug);
           else deletableSlugs.push(slug);
         }
+      } else if (!company) {
+        // #7130: Git could not list the history (a dangling ref fails `git log --all`), so no stale page is proven
+        // committed; deleting them would treat a never-committed page's absence as a deletion. Keep them all.
+        serr(`\n  WARNING: kept ${plan.staleSlugs.length} stale page(s) of source '${sid}': Git could not list the history that proves their files were committed and removed (run git -C ${gitContextRoot} log --all to see why). No pages were deleted.`);
+        deletableSlugs = [];
+      }
+      // #7130: the absolute caps (sync.max_deletes, sync.max_delete_ratio) brake a full reconcile below the 50% valve too.
+      const caps = await readSyncDeleteCaps(engine, sid);
+      const trip = syncDeleteTrip(deletableSlugs.length, plan.reconcilableCount, caps);
+      if (trip && !massReconcileAllowed()) {
+        serr(`\n  WARNING: refusing to reconcile-delete ${deletableSlugs.length} of ${plan.reconcilableCount} file-backed page(s) for source '${sid}' (${syncDeleteTripText(trip, caps)}). ` +
+          `No pages were deleted. Check the checkout first; if the removal is intended, raise the cap (gbrain config set ${trip === 'max_deletes' ? 'sync.max_deletes' : 'sync.max_delete_ratio'}.source.${sid} <value>) or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1.`);
+        deletableSlugs = [];
       }
       if (dbOnlySlugs.length > 0) {
         let reExported = 0;
-        try {
-          const { writePageThrough } = await import('../../core/write-through.ts');
-          for (const slug of dbOnlySlugs) {
-            const r = await writePageThrough(engine, slug, { sourceId: sid });
-            if (r.written) reExported++;
+        let reExportFailures = 0;
+        const { writePageThrough } = await import('../../core/write-through.ts');
+        for (const slug of dbOnlySlugs) {
+          try {
+            if (segmentedSlugs.has(slug)) throw new OperationError('page_body_segmented', 'Re-export cannot render a segmented page.', 'Read it with gbrain get --body auto; the page stays in the database.');
+            const r = await writePageThrough(engine, slug, { sourceId: sid, expectedFileBytes: null });
+            if (r.written) { reExported++; continue; }
+            if (r.skipped === 'disabled_by_config' || r.skipped === 'url_clone') continue;
+            if (r.skipped === 'file_changed') throw new OperationError('file_database_drift', 'The checkout file exists; re-export only restores absent files.', `If the file holds the newer edit, run gbrain sync --source ${sid} to import it; otherwise ask the user which version to keep.`);
+            if (r.error) throw new Error(r.error);
+            throw new OperationError('storage_error', `The page was not re-exported (${r.skipped}).`, 'Run gbrain doctor --json for the write-through target, then sync again.');
+          } catch (error) {
+            const failure = classifyItemFailure(error);
+            if (failure.scope === 'run') throw error;
+            reExportFailures++;
+            serr(`  ${slug} (${failure.code}: ${failure.message}) Kept the database page and any existing file. ` +
+              `If the file is newer, import it with gbrain sync --source ${sid} --include-gitignored; ` +
+              `if the database is newer, re-save its copy with write-through on; when both changed, ask the user which edit wins.`);
           }
-        } catch { /* best-effort — pages are preserved either way */ }
+        }
         serr(
           `\n  Kept ${dbOnlySlugs.length} page(s) whose markdown was never committed to git ` +
           `(DB-only write-through — not deleting).` +
           (reExported > 0 ? ` Re-exported ${reExported} of them to the working tree.` : '') +
+          (reExportFailures > 0 ? ` ${reExportFailures} re-export failure(s), listed above.` : '') +
           `\n  Commit + push them (e.g. scripts/brain-commit-push.sh, or 'gbrain sources harden') ` +
           `so the next sync sees them as file-backed.`,
         );

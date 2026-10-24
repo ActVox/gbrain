@@ -23,7 +23,7 @@ import {
 import { runDecide } from '../core/ai/decide/index.ts';
 import { estimateContextTokens, packShape, planBatches } from '../core/ai/decide/pack.ts';
 import { KEY_DEFAULT_LABEL, keyDefaultOptOut, readiness, resolveSlotPolicy, type PolicyInputs, type SlotPolicy } from '../core/ai/decide/policy.ts';
-import { REFERENCE_CALIBRATIONS, recommendedSlots } from '../core/ai/decide/reference-calibrations.ts';
+import { newerReference, recommendedSlots } from '../core/ai/decide/reference-calibrations.ts';
 import { REFUSAL_CATALOG, SLOT_PLAIN_NAMES, refusalLine } from '../core/ai/decide/outcomes.ts';
 import { toWireQuestion } from '../core/ai/decide/providers/typesafe.ts';
 import { SLOT_SPECS } from '../core/ai/decide/slots.ts';
@@ -34,7 +34,8 @@ import {
 import { DECIDE_SLOTS, DecideError, EVIDENCE_CLASSES, type DecideQuestion, type DecideSlot } from '../core/ai/decide/types.ts';
 import { usageCostUsd } from '../core/budget/reservation-cost.ts';
 import { evidenceCoPackedSlots, resetDecideSearchCache } from '../core/search/decide-stage.ts';
-import { promptYesNo } from '../core/confirm-prompt.ts';
+import { currentExitCode } from '../core/cli-force-exit.ts';
+import { consentGate, engineConsentEnv } from '../core/consent-cli.ts';
 
 export const DECIDE_HELP = `Usage: gbrain decide <subcommand> [options]
 
@@ -54,7 +55,7 @@ Subcommands:
   disable <slot> | --all                     Turn a slot (or every slot) off
   calibrate --slot <slot> --dataset <jsonl> [--target precision|recall|f1] [--min <x>]
             [--call-site <site>] [--dry-run] [--json]
-  qualify --slot <slot> --dataset <jsonl> [--call-site <site>] [--json]
+  qualify --slot <slot> --dataset <jsonl> [--call-site <site>] [--items-out <path>] [--json]
   calibrations list [--slot <slot>] [--json] | adopt <id> | retire <id> | restore <id>
   dataset --slot <slot> --from <source> <path> [--out <file>]
   receipts [--slot <slot>] [--since <hours>] [--what-if-threshold <t>] [--json]
@@ -186,28 +187,28 @@ function costPer1k(slot: DecideSlot, provider: string, usage?: { decisions: numb
 // ---------------------------------------------------------------------------
 
 export async function buildStatus(engine: BrainEngine, state: DecideState) {
-  const [spend, usage, noEntity] = await Promise.all([
+  const [spend, usage, noEntity, reviewRates] = await Promise.all([
     dailySpend(engine).catch(() => ({ total: 0, remote: 0 })), slotUsage(engine, 24).catch(() => []),
     conflictNoEntityShare(engine).catch(() => ({ skipped: 0, receipts: 0, share: 0 })),
+    import('../core/ai/decide/review-lane.ts').then(m => m.proposalReviewRates(engine)).catch(() => []),
   ]);
   const slots = DECIDE_SLOTS.map((slot) => {
     const p = policyFor(state, slot);
     const u = usage.find((x) => x.slot === slot);
     const inputs = policyInputs(state, slot);
-    const newestRef = REFERENCE_CALIBRATIONS.filter((r) => r.slot === slot && r.provider === p.provider).at(-1);
     return {
       slot, plain: SLOT_PLAIN_NAMES[slot], wired: SLOT_SPECS[slot].wired, mode: p.requested, effective: p.effective,
       readiness: readiness(p, inputs), inactive: p.inactive ?? null, provider: p.provider, model: p.model,
       threshold: p.threshold ?? null, threshold_source: p.thresholdSource, calibration: p.calibration?.ref ?? null,
       min_keep: SLOT_SPECS[slot].thresholded ? p.minKeep : null, force_on: p.forceOn,
-      newer_reference: newestRef && p.calibration && `ref:${newestRef.id}` !== p.calibration.ref ? `ref:${newestRef.id}` : null,
+      newer_reference: newerReference(p),
       receipts_24h: u?.rows ?? 0, decisions_24h: u?.decisions ?? 0, errors_24h: u?.errors ?? 0,
       error_rate_24h: u && u.rows > 0 ? Number((u.errors / u.rows).toFixed(4)) : 0, egress_refusals_24h: u?.egress ?? 0,
       status: !u || u.rows === 0 ? 'pending' : u.skipped === u.rows ? (p.inactive ? 'demoted' : 'blocked') : 'active',
       cost_per_1k: { ...costPer1k(slot, p.provider, u), unit: COST_UNITS[slot]?.unit ?? 'units' },
       effective_line: effectiveModeLine(p),
       ...(state.cfg.slots[slot].keyDefault ? { key_default: true, opt_out: keyDefaultOptOut(slot) } : {}),
-      ...(slot === 'conflict' ? { no_entity_7d: noEntity } : {}),
+      ...(slot === 'conflict' ? { no_entity_7d: noEntity, proposal_review: reviewRates } : {}),
     };
   });
   return {
@@ -253,6 +254,10 @@ async function cmdStatus(engine: BrainEngine, args: string[]): Promise<number> {
     if (s.newer_reference) console.log(`    newer reference available: ${s.newer_reference} (gbrain decide calibrations adopt ${s.newer_reference})`);
     if (s.no_entity_7d && s.no_entity_7d.skipped > 0) {
       console.log(`    ${(s.no_entity_7d.share * 100).toFixed(1)}% of conflict receipts in 7 days (${s.no_entity_7d.skipped} of ${s.no_entity_7d.receipts}) skipped a fact with no entity (no_entity); link them: gbrain facts relink --dry-run`);
+    }
+    for (const r of s.proposal_review ?? []) {
+      if (!r.enabled && r.pending === 0) continue;
+      console.log(`    ${r.kind} proposals: ${r.pending} pending${r.oldest_pending_days !== null ? ` (oldest ${r.oldest_pending_days} days)` : ''}; last 30 days: ${r.accepted_30d} accepted, ${r.rejected_30d} rejected${r.pending > 0 ? ' (review: gbrain decide proposals list)' : ''}`);
     }
     if (s.opt_out) console.log(`    on by default because a TypeSafe key is present (sends ${SLOT_SPECS[s.slot].egressClasses.map((c) => CLASS_TEXT[c]).join(', ')} to TypeSafe); opt out: ${s.opt_out}`);
   }
@@ -334,11 +339,31 @@ async function resolvePinned(provider: string): Promise<string> {
   return `typesafe:${r.model_resolved}`;
 }
 
-async function confirmed(args: string[], summary: string[]): Promise<boolean> {
-  for (const line of summary) console.log(line);
-  if (has(args, '--yes')) return true;
-  if (!process.stdin.isTTY) { console.error('Re-run with --yes to confirm (non-interactive).'); return false; }
-  return promptYesNo('Proceed? [y/N] ');
+/**
+ * A4 consent for turning a slot on: text leaves the machine (`egress`) and the
+ * provider bills per call (`paid`, bounded by decide.budget.daily_usd). `--yes`
+ * authorizes; `--json` never does. Resolves false after printing the refusal
+ * (exit verdict 3) or a declined prompt.
+ */
+async function enableConsent(engine: BrainEngine, args: string[], req: { slots: DecideSlot[]; summary: string[]; dailyUsd: number; argv: string[] }): Promise<boolean> {
+  const json = has(args, '--json');
+  for (const line of req.summary) (json ? console.error : console.log)(line);
+  const what = req.slots.length === 1 ? `Turn on the decide slot ${req.slots[0]}` : `Turn on the decide slots ${req.slots.join(', ')}`;
+  const auth = await consentGate({
+    command: 'decide enable',
+    effects: ['egress', 'paid'],
+    actor: 'agent',
+    what,
+    why: 'System One answers these routing and ranking questions with a hosted model instead of local heuristics; each slot is a measured win on the eval sets.',
+    risk: `From now on, brain text named in the summary leaves this machine on every affected call, and the provider bills per call up to decide.budget.daily_usd ($${req.dailyUsd.toFixed(2)}/day). `
+      + 'Undo any time: gbrain decide disable --all.',
+    user_message: `${what}? Some of your brain's text (${req.summary.find(l => l.startsWith('Data that leaves')) ?? 'see the summary'}) will be sent to the provider on each call, capped at $${req.dailyUsd.toFixed(2)} a day; gbrain decide disable --all turns it off.`,
+    argv: req.argv,
+    preview_argv: ['gbrain', 'decide', 'status', '--json'],
+    est_usd: null,
+    args,
+  }, { json, env: engineConsentEnv(engine, { configuredCapUsd: req.dailyUsd }) });
+  return auth !== null;
 }
 
 async function writeConfig(engine: BrainEngine, writes: Array<[string, string]>): Promise<void> {
@@ -418,8 +443,8 @@ async function cmdEnable(engine: BrainEngine, args: string[]): Promise<number> {
     ...(cost.usd !== null ? [`Estimated cost: ~$${cost.usd.toFixed(4)} per 1,000 ${COST_UNITS[slot]?.unit ?? 'units'}; daily cap $${nextCfg.dailyUsd.toFixed(2)} (decide.budget.daily_usd${slot === 'rerank' ? '; S1 on uses reranker spend controls' : ''}).`] : []),
     `Writes: ${[...writes, ...(slot === 'rerank' ? [['search.reranker.model', provider], ['search.reranker.enabled', 'true']] : [])].map(([k, v]) => `${k}=${v}`).join(', ')}`,
   ];
-  if (!json && !(await confirmed(args, summary))) return 1;
-  if (json && !has(args, '--yes')) { console.error('--json enable needs --yes'); return 1; }
+  if (!(await enableConsent(engine, args, { slots: [slot], summary, dailyUsd: nextCfg.dailyUsd,
+    argv: ['gbrain', 'decide', 'enable', slot, '--provider', provider, ...(mode === 'shadow' ? ['--shadow'] : []), ...(json ? ['--json'] : [])] }))) return currentExitCode() || 1;
   if (slot === 'rerank') writes.push(...await enableRerank(engine, state, provider, args));
   await writeConfig(engine, writes);
   const after = policyFor(nextState, slot);
@@ -439,9 +464,16 @@ async function enableRecommended(engine: BrainEngine, state: DecideState, args: 
     console.error(`no slot has a recorded win for ${model}; see docs/eval/system-one/`);
     return 1;
   }
+  // One ask covers every winner; the per-slot runs then carry the approval.
+  if (!has(args, '--yes')) {
+    const summary = [`Enable ${winners.join(', ')} with ${provider} (the slots with a recorded win; docs/eval/system-one/).`,
+      `Data that leaves this machine: the query, candidate and fact text each slot scores, to ${provider.startsWith('typesafe:') ? 'TypeSafe' : 'your configured chat provider'}; private pages stay local unless decide.egress.private=allow.`];
+    if (!(await enableConsent(engine, args, { slots: winners, summary, dailyUsd: state.cfg.dailyUsd,
+      argv: ['gbrain', 'decide', 'enable', '--recommended', ...(flagValue(args, '--provider') ? ['--provider', flagValue(args, '--provider')!] : []), ...(has(args, '--json') ? ['--json'] : [])] }))) return currentExitCode() || 1;
+  }
   let code = 0;
   const pin = state.cfg.provider === 'none' && !flagValue(args, '--provider') ? ['--provider', provider] : [];
-  for (const slot of winners) code = Math.max(code, await cmdEnable(engine, ['enable', slot, ...pin, ...args.filter((a) => a !== '--recommended')]));
+  for (const slot of winners) code = Math.max(code, await cmdEnable(engine, ['enable', slot, ...pin, ...args.filter((a) => a !== '--recommended' && a !== '--yes'), '--yes']));
   return code;
 }
 

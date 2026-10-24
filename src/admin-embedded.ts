@@ -1,6 +1,6 @@
 // AUTO-GENERATED — do not edit by hand.
 // Run `bun run scripts/build-admin-embedded.ts` to regenerate.
-// Source: admin/dist/ at 2026-10-01.
+// Source: admin/dist/ at 2026-10-24.
 //
 // Bun resolves the file: imports to a path that works at runtime even
 // inside a compiled binary (`bun build --compile`). The manifest maps
@@ -9,7 +9,7 @@
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
 import A_0_assets_index_C1D4HToW_css from '../admin/dist/assets/index-C1D4HToW.css' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
-import A_1_assets_index_DQpLv_A4_js from '../admin/dist/assets/index-DQpLv-A4.js' with { type: 'file' };
+import A_1_assets_index_CIou72sv_js from '../admin/dist/assets/index-CIou72sv.js' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
 import A_2_brand_JetBrainsMono_OFL_txt from '../admin/dist/brand/JetBrainsMono-OFL.txt' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
@@ -36,7 +36,7 @@ export interface AdminAsset {
 
 export const ADMIN_ASSETS: Record<string, AdminAsset> = {
   "/admin/assets/index-C1D4HToW.css": { path: A_0_assets_index_C1D4HToW_css as unknown as string, mime: "text/css; charset=utf-8" },
-  "/admin/assets/index-DQpLv-A4.js": { path: A_1_assets_index_DQpLv_A4_js as unknown as string, mime: "application/javascript; charset=utf-8" },
+  "/admin/assets/index-CIou72sv.js": { path: A_1_assets_index_CIou72sv_js as unknown as string, mime: "application/javascript; charset=utf-8" },
   "/admin/brand/JetBrainsMono-OFL.txt": { path: A_2_brand_JetBrainsMono_OFL_txt as unknown as string, mime: "text/plain; charset=utf-8" },
   "/admin/brand/README.txt": { path: A_3_brand_README_txt as unknown as string, mime: "text/plain; charset=utf-8" },
   "/admin/brand/apple-touch-icon.png": { path: A_4_brand_apple_touch_icon_png as unknown as string, mime: "image/png" },

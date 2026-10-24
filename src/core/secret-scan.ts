@@ -29,8 +29,17 @@
  */
 
 import { existsSync, readFileSync, statSync } from 'fs';
-import { isAbsolute, join, relative, sep } from 'path';
+import { isAbsolute, join, relative } from 'path';
 import { createHash } from 'crypto';
+import {
+  LABELED_CREDENTIAL_PATTERNS,
+  ECHO_MIN_CHARS_LABELED,
+  LABELED_PRECHECK_RE,
+  danglingLabel,
+  labeledEchoEligible,
+  labeledValueIsCredential,
+  newTableScanState, tableCredentialCells,
+} from './secret-scan-labeled.ts';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,10 +81,23 @@ export interface ScanOpts {
   workspaceRoot?: string;
   /** Opt-in generic high-entropy assignment heuristic. Default false. */
   highEntropy?: boolean;
+  /**
+   * Opt-in `labeled_credential` detector (secret-scan-labeled.ts): a value
+   * after a password / login / credentials label. Transcript pages and the
+   * transcript audit only. Default false.
+   */
+  labeledCredentials?: boolean;
+  /** Work counters the scan fills in (secret-scan-work.ts); absent means no counting. */
+  work?: ScanWork;
 }
 
-/** Name of the per-workspace allowlist override file. */
-export const SCAN_ALLOW_FILENAME = '.gbrain-scan-allow';
+export {
+  SCAN_ALLOW_FILENAME, ALLOWLIST_FINGERPRINT_MIN_HEX, loadWorkspaceAllowlist, globToRegExp, matchesGlob, valueAllowlisted, pathAllowlisted,
+} from './secret-scan-allowlist.ts';
+import { valueAllowlisted, pathAllowlisted } from './secret-scan-allowlist.ts';
+import { PUSH_SCAN_MAX_FILE_BYTES } from './page-size-policy.ts';
+import type { ScanWork } from './secret-scan-work.ts';
+export { createScanWork, type ScanWork } from './secret-scan-work.ts';
 
 // ── Patterns ────────────────────────────────────────────────────────────────
 //
@@ -104,8 +126,10 @@ interface CompiledPattern {
   entropyGated?: boolean;
   /** See CorePattern.precheck. */
   precheck?: (line: string) => boolean;
-  /** See CorePattern.validate. */
-  validate?: (value: string) => boolean;
+  /** See CorePattern.validate; `head` is the match text before the value. */
+  validate?: (value: string, head: string) => boolean;
+  /** Runs only on the line after one that ends in a dangling credential label of this form. */
+  continuation?: 'single' | 'pair';
 }
 
 interface CorePattern {
@@ -397,8 +421,8 @@ const PEM_LINE_MAX = 128;
 const PEM_LINE_MIN = 16;
 const PEM_INDENT_MAX = 16;
 const PEM_RFC1421_LINE_MAX = 256;
-const PEM_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/g;
-const PEM_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/g;
+export const PEM_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/g;
+export const PEM_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/g;
 
 type PemClaimKind = 'block' | 'forward' | 'backward';
 
@@ -464,7 +488,7 @@ function atCut(t: string, i: number): boolean {
 }
 
 /** FORWARD claim end for a BEGIN fence ending at `headerEnd` (== headerEnd when no body line follows). */
-function pemForwardEnd(t: string, headerEnd: number): number {
+export function pemForwardEnd(t: string, headerEnd: number): number {
   const n = t.length;
   const cap = headerEnd + PEM_BODY_MAX_CHARS;
   let pos = lineEndAfter(t, headerEnd);
@@ -496,7 +520,7 @@ function pemForwardEnd(t: string, headerEnd: number): number {
 }
 
 /** BACKWARD claim start for an END fence at `endStart`, never below `floor`; -1 when no body line precedes it. */
-function pemBackwardStart(t: string, endStart: number, floor: number): number {
+export function pemBackwardStart(t: string, endStart: number, floor: number): number {
   let p = endStart;
   while (endStart - p < PEM_INDENT_MAX && p > floor && isIndentCode(t.charCodeAt(p - 1))) p--;
   let le = lineEndBefore(t, p, floor);
@@ -676,7 +700,22 @@ function assignmentValueIsSecretShaped(value: string): boolean {
   return !(value.startsWith('/') && !LEGACY_ASSIGNMENT_VALUE_RE.test(value));
 }
 
+/**
+ * One compiled set per option combination. scanInternal is synchronous and
+ * resets each pattern's lastIndex before every line, so the 'g' regexes are
+ * safe to share; recompiling them per call cost a search response about a
+ * millisecond per scanned field (GBRA-156).
+ */
+const compiledPatterns = new Map<string, CompiledPattern[]>();
+
 function compilePatterns(opts: ScanOpts): CompiledPattern[] {
+  const key = `${opts.highEntropy === true}|${opts.labeledCredentials === true}`;
+  let compiled = compiledPatterns.get(key);
+  if (!compiled) compiledPatterns.set(key, compiled = buildPatterns(opts));
+  return compiled;
+}
+
+function buildPatterns(opts: ScanOpts): CompiledPattern[] {
   const out: CompiledPattern[] = CORE_PATTERNS.map((p) => ({
     name: p.name,
     // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- p.source is a compile-time literal from CORE_PATTERNS (never caller input); every pattern uses bounded quantifiers, pinned by test/secret-scan-perf.test.ts
@@ -697,6 +736,17 @@ function compilePatterns(opts: ScanOpts): CompiledPattern[] {
       });
     }
   }
+  if (opts.labeledCredentials) {
+    for (const p of LABELED_CREDENTIAL_PATTERNS) {
+      out.push({
+        name: 'labeled_credential',
+        // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- compile-time literal; bounded quantifiers, pinned by test/secret-scan-perf.test.ts
+        re: new RegExp(p.source, 'gi'),
+        ...(p.continuation ? { continuation: p.continuation } : { precheck: (line: string) => LABELED_PRECHECK_RE.test(line) }),
+        validate: (value: string, head: string) => labeledValueIsCredential(value, p.form, head),
+      });
+    }
+  }
   return out;
 }
 
@@ -704,10 +754,27 @@ function compilePatterns(opts: ScanOpts): CompiledPattern[] {
  * Bias-corrected (Miller-Madow) Shannon entropy in bits/char: the raw
  * estimate plus (distinct - 1) / (2 n ln 2). The entropy gate of
  * `high_entropy_assignment` reads this. Exported for tests.
+ *
+ * One histogram pass: the distinct count is the histogram's size, so the
+ * former second pass (`new Set(s).size`, ~80 % of the gate's time on a
+ * 4096-char value) is gone. The arithmetic is unchanged and the result is
+ * byte-identical to `shannonEntropy(s) + (new Set(s).size - 1) / (2 n ln 2)`
+ * (test/secret-scan-entropy-equivalence.test.ts): the same `for…of` code
+ * points, the same insertion-ordered sum, the same `s.length` (UTF-16 units)
+ * denominator. `work` counts the characters handed to the gate here, at the
+ * call, so a second call per candidate doubles `gateChars`.
  */
-export function correctedEntropy(s: string): number {
+export function correctedEntropy(s: string, work?: ScanWork): number {
+  if (work) work.gateChars += s.length;
   if (s.length === 0) return 0;
-  return shannonEntropy(s) + (new Set(s).size - 1) / (2 * s.length * Math.LN2);
+  const counts = new Map<string, number>();
+  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let bits = 0;
+  for (const n of counts.values()) {
+    const p = n / s.length;
+    bits -= p * Math.log2(p);
+  }
+  return bits + (counts.size - 1) / (2 * s.length * Math.LN2);
 }
 
 /** Shannon entropy in bits/char. Exported for tests. */
@@ -721,114 +788,6 @@ export function shannonEntropy(s: string): number {
     bits -= p * Math.log2(p);
   }
   return bits;
-}
-
-// ── Allowlist ───────────────────────────────────────────────────────────────
-
-/**
- * Load `<workspaceRoot>/.gbrain-scan-allow`: one glob-or-fingerprint per
- * line, `#` comments and blank lines ignored. Absent/unreadable file → []
- * (the shipped default allowlist is EMPTY [CX2-15]).
- */
-export function loadWorkspaceAllowlist(workspaceRoot: string): string[] {
-  try {
-    const p = join(workspaceRoot, SCAN_ALLOW_FILENAME);
-    if (!existsSync(p)) return [];
-    return readFileSync(p, 'utf-8')
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0 && !l.startsWith('#'));
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Minimal anchored glob → RegExp. `**` crosses `/`, `*` stays within a path
- * segment, `?` is one non-slash char. Shared by the scan allowlist and the
- * workspace-push deny-glob backstop (one glob dialect everywhere).
- */
-const GLOB_REGEX_CACHE = new Map<string, RegExp>();
-
-export function globToRegExp(glob: string): RegExp {
-  const cached = GLOB_REGEX_CACHE.get(glob);
-  if (cached) return cached;
-  let g = glob;
-  if (g.endsWith('/')) g += '**'; // `foo/` means everything under foo/
-  let re = '';
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i];
-    if (c === '*') {
-      if (g[i + 1] === '*') {
-        i++;
-        if (g[i + 1] === '/') {
-          re += '(?:.*/)?';
-          i++;
-        } else {
-          re += '.*';
-        }
-      } else {
-        re += '[^/]*';
-      }
-    } else if (c === '?') {
-      re += '[^/]';
-    } else if ('\\^$.|+()[]{}'.includes(c)) {
-      re += '\\' + c;
-    } else {
-      re += c;
-    }
-  }
-  const compiled = new RegExp(`^${re}$`);
-  GLOB_REGEX_CACHE.set(glob, compiled);
-  return compiled;
-}
-
-/**
- * Gitignore-flavored match: a glob WITHOUT `/` matches the basename at any
- * depth (`*.pem` catches `sub/dir/key.pem`); a glob WITH `/` is anchored at
- * the workspace root (`.gbrain/**`). Paths are normalized to `/` separators.
- */
-export function matchesGlob(glob: string, relPath: string): boolean {
-  const norm = relPath.split(sep).join('/');
-  if (!glob.includes('/')) {
-    const base = norm.slice(norm.lastIndexOf('/') + 1);
-    return globToRegExp(glob).test(base);
-  }
-  return globToRegExp(glob).test(norm);
-}
-
-function isFingerprintEntry(entry: string): boolean {
-  return entry.startsWith('sha256:');
-}
-
-/**
- * Minimum fingerprint-prefix length (hex chars) an allowlist entry must carry
- * to suppress a finding. 16 hex = 64 bits: an 8-hex (32-bit) floor was low
- * enough that a short allowlist entry could collide with an UNRELATED secret's
- * hash and silently un-report it. The emitted fingerprint is exactly 16 hex,
- * so a copy-pasted fingerprint still matches at the floor.
- */
-export const ALLOWLIST_FINGERPRINT_MIN_HEX = 16;
-
-/**
- * True when the full sha256 hex of a matched value is allowlisted (≥16-hex
- * prefix). Exported so the sensitivity scan (context/sensitivity-scan.ts)
- * honors the SAME `.gbrain-scan-allow` fingerprint mechanics for its
- * non-secret families (PII, blocklist, pattern-file) — one escape hatch,
- * one dialect.
- */
-export function valueAllowlisted(fullHex: string, allowlist: string[]): boolean {
-  for (const entry of allowlist) {
-    if (!isFingerprintEntry(entry)) continue;
-    const prefix = entry.slice('sha256:'.length).toLowerCase();
-    if (prefix.length >= ALLOWLIST_FINGERPRINT_MIN_HEX && fullHex.startsWith(prefix)) return true;
-  }
-  return false;
-}
-
-/** True when a file path is allowlisted by any glob entry. */
-export function pathAllowlisted(relPath: string, allowlist: string[]): boolean {
-  return allowlist.some((entry) => !isFingerprintEntry(entry) && matchesGlob(entry, relPath));
 }
 
 // ── Scanning ────────────────────────────────────────────────────────────────
@@ -857,6 +816,8 @@ interface RawHit extends LineSpan {
   line: number; // 1-based
   /** Absolute offset of `value` within the scanned text (redactFindings splices on it). */
   abs: number;
+  /** Absolute offset where the match that made this claim starts, its anchor included (<= abs). */
+  from: number;
   lineText: string;
   spans: LineSpans;
   /**
@@ -898,7 +859,7 @@ function scanPemBlocks(text: string, claims: PemClaim[]): RawHit[] {
     }
     const value = text.slice(c.start, c.end);
     const span: LineSpan = { pattern: 'private_key_pem', value, start: 0 };
-    const hit: RawHit = { ...span, line, abs: c.start, lineText: value, spans: { all: [span] } };
+    const hit: RawHit = { ...span, line, abs: c.start, from: c.start, lineText: value, spans: { all: [span] } };
     if (c.kind === 'forward' && c.end > c.headerEnd) hit.legacyValue = text.slice(c.start, c.headerEnd);
     hits.push(hit);
   }
@@ -920,6 +881,7 @@ function insideClaim(claims: PemClaim[], start: number, end: number): boolean {
 
 function scanInternal(text: string, opts: ScanOpts): RawHit[] {
   const patterns = compilePatterns(opts);
+  const work = opts.work;
   // PEM blocks first: their full-span value must be redacted before any
   // per-line replacement can touch the region (base64 bodies never match the
   // named patterns, so order is a belt-and-suspenders guarantee).
@@ -946,33 +908,44 @@ function scanInternal(text: string, opts: ScanOpts): RawHit[] {
   // redactFindings can splice the text once instead of searching it per
   // value.
   let offset = 0;
+  // W4.1: Markdown table state for the labeled lane (credential columns of the table being scanned).
+  const table = opts.labeledCredentials === true ? newTableScanState() : null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     const lineStart = offset;
     offset += line.length + 1;
-    if (line.length < 8) continue;
+    const dangling = opts.labeledCredentials === true && i > 0 ? danglingLabel(lines[i - 1] ?? '') : null;
+    const cells = table ? tableCredentialCells(line, lines[i + 1], table) : [];
+    if (line.length < 8 && !dangling && cells.length === 0) continue;
     // ENG-12: a line wholly inside a private-key claim is already redacted by
     // it; hits on it would only double-report (one key, one finding).
     if (pem.length > 0 && insideClaim(pem, lineStart, lineStart + line.length)) continue;
+    if (work) { work.linesScanned++; work.lineChars += line.length; }
     const spans: LineSpans = { all: [] };
     // Claimed-character bitmap behind the first-wins dedupe: allocated on the
     // line's FIRST hit only (most lines have none), then O(value) to test and
     // to mark. Same answer as scanning every prior span for an intersection.
     let taken: Uint8Array | null = null;
-    const claim = (pattern: string, value: string, start: number): void => {
+    const claim = (pattern: string, value: string, start: number, from: number): void => {
+      if (work) work.claims++;
       taken!.fill(1, start, start + value.length);
       // A hit entirely inside a private-key claim (a vendor-shaped run in a
       // key body on a line the claim only partly covers) still takes its
       // characters for the first-wins dedupe but is not reported.
       if (pem.length > 0 && insideClaim(pem, lineStart + start, lineStart + start + value.length)) return;
       spans.all.push({ pattern, value, start });
-      hits.push({ pattern, value, start, abs: lineStart + start, line: i + 1, lineText: line, spans });
+      hits.push({ pattern, value, start, abs: lineStart + start, from: lineStart + from, line: i + 1, lineText: line, spans });
     };
     for (const p of patterns) {
+      if (p.continuation && p.continuation !== dangling) continue;
       if (p.precheck && !p.precheck(line)) continue;
       p.re.lastIndex = 0;
       let m: RegExpExecArray | null;
-      while ((m = p.re.exec(line)) !== null) {
+      for (;;) {
+        if (work) work.regexExecs++;
+        m = p.re.exec(line);
+        if (m === null) break;
+        if (work) work.candidates[p.name] = (work.candidates[p.name] ?? 0) + 1;
         const value = m[2];
         const start = m.index + m[1].length;
         const end = start + value.length;
@@ -981,11 +954,18 @@ function scanInternal(text: string, opts: ScanOpts): RawHit[] {
         // The entropy gate judges the WHOLE matched value (the rule fired on
         // the assignment's value), before any overlap split.
         if (p.entropyGated && (!HIGH_ENTROPY_REQUIRES_DIGIT_RE.test(value) || !HIGH_ENTROPY_REQUIRES_NON_DIGIT_RE.test(value))) continue;
-        if (p.entropyGated && correctedEntropy(value) < HIGH_ENTROPY_MIN_BITS_PER_CHAR) continue;
-        if (p.validate && !p.validate(value)) continue;
+        if (p.entropyGated) {
+          if (correctedEntropy(value, work) < HIGH_ENTROPY_MIN_BITS_PER_CHAR) continue;
+          if (work) work.gatePassed++;
+        }
+        if (p.validate) {
+          if (work) work.validateCalls++;
+          if (!p.validate(value, m[1])) continue;
+        }
         if (!taken) {
           taken = new Uint8Array(line.length);
         } else if (anyTaken(taken, start, end)) {
+          if (work) work.unionSplits++;
           // UNION COVERAGE. An earlier pattern already claimed part of this
           // span. Attribution stays first-wins — a FULLY covered span is
           // skipped, so `Bearer <vendor key>` reports the vendor only — but
@@ -997,14 +977,15 @@ function scanInternal(text: string, opts: ScanOpts): RawHit[] {
           // the surrounding `db_url_credentials` span was dropped).
           for (let a = start, k = start; k <= end; k++) {
             if (k < end && !taken[k]) continue;
-            if (a < k) claim(p.name, line.slice(a, k), a);
+            if (a < k) claim(p.name, line.slice(a, k), a, m.index);
             a = k + 1;
           }
           continue;
         }
-        claim(p.name, value, start);
+        claim(p.name, value, start, m.index);
       }
     }
+    for (const c of cells) if (!taken || !anyTaken(taken, c.start, c.start + c.value.length)) { taken ??= new Uint8Array(line.length); claim('labeled_credential', c.value, c.start, c.start); }
   }
   return hits;
 }
@@ -1139,11 +1120,27 @@ export function scanText(text: string, opts: ScanOpts = {}): SecretFinding[] {
   return out;
 }
 
+/**
+ * `scanText` with each claim's absolute span [start, end) in `text` (UTF-16
+ * offsets of the claimed value) and `from`, where the match that made it
+ * starts: its anchor (`Bearer `, `Authorization: Basic `, an assignment
+ * key) or the boundary character before the value. An allowlisted claim keeps
+ * its span with `finding: null`, so the windowed scan (secret-scan-stream.ts)
+ * can still drop a seam's partial copy of it.
+ */
+export function scanTextSpans(text: string, opts: ScanOpts = {}): Array<{ start: number; end: number; from: number; finding: SecretFinding | null }> {
+  const allowlist = opts.allowlist ?? [];
+  return scanInternal(text, opts).map((hit) => {
+    const fullHex = sha256Hex(hit.value);
+    return { start: hit.abs, end: hit.abs + hit.value.length, from: hit.from, finding: valueAllowlisted(fullHex, allowlist) ? null : toFinding(hit, fullHex) };
+  });
+}
+
 /** Bytes to sniff for NUL when deciding content is binary. */
 export const BINARY_SNIFF_BYTES = 8192;
 
 /** scanFiles skips anything larger (the push gate applies the same cap). */
-export const SCAN_MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const SCAN_MAX_FILE_BYTES = PUSH_SCAN_MAX_FILE_BYTES;
 
 /** True when the first BINARY_SNIFF_BYTES of the buffer contain a NUL byte. */
 export function looksBinaryBuffer(buf: Uint8Array): boolean {
@@ -1232,7 +1229,10 @@ export function scanFiles(paths: string[], opts: ScanOpts = {}): SecretFinding[]
 // collision-safe: a value must clear its pattern's floor
 // (ECHO_MIN_CHARS_BEARER = 20, ECHO_MIN_CHARS_ENTROPY = 12 — the rules' own
 // floors, restated so a pattern edit alone can never widen the pass to
-// short, collision-prone values), must be at most ECHO_MAX_VALUE_CHARS long,
+// short, collision-prone values; an opted-in `labeled_credential` value
+// needs ECHO_MIN_CHARS_LABELED = 8 and must not be a stoplisted word, so
+// `pwd: 1234` never scrubs every later "1234"), must be at most
+// ECHO_MAX_VALUE_CHARS long,
 // and only the first ECHO_MAX_UNIQUE unique values in claim order — ONE cap
 // across both patterns — join. A value past either cap is still redacted at
 // its claimed span; only its echoes are the accepted miss.
@@ -1318,15 +1318,20 @@ export interface RedactionPlan {
   text: string;
   /** Claimed spans, sorted by absolute offset. */
   claimed: Array<{ abs: number; end: number; pattern: string }>;
+  /** The caller's work counters, carried to `applyRedaction` (echo sweeps are counted there). */
+  work?: ScanWork;
 }
 
 function addEchoValue(into: EchoDictionary, pattern: string, value: string): void {
+  if (pattern === 'labeled_credential' && !labeledEchoEligible(value)) return;
   const floor =
     pattern === 'bearer'
       ? ECHO_MIN_CHARS_BEARER
       : pattern === 'high_entropy_assignment'
         ? ECHO_MIN_CHARS_ENTROPY
-        : Infinity;
+        : pattern === 'labeled_credential'
+          ? ECHO_MIN_CHARS_LABELED
+          : Infinity;
   if (value.length < floor || value.length > ECHO_MAX_VALUE_CHARS) return;
   if (into.has(value) || into.size >= ECHO_MAX_UNIQUE) return;
   into.set(value, pattern);
@@ -1351,7 +1356,7 @@ export function planRedaction(text: string, opts: RedactOpts = {}): RedactionPla
     addEchoValue(echoValues, hit.pattern, hit.value);
   }
   claimed.sort((a, b) => a.abs - b.abs);
-  return { redactions, echoValues, text, claimed };
+  return { redactions, echoValues, text, claimed, ...(opts.work ? { work: opts.work } : {}) };
 }
 
 /**
@@ -1395,6 +1400,7 @@ export function applyRedaction(plan: RedactionPlan): string {
   const { text, claimed, echoValues } = plan;
   if (claimed.length === 0 && echoValues.size === 0) return text;
   const sweep = echoValues.size > 0 ? startEchoSweep(text, echoValues) : null;
+  if (sweep && plan.work) plan.work.echoSweeps++;
   const parts: string[] = [];
   // Copy text[from, to) through, splicing the echo occurrences inside it. At
   // each step the leftmost (then longest) occurrence at or beyond the cursor

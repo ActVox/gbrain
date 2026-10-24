@@ -16,6 +16,9 @@
       "backfill": [
         "./commands/backfill.ts"
       ],
+      "beliefs": [
+        "./commands/beliefs.ts"
+      ],
       "book-mirror": [
         "./commands/book-mirror.ts"
       ],
@@ -46,11 +49,21 @@
       "conversation-parser": [
         "./commands/conversation-parser.ts"
       ],
+      "core": [
+        "./commands/core.ts"
+      ],
+      "diag": [
+        "./commands/diag.ts"
+      ],
+      "edge-proposals": [
+        "./commands/edge-proposals.ts"
+      ],
       "edges-backfill": [
         "./commands/edges-backfill.ts"
       ],
       "embed": [
-        "./commands/embed.ts"
+        "./commands/embed.ts",
+        "./core/held-embedding.ts"
       ],
       "enrich": [
         "./commands/enrich.ts"
@@ -70,6 +83,9 @@
       ],
       "features": [
         "./commands/features.ts"
+      ],
+      "feedback": [
+        "./commands/feedback.ts"
       ],
       "files": [
         "./commands/files.ts"
@@ -100,6 +116,7 @@
       ],
       "migrate": [
         "./commands/migrate-embeddings.ts",
+        "./commands/migrate-graduation.ts",
         "./commands/migrate-engine.ts"
       ],
       "models": [
@@ -117,8 +134,15 @@
       "pages": [
         "./commands/pages.ts"
       ],
+      "pricing": [
+        "./commands/pricing.ts"
+      ],
       "quarantine": [
+        "./commands/trust.ts",
         "./commands/quarantine.ts"
+      ],
+      "questions": [
+        "./commands/questions.ts"
       ],
       "recall": [
         "./commands/recall.ts"
@@ -130,9 +154,12 @@
         "./commands/reindex.ts",
         "./commands/reindex-multimodal.ts",
         "./core/sync-concurrency.ts",
+        "./core/oversized-backfill.ts",
         "./commands/reindex-vectors.ts",
         "./commands/reindex-aliases.ts",
-        "./commands/reindex.ts"
+        "./commands/reindex.ts",
+        "./core/consent.ts",
+        "./core/ops/contract.ts"
       ],
       "reindex-code": [
         "./commands/reindex-code.ts"
@@ -156,6 +183,7 @@
         "./commands/salience.ts"
       ],
       "serve": [
+        "./core/serve-log.ts",
         "./commands/serve.ts"
       ],
       "skillopt": [
@@ -184,6 +212,12 @@
       ],
       "transcripts": [
         "./commands/transcripts.ts"
+      ],
+      "trust": [
+        "./commands/trust-claim.ts",
+        "./core/eligibility/explain.ts",
+        "./core/eligibility/scan.ts",
+        "./core/trust/backfill.ts"
       ],
       "waiting": [
         "./commands/loops.ts"

@@ -2,6 +2,19 @@
   "golden": {
     "domain": "pages",
     "methods": {
+      "countStaleFrontmatterKeyPages": {
+        "default": [
+          {
+            "lane": "pool",
+            "params": [
+              "array<string>",
+              "array<string>"
+            ],
+            "sql": "SELECT source_id, count(*)::bigint AS n FROM pages WHERE source_id = ANY($1::text[]) AND deleted_at IS NULL AND frontmatter ?| $2::text[] GROUP BY source_id ORDER BY source_id",
+            "textSha256": "a6aa5270504c70e330a9c23731f7f2c7f2efbf90b16c48a83e43195e537930bd"
+          }
+        ]
+      },
       "countStalePagesForExtraction": {
         "attendance-blocked+sourceId": [
           {
@@ -10,8 +23,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at) AND source_id = $2 AND links_attendance_blocked_revision = knowledge_revision",
-            "textSha256": "be4f84c6281e3977a29eab4c2d35b5cab52a54f87936fb84eed35ac55b5a3bf3"
+            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND NOT (COALESCE(pages.frontmatter, '{}'::jsonb) ? 'quarantine') AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at OR id IN (SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND t.slug = w.target_ref AND t.deleted_at IS NULL WHERE t.updated_at > w.checked_at UNION SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND regexp_replace(t.slug, '^.*/', '') = w.target_ref AND t.deleted_at IS NULL WHERE w.ref_kind = 'name' AND t.updated_at > w.checked_at)) AND source_id = $2 AND links_attendance_blocked_revision = knowledge_revision",
+            "textSha256": "002fabcfde69b77bcdf854b15c11e46e4c797cde1be1973e34ab73df3d327bd7"
           }
         ],
         "attendance-exclude": [
@@ -20,16 +33,16 @@
             "params": [
               "string"
             ],
-            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at) AND links_attendance_blocked_revision IS DISTINCT FROM knowledge_revision",
-            "textSha256": "ac18ba62c816b3be4564d5a24bdc69304c45d24022c7ade0de8a81d0b36e3123"
+            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND NOT (COALESCE(pages.frontmatter, '{}'::jsonb) ? 'quarantine') AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at OR id IN (SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND t.slug = w.target_ref AND t.deleted_at IS NULL WHERE t.updated_at > w.checked_at UNION SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND regexp_replace(t.slug, '^.*/', '') = w.target_ref AND t.deleted_at IS NULL WHERE w.ref_kind = 'name' AND t.updated_at > w.checked_at)) AND links_attendance_blocked_revision IS DISTINCT FROM knowledge_revision",
+            "textSha256": "e568ead5dc5191a909c2e58fea58356a5acde8fcda59cd40b091727b964fb6a3"
           }
         ],
         "default": [
           {
             "lane": "pool",
             "params": [],
-            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND (links_extracted_at IS NULL OR updated_at > links_extracted_at)",
-            "textSha256": "3f9c86c575246f3a4f112b931aa51361c5e7b4c165330c026843dcb614072c94"
+            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND NOT (COALESCE(pages.frontmatter, '{}'::jsonb) ? 'quarantine') AND (links_extracted_at IS NULL OR updated_at > links_extracted_at OR id IN (SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND t.slug = w.target_ref AND t.deleted_at IS NULL WHERE t.updated_at > w.checked_at UNION SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND regexp_replace(t.slug, '^.*/', '') = w.target_ref AND t.deleted_at IS NULL WHERE w.ref_kind = 'name' AND t.updated_at > w.checked_at))",
+            "textSha256": "2288e7b188811bbaa877f1d9a13e4148bbee4ed200d7ba438a12737c69ef72e5"
           }
         ],
         "versionTs+sourceId": [
@@ -39,8 +52,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at) AND source_id = $2",
-            "textSha256": "fb4400e83c4a8ed0cf977fad5a1bd11c8336d3be942ba26f6e15486c2561dc3a"
+            "sql": "SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND NOT (COALESCE(pages.frontmatter, '{}'::jsonb) ? 'quarantine') AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at OR id IN (SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND t.slug = w.target_ref AND t.deleted_at IS NULL WHERE t.updated_at > w.checked_at UNION SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND regexp_replace(t.slug, '^.*/', '') = w.target_ref AND t.deleted_at IS NULL WHERE w.ref_kind = 'name' AND t.updated_at > w.checked_at)) AND source_id = $2",
+            "textSha256": "57ff70c7578ba9ff9e97f7d18593cb82a92ede5115e7cbf45e9b6d29a8aa2a3b"
           }
         ]
       },
@@ -64,8 +77,8 @@
               "string",
               "string"
             ],
-            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING",
-            "textSha256": "fa56fa770a66caa8ae77b19c2c3ae9caac336d8e8281bc16f09d36a7fcdd74fd"
+            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) SELECT incarnation,$1 FROM sources WHERE id=$2 ON CONFLICT DO NOTHING",
+            "textSha256": "91584b13aae786f054e246bcc667c9ebe8c065d61b42d5ae775634739bce9f54"
           },
           {
             "lane": "tx",
@@ -73,8 +86,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug FROM page_write_guards WHERE source_incarnation=$1::uuid AND slug=$2 FOR UPDATE",
-            "textSha256": "3d08e10394edab70fb78946e378dd11528213526b214a8516d8cf3825e87ac19"
+            "sql": "SELECT g.slug FROM page_write_guards g JOIN sources s ON s.incarnation=g.source_incarnation WHERE s.id=$1 AND g.slug=$2 FOR UPDATE OF g",
+            "textSha256": "becdf4418f95796c9bab86a61f0f6e9d42bba2f74baedfe40ba9d9705977d77a"
           },
           {
             "lane": "tx",
@@ -93,8 +106,8 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "676e5a10b94e68884b82636a9286cf562fe3b49751b761d6758c9b883ee63140"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "d49abdfac0d474258cc62de6b765f6c2bd3d4dc6f1098394ab26b05e48e8bc1c"
           },
           {
             "lane": "tx",
@@ -207,6 +220,19 @@
           }
         ]
       },
+      "findDuplicatePages": {
+        "default": [
+          {
+            "lane": "pool",
+            "params": [
+              "string",
+              "string"
+            ],
+            "sql": "SELECT DISTINCT ON (k.n) k.n, p.id, p.slug FROM jsonb_to_recordset($1::text::jsonb) AS k(n int, hash text, frontmatter_id text, exclude_slug text) JOIN pages p ON p.source_id = $2 AND p.deleted_at IS NULL AND (p.content_hash = k.hash OR (p.frontmatter->>'id' = k.frontmatter_id AND k.frontmatter_id IS NOT NULL)) AND (k.exclude_slug IS NULL OR p.slug <> k.exclude_slug) ORDER BY k.n, (p.frontmatter->>'id' IS NOT DISTINCT FROM k.frontmatter_id) DESC, p.id",
+            "textSha256": "5b29f12f7789361b6f440a9ce65564b4f85bfd8941cf37df432b1972db547798"
+          }
+        ]
+      },
       "getAllSlugs": {
         "default": [
           {
@@ -236,8 +262,8 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.deleted_at IS NULL ORDER BY (p.slug=$2) DESC, (p.source_id=$3) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "d5b9e80760a00e92ff197976d71394d7dee3bb507517d6e44eb8dd0a8abb2341"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.deleted_at IS NULL ORDER BY (p.slug=$2) DESC, (p.source_id=$3) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "87d87ff8ff806282cdbee4a6dc503d77832d78df31a180f4af5251fdd74ab03f"
           }
         ],
         "includeDeleted": [
@@ -248,8 +274,8 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 ORDER BY (p.slug=$2) DESC, (p.source_id=$3) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "5da580e700637e9914bc6d2dc1dc1d42ccaa117126e916beba20def642b685fe"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 ORDER BY (p.slug=$2) DESC, (p.source_id=$3) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "11f9fe77a38b85517d56455ef442559890bf3082bafc0fafee80f1366b289ad5"
           }
         ],
         "sourceId": [
@@ -261,8 +287,8 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 AND p.deleted_at IS NULL ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "22ce659b8fb6104bf08b6ee101bd0e0bafb2769bb7c399380a38e9a4a26c693e"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 AND p.deleted_at IS NULL ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "993c9cf80610982d62aaa83f0b1f333abd84a5c9e2783cece6875b37787c1e45"
           }
         ],
         "sourceIds": [
@@ -274,8 +300,8 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=ANY($2::text[]) AND p.deleted_at IS NULL ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "77849895353db0e79841cf998b3a7bd2382c133a171ee34c4bbee7d17c47f7a7"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=ANY($2::text[]) AND p.deleted_at IS NULL ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "e0704171c48ac18a258e0ac534c57ab4f09b2ef1e7e06b0b79f7c7e31df2d94b"
           }
         ]
       },
@@ -298,8 +324,8 @@
             "params": [
               "string"
             ],
-            "sql": "SELECT pv.* FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 ORDER BY pv.snapshot_at DESC",
-            "textSha256": "f395d4b0edaab8def000a29ff2de0f3655d372663c97a6185c5ddc139051f8a1"
+            "sql": "SELECT pv.id, pv.page_id, pv.compiled_truth, pv.frontmatter, pv.snapshot_at, pv.knowledge_revision, pv.timeline, pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path, pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND NOT EXISTS (SELECT 1 FROM needs_rederive elig_nr WHERE elig_nr.derived_table = 'pages' AND elig_nr.derived_id = p.id::text) ORDER BY pv.snapshot_at DESC, pv.id DESC",
+            "textSha256": "29b6b9d32e702ffd6daf4ded014ec4077c25826da4224bd65137ca7750583309"
           }
         ],
         "excludePrivate": [
@@ -308,8 +334,31 @@
             "params": [
               "string"
             ],
-            "sql": "SELECT pv.* FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND (COALESCE(p.frontmatter->>'visibility', CASE WHEN (p.type = 'atom' OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT (CASE WHEN p.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = p.source_id AND derived_origin.slug = p.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (p.type = 'atom' OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = p.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) ELSE false END)) AND COALESCE(pv.frontmatter->>'visibility', CASE WHEN (pv.type = 'atom' OR (pv.type = 'concept' AND pv.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' ORDER BY pv.snapshot_at DESC",
-            "textSha256": "e439957f795c0c06fc82bbf0de4b84b2050b72f9a59a13266e08afd1e635be28"
+            "sql": "SELECT pv.id, pv.page_id, pv.compiled_truth, pv.frontmatter, pv.snapshot_at, pv.knowledge_revision, pv.timeline, pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path, pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND ((COALESCE(p.frontmatter->>'visibility', CASE WHEN (p.type IN ('atom', 'question') OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(p.frontmatter ? 'pinned_question', false) AND NOT (p.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(p.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(p.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN p.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = p.source_id AND derived_origin.slug = p.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (p.type IN ('atom', 'question') OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = p.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) WHEN p.type = 'event' AND p.frontmatter->>'captured_via' LIKE 'life-chronicle:%' THEN NOT EXISTS (SELECT 1 FROM pages chronicle_origin WHERE chronicle_origin.source_id = p.source_id AND chronicle_origin.slug = p.frontmatter->'event'->>'depth' AND (COALESCE(chronicle_origin.frontmatter->>'visibility', CASE WHEN (chronicle_origin.type IN ('atom', 'question') OR (chronicle_origin.type = 'concept' AND chronicle_origin.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(chronicle_origin.frontmatter ? 'pinned_question', false) AND NOT (chronicle_origin.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(chronicle_origin.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(chronicle_origin.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = chronicle_origin.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') = 'array' THEN chronicle_origin.frontmatter->'derived_from' ELSE jsonb_build_array(chronicle_origin.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) ELSE false END) AND NOT (CASE WHEN jsonb_typeof(p.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = p.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(p.frontmatter->'derived_from') = 'array' THEN p.frontmatter->'derived_from' ELSE jsonb_build_array(p.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) AND (COALESCE(pv.frontmatter->>'visibility', CASE WHEN (pv.type IN ('atom', 'question') OR (pv.type = 'concept' AND pv.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(pv.frontmatter ? 'pinned_question', false) AND NOT (pv.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(pv.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(pv.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT EXISTS (SELECT 1 FROM needs_rederive elig_nr WHERE elig_nr.derived_table = 'pages' AND elig_nr.derived_id = p.id::text) ORDER BY pv.snapshot_at DESC, pv.id DESC",
+            "textSha256": "aaed47f49d37273586891c43bfd230638be6b3bea7683a931e9cf412f73f121a"
+          }
+        ],
+        "limit": [
+          {
+            "lane": "pool",
+            "params": [
+              "string",
+              "string",
+              "number"
+            ],
+            "sql": "SELECT pv.id, pv.page_id, pv.compiled_truth, pv.frontmatter, pv.snapshot_at, pv.knowledge_revision, pv.timeline, pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path, pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND p.source_id = $2 AND NOT EXISTS (SELECT 1 FROM needs_rederive elig_nr WHERE elig_nr.derived_table = 'pages' AND elig_nr.derived_id = p.id::text) ORDER BY pv.snapshot_at DESC, pv.id DESC LIMIT $3",
+            "textSha256": "f6423b98fbe2e48521d63310d555c5be3be7cc979a60fdec8e2e6b903ce70316"
+          }
+        ],
+        "metadataOnly": [
+          {
+            "lane": "pool",
+            "params": [
+              "string",
+              "array<string>"
+            ],
+            "sql": "SELECT pv.id, pv.page_id, pv.frontmatter, pv.snapshot_at, pv.knowledge_revision, pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path, pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND p.source_id = ANY($2::text[]) AND NOT EXISTS (SELECT 1 FROM needs_rederive elig_nr WHERE elig_nr.derived_table = 'pages' AND elig_nr.derived_id = p.id::text) ORDER BY pv.snapshot_at DESC, pv.id DESC",
+            "textSha256": "dfc23c45664ee5a287d6723b597867c16305fa4ca28659a507f16fa610da9590"
           }
         ],
         "sourceId": [
@@ -319,8 +368,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT pv.* FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND p.source_id = $2 ORDER BY pv.snapshot_at DESC",
-            "textSha256": "4c7670d05a65254d3c3d2b0495007c78f42103badfb84953768a10bb8b35c66b"
+            "sql": "SELECT pv.id, pv.page_id, pv.compiled_truth, pv.frontmatter, pv.snapshot_at, pv.knowledge_revision, pv.timeline, pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path, pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND p.source_id = $2 AND NOT EXISTS (SELECT 1 FROM needs_rederive elig_nr WHERE elig_nr.derived_table = 'pages' AND elig_nr.derived_id = p.id::text) ORDER BY pv.snapshot_at DESC, pv.id DESC",
+            "textSha256": "8c518137389b8e440843030f823817763a55aaa35e4386743b3ba3d216f1977a"
           }
         ],
         "sourceIds": [
@@ -330,8 +379,8 @@
               "string",
               "array<string>"
             ],
-            "sql": "SELECT pv.* FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND p.source_id = ANY($2::text[]) ORDER BY pv.snapshot_at DESC",
-            "textSha256": "70ea471f52433318a287a59f5d743f1c6764c45e6c486348d75729e9212b78aa"
+            "sql": "SELECT pv.id, pv.page_id, pv.compiled_truth, pv.frontmatter, pv.snapshot_at, pv.knowledge_revision, pv.timeline, pv.title, pv.type, pv.tags, pv.is_deleted, pv.source_path, pv.body_storage, pv.body_generation, pv.body_bytes, pv.content_hash FROM page_versions pv JOIN pages p ON p.id = pv.page_id WHERE p.slug = $1 AND p.source_id = ANY($2::text[]) AND NOT EXISTS (SELECT 1 FROM needs_rederive elig_nr WHERE elig_nr.derived_table = 'pages' AND elig_nr.derived_id = p.id::text) ORDER BY pv.snapshot_at DESC, pv.id DESC",
+            "textSha256": "15f2ef2789ab2b877b76f6b87a460dc5ef4b5bc339616aaa6487403fabe6d47f"
           }
         ]
       },
@@ -361,8 +410,8 @@
               "null",
               "number"
             ],
-            "sql": "WITH sampled AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, (SELECT COUNT(*) FROM page_links pl WHERE pl.to_page_id = p.id) AS connection_count FROM pages p WHERE p.deleted_at IS NULL AND (cardinality($1::text[]) = 0 OR NOT (p.slug = ANY($2::text[]))) AND ( ($3::text[] IS NOT NULL AND p.source_id = ANY($4::text[])) OR ($5::text[] IS NULL AND $6::text IS NOT NULL AND p.source_id = $7) OR ($8::text[] IS NULL AND $9::text IS NULL) ) ORDER BY RANDOM() LIMIT $10 ) SELECT s.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = s.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM sampled s",
-            "textSha256": "717e2ebe0018ed27e4e5d34bbccc61aad0f040b397b236af2c259bf77ba0439b"
+            "sql": "WITH sampled AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, GREATEST(p.last_retrieved_at, r.last_retrieved_at) AS last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, (SELECT COUNT(*) FROM page_links pl WHERE pl.to_page_id = p.id) AS connection_count FROM pages p LEFT JOIN page_retrievals r ON r.page_id = p.id WHERE p.deleted_at IS NULL AND p.body_storage = 'inline' AND (cardinality($1::text[]) = 0 OR NOT (p.slug = ANY($2::text[]))) AND ( ($3::text[] IS NOT NULL AND p.source_id = ANY($4::text[])) OR ($5::text[] IS NULL AND $6::text IS NOT NULL AND p.source_id = $7) OR ($8::text[] IS NULL AND $9::text IS NULL) ) ORDER BY RANDOM() LIMIT $10 ) SELECT s.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = s.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM sampled s",
+            "textSha256": "1b1990a71db7953aceea9032390a75b315572adfdfa6e5dc549525844d7fd884"
           }
         ],
         "seed": [
@@ -392,8 +441,8 @@
               "string",
               "number"
             ],
-            "sql": "WITH sampled AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, (SELECT COUNT(*) FROM page_links pl WHERE pl.to_page_id = p.id) AS connection_count FROM pages p WHERE p.deleted_at IS NULL AND (cardinality($1::text[]) = 0 OR NOT (p.slug = ANY($2::text[]))) AND ( ($3::text[] IS NOT NULL AND p.source_id = ANY($4::text[])) OR ($5::text[] IS NULL AND $6::text IS NOT NULL AND p.source_id = $7) OR ($8::text[] IS NULL AND $9::text IS NULL) ) ORDER BY RANDOM() LIMIT $10 ) SELECT s.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = s.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM sampled s",
-            "textSha256": "717e2ebe0018ed27e4e5d34bbccc61aad0f040b397b236af2c259bf77ba0439b"
+            "sql": "WITH sampled AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, GREATEST(p.last_retrieved_at, r.last_retrieved_at) AS last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, (SELECT COUNT(*) FROM page_links pl WHERE pl.to_page_id = p.id) AS connection_count FROM pages p LEFT JOIN page_retrievals r ON r.page_id = p.id WHERE p.deleted_at IS NULL AND p.body_storage = 'inline' AND (cardinality($1::text[]) = 0 OR NOT (p.slug = ANY($2::text[]))) AND ( ($3::text[] IS NOT NULL AND p.source_id = ANY($4::text[])) OR ($5::text[] IS NULL AND $6::text IS NOT NULL AND p.source_id = $7) OR ($8::text[] IS NULL AND $9::text IS NULL) ) ORDER BY RANDOM() LIMIT $10 ) SELECT s.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = s.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM sampled s",
+            "textSha256": "1b1990a71db7953aceea9032390a75b315572adfdfa6e5dc549525844d7fd884"
           },
           {
             "event": "commit",
@@ -409,8 +458,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $1 OFFSET $2",
-            "textSha256": "b53eedb61eb045a5e22ea5a53328ab5e14d8af00e052458389fa75c7f09b92c1"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $1 OFFSET $2",
+            "textSha256": "afebc8c006e1778b46d5f1904b8b6443c06d9fa54e7d74e405cdae5a3db9a354"
           }
         ],
         "effective_after": [
@@ -421,8 +470,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL AND p.effective_date >= $1::timestamptz ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "e300dc2ea65cbb6ec63120ab02e17948c47ce081dca436bc2dcfd72fd347d6a8"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL AND p.effective_date >= $1::timestamptz ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "ab496548df66feb6509bd94bd252bb8450ce1bacd31ce623e6f19eadbdd5be8b"
           }
         ],
         "effective_before": [
@@ -433,8 +482,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL AND p.effective_date <= $1::timestamptz ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "4b3c992ab60c2c856fbf45771893902242c5acdba7cbca9a54f05536acf7dda8"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL AND p.effective_date <= $1::timestamptz ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "4fca7c1cb5a3bf528dd3191386e43eb5ecf2f1fe368dfbba8adbb7d5b9a69679"
           }
         ],
         "excludePrivate": [
@@ -444,8 +493,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL AND (COALESCE(p.frontmatter->>'visibility', CASE WHEN (p.type = 'atom' OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT (CASE WHEN p.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = p.source_id AND derived_origin.slug = p.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (p.type = 'atom' OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = p.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) ELSE false END)) ORDER BY p.updated_at DESC LIMIT $1 OFFSET $2",
-            "textSha256": "94b4efb4775f893ca7b3adb34748bf0a65a323936a84ffee50c8dd0f62191123"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL AND ((COALESCE(p.frontmatter->>'visibility', CASE WHEN (p.type IN ('atom', 'question') OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(p.frontmatter ? 'pinned_question', false) AND NOT (p.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(p.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(p.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN p.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = p.source_id AND derived_origin.slug = p.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (p.type IN ('atom', 'question') OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = p.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) WHEN p.type = 'event' AND p.frontmatter->>'captured_via' LIKE 'life-chronicle:%' THEN NOT EXISTS (SELECT 1 FROM pages chronicle_origin WHERE chronicle_origin.source_id = p.source_id AND chronicle_origin.slug = p.frontmatter->'event'->>'depth' AND (COALESCE(chronicle_origin.frontmatter->>'visibility', CASE WHEN (chronicle_origin.type IN ('atom', 'question') OR (chronicle_origin.type = 'concept' AND chronicle_origin.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(chronicle_origin.frontmatter ? 'pinned_question', false) AND NOT (chronicle_origin.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(chronicle_origin.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(chronicle_origin.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = chronicle_origin.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') = 'array' THEN chronicle_origin.frontmatter->'derived_from' ELSE jsonb_build_array(chronicle_origin.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) ELSE false END) AND NOT (CASE WHEN jsonb_typeof(p.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = p.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(p.frontmatter->'derived_from') = 'array' THEN p.frontmatter->'derived_from' ELSE jsonb_build_array(p.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $1 OFFSET $2",
+            "textSha256": "56d9c5342445dc89d3d167306b8b65039ffe836112464fe25ca2b86938fd9d80"
           }
         ],
         "includeDeleted": [
@@ -455,8 +504,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 ORDER BY p.updated_at DESC LIMIT $1 OFFSET $2",
-            "textSha256": "88a25ae800a30123e92501a9c7fd7d569c5649352cd7b9fbb67acb2609d14c78"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $1 OFFSET $2",
+            "textSha256": "7111a5f4a6e015491a90a5a04c87c262836328dfe4cf08a563ea9bab6f6cb313"
           }
         ],
         "slugPrefix": [
@@ -467,8 +516,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.slug LIKE $1 ESCAPE '\\' AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "c3d77b145e83c4b5d27b3c2c4be1ab39dfa2de02ec0a5f6e80d89807e8b314d9"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.slug LIKE $1 ESCAPE '\\' AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "1c85149b8022246208b00e06ba72bdabcf8f3c554c73c3586c6dd36307133066"
           }
         ],
         "sort": [
@@ -479,7 +528,7 @@
               "number"
             ],
             "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.deleted_at IS NULL ORDER BY p.slug ASC, p.source_id ASC, p.id ASC LIMIT $1 OFFSET $2",
-            "textSha256": "f2142b0f2a082558ad2c58ec5b9ed6ad074c3b2566d31b7cbe580372c533d765"
+            "textSha256": "9528be19bc9bdfc8cd83599978a248425c6d756ec6fc2b1d40b6ba0bae361fce"
           }
         ],
         "sourceId": [
@@ -490,8 +539,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.source_id = $1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "af95db9a73f91d9b0e61ad64b5e86e8dd96f9002dc570d21f0768312fce390b7"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.source_id = $1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "0b7ce1d18c431b24eca0237e7a8f2cc72e08c2e6c389c73f7e16273aec8907db"
           }
         ],
         "sourceIds": [
@@ -502,8 +551,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.source_id = ANY($1::text[]) AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "11551be34c7fbe0730ac398ee6cd5adc3f3e584208fdda55910b1a977c00c638"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.source_id = ANY($1::text[]) AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "8734246416f862843af720bc788f75f733bd455b20ed4fd8f79a1e648e0d498c"
           }
         ],
         "tag": [
@@ -514,8 +563,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p JOIN tags t ON t.page_id = p.id WHERE 1=1 AND t.tag = $1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "4c16627334aff5a4ae92e92e075f56a3bab769967cc0160ae82af805be9a1683"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p JOIN tags t ON t.page_id = p.id WHERE 1=1 AND t.tag = $1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "a822dd046fae47e749537747876a845f6beab727cb54680456ff7fea723c8e79"
           }
         ],
         "type": [
@@ -526,8 +575,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.type = $1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "142cd63350c7d54827843daeca3261efbd6589ef71e31b06fafc7ff5ac25f83f"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.type = $1 AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "6f939279c2d90ecb8217ef33a923bf54328fd994a3b43c5c0d0c33dc5559a4e5"
           }
         ],
         "updatedAfterKeyset": [
@@ -540,8 +589,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND (p.updated_at > $1::timestamptz OR (p.updated_at = $2::timestamptz AND p.slug > $3)) AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $4 OFFSET $5",
-            "textSha256": "9a681698e0e8f5db467af463257f72afd33c8bf51ac91ae09b7119c8ace39e9c"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND (p.updated_at > $1::text::timestamptz OR (p.updated_at = $2::text::timestamptz AND p.slug > $3)) AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $4 OFFSET $5",
+            "textSha256": "5624972aa552ba952b2321663a59a0ac2e0f7f1684f9676ef317da8b3e0149b3"
           }
         ],
         "updated_after": [
@@ -552,8 +601,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.updated_at > $1::timestamptz AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT $2 OFFSET $3",
-            "textSha256": "1df2d216e9f3e7a7b13e7e2c765a1b87e086d9367ce7540d13b7de62be8bf004"
+            "sql": "SELECT p.*, to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages p WHERE 1=1 AND p.updated_at > $1::text::timestamptz AND p.deleted_at IS NULL ORDER BY p.updated_at DESC, p.slug DESC, p.source_id DESC, p.id DESC LIMIT $2 OFFSET $3",
+            "textSha256": "a1c730170025919ab78bd8bd2f5b62dc41d02fc57d374e5418f0836ae1e4978d"
           }
         ]
       },
@@ -577,8 +626,8 @@
               "boolean",
               "number"
             ],
-            "sql": "WITH prefix_pages AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, COUNT(pl.id) AS connection_count FROM pages p LEFT JOIN page_links pl ON pl.to_page_id = p.id WHERE p.deleted_at IS NULL AND substring(p.slug from '^[^/]+/[^/]+') = ANY($1::text[]) AND (cardinality($2::text[]) = 0 OR NOT (p.slug = ANY($3::text[]))) AND ( ($4::text[] IS NOT NULL AND p.source_id = ANY($5::text[])) OR ($6::text[] IS NULL AND $7::text IS NOT NULL AND p.source_id = $8) OR ($9::text[] IS NULL AND $10::text IS NULL) ) GROUP BY p.id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at ), ranked AS ( SELECT pp.*, (CASE WHEN $11::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($12::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) AS stale_score, ROW_NUMBER() OVER ( PARTITION BY pp.prefix ORDER BY (CASE WHEN $13::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($14::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) DESC, pp.connection_count DESC, pp.slug ASC ) AS rn FROM prefix_pages pp ), with_chunk AS ( SELECT r.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = r.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM ranked r WHERE r.rn = 1 ) SELECT page_id, slug, source_id, title, compiled_truth, last_retrieved_at, prefix, connection_count, representative_chunk_id FROM with_chunk ORDER BY prefix",
-            "textSha256": "38b0cdcd98c314cd347fa9433fd5dcc0b2ed672bdc4eafecf8dad90fa26de590"
+            "sql": "WITH prefix_pages AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, GREATEST(p.last_retrieved_at, r.last_retrieved_at) AS last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, COUNT(pl.id) AS connection_count FROM pages p LEFT JOIN page_retrievals r ON r.page_id = p.id LEFT JOIN page_links pl ON pl.to_page_id = p.id WHERE p.deleted_at IS NULL AND p.body_storage = 'inline' AND substring(p.slug from '^[^/]+/[^/]+') = ANY($1::text[]) AND (cardinality($2::text[]) = 0 OR NOT (p.slug = ANY($3::text[]))) AND ( ($4::text[] IS NOT NULL AND p.source_id = ANY($5::text[])) OR ($6::text[] IS NULL AND $7::text IS NOT NULL AND p.source_id = $8) OR ($9::text[] IS NULL AND $10::text IS NULL) ) GROUP BY p.id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at, r.last_retrieved_at ), ranked AS ( SELECT pp.*, (CASE WHEN $11::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($12::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) AS stale_score, ROW_NUMBER() OVER ( PARTITION BY pp.prefix ORDER BY (CASE WHEN $13::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($14::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) DESC, pp.connection_count DESC, pp.slug ASC ) AS rn FROM prefix_pages pp ), with_chunk AS ( SELECT r.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = r.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM ranked r WHERE r.rn = 1 ) SELECT page_id, slug, source_id, title, compiled_truth, last_retrieved_at, prefix, connection_count, representative_chunk_id FROM with_chunk ORDER BY prefix",
+            "textSha256": "326299e6bf501ac95c676f7e32ac50dbef1a33db37db88efa2bf5e1a8dc67138"
           }
         ],
         "sourceIds": [
@@ -600,8 +649,24 @@
               "boolean",
               "number"
             ],
-            "sql": "WITH prefix_pages AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, COUNT(pl.id) AS connection_count FROM pages p LEFT JOIN page_links pl ON pl.to_page_id = p.id WHERE p.deleted_at IS NULL AND substring(p.slug from '^[^/]+/[^/]+') = ANY($1::text[]) AND (cardinality($2::text[]) = 0 OR NOT (p.slug = ANY($3::text[]))) AND ( ($4::text[] IS NOT NULL AND p.source_id = ANY($5::text[])) OR ($6::text[] IS NULL AND $7::text IS NOT NULL AND p.source_id = $8) OR ($9::text[] IS NULL AND $10::text IS NULL) ) GROUP BY p.id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at ), ranked AS ( SELECT pp.*, (CASE WHEN $11::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($12::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) AS stale_score, ROW_NUMBER() OVER ( PARTITION BY pp.prefix ORDER BY (CASE WHEN $13::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($14::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) DESC, pp.connection_count DESC, pp.slug ASC ) AS rn FROM prefix_pages pp ), with_chunk AS ( SELECT r.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = r.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM ranked r WHERE r.rn = 1 ) SELECT page_id, slug, source_id, title, compiled_truth, last_retrieved_at, prefix, connection_count, representative_chunk_id FROM with_chunk ORDER BY prefix",
-            "textSha256": "38b0cdcd98c314cd347fa9433fd5dcc0b2ed672bdc4eafecf8dad90fa26de590"
+            "sql": "WITH prefix_pages AS ( SELECT p.id AS page_id, p.slug, p.source_id, p.title, p.compiled_truth, GREATEST(p.last_retrieved_at, r.last_retrieved_at) AS last_retrieved_at, substring(p.slug from '^[^/]+/[^/]+') AS prefix, COUNT(pl.id) AS connection_count FROM pages p LEFT JOIN page_retrievals r ON r.page_id = p.id LEFT JOIN page_links pl ON pl.to_page_id = p.id WHERE p.deleted_at IS NULL AND p.body_storage = 'inline' AND substring(p.slug from '^[^/]+/[^/]+') = ANY($1::text[]) AND (cardinality($2::text[]) = 0 OR NOT (p.slug = ANY($3::text[]))) AND ( ($4::text[] IS NOT NULL AND p.source_id = ANY($5::text[])) OR ($6::text[] IS NULL AND $7::text IS NOT NULL AND p.source_id = $8) OR ($9::text[] IS NULL AND $10::text IS NULL) ) GROUP BY p.id, p.slug, p.source_id, p.title, p.compiled_truth, p.last_retrieved_at, r.last_retrieved_at ), ranked AS ( SELECT pp.*, (CASE WHEN $11::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($12::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) AS stale_score, ROW_NUMBER() OVER ( PARTITION BY pp.prefix ORDER BY (CASE WHEN $13::boolean THEN CASE WHEN pp.last_retrieved_at IS NULL THEN 2 WHEN pp.last_retrieved_at < NOW() - ($14::int * INTERVAL '1 day') THEN 1 ELSE 0 END ELSE 0 END) DESC, pp.connection_count DESC, pp.slug ASC ) AS rn FROM prefix_pages pp ), with_chunk AS ( SELECT r.*, ( SELECT cc.id FROM content_chunks cc WHERE cc.page_id = r.page_id AND cc.embedding IS NOT NULL ORDER BY cc.chunk_index ASC LIMIT 1 ) AS representative_chunk_id FROM ranked r WHERE r.rn = 1 ) SELECT page_id, slug, source_id, title, compiled_truth, last_retrieved_at, prefix, connection_count, representative_chunk_id FROM with_chunk ORDER BY prefix",
+            "textSha256": "326299e6bf501ac95c676f7e32ac50dbef1a33db37db88efa2bf5e1a8dc67138"
+          }
+        ]
+      },
+      "listStaleFrontmatterKeyPages": {
+        "default": [
+          {
+            "lane": "pool",
+            "params": [
+              "array<string>",
+              "string",
+              "array<string>",
+              "number",
+              "number"
+            ],
+            "sql": "SELECT id, slug, ARRAY(SELECT k FROM unnest($1::text[]) AS k WHERE frontmatter ? k ORDER BY k) AS keys FROM pages WHERE source_id = $2 AND deleted_at IS NULL AND frontmatter ?| $3::text[] AND id > $4 ORDER BY id LIMIT $5",
+            "textSha256": "3595340f4f1ae3e42ab96ec07baff1c86fa2e78cb3a5bcbf09d2e1a4dee884a8"
           }
         ]
       },
@@ -615,8 +680,8 @@
               "number",
               "number"
             ],
-            "sql": "SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages WHERE deleted_at IS NULL AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at) AND source_id = $2 AND id > $3 ORDER BY id LIMIT $4",
-            "textSha256": "02f69476257e0b3f3c2b8526ef5d8c92b84039ab79fe2a86c69cc9670b4603a8"
+            "sql": "SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages WHERE deleted_at IS NULL AND NOT (COALESCE(pages.frontmatter, '{}'::jsonb) ? 'quarantine') AND (links_extracted_at IS NULL OR links_extracted_at < $1::timestamptz OR updated_at > links_extracted_at OR id IN (SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND t.slug = w.target_ref AND t.deleted_at IS NULL WHERE t.updated_at > w.checked_at UNION SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND regexp_replace(t.slug, '^.*/', '') = w.target_ref AND t.deleted_at IS NULL WHERE w.ref_kind = 'name' AND t.updated_at > w.checked_at)) AND source_id = $2 AND id > $3 ORDER BY id LIMIT $4",
+            "textSha256": "22fb498ad7872c970f05a3905d04bebef7df2790c417bea32d6a214eb0ae4505"
           }
         ],
         "default": [
@@ -625,8 +690,8 @@
             "params": [
               "number"
             ],
-            "sql": "SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages WHERE deleted_at IS NULL AND (links_extracted_at IS NULL OR updated_at > links_extracted_at) ORDER BY id LIMIT $1",
-            "textSha256": "5caf4d2f7968dbdcb18b553c3d4c7e05bb474dbb338ed171071ccaadce8b0188"
+            "sql": "SELECT id, slug, source_id, type, title, compiled_truth, timeline, frontmatter, updated_at, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at_iso FROM pages WHERE deleted_at IS NULL AND NOT (COALESCE(pages.frontmatter, '{}'::jsonb) ? 'quarantine') AND (links_extracted_at IS NULL OR updated_at > links_extracted_at OR id IN (SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND t.slug = w.target_ref AND t.deleted_at IS NULL WHERE t.updated_at > w.checked_at UNION SELECT w.origin_page_id FROM wanted_links w JOIN pages t ON t.source_id = w.target_source_id AND regexp_replace(t.slug, '^.*/', '') = w.target_ref AND t.deleted_at IS NULL WHERE w.ref_kind = 'name' AND t.updated_at > w.checked_at)) ORDER BY id LIMIT $1",
+            "textSha256": "27cc368fcbecffffad33b5d8542adbc3d0fcd24e6700ce7b5d351ec5e2103a57"
           }
         ]
       },
@@ -650,8 +715,8 @@
               "string",
               "string"
             ],
-            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING",
-            "textSha256": "fa56fa770a66caa8ae77b19c2c3ae9caac336d8e8281bc16f09d36a7fcdd74fd"
+            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) SELECT incarnation,$1 FROM sources WHERE id=$2 ON CONFLICT DO NOTHING",
+            "textSha256": "91584b13aae786f054e246bcc667c9ebe8c065d61b42d5ae775634739bce9f54"
           },
           {
             "lane": "tx",
@@ -659,8 +724,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug FROM page_write_guards WHERE source_incarnation=$1::uuid AND slug=$2 FOR UPDATE",
-            "textSha256": "3d08e10394edab70fb78946e378dd11528213526b214a8516d8cf3825e87ac19"
+            "sql": "SELECT g.slug FROM page_write_guards g JOIN sources s ON s.incarnation=g.source_incarnation WHERE s.id=$1 AND g.slug=$2 FOR UPDATE OF g",
+            "textSha256": "becdf4418f95796c9bab86a61f0f6e9d42bba2f74baedfe40ba9d9705977d77a"
           },
           {
             "lane": "tx",
@@ -700,20 +765,36 @@
               "array<string>",
               "array<string>"
             ],
-            "sql": "UPDATE pages p SET links_extracted_at = v.ts::timestamptz, links_attendance_blocked_revision = NULL, links_attendance_blocked_at = NULL FROM unnest($1::text[], $2::text[], $3::text[]) AS v(slug, source_id, ts) WHERE p.slug = v.slug AND p.source_id = v.source_id",
-            "textSha256": "38571ef9bc7efbcc636e789f18047fbcfab31eb71509440e6b7fadc7e70a93ad"
+            "sql": "UPDATE pages p SET links_extracted_at = v.ts::timestamptz, links_attendance_blocked_revision = NULL, links_attendance_blocked_at = NULL, links_extract_failure = NULL FROM unnest($1::text[], $2::text[], $3::text[]) AS v(slug, source_id, ts) WHERE p.slug = v.slug AND p.source_id = v.source_id",
+            "textSha256": "8aca8d9906c57653530ec671b03a9eaca5866385f12c765594cc8451c0d63679"
           }
         ]
       },
       "purgeDeletedPages": {
         "default": [
           {
-            "lane": "pool",
+            "event": "begin",
+            "lane": "tx"
+          },
+          {
+            "lane": "tx",
             "params": [
               "number"
             ],
-            "sql": "DELETE FROM pages WHERE deleted_at IS NOT NULL AND deleted_at < now() - ($1 || ' hours')::interval RETURNING slug",
-            "textSha256": "f92fe640850731cd347ca2ea99eef26d1adb3f7cd9b5a16584159313ce298e07"
+            "sql": "SELECT DISTINCT m.source_id, encode(m.sha256, 'hex') AS sha FROM page_body_manifest m JOIN pages p ON p.id = m.page_id WHERE p.deleted_at IS NOT NULL AND p.deleted_at < now() - ($1 || ' hours')::interval",
+            "textSha256": "4b0222c2e2ac186c99149f232e8252422c9ad242f9af5240ef093e847432ae4a"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "number"
+            ],
+            "sql": "DELETE FROM pages WHERE deleted_at IS NOT NULL AND deleted_at < now() - ($1 || ' hours')::interval -- #6729: the old page of an open rename-identity downgrade waits for its disposition (identityDowngradePurgeHold). AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz) -- #7013: a restorable re-extraction retirement waits out its hold (atomRetirementPurgeHold). AND NOT (pages.type='atom' AND pages.frontmatter->>'retired_by'='managed-reextract' AND pages.deleted_at > now() - interval '30 days' AND pages.id IN (SELECT held.id FROM (WITH retired AS ( SELECT p.id, p.source_id, p.slug, CASE WHEN NULLIF(p.frontmatter->>'source_slug','') IS NOT NULL THEN 'slug:'||(p.frontmatter->>'source_slug') WHEN NULLIF(p.frontmatter->>'source_path','') IS NOT NULL THEN 'path:'||(p.frontmatter->>'source_path') END AS okey, NULLIF(p.frontmatter->>'source_slug','') AS origin_slug, COALESCE(NULLIF(p.frontmatter->>'source_slug',''), p.frontmatter->>'source_path') AS origin, regexp_replace(COALESCE(p.frontmatter->>'source_hash',''),'^pending:','') AS hash, p.frontmatter->>'retired_at' AS retired_at FROM pages p WHERE p.type='atom' AND p.deleted_at IS NOT NULL AND p.frontmatter->>'retired_by'='managed-reextract' AND NULLIF(p.frontmatter->>'imported_from','') IS NULL AND (true) ), latest AS ( SELECT DISTINCT ON (source_id, okey) source_id, okey, hash FROM retired WHERE okey IS NOT NULL ORDER BY source_id, okey, retired_at DESC NULLS LAST, id DESC ), live AS ( SELECT p.source_id, CASE WHEN NULLIF(p.frontmatter->>'source_slug','') IS NOT NULL THEN 'slug:'||(p.frontmatter->>'source_slug') WHEN NULLIF(p.frontmatter->>'source_path','') IS NOT NULL THEN 'path:'||(p.frontmatter->>'source_path') END AS okey, array_agg(DISTINCT regexp_replace(COALESCE(p.frontmatter->>'source_hash',''),'^pending:','')) AS hashes FROM pages p WHERE p.type='atom' AND p.deleted_at IS NULL AND NULLIF(p.frontmatter->>'imported_from','') IS NULL AND (true) GROUP BY 1, 2 ) SELECT r.id, r.source_id, r.slug, CASE WHEN r.origin_slug IS NOT NULL THEN 'page' ELSE 'transcript' END AS origin_kind, r.origin, o.id AS origin_page_id, r.hash, r.retired_at, (r.okey IS NOT NULL AND (r.origin_slug IS NULL OR o.id IS NOT NULL)) AS origin_live, (lv.hashes IS NOT NULL AND NOT (lv.hashes <@ ARRAY[r.hash])) AS replaced, COALESCE(l.hash = r.hash, false) AS latest, (r.okey IS NOT NULL AND (r.origin_slug IS NULL OR o.id IS NOT NULL) AND NOT COALESCE(lv.hashes IS NOT NULL AND NOT (lv.hashes <@ ARRAY[r.hash]), false) AND COALESCE(l.hash = r.hash, false)) AS restorable, (SELECT g.id FROM derived_generation_items i JOIN derived_generations g ON g.id=i.generation_id WHERE g.source_id=r.source_id AND g.kind='atom' AND g.state='live' AND i.item_key=r.slug AND i.action='retired' ORDER BY g.id DESC LIMIT 1) AS ledger_generation FROM retired r LEFT JOIN pages o ON o.source_id=r.source_id AND o.slug=r.origin_slug AND o.deleted_at IS NULL LEFT JOIN live lv ON lv.source_id=r.source_id AND lv.okey=r.okey LEFT JOIN latest l ON l.source_id=r.source_id AND l.okey=r.okey) held WHERE held.restorable)) -- GBRA-161: every derived retirement waits out its hold (derivedRetirementPurgeHold). AND NOT (COALESCE(pages.frontmatter->>'retired_by','') IN ('extract-atoms','managed-reextract','stale-atoms','life-chronicle','generation-restore','synthesis-resynthesis','synthesis-cleanup') AND pages.deleted_at > now() - interval '1 day' * (SELECT COALESCE(MAX(CASE WHEN c.value ~ '^[0-9]{1,3}$' THEN CASE WHEN c.value::int BETWEEN 3 AND 365 THEN c.value::int END END), 30) FROM config c WHERE c.key = 'generations.restore_days')) RETURNING slug, source_id",
+            "textSha256": "9bd0a9e9c1d4a2f2e6984038737f5d74b708c92465293d31d5c894aa2a5ab2f2"
+          },
+          {
+            "event": "commit",
+            "lane": "tx"
           }
         ],
         "dryRun": [
@@ -722,8 +803,8 @@
             "params": [
               "number"
             ],
-            "sql": "SELECT slug, deleted_at FROM pages WHERE deleted_at IS NOT NULL AND deleted_at < now() - ($1 || ' hours')::interval ORDER BY deleted_at ASC, slug ASC",
-            "textSha256": "3f3ea375a23f949c89c760499ed7542180bbe9bb1e4e146359337e8693079d09"
+            "sql": "SELECT slug, deleted_at FROM pages WHERE deleted_at IS NOT NULL AND deleted_at < now() - ($1 || ' hours')::interval AND NOT EXISTS (SELECT 1 FROM op_checkpoints dg WHERE dg.op = 'sync-identity-downgrade' AND dg.fingerprint = pages.id::text AND dg.completed_keys->0->>'disposition' IS NULL AND pages.deleted_at = (dg.completed_keys->0->>'old_deleted_at')::timestamptz) AND NOT (pages.type='atom' AND pages.frontmatter->>'retired_by'='managed-reextract' AND pages.deleted_at > now() - interval '30 days' AND pages.id IN (SELECT held.id FROM (WITH retired AS ( SELECT p.id, p.source_id, p.slug, CASE WHEN NULLIF(p.frontmatter->>'source_slug','') IS NOT NULL THEN 'slug:'||(p.frontmatter->>'source_slug') WHEN NULLIF(p.frontmatter->>'source_path','') IS NOT NULL THEN 'path:'||(p.frontmatter->>'source_path') END AS okey, NULLIF(p.frontmatter->>'source_slug','') AS origin_slug, COALESCE(NULLIF(p.frontmatter->>'source_slug',''), p.frontmatter->>'source_path') AS origin, regexp_replace(COALESCE(p.frontmatter->>'source_hash',''),'^pending:','') AS hash, p.frontmatter->>'retired_at' AS retired_at FROM pages p WHERE p.type='atom' AND p.deleted_at IS NOT NULL AND p.frontmatter->>'retired_by'='managed-reextract' AND NULLIF(p.frontmatter->>'imported_from','') IS NULL AND (true) ), latest AS ( SELECT DISTINCT ON (source_id, okey) source_id, okey, hash FROM retired WHERE okey IS NOT NULL ORDER BY source_id, okey, retired_at DESC NULLS LAST, id DESC ), live AS ( SELECT p.source_id, CASE WHEN NULLIF(p.frontmatter->>'source_slug','') IS NOT NULL THEN 'slug:'||(p.frontmatter->>'source_slug') WHEN NULLIF(p.frontmatter->>'source_path','') IS NOT NULL THEN 'path:'||(p.frontmatter->>'source_path') END AS okey, array_agg(DISTINCT regexp_replace(COALESCE(p.frontmatter->>'source_hash',''),'^pending:','')) AS hashes FROM pages p WHERE p.type='atom' AND p.deleted_at IS NULL AND NULLIF(p.frontmatter->>'imported_from','') IS NULL AND (true) GROUP BY 1, 2 ) SELECT r.id, r.source_id, r.slug, CASE WHEN r.origin_slug IS NOT NULL THEN 'page' ELSE 'transcript' END AS origin_kind, r.origin, o.id AS origin_page_id, r.hash, r.retired_at, (r.okey IS NOT NULL AND (r.origin_slug IS NULL OR o.id IS NOT NULL)) AS origin_live, (lv.hashes IS NOT NULL AND NOT (lv.hashes <@ ARRAY[r.hash])) AS replaced, COALESCE(l.hash = r.hash, false) AS latest, (r.okey IS NOT NULL AND (r.origin_slug IS NULL OR o.id IS NOT NULL) AND NOT COALESCE(lv.hashes IS NOT NULL AND NOT (lv.hashes <@ ARRAY[r.hash]), false) AND COALESCE(l.hash = r.hash, false)) AS restorable, (SELECT g.id FROM derived_generation_items i JOIN derived_generations g ON g.id=i.generation_id WHERE g.source_id=r.source_id AND g.kind='atom' AND g.state='live' AND i.item_key=r.slug AND i.action='retired' ORDER BY g.id DESC LIMIT 1) AS ledger_generation FROM retired r LEFT JOIN pages o ON o.source_id=r.source_id AND o.slug=r.origin_slug AND o.deleted_at IS NULL LEFT JOIN live lv ON lv.source_id=r.source_id AND lv.okey=r.okey LEFT JOIN latest l ON l.source_id=r.source_id AND l.okey=r.okey) held WHERE held.restorable)) AND NOT (COALESCE(pages.frontmatter->>'retired_by','') IN ('extract-atoms','managed-reextract','stale-atoms','life-chronicle','generation-restore','synthesis-resynthesis','synthesis-cleanup') AND pages.deleted_at > now() - interval '1 day' * (SELECT COALESCE(MAX(CASE WHEN c.value ~ '^[0-9]{1,3}$' THEN CASE WHEN c.value::int BETWEEN 3 AND 365 THEN c.value::int END END), 30) FROM config c WHERE c.key = 'generations.restore_days')) ORDER BY deleted_at ASC, slug ASC",
+            "textSha256": "ba89292c8dfd0f6d0b8db2bcbc171271baf490a5150e48fa783cdd42fbbff79b"
           }
         ]
       },
@@ -747,8 +828,8 @@
               "string",
               "string"
             ],
-            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING",
-            "textSha256": "fa56fa770a66caa8ae77b19c2c3ae9caac336d8e8281bc16f09d36a7fcdd74fd"
+            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) SELECT incarnation,$1 FROM sources WHERE id=$2 ON CONFLICT DO NOTHING",
+            "textSha256": "91584b13aae786f054e246bcc667c9ebe8c065d61b42d5ae775634739bce9f54"
           },
           {
             "lane": "tx",
@@ -756,8 +837,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug FROM page_write_guards WHERE source_incarnation=$1::uuid AND slug=$2 FOR UPDATE",
-            "textSha256": "3d08e10394edab70fb78946e378dd11528213526b214a8516d8cf3825e87ac19"
+            "sql": "SELECT g.slug FROM page_write_guards g JOIN sources s ON s.incarnation=g.source_incarnation WHERE s.id=$1 AND g.slug=$2 FOR UPDATE OF g",
+            "textSha256": "becdf4418f95796c9bab86a61f0f6e9d42bba2f74baedfe40ba9d9705977d77a"
           },
           {
             "lane": "tx",
@@ -774,8 +855,17 @@
               "string",
               "string"
             ],
-            "sql": "SELECT compiled_truth FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1",
-            "textSha256": "52345f51a17688718a9b55ae84f8501985f54bb79428d6172a1ef6c55117a6b7"
+            "sql": "SELECT id, slug, source_path, deleted_at FROM pages WHERE source_id=$1 AND slug=$2",
+            "textSha256": "13e0824db40fa0938c1e53873667c76000adde55a7fa159fce8e1a5969bf1bb0"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "string",
+              "string"
+            ],
+            "sql": "SELECT compiled_truth, body_storage, body_bytes FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1",
+            "textSha256": "5dc846d005a55cfbdd0af4437f04cc30cd6ea8245fc9c8eb5b744890a1a4b845"
           },
           {
             "lane": "tx",
@@ -799,8 +889,8 @@
               "null",
               "null"
             ],
-            "sql": "INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13::smallint, $14, $15, $16, $17, $18) ON CONFLICT (source_id, slug) DO UPDATE SET type = EXCLUDED.type, page_kind = EXCLUDED.page_kind, title = EXCLUDED.title, compiled_truth = EXCLUDED.compiled_truth, timeline = EXCLUDED.timeline, frontmatter = EXCLUDED.frontmatter, content_hash = EXCLUDED.content_hash, updated_at = now(), deleted_at = NULL, effective_date = COALESCE(EXCLUDED.effective_date, pages.effective_date), effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source), import_filename = COALESCE(EXCLUDED.import_filename, pages.import_filename), chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM EXCLUDED.compiled_truth AND pages.timeline IS NOT DISTINCT FROM EXCLUDED.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') OR COALESCE(EXCLUDED.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(EXCLUDED.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, source_path = COALESCE(EXCLUDED.source_path, pages.source_path), source_kind = COALESCE(EXCLUDED.source_kind, pages.source_kind), source_uri = COALESCE(EXCLUDED.source_uri, pages.source_uri), ingested_via = COALESCE(EXCLUDED.ingested_via, pages.ingested_via), ingested_at = COALESCE(EXCLUDED.ingested_at, pages.ingested_at) RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at",
-            "textSha256": "7af7ed575e1d3c88ceb7a79646efe4601a450db1df760f36034860c982484288"
+            "sql": "INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13::smallint, $14, $15, $16, $17, $18) ON CONFLICT (source_id, slug) DO UPDATE SET type = EXCLUDED.type, page_kind = EXCLUDED.page_kind, title = EXCLUDED.title, compiled_truth = EXCLUDED.compiled_truth, timeline = EXCLUDED.timeline, frontmatter = EXCLUDED.frontmatter, content_hash = EXCLUDED.content_hash, updated_at = now(), deleted_at = NULL, effective_date = COALESCE(EXCLUDED.effective_date, pages.effective_date), effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source), import_filename = COALESCE(EXCLUDED.import_filename, pages.import_filename), chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM EXCLUDED.compiled_truth AND pages.timeline IS NOT DISTINCT FROM EXCLUDED.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (CASE WHEN pages.body_storage = 'segmented' THEN pages.body_flags->>'has_protected' IS DISTINCT FROM 'false' ELSE (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') END) OR COALESCE(EXCLUDED.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(EXCLUDED.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, source_path = COALESCE(EXCLUDED.source_path, pages.source_path), database_only_reason = CASE WHEN EXCLUDED.source_path IS NOT NULL AND pages.database_only_reason IN ('detached', 'origin_twin') THEN NULL ELSE pages.database_only_reason END, source_kind = COALESCE(EXCLUDED.source_kind, pages.source_kind), source_uri = COALESCE(EXCLUDED.source_uri, pages.source_uri), ingested_via = COALESCE(EXCLUDED.ingested_via, pages.ingested_via), ingested_at = COALESCE(EXCLUDED.ingested_at, pages.ingested_at) RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at",
+            "textSha256": "abe31a1d94feb3381dd47ed9184d401c99487afe2787905d9ff2f1a373fed95c"
           },
           {
             "event": "commit",
@@ -826,8 +916,8 @@
               "string",
               "string"
             ],
-            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING",
-            "textSha256": "fa56fa770a66caa8ae77b19c2c3ae9caac336d8e8281bc16f09d36a7fcdd74fd"
+            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) SELECT incarnation,$1 FROM sources WHERE id=$2 ON CONFLICT DO NOTHING",
+            "textSha256": "91584b13aae786f054e246bcc667c9ebe8c065d61b42d5ae775634739bce9f54"
           },
           {
             "lane": "tx",
@@ -835,8 +925,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug FROM page_write_guards WHERE source_incarnation=$1::uuid AND slug=$2 FOR UPDATE",
-            "textSha256": "3d08e10394edab70fb78946e378dd11528213526b214a8516d8cf3825e87ac19"
+            "sql": "SELECT g.slug FROM page_write_guards g JOIN sources s ON s.incarnation=g.source_incarnation WHERE s.id=$1 AND g.slug=$2 FOR UPDATE OF g",
+            "textSha256": "becdf4418f95796c9bab86a61f0f6e9d42bba2f74baedfe40ba9d9705977d77a"
           },
           {
             "lane": "tx",
@@ -846,6 +936,15 @@
             ],
             "sql": "SELECT id FROM pages WHERE source_id=$1 AND slug=$2 FOR UPDATE",
             "textSha256": "6c2eb61492fe7470a32169e89b9f04d471f3311d55ff790ad08f4736af483a2c"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "string",
+              "string"
+            ],
+            "sql": "SELECT id, slug, source_path, deleted_at FROM pages WHERE source_id=$1 AND slug=$2",
+            "textSha256": "13e0824db40fa0938c1e53873667c76000adde55a7fa159fce8e1a5969bf1bb0"
           },
           {
             "lane": "tx",
@@ -869,8 +968,8 @@
               "null",
               "null"
             ],
-            "sql": "INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13::smallint, $14, $15, $16, $17, $18) ON CONFLICT (source_id, slug) DO UPDATE SET type = EXCLUDED.type, page_kind = EXCLUDED.page_kind, title = EXCLUDED.title, compiled_truth = EXCLUDED.compiled_truth, timeline = EXCLUDED.timeline, frontmatter = EXCLUDED.frontmatter, content_hash = EXCLUDED.content_hash, updated_at = now(), deleted_at = NULL, effective_date = COALESCE(EXCLUDED.effective_date, pages.effective_date), effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source), import_filename = COALESCE(EXCLUDED.import_filename, pages.import_filename), chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM EXCLUDED.compiled_truth AND pages.timeline IS NOT DISTINCT FROM EXCLUDED.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') OR COALESCE(EXCLUDED.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(EXCLUDED.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, source_path = COALESCE(EXCLUDED.source_path, pages.source_path), source_kind = COALESCE(EXCLUDED.source_kind, pages.source_kind), source_uri = COALESCE(EXCLUDED.source_uri, pages.source_uri), ingested_via = COALESCE(EXCLUDED.ingested_via, pages.ingested_via), ingested_at = COALESCE(EXCLUDED.ingested_at, pages.ingested_at) RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at",
-            "textSha256": "7af7ed575e1d3c88ceb7a79646efe4601a450db1df760f36034860c982484288"
+            "sql": "INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13::smallint, $14, $15, $16, $17, $18) ON CONFLICT (source_id, slug) DO UPDATE SET type = EXCLUDED.type, page_kind = EXCLUDED.page_kind, title = EXCLUDED.title, compiled_truth = EXCLUDED.compiled_truth, timeline = EXCLUDED.timeline, frontmatter = EXCLUDED.frontmatter, content_hash = EXCLUDED.content_hash, updated_at = now(), deleted_at = NULL, effective_date = COALESCE(EXCLUDED.effective_date, pages.effective_date), effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source), import_filename = COALESCE(EXCLUDED.import_filename, pages.import_filename), chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM EXCLUDED.compiled_truth AND pages.timeline IS NOT DISTINCT FROM EXCLUDED.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (CASE WHEN pages.body_storage = 'segmented' THEN pages.body_flags->>'has_protected' IS DISTINCT FROM 'false' ELSE (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') END) OR COALESCE(EXCLUDED.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(EXCLUDED.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, source_path = COALESCE(EXCLUDED.source_path, pages.source_path), database_only_reason = CASE WHEN EXCLUDED.source_path IS NOT NULL AND pages.database_only_reason IN ('detached', 'origin_twin') THEN NULL ELSE pages.database_only_reason END, source_kind = COALESCE(EXCLUDED.source_kind, pages.source_kind), source_uri = COALESCE(EXCLUDED.source_uri, pages.source_uri), ingested_via = COALESCE(EXCLUDED.ingested_via, pages.ingested_via), ingested_at = COALESCE(EXCLUDED.ingested_at, pages.ingested_at) RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at",
+            "textSha256": "abe31a1d94feb3381dd47ed9184d401c99487afe2787905d9ff2f1a373fed95c"
           },
           {
             "event": "commit",
@@ -896,8 +995,8 @@
               "string",
               "string"
             ],
-            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING",
-            "textSha256": "fa56fa770a66caa8ae77b19c2c3ae9caac336d8e8281bc16f09d36a7fcdd74fd"
+            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) SELECT incarnation,$1 FROM sources WHERE id=$2 ON CONFLICT DO NOTHING",
+            "textSha256": "91584b13aae786f054e246bcc667c9ebe8c065d61b42d5ae775634739bce9f54"
           },
           {
             "lane": "tx",
@@ -905,8 +1004,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug FROM page_write_guards WHERE source_incarnation=$1::uuid AND slug=$2 FOR UPDATE",
-            "textSha256": "3d08e10394edab70fb78946e378dd11528213526b214a8516d8cf3825e87ac19"
+            "sql": "SELECT g.slug FROM page_write_guards g JOIN sources s ON s.incarnation=g.source_incarnation WHERE s.id=$1 AND g.slug=$2 FOR UPDATE OF g",
+            "textSha256": "becdf4418f95796c9bab86a61f0f6e9d42bba2f74baedfe40ba9d9705977d77a"
           },
           {
             "lane": "tx",
@@ -925,8 +1024,17 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "676e5a10b94e68884b82636a9286cf562fe3b49751b761d6758c9b883ee63140"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "d49abdfac0d474258cc62de6b765f6c2bd3d4dc6f1098394ab26b05e48e8bc1c"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "string",
+              "string"
+            ],
+            "sql": "SELECT id, slug, source_path, deleted_at FROM pages WHERE source_id=$1 AND slug=$2",
+            "textSha256": "13e0824db40fa0938c1e53873667c76000adde55a7fa159fce8e1a5969bf1bb0"
           },
           {
             "lane": "tx",
@@ -950,8 +1058,8 @@
               "null",
               "null"
             ],
-            "sql": "INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13::smallint, $14, $15, $16, $17, $18) ON CONFLICT (source_id, slug) DO UPDATE SET type = EXCLUDED.type, page_kind = EXCLUDED.page_kind, title = EXCLUDED.title, compiled_truth = EXCLUDED.compiled_truth, timeline = EXCLUDED.timeline, frontmatter = EXCLUDED.frontmatter, content_hash = EXCLUDED.content_hash, updated_at = now(), deleted_at = NULL, effective_date = COALESCE(EXCLUDED.effective_date, pages.effective_date), effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source), import_filename = COALESCE(EXCLUDED.import_filename, pages.import_filename), chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM EXCLUDED.compiled_truth AND pages.timeline IS NOT DISTINCT FROM EXCLUDED.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') OR COALESCE(EXCLUDED.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(EXCLUDED.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, source_path = COALESCE(EXCLUDED.source_path, pages.source_path), source_kind = COALESCE(EXCLUDED.source_kind, pages.source_kind), source_uri = COALESCE(EXCLUDED.source_uri, pages.source_uri), ingested_via = COALESCE(EXCLUDED.ingested_via, pages.ingested_via), ingested_at = COALESCE(EXCLUDED.ingested_at, pages.ingested_at) RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at",
-            "textSha256": "7af7ed575e1d3c88ceb7a79646efe4601a450db1df760f36034860c982484288"
+            "sql": "INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10, $11, $12, $13::smallint, $14, $15, $16, $17, $18) ON CONFLICT (source_id, slug) DO UPDATE SET type = EXCLUDED.type, page_kind = EXCLUDED.page_kind, title = EXCLUDED.title, compiled_truth = EXCLUDED.compiled_truth, timeline = EXCLUDED.timeline, frontmatter = EXCLUDED.frontmatter, content_hash = EXCLUDED.content_hash, updated_at = now(), deleted_at = NULL, effective_date = COALESCE(EXCLUDED.effective_date, pages.effective_date), effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source), import_filename = COALESCE(EXCLUDED.import_filename, pages.import_filename), chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM EXCLUDED.compiled_truth AND pages.timeline IS NOT DISTINCT FROM EXCLUDED.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (CASE WHEN pages.body_storage = 'segmented' THEN pages.body_flags->>'has_protected' IS DISTINCT FROM 'false' ELSE (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') END) OR COALESCE(EXCLUDED.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(EXCLUDED.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, source_path = COALESCE(EXCLUDED.source_path, pages.source_path), database_only_reason = CASE WHEN EXCLUDED.source_path IS NOT NULL AND pages.database_only_reason IN ('detached', 'origin_twin') THEN NULL ELSE pages.database_only_reason END, source_kind = COALESCE(EXCLUDED.source_kind, pages.source_kind), source_uri = COALESCE(EXCLUDED.source_uri, pages.source_uri), ingested_via = COALESCE(EXCLUDED.ingested_via, pages.ingested_via), ingested_at = COALESCE(EXCLUDED.ingested_at, pages.ingested_at) RETURNING knowledge_revision, text_projection_revision, id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at",
+            "textSha256": "abe31a1d94feb3381dd47ed9184d401c99487afe2787905d9ff2f1a373fed95c"
           },
           {
             "event": "commit",
@@ -968,8 +1076,8 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.deleted_at IS NULL ORDER BY (p.slug=$2) DESC, (p.source_id=$3) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "d5b9e80760a00e92ff197976d71394d7dee3bb507517d6e44eb8dd0a8abb2341"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.deleted_at IS NULL ORDER BY (p.slug=$2) DESC, (p.source_id=$3) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "87d87ff8ff806282cdbee4a6dc503d77832d78df31a180f4af5251fdd74ab03f"
           }
         ],
         "sourceId": [
@@ -981,8 +1089,23 @@
               "string",
               "string"
             ],
-            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 AND p.deleted_at IS NULL ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body, (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_timeline FROM chosen p",
-            "textSha256": "22ce659b8fb6104bf08b6ee101bd0e0bafb2769bb7c399380a38e9a4a26c693e"
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 AND p.deleted_at IS NULL ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "993c9cf80610982d62aaa83f0b1f333abd84a5c9e2783cece6875b37787c1e45"
+          }
+        ]
+      },
+      "readPageSnapshotsBatch": {
+        "default": [
+          {
+            "lane": "pool",
+            "params": [
+              "array<string>",
+              "array<string>",
+              "boolean",
+              "number"
+            ],
+            "sql": "WITH wanted AS ( SELECT v.slug AS batch_slug, v.source_id AS batch_source_id, v.n AS batch_n, p.id AS batch_page_id, COALESCE(sum(octet_length(p.compiled_truth) + COALESCE(octet_length(p.timeline), 0)) OVER (ORDER BY v.n ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS batch_prior_bytes FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS v(slug, source_id, n) LEFT JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id AND ($3::boolean OR p.deleted_at IS NULL) ), chosen AS ( SELECT w.batch_n, w.batch_slug, w.batch_source_id, p.* FROM wanted w LEFT JOIN pages p ON p.id = w.batch_page_id WHERE w.batch_n = 1 OR w.batch_prior_bytes < $4 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*') AS snapshot_global_purges) wd ORDER BY p.batch_n",
+            "textSha256": "6697c4ea2aa0153ccf9a62abf45ec8a06ff1b51fcfb23edac1eed9ac61aaecf9"
           }
         ]
       },
@@ -1001,8 +1124,8 @@
               "string",
               "string"
             ],
-            "sql": "UPDATE pages SET compiled_truth = $1, timeline = $2, content_hash = $3, chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM $4 AND pages.timeline IS NOT DISTINCT FROM $5 THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') OR COALESCE($6, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE($7, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, updated_at = now() WHERE source_id = $8 AND slug = $9 AND deleted_at IS NULL",
-            "textSha256": "23c99e0b8b34e4b8cfaa7349b92af8734e295f3afcd3c5661134da6e2bc22d11"
+            "sql": "UPDATE pages SET compiled_truth = $1, timeline = $2, content_hash = $3, chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM $4 AND pages.timeline IS NOT DISTINCT FROM $5 THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (CASE WHEN pages.body_storage = 'segmented' THEN pages.body_flags->>'has_protected' IS DISTINCT FROM 'false' ELSE (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') END) OR COALESCE($6, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE($7, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, updated_at = now() WHERE source_id = $8 AND slug = $9 AND deleted_at IS NULL",
+            "textSha256": "a7ff4af52f9955d49ace9e4b290464c196e73dd98802cbea49bb3ff121904f86"
           }
         ]
       },
@@ -1041,8 +1164,8 @@
               "array<string>",
               "array<string>"
             ],
-            "sql": "SELECT canonical_slug, source_id FROM slug_aliases WHERE alias_slug = $1 AND source_id = ANY($2::text[]) AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND (COALESCE(p.frontmatter->>'visibility', CASE WHEN (p.type = 'atom' OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT (CASE WHEN p.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = p.source_id AND derived_origin.slug = p.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (p.type = 'atom' OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = p.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) ELSE false END))) ORDER BY array_position($3::text[], source_id), id",
-            "textSha256": "af1b103ea01db0fe3f43efd8631ca2a75ca76a4ebaccc5a9ee166ac510e5575a"
+            "sql": "SELECT canonical_slug, source_id FROM slug_aliases WHERE alias_slug = $1 AND source_id = ANY($2::text[]) AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND ((COALESCE(p.frontmatter->>'visibility', CASE WHEN (p.type IN ('atom', 'question') OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(p.frontmatter ? 'pinned_question', false) AND NOT (p.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(p.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(p.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN p.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = p.source_id AND derived_origin.slug = p.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (p.type IN ('atom', 'question') OR (p.type = 'concept' AND p.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = p.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) WHEN p.type = 'event' AND p.frontmatter->>'captured_via' LIKE 'life-chronicle:%' THEN NOT EXISTS (SELECT 1 FROM pages chronicle_origin WHERE chronicle_origin.source_id = p.source_id AND chronicle_origin.slug = p.frontmatter->'event'->>'depth' AND (COALESCE(chronicle_origin.frontmatter->>'visibility', CASE WHEN (chronicle_origin.type IN ('atom', 'question') OR (chronicle_origin.type = 'concept' AND chronicle_origin.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(chronicle_origin.frontmatter ? 'pinned_question', false) AND NOT (chronicle_origin.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(chronicle_origin.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(chronicle_origin.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = chronicle_origin.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') = 'array' THEN chronicle_origin.frontmatter->'derived_from' ELSE jsonb_build_array(chronicle_origin.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) ELSE false END) AND NOT (CASE WHEN jsonb_typeof(p.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = p.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(p.frontmatter->'derived_from') = 'array' THEN p.frontmatter->'derived_from' ELSE jsonb_build_array(p.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END))) ORDER BY array_position($3::text[], source_id), id",
+            "textSha256": "1d98f8b9962c2785f53e1f1d2c67e53687183fc32eb04afc197907507f8b5406"
           }
         ]
       },
@@ -1063,8 +1186,8 @@
             "params": [
               "string"
             ],
-            "sql": "SELECT slug FROM pages WHERE slug = $1 AND deleted_at IS NULL AND (COALESCE(pages.frontmatter->>'visibility', CASE WHEN (pages.type = 'atom' OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT (CASE WHEN pages.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = pages.source_id AND derived_origin.slug = pages.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (pages.type = 'atom' OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = pages.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) ELSE false END))",
-            "textSha256": "f83f92e948b47eb3f7d4323b7a5bf3edc182f50c62f8882b60ba690a29ea7a51"
+            "sql": "SELECT slug FROM pages WHERE slug = $1 AND deleted_at IS NULL AND ((COALESCE(pages.frontmatter->>'visibility', CASE WHEN (pages.type IN ('atom', 'question') OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(pages.frontmatter ? 'pinned_question', false) AND NOT (pages.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(pages.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(pages.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN pages.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = pages.source_id AND derived_origin.slug = pages.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (pages.type IN ('atom', 'question') OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = pages.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) WHEN pages.type = 'event' AND pages.frontmatter->>'captured_via' LIKE 'life-chronicle:%' THEN NOT EXISTS (SELECT 1 FROM pages chronicle_origin WHERE chronicle_origin.source_id = pages.source_id AND chronicle_origin.slug = pages.frontmatter->'event'->>'depth' AND (COALESCE(chronicle_origin.frontmatter->>'visibility', CASE WHEN (chronicle_origin.type IN ('atom', 'question') OR (chronicle_origin.type = 'concept' AND chronicle_origin.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(chronicle_origin.frontmatter ? 'pinned_question', false) AND NOT (chronicle_origin.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(chronicle_origin.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(chronicle_origin.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = chronicle_origin.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') = 'array' THEN chronicle_origin.frontmatter->'derived_from' ELSE jsonb_build_array(chronicle_origin.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) ELSE false END) AND NOT (CASE WHEN jsonb_typeof(pages.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = pages.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(pages.frontmatter->'derived_from') = 'array' THEN pages.frontmatter->'derived_from' ELSE jsonb_build_array(pages.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END))",
+            "textSha256": "6ee6e63ab62ac8eb21deaf1742ce352262257ea5a5173ce392c1d29992e2f727"
           },
           {
             "lane": "pool",
@@ -1073,8 +1196,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug, similarity(title, $1) AS sim FROM pages WHERE deleted_at IS NULL AND (title % $2 OR slug ILIKE $3) AND (COALESCE(pages.frontmatter->>'visibility', CASE WHEN (pages.type = 'atom' OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT (CASE WHEN pages.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = pages.source_id AND derived_origin.slug = pages.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (pages.type = 'atom' OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = pages.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) ELSE false END)) ORDER BY sim DESC LIMIT 5",
-            "textSha256": "0025cff30e79106c56b82b3835829792dddf87b7acef29dbbc7c93114c2702b9"
+            "sql": "SELECT slug, similarity(title, $1) AS sim FROM pages WHERE deleted_at IS NULL AND (title % $2 OR slug ILIKE $3) AND ((COALESCE(pages.frontmatter->>'visibility', CASE WHEN (pages.type IN ('atom', 'question') OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(pages.frontmatter ? 'pinned_question', false) AND NOT (pages.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(pages.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(pages.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN pages.type = 'atom' THEN EXISTS (SELECT 1 FROM pages derived_origin WHERE derived_origin.source_id = pages.source_id AND derived_origin.slug = pages.frontmatter->>'source_slug' AND derived_origin.frontmatter->>'visibility' = 'private') WHEN (pages.type IN ('atom', 'question') OR (pages.type = 'concept' AND pages.frontmatter->>'synthesized_by' IS NOT NULL)) THEN EXISTS (SELECT 1 FROM links derived_input_link JOIN pages derived_input ON derived_input.id = derived_input_link.to_page_id WHERE derived_input_link.from_page_id = pages.id AND derived_input_link.link_source = 'concept-provenance' AND derived_input_link.link_type = 'synthesized_from' AND (COALESCE(derived_input.frontmatter->>'visibility', CASE WHEN derived_input.type = 'atom' THEN 'private' ELSE 'world' END) = 'private' OR EXISTS (SELECT 1 FROM pages derived_input_origin WHERE derived_input_origin.source_id = derived_input.source_id AND derived_input_origin.slug = derived_input.frontmatter->>'source_slug' AND derived_input_origin.frontmatter->>'visibility' = 'private'))) WHEN pages.type = 'event' AND pages.frontmatter->>'captured_via' LIKE 'life-chronicle:%' THEN NOT EXISTS (SELECT 1 FROM pages chronicle_origin WHERE chronicle_origin.source_id = pages.source_id AND chronicle_origin.slug = pages.frontmatter->'event'->>'depth' AND (COALESCE(chronicle_origin.frontmatter->>'visibility', CASE WHEN (chronicle_origin.type IN ('atom', 'question') OR (chronicle_origin.type = 'concept' AND chronicle_origin.frontmatter->>'synthesized_by' IS NOT NULL)) THEN 'private' ELSE 'world' END) <> 'private' AND NOT COALESCE(chronicle_origin.frontmatter ? 'pinned_question', false) AND NOT (chronicle_origin.frontmatter->>'visibility' IS NULL AND (COALESCE(lower(btrim(chronicle_origin.frontmatter->>'access')) IN ('private','restricted','confidential'), false) OR COALESCE(lower(btrim(chronicle_origin.frontmatter->>'confidentiality')) IN ('confidential','secret','private','restricted'), false)))) AND NOT (CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = chronicle_origin.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(chronicle_origin.frontmatter->'derived_from') = 'array' THEN chronicle_origin.frontmatter->'derived_from' ELSE jsonb_build_array(chronicle_origin.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) ELSE false END) AND NOT (CASE WHEN jsonb_typeof(pages.frontmatter->'derived_from') IN ('array', 'string') THEN EXISTS ( SELECT 1 FROM pages declared_origin WHERE declared_origin.source_id = pages.source_id AND declared_origin.frontmatter->>'visibility' = 'private' AND declared_origin.slug = ANY(ARRAY( SELECT regexp_replace(declared.slug, '\\.md$', '') FROM jsonb_array_elements_text( CASE WHEN jsonb_typeof(pages.frontmatter->'derived_from') = 'array' THEN pages.frontmatter->'derived_from' ELSE jsonb_build_array(pages.frontmatter->'derived_from') END) AS declared(slug)))) ELSE false END)) ORDER BY sim DESC LIMIT 5",
+            "textSha256": "cc2ed19a087096b422d265ecd34b1552bc83db1f42b2de7390c48d5762ae14f0"
           }
         ],
         "fuzzy": [
@@ -1150,31 +1273,67 @@
               "array<string>",
               "string"
             ],
-            "sql": "SELECT slug, source_path FROM pages WHERE source_path = ANY($1::text[]) AND source_id = $2",
-            "textSha256": "eb7db9ec7a9b853b93f4d475f715a6a72fd1ee4b48da9bbf9217deac299ebfff"
+            "sql": "SELECT slug, source_path, deleted_at IS NULL AS live FROM pages WHERE source_path = ANY($1::text[]) AND source_id = $2 ORDER BY source_path, slug",
+            "textSha256": "bee87a5adc9be889a362de92ea6380595113f9360e8c720aada24a4e9a3e44d5"
           }
         ]
       },
       "restorePage": {
         "default": [
           {
-            "lane": "pool",
+            "event": "begin",
+            "lane": "tx"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "string",
+              "null",
+              "null"
+            ],
+            "sql": "SELECT id, source_id FROM pages WHERE slug=$1 AND deleted_at IS NOT NULL AND ($2::text IS NULL OR source_id=$3) ORDER BY source_id",
+            "textSha256": "8d4bea0f03c96cfdea2bad6a82c4050073b3cad615d0115bb66cf05aaa9f9300"
+          },
+          {
+            "lane": "tx",
             "params": [
               "string"
             ],
-            "sql": "UPDATE pages SET deleted_at = NULL WHERE slug = $1 AND deleted_at IS NOT NULL RETURNING slug",
-            "textSha256": "acd1c51520605f0e6825a414c68860b9f4b74c9cbbfd6ce8b33a2ac454de6f09"
+            "sql": "UPDATE pages SET deleted_at = NULL, updated_at = now() WHERE slug = $1 AND deleted_at IS NOT NULL RETURNING slug",
+            "textSha256": "e657e4a81c518ed0669a4f80ce47e3114b42aaa4aa13667cdc35bb516e4d37cd"
+          },
+          {
+            "event": "commit",
+            "lane": "tx"
           }
         ],
         "sourceId": [
           {
-            "lane": "pool",
+            "event": "begin",
+            "lane": "tx"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "string",
+              "string",
+              "string"
+            ],
+            "sql": "SELECT id, source_id FROM pages WHERE slug=$1 AND deleted_at IS NOT NULL AND ($2::text IS NULL OR source_id=$3) ORDER BY source_id",
+            "textSha256": "8d4bea0f03c96cfdea2bad6a82c4050073b3cad615d0115bb66cf05aaa9f9300"
+          },
+          {
+            "lane": "tx",
             "params": [
               "string",
               "string"
             ],
-            "sql": "UPDATE pages SET deleted_at = NULL WHERE slug = $1 AND deleted_at IS NOT NULL AND source_id = $2 RETURNING slug",
-            "textSha256": "090e0cc13e4a8f75a1b0348c64728d42d1e3f6d57c91b0957679599af7ca3f3f"
+            "sql": "UPDATE pages SET deleted_at = NULL, updated_at = now() WHERE slug = $1 AND deleted_at IS NOT NULL AND source_id = $2 RETURNING slug",
+            "textSha256": "d36ab3e3d4968ce3e210fbbc3a1e9247e4d6065537b380001da3285a3dc6054b"
+          },
+          {
+            "event": "commit",
+            "lane": "tx"
           }
         ]
       },
@@ -1186,8 +1345,17 @@
               "string",
               "number"
             ],
-            "sql": "UPDATE pages SET compiled_truth = pv.compiled_truth, frontmatter = pv.frontmatter, chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM pv.compiled_truth AND pages.timeline IS NOT DISTINCT FROM pages.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') OR COALESCE(pv.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, updated_at = now() FROM page_versions pv WHERE pages.slug = $1 AND pv.id = $2 AND pv.page_id = pages.id",
-            "textSha256": "69bf317fe183d46f040111714e55e71f34436d1b7a3d5c44ebbfef87aeb9ebc9"
+            "sql": "SELECT 1 FROM pages p JOIN page_versions pv ON pv.page_id = p.id WHERE p.slug = $1 AND pv.id = $2 AND (p.body_storage = 'segmented' OR pv.body_storage = 'segmented')",
+            "textSha256": "fcfdc6d3e88ec26342f6bf9661e763d09d2bd7d8647194036be0bf3e5126729a"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "string",
+              "number"
+            ],
+            "sql": "UPDATE pages SET compiled_truth = pv.compiled_truth, frontmatter = pv.frontmatter, chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM pv.compiled_truth AND pages.timeline IS NOT DISTINCT FROM pages.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (CASE WHEN pages.body_storage = 'segmented' THEN pages.body_flags->>'has_protected' IS DISTINCT FROM 'false' ELSE (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') END) OR COALESCE(pv.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, updated_at = now() FROM page_versions pv WHERE pages.slug = $1 AND pv.id = $2 AND pv.page_id = pages.id",
+            "textSha256": "c3f453c471bbfe866f73945164aaf74f3e4811bda785b12c1a494327eadc911d"
           }
         ],
         "sourceId": [
@@ -1198,8 +1366,18 @@
               "string",
               "number"
             ],
-            "sql": "UPDATE pages SET compiled_truth = pv.compiled_truth, frontmatter = pv.frontmatter, chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM pv.compiled_truth AND pages.timeline IS NOT DISTINCT FROM pages.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') OR COALESCE(pv.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, updated_at = now() FROM page_versions pv WHERE pages.slug = $1 AND pages.source_id = $2 AND pv.id = $3 AND pv.page_id = pages.id",
-            "textSha256": "4ee0413e26da27f5cd804c898cc9ee89ef767277c888a9d80d20ad05699bc771"
+            "sql": "SELECT 1 FROM pages p JOIN page_versions pv ON pv.page_id = p.id WHERE p.slug = $1 AND p.source_id = $2 AND pv.id = $3 AND (p.body_storage = 'segmented' OR pv.body_storage = 'segmented')",
+            "textSha256": "f76c712b0870d1849d6e6f540d73fd130ab2c39f5a399eae60a5fe0f42406023"
+          },
+          {
+            "lane": "pool",
+            "params": [
+              "string",
+              "string",
+              "number"
+            ],
+            "sql": "UPDATE pages SET compiled_truth = pv.compiled_truth, frontmatter = pv.frontmatter, chunker_version = CASE WHEN pages.compiled_truth IS NOT DISTINCT FROM pv.compiled_truth AND pages.timeline IS NOT DISTINCT FROM pages.timeline THEN pages.chunker_version WHEN pages.chunker_version < 0 OR (CASE WHEN pages.body_storage = 'segmented' THEN pages.body_flags->>'has_protected' IS DISTINCT FROM 'false' ELSE (COALESCE(pages.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->') END) OR COALESCE(pv.compiled_truth, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' OR COALESCE(pages.timeline, '') ~ '<!--- gbrain:(facts|takes):(begin|end) -->' THEN -1 ELSE LEAST(COALESCE(pages.chunker_version, 0), 3) END, updated_at = now() FROM page_versions pv WHERE pages.slug = $1 AND pages.source_id = $2 AND pv.id = $3 AND pv.page_id = pages.id",
+            "textSha256": "8adc51ef3080d2dada22918e15c0390069dff8b06ef50ef495a04aa45dba8e67"
           }
         ]
       },
@@ -1223,8 +1401,8 @@
               "string",
               "string"
             ],
-            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING",
-            "textSha256": "fa56fa770a66caa8ae77b19c2c3ae9caac336d8e8281bc16f09d36a7fcdd74fd"
+            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) SELECT incarnation,$1 FROM sources WHERE id=$2 ON CONFLICT DO NOTHING",
+            "textSha256": "91584b13aae786f054e246bcc667c9ebe8c065d61b42d5ae775634739bce9f54"
           },
           {
             "lane": "tx",
@@ -1232,8 +1410,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug FROM page_write_guards WHERE source_incarnation=$1::uuid AND slug=$2 FOR UPDATE",
-            "textSha256": "3d08e10394edab70fb78946e378dd11528213526b214a8516d8cf3825e87ac19"
+            "sql": "SELECT g.slug FROM page_write_guards g JOIN sources s ON s.incarnation=g.source_incarnation WHERE s.id=$1 AND g.slug=$2 FOR UPDATE OF g",
+            "textSha256": "becdf4418f95796c9bab86a61f0f6e9d42bba2f74baedfe40ba9d9705977d77a"
           },
           {
             "lane": "tx",
@@ -1250,8 +1428,8 @@
               "string",
               "string"
             ],
-            "sql": "DELETE FROM page_aliases WHERE source_id=$1 AND slug=$2",
-            "textSha256": "6da211c8cdf3da0076f9251fb24d538ea62e28960c13455e5515dcf58b372937"
+            "sql": "DELETE FROM page_aliases WHERE source_id=$1 AND slug=$2 AND origin='frontmatter'",
+            "textSha256": "4e08a734d456bfca77faf68b2ba5e113ba5234cba27a0991b451016d66d17f86"
           },
           {
             "lane": "tx",
@@ -1287,8 +1465,8 @@
               "string",
               "string"
             ],
-            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) VALUES ($1::uuid,$2) ON CONFLICT DO NOTHING",
-            "textSha256": "fa56fa770a66caa8ae77b19c2c3ae9caac336d8e8281bc16f09d36a7fcdd74fd"
+            "sql": "INSERT INTO page_write_guards(source_incarnation,slug) SELECT incarnation,$1 FROM sources WHERE id=$2 ON CONFLICT DO NOTHING",
+            "textSha256": "91584b13aae786f054e246bcc667c9ebe8c065d61b42d5ae775634739bce9f54"
           },
           {
             "lane": "tx",
@@ -1296,8 +1474,8 @@
               "string",
               "string"
             ],
-            "sql": "SELECT slug FROM page_write_guards WHERE source_incarnation=$1::uuid AND slug=$2 FOR UPDATE",
-            "textSha256": "3d08e10394edab70fb78946e378dd11528213526b214a8516d8cf3825e87ac19"
+            "sql": "SELECT g.slug FROM page_write_guards g JOIN sources s ON s.incarnation=g.source_incarnation WHERE s.id=$1 AND g.slug=$2 FOR UPDATE OF g",
+            "textSha256": "becdf4418f95796c9bab86a61f0f6e9d42bba2f74baedfe40ba9d9705977d77a"
           },
           {
             "lane": "tx",
@@ -1314,8 +1492,8 @@
               "string",
               "string"
             ],
-            "sql": "DELETE FROM page_aliases WHERE source_id=$1 AND slug=$2",
-            "textSha256": "6da211c8cdf3da0076f9251fb24d538ea62e28960c13455e5515dcf58b372937"
+            "sql": "DELETE FROM page_aliases WHERE source_id=$1 AND slug=$2 AND origin='frontmatter'",
+            "textSha256": "4e08a734d456bfca77faf68b2ba5e113ba5234cba27a0991b451016d66d17f86"
           },
           {
             "event": "commit",
@@ -1359,6 +1537,21 @@
           }
         ]
       },
+      "stripStaleFrontmatterKeys": {
+        "default": [
+          {
+            "lane": "pool",
+            "params": [
+              "array<string>",
+              "string",
+              "array<number>",
+              "array<string>"
+            ],
+            "sql": "UPDATE pages SET frontmatter = frontmatter - $1::text[] WHERE source_id = $2 AND id = ANY($3::int[]) AND deleted_at IS NULL AND frontmatter ?| $4::text[]",
+            "textSha256": "12fe54535ce3d72bb4f980079919a8550d73cb9ba93fe539176bf6dc1cd08fbd"
+          }
+        ]
+      },
       "updatePageContextualRetrievalState": {
         "default": [
           {
@@ -1379,6 +1572,34 @@
           {
             "event": "begin",
             "lane": "tx"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "string",
+              "string",
+              "string",
+              "string"
+            ],
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "d49abdfac0d474258cc62de6b765f6c2bd3d4dc6f1098394ab26b05e48e8bc1c"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "number",
+              "string",
+              "string",
+              "string",
+              "string",
+              "string",
+              "string",
+              "string",
+              "boolean",
+              "null"
+            ],
+            "sql": "INSERT INTO page_versions (page_id,compiled_truth,frontmatter,knowledge_revision,timeline,title,type,tags,is_deleted,source_path) VALUES ($1,$2,$3::text::jsonb,$4::uuid,$5,$6,$7,$8::text::jsonb,$9,$10) RETURNING *",
+            "textSha256": "b2ff46c472f9770ffbf0c2aec78494499be17ecdd7f5661d0c268d3dd6c7e9bb"
           },
           {
             "lane": "tx",
@@ -1449,6 +1670,25 @@
             "params": [
               "string",
               "string",
+              "string",
+              "string"
+            ],
+            "sql": "WITH m AS ( SELECT f.id, f.expired_at, $1::text AS e, f.source_markdown_slug AS s, f.dimension, f.value_hash, f.valid_from FROM facts f WHERE f.source_id = $2 AND f.dimension IS NOT NULL AND f.entity_slug = $3), cand AS ( SELECT m.id, m.expired_at, m.e, m.s, m.dimension, m.value_hash, m.valid_from, 1 AS moving FROM m UNION ALL SELECT t.id, t.expired_at, t.entity_slug, t.source_markdown_slug, t.dimension, t.value_hash, t.valid_from, 0 FROM facts t WHERE t.source_id = $4 AND t.dimension IS NOT NULL AND NOT EXISTS (SELECT 1 FROM m WHERE m.id = t.id) AND EXISTS (SELECT 1 FROM m WHERE m.e = t.entity_slug AND m.s = t.source_markdown_slug AND m.dimension = t.dimension AND m.value_hash = t.value_hash AND m.valid_from = t.valid_from)), ranked AS ( SELECT id, row_number() OVER w AS rn, first_value(id) OVER w AS keep FROM cand WHERE e IS NOT NULL AND s IS NOT NULL AND value_hash IS NOT NULL AND valid_from IS NOT NULL WINDOW w AS (PARTITION BY e, s, dimension, value_hash, valid_from ORDER BY (expired_at IS NULL) DESC, moving, id)) SELECT id, keep FROM ranked WHERE rn > 1",
+            "textSha256": "625c2bd6d6158459e460f5f5284500a2df6f7388761406d953e8b1a74473de58"
+          },
+          {
+            "event": "savepoint-release",
+            "lane": "tx>sp"
+          },
+          {
+            "event": "savepoint",
+            "lane": "tx>sp"
+          },
+          {
+            "lane": "tx>sp",
+            "params": [
+              "string",
+              "string",
               "string"
             ],
             "sql": "UPDATE facts SET entity_slug = $1 WHERE source_id = $2 AND entity_slug = $3",
@@ -1486,6 +1726,25 @@
             "params": [
               "string",
               "string",
+              "string",
+              "string"
+            ],
+            "sql": "WITH m AS ( SELECT f.id, f.expired_at, f.entity_slug AS e, $1::text AS s, f.dimension, f.value_hash, f.valid_from FROM facts f WHERE f.source_id = $2 AND f.dimension IS NOT NULL AND f.source_markdown_slug = $3), cand AS ( SELECT m.id, m.expired_at, m.e, m.s, m.dimension, m.value_hash, m.valid_from, 1 AS moving FROM m UNION ALL SELECT t.id, t.expired_at, t.entity_slug, t.source_markdown_slug, t.dimension, t.value_hash, t.valid_from, 0 FROM facts t WHERE t.source_id = $4 AND t.dimension IS NOT NULL AND NOT EXISTS (SELECT 1 FROM m WHERE m.id = t.id) AND EXISTS (SELECT 1 FROM m WHERE m.e = t.entity_slug AND m.s = t.source_markdown_slug AND m.dimension = t.dimension AND m.value_hash = t.value_hash AND m.valid_from = t.valid_from)), ranked AS ( SELECT id, row_number() OVER w AS rn, first_value(id) OVER w AS keep FROM cand WHERE e IS NOT NULL AND s IS NOT NULL AND value_hash IS NOT NULL AND valid_from IS NOT NULL WINDOW w AS (PARTITION BY e, s, dimension, value_hash, valid_from ORDER BY (expired_at IS NULL) DESC, moving, id)) SELECT id, keep FROM ranked WHERE rn > 1",
+            "textSha256": "0b322cac7bcdffc723a918ff5a7891fdab2d2655acec826cb0b1720f1819d6b0"
+          },
+          {
+            "event": "savepoint-release",
+            "lane": "tx>sp"
+          },
+          {
+            "event": "savepoint",
+            "lane": "tx>sp"
+          },
+          {
+            "lane": "tx>sp",
+            "params": [
+              "string",
+              "string",
               "string"
             ],
             "sql": "UPDATE facts SET source_markdown_slug = $1 WHERE source_id = $2 AND source_markdown_slug = $3",
@@ -1507,8 +1766,8 @@
               "string",
               "string"
             ],
-            "sql": "DELETE FROM page_aliases a WHERE a.source_id = $1 AND a.slug = $2 AND EXISTS (SELECT 1 FROM page_aliases o WHERE o.source_id = $3 AND o.slug = $4 AND o.alias_norm = a.alias_norm)",
-            "textSha256": "c534f6c79181120132daf04f1bfa6d7b1a98611b3b1db953da697789b1758bbf"
+            "sql": "DELETE FROM page_aliases a WHERE a.source_id = $1 AND a.slug = $2 AND EXISTS (SELECT 1 FROM page_aliases o WHERE o.source_id = $3 AND o.slug = $4 AND o.alias_norm = a.alias_norm AND o.origin = a.origin)",
+            "textSha256": "584810386449ba564be21a2affc996de1fac7f8fb089faa941936b9827a1b85d"
           },
           {
             "event": "savepoint-release",
@@ -1541,6 +1800,34 @@
           {
             "event": "begin",
             "lane": "tx"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "string",
+              "string",
+              "string",
+              "string"
+            ],
+            "sql": "WITH chosen AS ( SELECT p.* FROM pages p WHERE p.slug=$1 AND p.source_id=$2 ORDER BY (p.slug=$3) DESC, (p.source_id=$4) DESC, p.source_id ASC LIMIT 1 ) SELECT p.*, (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation, COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags, wd.snapshot_withdrawals, wd.snapshot_global_purges, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_body, CASE WHEN wd.snapshot_withdrawals <> '[]'::jsonb OR (wd.snapshot_global_purges->>'count')::int > 0 THEN (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord) FROM unnest(string_to_array(p.timeline,chr(10))) WITH ORDINALITY AS lines(line,ord)) END AS fingerprint_timeline FROM chosen p CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at) ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug) GROUP BY visibility,fact_hash) w), '[]'::jsonb) || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true) ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals, (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*' ) AS snapshot_global_purges) wd",
+            "textSha256": "d49abdfac0d474258cc62de6b765f6c2bd3d4dc6f1098394ab26b05e48e8bc1c"
+          },
+          {
+            "lane": "tx",
+            "params": [
+              "number",
+              "string",
+              "string",
+              "string",
+              "string",
+              "string",
+              "string",
+              "string",
+              "boolean",
+              "null"
+            ],
+            "sql": "INSERT INTO page_versions (page_id,compiled_truth,frontmatter,knowledge_revision,timeline,title,type,tags,is_deleted,source_path) VALUES ($1,$2,$3::text::jsonb,$4::uuid,$5,$6,$7,$8::text::jsonb,$9,$10) RETURNING *",
+            "textSha256": "b2ff46c472f9770ffbf0c2aec78494499be17ecdd7f5661d0c268d3dd6c7e9bb"
           },
           {
             "lane": "tx",

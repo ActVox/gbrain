@@ -7,17 +7,31 @@
  * src/commands/doctor/registry.ts and src/core/doctor-categories.ts.
  */
 
+import { embedBackfillFix } from '../../../core/embed-consent.ts';
 import * as db from '../../../core/db.ts';
+import { loadConfig } from '../../../core/config.ts';
+import { isSupabasePoolerUrl } from '../../../core/connection-manager.ts';
 import { LATEST_VERSION } from '../../../core/migrate.ts';
 import { schemaVersionHealth } from '../../../core/schema-version-health.ts';
 import { pgvectorCheck, pagesUpsertArbiterCheck, linkSourceCheckConstraintCheck } from './core-health.ts';
 import { pgliteScaleCheck } from './engine-fit.ts';
 import { checkParkedEffects } from './parked-effects.ts';
-import { checkPersistenceCapacity } from './persistence-capacity.ts';
+import { checkManagedGuardSchemaDrift, checkPublicationRefusals } from './managed-guard.ts';
+import { checkWorktreeRefreshStuck } from './worktree-refresh.ts';
+import { checkPersistenceCounterDrift } from './persistence-compaction.ts';
 import { checkPostgresCancellationDriver } from './postgres-cancellation.ts';
 import { checkProjectionReadiness } from './projection-readiness.ts';
 import type { Check } from '../../doctor.ts';
-import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
+import type { BrainEngine } from '../../../core/engine.ts';
+import { connectedEngine, type DoctorContext, type DoctorEntry, doctorHealth } from '../context.ts';
+import { embeddingsDisabled } from '../../../core/embedding-disabled.ts';
+import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from '../../../core/search/embedding-column.ts';
+import { agentFix, checkError, doctorVerify, infoCheck, keylessEnablementFix } from '../check-fix.ts';
+import { readMigrationTimeout } from '../../../core/migration-timeout.ts';
+import { migrationTimeoutAdvice } from '../../../core/migration-timeout-advice.ts';
+import type { MissingTable, MissingTablesReport } from '../../../core/schema-missing-tables.ts';
+
+const MISSING_TABLES_DOCS = 'docs/guides/repair.md#missing-tables';
 
 async function runPgvector(ctx: DoctorContext): Promise<Check[]> {
   const { progress } = ctx;
@@ -36,9 +50,11 @@ async function runPgvector(ctx: DoctorContext): Promise<Check[]> {
   checks.push(await pagesUpsertArbiterCheck(engine));
   checks.push(await checkProjectionReadiness(engine));
 
-  // 4a-bis. Managed write capacity (#5470) and parked postcommit effects (#5612).
-  progress.heartbeat('persistence_capacity');
-  checks.push(await checkPersistenceCapacity(engine), await checkParkedEffects(engine));
+  // 4a-bis. Parked postcommit effects (#5612) and receipt-bytes counter drift (#6696 A10); capacity and compaction are ops entries (checks/ops-sections.ts).
+  progress.heartbeat('parked_effects');
+  checks.push(await checkPersistenceCounterDrift(engine), await checkParkedEffects(engine), await checkWorktreeRefreshStuck(engine));
+  // #5983/#5974: schema drift on guarded tables and writes the database refused.
+  checks.push(await checkManagedGuardSchemaDrift(engine), await checkPublicationRefusals(engine));
 
   // 4a-ter. #4613: links_link_source_check shape — a ledger-current brain
   // whose CHECK reverted to the pre-v114 allowlist rejects every kebab
@@ -63,8 +79,11 @@ export const pgvectorEntry: DoctorEntry = {
     'postgres_cancellation_driver',
     'pages_upsert_arbiter',
     'text_projection_readiness',
-    'persistence_capacity',
+    'persistence_counter_drift',
     'parked_effects',
+    'worktree_refresh_stuck',
+    'managed_guard_schema_drift',
+    'publication_refusals',
     'links_link_source_check',
     'pglite_scale',
   ],
@@ -143,6 +162,7 @@ async function runRls(ctx: DoctorContext): Promise<Check[]> {
           message: `RLS enabled on ${tables.length - exempt.length}/${tables.length} public tables${suffix}`,
         });
       } else {
+        const exposure = await publicSchemaExposure(sql);
         const names = gaps.join(', ');
         // Double-escape " inside identifiers so a pathological table name
         // like `weird"table` renders as `"weird""table"` in the remediation
@@ -155,23 +175,32 @@ async function runRls(ctx: DoctorContext): Promise<Check[]> {
         const exemptInfo = exempt.length > 0
           ? ` (${exempt.length} other table(s) explicitly exempt.)`
           : '';
-        checks.push({
-          name: 'rls',
-          status: 'fail',
-          message:
-            `${gaps.length} table(s) WITHOUT Row Level Security: ${names}.${exemptInfo} ` +
-            `Fix: ${fixes} ` +
-            `If a table should stay readable by the anon key on purpose, see docs/guides/rls-and-you.md for the GBRAIN:RLS_EXEMPT comment escape hatch.`,
-        });
+        const fixTail = `Fix: ${fixes} ` +
+          `If a table should stay readable by the anon key on purpose, see docs/guides/rls-and-you.md for the GBRAIN:RLS_EXEMPT comment escape hatch.`;
+        const gapLine = `${gaps.length} table(s) WITHOUT Row Level Security: ${names}.${exemptInfo} `;
+        checks.push(exposure
+          ? { name: 'rls', status: 'fail', message: `${gapLine}The public schema may be served to the anon key (${exposure}). ${fixTail}` }
+          : { name: 'rls', status: 'warn', message: `${gapLine}No PostgREST exposure detected (no anon, authenticated, authenticator or service_role role; not a Supabase URL), so this is a warning: enable RLS before putting PostgREST or a similar API in front of the public schema. ${fixTail}` });
       }
     } catch {
-      checks.push({ name: 'rls', status: 'warn', message: 'Could not check RLS status' });
+      checks.push(checkError('rls', 'check RLS status'));
     }
   }
   return checks;
 }
 
 export const rlsEntry: DoctorEntry = { name: 'rls', emits: ['rls'], run: runRls };
+
+/** PostgREST role conventions or a Supabase host mean the public schema may be reachable with the anon key; null when neither is present. */
+async function publicSchemaExposure(sql: ReturnType<typeof db.getConnection>): Promise<string | null> {
+  const roles = await sql`SELECT rolname FROM pg_roles
+    WHERE rolname IN ('anon', 'authenticated', 'authenticator', 'service_role') ORDER BY rolname`;
+  if (roles.length > 0) return `PostgREST role(s) present: ${(roles as unknown as Array<{ rolname: string }>).map(r => r.rolname).join(', ')}`;
+  const url = loadConfig()?.database_url ?? '';
+  let host = '';
+  try { host = new URL(url.replace(/^postgres(ql)?:\/\//, 'http://')).hostname; } catch { /* no parsable URL */ }
+  return /(^|\.)supabase\.(co|com)$/i.test(host) || isSupabasePoolerUrl(url) ? 'Supabase database URL' : null;
+}
 
 async function runSchemaVersion(ctx: DoctorContext): Promise<Check[]> {
   const { progress } = ctx;
@@ -188,7 +217,13 @@ async function runSchemaVersion(ctx: DoctorContext): Promise<Check[]> {
   try {
     const version = await engine.getConfig('version');
     schemaVersion = parseInt(version || '0', 10);
-    checks.push({ name: 'schema_version', ...schemaVersionHealth(schemaVersion, LATEST_VERSION) });
+    const timeout = schemaVersion > 0 && schemaVersion < LATEST_VERSION ? await readMigrationTimeout(engine, schemaVersion) : null;
+    if (timeout) {
+      const advice = migrationTimeoutAdvice(timeout, doctorVerify('schema_version'));
+      checks.push({ name: 'schema_version', status: 'warn', message: `Version ${schemaVersion}, latest is ${LATEST_VERSION}. ${advice.message}`, details: { migration_timeout: timeout }, fix: advice.fix });
+    } else {
+      checks.push({ name: 'schema_version', ...schemaVersionHealth(schemaVersion, LATEST_VERSION) });
+    }
 
     // 6b. Schema columns — gbrain#4421/#4425. The ledger counter alone can
     // lie: a PgBouncer transaction-mode pooler can swallow an ALTER TABLE
@@ -225,19 +260,58 @@ async function runSchemaVersion(ctx: DoctorContext): Promise<Check[]> {
           });
         }
       } catch {
-        checks.push({ name: 'schema_columns', status: 'warn', message: 'Could not verify live schema columns' });
+        checks.push(checkError('schema_columns', 'verify live schema columns'));
       }
     }
+    // 6c. #6911: tables the applied migrations created that the brain no longer has (the ledger cannot see a drop).
+    // Below head too: a missing cache that a pending migration alters wedges apply-migrations with 42P01.
+    progress.heartbeat('schema_missing_tables');
+    try {
+      const { readMissingTables } = await import('../../../core/schema-missing-tables.ts');
+      checks.push({ name: 'schema_missing_tables', ...missingTablesFields(await readMissingTables(engine)) });
+    } catch (error) {
+      checks.push(checkError('schema_missing_tables', 'check for tables the applied migrations created', error));
+    }
   } catch {
-    checks.push({ name: 'schema_version', status: 'warn', message: 'Could not check schema version' });
+    checks.push(checkError('schema_version', 'check schema version'));
   }
   ctx.schemaVersion = schemaVersion;
   return checks;
 }
 
+/**
+ * #6911: the schema_missing_tables verdict. A missing rebuildable cache warns with the repair preview; a missing
+ * user-data table fails, because base-schema replays (init --migrate-only, upgrade, apply-migrations) recreate it
+ * empty and clear this check while the rows stay lost; any other missing table warns.
+ */
+function missingTablesFields(report: MissingTablesReport): Omit<Check, 'name'> {
+  if (report.status === 'skipped') {
+    return { status: 'ok', message: `Skipped: the brain schema is v${report.version}, newer than this client (v${report.latest}); upgrade gbrain to check it.` };
+  }
+  if (!report.missing.length) {
+    return { status: 'ok', message: report.scope === 'all_tables' ? `All ${report.checked} table(s) the applied migrations create exist.`
+      : `All ${report.checked} rebuildable cache table(s) the applied migrations create exist.` };
+  }
+  const caches = report.missing.filter(m => m.recreatable);
+  const userData = report.missing.filter(m => !m.recreatable && m.loss_kind === 'user_data');
+  const other = report.missing.filter(m => !m.recreatable && m.loss_kind !== 'user_data');
+  const names = (list: MissingTable[]) => list.map(m => m.table).join(', ');
+  const sentences = [`${report.missing.length} table(s) the applied migrations create are missing, and apply-migrations will not recreate them from the migrations that already ran`];
+  if (caches.length) sentences.push(`Rebuildable cache(s) ${names(caches)}: preview recreating them empty with gbrain repair missing-tables, then apply the printed command after the user agrees`);
+  if (userData.length) sentences.push(`${names(userData)} hold user data: restore their rows from a backup before running gbrain init --migrate-only, gbrain upgrade or apply-migrations, which recreate a base-schema table empty and clear this check while the rows stay lost (see ${MISSING_TABLES_DOCS})`);
+  if (other.length) sentences.push(`${names(other)} hold no user data: gbrain init --migrate-only recreates the ones the base schema defines; report any it does not (see ${MISSING_TABLES_DOCS})`);
+  return { status: userData.length ? 'fail' : 'warn', message: `${sentences.join('. ')}.`,
+    details: { missing: report.missing, checked: report.checked, scope: report.scope, docs: MISSING_TABLES_DOCS },
+    ...(caches.length
+      ? { fix: agentFix(['gbrain', 'repair', 'missing-tables', '--json'], 'Read-only preview: lists each rebuildable cache table it would recreate empty and prints the apply command with its hash. Apply only after the user agrees.',
+        'schema_missing_tables', { docs: MISSING_TABLES_DOCS }) }
+      : { fix_unavailable_reason: 'operator_judgement' as const }) };
+}
+
 export const schemaVersionEntry: DoctorEntry = {
   name: 'schema_version',
-  emits: ['schema_version', 'schema_columns'],
+  emits: ['schema_version', 'schema_columns', 'schema_missing_tables'],
+  tier: 'quick',
   run: runSchemaVersion,
 };
 
@@ -302,11 +376,7 @@ async function runRlsEventTrigger(ctx: DoctorContext): Promise<Check[]> {
         });
       }
     } catch {
-      checks.push({
-        name: 'rls_event_trigger',
-        status: 'warn',
-        message: 'Could not check RLS event trigger',
-      });
+      checks.push(checkError('rls_event_trigger', 'check RLS event trigger'));
     }
   }
   return checks;
@@ -318,6 +388,49 @@ export const rlsEventTriggerEntry: DoctorEntry = {
   run: runRlsEventTrigger,
 };
 
+/**
+ * A backlog warns only when it is both large (over 1,000 chunks or 1% of
+ * embeddable chunks) and old: its oldest pending chunk has waited longer than
+ * this. A fresh brain draining its first embed, an edited page and a model
+ * swap re-embed all start their wait at the moment the vector went missing
+ * (`content_chunks.embedding_pending_since`), so they stay `ok` while they
+ * drain inside the window.
+ */
+export const EMBEDDING_BACKLOG_MAX_AGE_S = 24 * 60 * 60;
+const EMBEDDING_BACKLOG_MIN_CHUNKS = 1_000;
+const EMBEDDING_BACKLOG_MIN_SHARE = 0.01;
+
+interface BacklogAge { oldest_pending_age_s: number; backfilled: boolean }
+
+/**
+ * Age of the oldest chunk the health counters call missing (live, not
+ * embed_skip, registry-active vector NULL). Null when it cannot be read: the
+ * column is absent, or a pending chunk carries no pending-since stamp.
+ */
+async function readBacklogAge(engine: BrainEngine): Promise<BacklogAge | null> {
+  try {
+    const column = quoteIdentifier((await resolveActiveEmbeddingColumnFromEngine(engine, { fallbackToLegacy: true })).name);
+    const [row] = await engine.executeRaw<{ age_s: number | null; unaged: number; backfilled: boolean | null }>(
+      `SELECT EXTRACT(EPOCH FROM now() - min(cc.embedding_pending_since))::float8 AS age_s,
+              count(*) FILTER (WHERE cc.embedding_pending_since IS NULL)::int AS unaged,
+              min(cc.embedding_pending_since) <= (SELECT value::timestamptz FROM config
+                WHERE key = 'embedding_pending_since_backfilled_at') AS backfilled
+         FROM content_chunks cc JOIN pages p ON p.id = cc.page_id
+        WHERE cc.${column} IS NULL AND p.deleted_at IS NULL
+          AND NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip')`);
+    if (!row || row.age_s === null || Number(row.unaged) > 0) return null;
+    return { oldest_pending_age_s: Math.max(0, Math.round(Number(row.age_s))), backfilled: row.backfilled === true };
+  } catch {
+    return null;
+  }
+}
+
+function formatWait(seconds: number): string {
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 172_800) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
+}
+
 async function runEmbeddings(ctx: DoctorContext): Promise<Check[]> {
   const { progress } = ctx;
   const engine = connectedEngine(ctx);
@@ -326,7 +439,13 @@ async function runEmbeddings(ctx: DoctorContext): Promise<Check[]> {
   // 8. Embedding health
   progress.heartbeat('embeddings');
   try {
-    const health = await engine.getHealth();
+    // A keyless brain has no embedding backlog to drain: recommending a paid
+    // catch-up there would send the agent into a refusal.
+    if (await embeddingsDisabled(engine)) {
+      checks.push(infoCheck('embeddings', 'Not applicable: embeddings are disabled on this brain (keyword search keeps working).', 'disabled_by_choice', keylessEnablementFix()));
+      return checks;
+    }
+    const health = await doctorHealth(ctx);
     const pct = (health.embed_coverage * 100).toFixed(0);
     // Coverage + missing now share one source (the stored vector over
     // eligible chunks), so the two numbers can no longer contradict each
@@ -342,15 +461,41 @@ async function runEmbeddings(ctx: DoctorContext): Promise<Check[]> {
     } catch {
       // Config read is best-effort; the coverage numbers stand alone.
     }
-    if (health.embed_coverage >= 0.9) {
-      checks.push({ name: 'embeddings', status: 'ok', message: `${pct}% coverage, ${health.missing_embeddings} missing${carveOut}` });
-    } else if (health.embed_coverage > 0) {
-      checks.push({ name: 'embeddings', status: 'warn', message: `${pct}% coverage, ${health.missing_embeddings} missing. Run: gbrain embed --stale${carveOut}` });
-    } else {
-      checks.push({ name: 'embeddings', status: 'warn', message: `No embeddings yet. Run: gbrain embed --stale${carveOut}` });
+    const backlog = health.missing_embeddings;
+    const age = backlog > 0 ? await readBacklogAge(engine) : null;
+    const ageDetails = {
+      backlog,
+      oldest_pending_age_s: age?.oldest_pending_age_s ?? null,
+      age_threshold_s: EMBEDDING_BACKLOG_MAX_AGE_S,
+      ...(age?.backfilled ? { age_source: 'created_at_backfill' } : {}),
+    };
+    if (backlog === 0) {
+      checks.push({ name: 'embeddings', status: 'ok', message: `${pct}% coverage, ${backlog} missing${carveOut}`, details: ageDetails });
+      return checks;
     }
+    // The backlog's fix is the catch-up drain: a plain `embed --stale` stops
+    // at its 30-minute budget, which on a large brain leaves most of the
+    // backlog behind (52k documents: 51,910 chunks after one run).
+    const fix = 'gbrain embed --stale --catch-up';
+    const details = { code: 'embedding_backlog', ...ageDetails, fix, requires_user_approval: 'paid embedding calls',
+      docs: 'docs/operations/backfill-pacing.md#large-brain-deadlines' };
+    const fixText = `Fix: ${fix} (runs until the backlog is empty; a plain gbrain embed --stale stops after its 30-minute budget). ` +
+      'It makes paid embedding calls: confirm with the user unless embedding spend is already approved.';
+    // Without a readable age (pre-migration schema, unstamped rows) the
+    // coverage rule decides: warn below 90%.
+    const stale = age
+      ? (backlog > EMBEDDING_BACKLOG_MIN_CHUNKS || 1 - health.embed_coverage > EMBEDDING_BACKLOG_MIN_SHARE)
+        && age.oldest_pending_age_s > EMBEDDING_BACKLOG_MAX_AGE_S
+      : health.embed_coverage < 0.9;
+    const waited = age
+      ? ` Oldest pending chunk has waited ${formatWait(age.oldest_pending_age_s)}${age.backfilled ? ' (backfilled from its creation time)' : ''}; a large backlog warns after ${formatWait(EMBEDDING_BACKLOG_MAX_AGE_S)}.`
+      : '';
+    const summary = health.embed_coverage > 0 ? `${pct}% coverage, ${backlog} missing` : 'No embeddings yet';
+    checks.push({ name: 'embeddings', status: stale ? 'warn' : 'ok',
+      message: `${summary}${carveOut}. Backlog: ${backlog} chunk(s) without embeddings.${waited} ${fixText}`,
+      details, fix: embedBackfillFix({ backlog, verifyCheck: 'embeddings' }) });
   } catch {
-    checks.push({ name: 'embeddings', status: 'warn', message: 'Could not check embedding health' });
+    checks.push(checkError('embeddings', 'check embedding health'));
   }
   return checks;
 }

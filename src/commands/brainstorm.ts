@@ -26,8 +26,11 @@ import { loadConfig } from '../core/config.ts';
 import { StructuredAgentError } from '../core/errors.ts';
 import { serializeMarkdown } from '../core/markdown.ts';
 import { importFromContent } from '../core/import-file.ts';
-import { writePageThrough, type WriteThroughResult } from '../core/write-through.ts';
+import { isWriteThroughDisabled, resolvePageWriteTarget, writePageThrough, type WriteThroughResult } from '../core/write-through.ts';
+import { fileDatabaseDriftToken, replaceableFile } from '../core/facts/file-body-guard.ts';
 import { randomBytes } from 'crypto';
+import { legacyNestedErrorDocument } from '../core/agent-output.ts';
+import { CapFlagError, mergeCapFlag, parseCapFlag, type CapFlag } from '../core/budget/cap-flag.ts';
 
 export interface BrainstormCliArgs {
   question?: string;
@@ -35,8 +38,10 @@ export interface BrainstormCliArgs {
   save?: boolean;
   yes: boolean;
   limit?: number;
-  /** Cost ceiling in USD; aborts pre-run if estimate exceeds. Default $5. */
-  maxCost?: number;
+  /** Cost ceiling in USD (`--max-usd`, legacy `--max-cost`); null = off; undefined = the $5 default. */
+  maxCost?: number | null;
+  /** The cap flag spelling the user typed. */
+  maxCostFlag?: string;
   /** Hard cap on far-set prefix sampling. Default 50. */
   maxFarSet?: number;
   /** When true, abort mid-run if running spend exceeds 5× estimate. */
@@ -58,6 +63,7 @@ export interface BrainstormCliArgs {
 export function parseBrainstormArgs(args: string[]): BrainstormCliArgs {
   const out: BrainstormCliArgs = { json: false, yes: false, help: false };
   const positional: string[] = [];
+  let cap: CapFlag | undefined;
   let i = 0;
   while (i < args.length) {
     const arg = args[i];
@@ -79,14 +85,16 @@ export function parseBrainstormArgs(args: string[]): BrainstormCliArgs {
         return out;
       }
       out.limit = n;
-    } else if (arg === '--max-cost') {
-      const v = args[++i];
-      const n = v ? parseFloat(v) : NaN;
-      if (!Number.isFinite(n) || n <= 0) {
-        out.error = `--max-cost requires a positive number in USD (got ${v})`;
+    } else if (arg === '--max-usd' || arg === '--max-cost') {
+      try {
+        cap = mergeCapFlag(cap, parseCapFlag(arg, args[++i]));
+      } catch (err) {
+        if (!(err instanceof CapFlagError)) throw err;
+        out.error = err.message;
         return out;
       }
-      out.maxCost = n;
+      out.maxCost = cap.usd;
+      out.maxCostFlag = cap.flag;
     } else if (arg === '--max-far-set') {
       const v = args[++i];
       const n = v ? parseInt(v, 10) : NaN;
@@ -150,7 +158,11 @@ Options:
   --no-save                       Don't save; print only
   --yes, -y                       Skip the 10s cost-preview wait (TTY only)
   --limit N                       Override the far-bank size (default 6 brainstorm / 12 LSD)
-  --max-cost USD                  Abort if estimated cost exceeds USD (default 5)
+  --max-usd USD|off               Abort if estimated cost exceeds USD (default 5;
+                                  --max-cost is the legacy spelling). off runs
+                                  uncapped. A model with no price runs under the
+                                  default with a warning; an explicit cap refuses
+                                  it until you register its rate (gbrain pricing set)
   --max-far-set N                 Cap domain bank prefix sampling (default 50)
   --strict-budget                 Abort if running cost exceeds 5× the estimate
   --judge-model MODEL             Override the judge LLM (larger-context for big runs)
@@ -185,7 +197,11 @@ Options:
   --save                          Persist to wiki/ideas/<date>-lsd-<slug>.md (default OFF)
   --yes, -y                       Skip the 10s cost-preview wait (TTY only)
   --limit N                       Override the far-bank size (default 12)
-  --max-cost USD                  Abort if estimated cost exceeds USD (default 5)
+  --max-usd USD|off               Abort if estimated cost exceeds USD (default 5;
+                                  --max-cost is the legacy spelling). off runs
+                                  uncapped. A model with no price runs under the
+                                  default with a warning; an explicit cap refuses
+                                  it until you register its rate (gbrain pricing set)
   --max-far-set N                 Cap domain bank prefix sampling (default 50)
   --strict-budget                 Abort if running cost exceeds 5× the estimate
   --judge-model MODEL             Override the judge LLM (larger-context for big runs)
@@ -281,6 +297,7 @@ async function runBrainstormCli(
       ideaSlug: shouldSave ? freshSlug : undefined,
       // v0.39.0.0 T10 cost-cap surface — wired in master, preserved here.
       maxCostUsd: parsed.maxCost,
+      maxCostFlag: parsed.maxCostFlag,
       maxFarSet: parsed.maxFarSet,
       strictBudget: parsed.strictBudget,
       judgeModel: parsed.judgeModel,
@@ -293,7 +310,7 @@ async function runBrainstormCli(
       if (parsed.json) {
         // Agents reading --json get the structured envelope (matches
         // serializeError shape from src/core/errors.ts).
-        console.log(JSON.stringify({ error: err.envelope }, null, 2));
+        console.log(JSON.stringify(legacyNestedErrorDocument(err.envelope), null, 2));
       } else {
         console.error(`Error [${err.envelope.code}]: ${err.envelope.message}`);
         if (err.envelope.hint) console.error(`  Hint: ${err.envelope.hint}`);
@@ -321,7 +338,7 @@ async function runBrainstormCli(
     // the saved file round-trips through `gbrain sync` byte-for-byte. Include
     // filtered ideas (onlyPassed:false) so a judge-failed run still shows every
     // idea; `--resume <run_id>` re-scores and overwrites this same page.
-    const fmObj = buildBrainstormFrontmatterObject(result);
+    const fmObj = { ...buildBrainstormFrontmatterObject(result), source_kind: profile.label };
     const body = formatBrainstormMarkdown(result, { onlyPassed: false, includeMeta: true });
     const content = serializeMarkdown(fmObj, body, '', { type: 'note', title, tags: [] });
 
@@ -341,6 +358,8 @@ export interface SaveOutcome {
   dbError?: string;
   /** Disk write-through result (rendered from the saved row). */
   writeThrough: WriteThroughResult;
+  /** Set when nothing was saved because the page's file holds content the database lacks (`file_database_drift`). */
+  held?: string;
 }
 
 export interface SaveMessage {
@@ -358,8 +377,14 @@ export interface SaveMessage {
  * embedding cost at save time) writes the DB row, then the shared
  * `writePageThrough` helper renders that row to disk. Rendering from the row
  * means the two sinks cannot diverge, and the row matches what `gbrain sync`
- * would produce — so a later sync doesn't churn it. The file is only attempted
- * when the DB write landed (it's rendered from the row).
+ * would produce — so a later sync doesn't churn it (the CLI puts `source_kind`
+ * in the content's frontmatter, so the row and the rendered file agree). The
+ * file is only attempted when the DB write landed (it's rendered from the row).
+ *
+ * #6982: before importing, the page's file (a `--resume` reuses the slug) must
+ * hold nothing the database lacks (`replaceableFile`); otherwise nothing is
+ * saved and `held` says why. The file write is bound to the bytes compared, so
+ * an edit landing during the save is kept (`skipped: 'file_changed'`).
  */
 export async function persistSavedIdea(
   engine: BrainEngine,
@@ -368,7 +393,14 @@ export async function persistSavedIdea(
   const sourceId = args.sourceId ?? 'default';
   let dbSaved = false;
   let dbError: string | undefined;
+  let expectedFileBytes: string | null | undefined;
   try {
+    const target = await isWriteThroughDisabled(engine) ? null : await resolvePageWriteTarget(engine, args.slug, sourceId);
+    const file = target?.ok ? await replaceableFile(engine, sourceId, args.slug, target.filePath) : null;
+    if (file && !file.ok) {
+      return { dbSaved: false, held: fileDatabaseDriftToken(args.slug, sourceId, 'before', 'the idea was not saved'), writeThrough: { written: false } };
+    }
+    expectedFileBytes = file?.expectedFileBytes;
     await importFromContent(engine, args.slug, args.content, {
       noEmbed: true,
       sourceId,
@@ -382,6 +414,7 @@ export async function persistSavedIdea(
     ? await writePageThrough(engine, args.slug, {
         sourceId,
         frontmatterOverrides: { source_kind: args.provenanceVia },
+        expectedFileBytes,
       })
     : { written: false, skipped: 'page_not_found_after_write' };
   return { dbSaved, dbError, writeThrough };
@@ -400,6 +433,10 @@ export function formatSaveOutcome(
 ): SaveMessage {
   const { dbSaved, dbError, writeThrough } = outcome;
   const stderr: string[] = [];
+  if (outcome.held) {
+    stderr.push(`gbrain ${ctx.profileLabel}: save refused: ${outcome.held}. Rerun with --resume <run_id> once the page and its file agree.`);
+    return { stderr, exitCode: 1 };
+  }
   if (dbError) stderr.push(`gbrain ${ctx.profileLabel}: DB save failed: ${dbError}`);
   if (writeThrough.error) {
     stderr.push(`gbrain ${ctx.profileLabel}: file write failed: ${writeThrough.error}`);
@@ -422,6 +459,20 @@ export function formatSaveOutcome(
   if (dbSaved && writeThrough.skipped === 'repo_not_found') {
     return {
       stdout: `\n_Saved to DB page \`${ctx.slug}\` (\`sync.repo_path\` is not a directory — skipped file write)._`,
+      stderr,
+      exitCode: 0,
+    };
+  }
+  if (dbSaved && writeThrough.skipped === 'file_changed') {
+    return {
+      stdout: `\n_Saved to DB page \`${ctx.slug}\` (its file changed during the save and was kept, not rewritten: file_changed; \`gbrain sync\` imports that edit, and page history keeps this save)._`,
+      stderr,
+      exitCode: 0,
+    };
+  }
+  if (dbSaved && writeThrough.skipped === 'url_clone') {
+    return {
+      stdout: `\n_Saved to DB page \`${ctx.slug}\` (the source is a clone gbrain pulls from upstream — kept database-only)._`,
       stderr,
       exitCode: 0,
     };

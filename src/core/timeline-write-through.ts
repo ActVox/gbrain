@@ -1,4 +1,5 @@
 import { bodyWriteChunkVersion } from './search/safe-chunks.ts';
+import { assertInlineBody } from './page-body/page-shape.ts';
 /**
  * #1856 — write-through for manual timeline entries.
  *
@@ -47,7 +48,6 @@ import { bodyWriteChunkVersion } from './search/safe-chunks.ts';
 
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 import { sanitizeForJsonb } from './batch-rows.ts';
 import {
@@ -57,6 +57,8 @@ import {
   type WriteThroughResult,
 } from './write-through.ts';
 import { withPageLock } from './page-lock.ts';
+import { atomicStagingPath } from './atomic-write.ts';
+import { maintenanceTransaction } from './persistence/attribution.ts';
 import { assertSourceFilesystemActive, hasSourceFilesystemLock, withSourceFilesystemLock } from './minions/source-filesystem.ts';
 import { findTimelineSplitIndex } from './markdown.ts';
 import { isMaterializedMarkerLine } from './timeline-marker.ts';
@@ -65,6 +67,7 @@ import {
   type PushLogOutcome,
 } from './brain-repo-durability.ts';
 import { extractTimelineFromContent } from './timeline-extract.ts';
+import { urlCloneReadOnly } from './url-clone.ts';
 
 /** Raw op params for one manual timeline entry (date pre-validated by caller). */
 export interface TimelineEntryWriteInput {
@@ -104,6 +107,7 @@ export interface TimelineWriteThroughOutcome {
   /** Why the FS-canonical path didn't apply (when handled=false). */
   skipped?:
     | 'disabled_by_config'
+    | 'url_clone'
     | 'no_repo_configured'
     | 'repo_not_found'
     | 'source_repo_belongs_to_other_source'
@@ -307,6 +311,9 @@ export async function writeTimelineEntryThrough(
     if (await isWriteThroughDisabled(engine)) {
       return { handled: false, skipped: 'disabled_by_config' };
     }
+    if (await urlCloneReadOnly(engine, sourceId)) {
+      return { handled: false, skipped: 'url_clone' };
+    }
     const target = await resolvePageWriteTarget(engine, slug, sourceId);
     if (!target.ok) {
       return { handled: false, skipped: target.skipped };
@@ -322,6 +329,7 @@ export async function writeTimelineEntryThrough(
       // error instead of inventing a second error shape here.
       return { handled: false, skipped: 'page_not_found' };
     }
+    assertInlineBody(page, 'timeline write-through');
 
     const rendered = renderTimelineEntry(entry, slug);
     if (!rendered) {
@@ -371,7 +379,7 @@ export async function writeTimelineEntryThrough(
 
         // Atomic write: unique temp sibling + rename (writePageThrough's
         // convention). Clean the temp up on failure — never leak a stray.
-        const tmpPath = `${filePath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
+        const tmpPath = atomicStagingPath(filePath);
         try {
           assertSourceFilesystemActive();
           writeFileSync(tmpPath, afterText, 'utf8');
@@ -389,22 +397,24 @@ export async function writeTimelineEntryThrough(
         const newTimeline = sanitizeForJsonb(
           spliceTimelineBlock(page.timeline ?? '', entry.date, rendered.block),
         );
-        await engine.executeRaw(
-          `UPDATE pages SET timeline = $1, chunker_version = ${bodyWriteChunkVersion('pages.compiled_truth', '$1')}, updated_at = now()
-            WHERE slug = $2 AND source_id = $3 AND deleted_at IS NULL`,
-          [newTimeline, slug, sourceId],
-        );
+        await maintenanceTransaction(engine, async tx => {
+          await tx.executeRaw(
+            `UPDATE pages SET timeline = $1, chunker_version = ${bodyWriteChunkVersion('pages.compiled_truth', '$1')}, updated_at = now()
+              WHERE slug = $2 AND source_id = $3 AND deleted_at IS NULL`,
+            [newTimeline, slug, sourceId],
+          );
 
-        // Store the tuple the FS extractor recovers from the bullet just
-        // spliced in, so every later sync/rebuild re-extraction
-        // conflicts-no-ops instead of duplicating (#1856's dedup-tuple
-        // divergence).
-        await engine.addTimelineEntry(slug, { // gbrain-allow-direct-insert: timeline write-through — the canonical markdown gains the same entry in this call, and the stored tuple is derived from the rendered bullet so sync/extract reconciliation dedups against it
-          date: rendered.canonical.date,
-          source: rendered.canonical.source,
-          summary: rendered.canonical.summary,
-          detail: entry.detail || '',
-        }, { sourceId, skipExistenceCheck: true });
+          // Store the tuple the FS extractor recovers from the bullet just
+          // spliced in, so every later sync/rebuild re-extraction
+          // conflicts-no-ops instead of duplicating (#1856's dedup-tuple
+          // divergence).
+          await tx.addTimelineEntry(slug, { // gbrain-allow-direct-insert: timeline write-through — the canonical markdown gains the same entry in this call, and the stored tuple is derived from the rendered bullet so sync/extract reconciliation dedups against it
+            date: rendered.canonical.date,
+            source: rendered.canonical.source,
+            summary: rendered.canonical.summary,
+            detail: entry.detail || '',
+          }, { sourceId, skipExistenceCheck: true });
+        });
 
         // #2426 mirror (writePageThrough): on a durability-hardened repo,
         // commit the artifact so it reaches git. Best-effort — a commit
@@ -417,7 +427,7 @@ export async function writeTimelineEntryThrough(
             committed = commitWriteThroughFile(writeRoot, filePath, slug);
             if (committed) {
               pushed = 'pending';
-              lastPushStatus = getLastPushOutcome(currentBranch(writeRoot));
+              lastPushStatus = getLastPushOutcome(currentBranch(writeRoot), writeRoot);
             }
           }
         } catch { /* best-effort */ }

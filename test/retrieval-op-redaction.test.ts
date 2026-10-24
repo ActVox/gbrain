@@ -136,15 +136,19 @@ const SWEEP: Record<string, Row> = {
   list_pages: { args: { limit: 100 } },
   search: { args: { query: 'PLANTMARK note body', limit: 20 } },
   query: { args: { query: 'PLANTMARK note body', limit: 20 } },
+  search_exact: { args: { phrase: 'PLANTMARK' } },
   assemble_evidence: { args: { hits: [{ source_id: SRC, slug: 'notes/n1', chunk_id: 0 }], return_unit: 'page' } },
   search_by_image: { skip: 'needs image-embedding infra; cross-modal suites own it. Wrapper coverage is the registration test below.' },
   get_links: { args: { slug: 'notes/n1' } },
   get_backlinks: { args: { slug: 'people/alice-example' } },
   traverse_graph: { args: { slug: 'notes/n1', depth: 2 } },
+  rank_entities: { args: {} },
   get_timeline: { args: { slug: 'people/alice-example' } },
   advisor: { skip: 'aggregate advisory over the installed skill stack; advisor suites own it' },
   get_ingest_log: { args: { limit: 50 } },
   find_orphans: { args: {} },
+  // Targets and origin slugs only; the fixture has no unresolved links (behavior: test/wanted-links.test.ts).
+  wanted_pages: { args: {}, content: false },
   get_calibration_profile: { args: {}, content: false },
   takes_list: { args: { limit: 50 } },
   takes_search: { args: { query: 'PLANTMARK', limit: 20 } },
@@ -185,6 +189,7 @@ const SWEEP: Record<string, Row> = {
   get_tags: { args: { slug: 'notes/n1' } },
   list_link_sources: { args: {} },
   get_brain_identity: { args: {} },
+  get_brain_health: { args: {} },
   list_skills: { skip: 'bundled skills catalog from the install tree (throws outside an installed skills dir)' },
   join_brain: { skip: 'shared-skills enrollment needs an explicit member grant; returns membership ids' },
   leave_brain: { skip: 'shared-skills membership op; returns membership ids' },
@@ -194,6 +199,7 @@ const SWEEP: Record<string, Row> = {
   whoami: { args: {} },
   sources_list: { args: {} },
   sources_status: { args: { id: SRC } },
+  sources_resolve_path: { skip: 'needs a Git checkout of the source; returns paths, slugs, states and counts, never page text; test/sources-resolve-path.test.ts owns it' },
   sources_inspect: { skip: 'local-only inspection of a committed Git repository directory; returns repo metadata, owned by the sources suites' },
   request_tools: { args: { tools: ['get_page'] } },
   connectors_status: { args: {}, remote: false },
@@ -206,6 +212,7 @@ const SWEEP: Record<string, Row> = {
   schema_graph: { args: {} },
   schema_explain_type: { args: { type: 'note' } },
   schema_review_orphans: { args: { limit: 50 } },
+  list_write_conflicts: { args: {} },
   // no_stored_text — write receipts (the planted content is the caller's own
   // input here; the receipt must not echo it)
   remember: { args: { fact: planted('remembered'), provenance: 'test:sweep', request_id: randomUUID() } },
@@ -342,7 +349,10 @@ describe('budgets and the delta cursor are computed from delivered (redacted) te
     expect(body.has_more).toBe(true);
     expect(body.pages.length).toBeGreaterThan(0);
     const last = body.pages[body.pages.length - 1];
-    expect(body.next_cursor).toEqual({ since: last.updated_at, slug: last.slug });
+    // At or before the last delivered page: equal once the page is older than
+    // delta's 2 s commit-visibility lag, held at the request's since before that.
+    expect(body.next_cursor.since <= last.updated_at).toBe(true);
+    if (body.next_cursor.since === last.updated_at) expect(body.next_cursor.slug).toBe(last.slug);
     for (const p of body.pages) expect(body.text).toContain(`\`${p.slug}\``);
   });
 

@@ -34,9 +34,10 @@
  * `changed_since_preview` and kept.
  */
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
-import { OperationError } from '../ops/contract.ts';
+import { opError, OperationError } from '../ops/contract.ts';
+import { readFix } from '../ops/op-fix.ts';
 import { parseFactsFence, type ParsedFact } from '../facts-fence.ts';
 import { strikeFenceRow } from '../facts/forget.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
@@ -53,6 +54,7 @@ import { claudeProjectsDir } from '../bootstrap/host-specs.ts';
 import { corpusFileSessionId, corpusTextForExtraction } from '../context/corpus-segments.ts';
 import { pruneDir } from '../sync.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairScope } from './core.ts';
+import { maintenanceTransaction } from '../persistence/attribution.ts';
 
 export const CAPTURE_LANES = ['hook:writeback', 'hook:compact', 'sweep:corpus'] as const;
 const CORPUS_KEY = 'dream.synthesize.session_corpus_dir';
@@ -80,6 +82,8 @@ export interface CapturedFactsClassification {
   candidates: CapturedFactCandidate[];
   unclassifiable: number;
   not_suspect: number;
+  /** GBRA-130 A-65: corpus directories and session files the classification could not read (relative to the corpus dir). */
+  unreadable_corpus_files: string[];
 }
 
 export interface CapturedFactsPage {
@@ -106,13 +110,13 @@ function words(text: string): Set<string> {
   return new Set((text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter(w => !STOPWORDS.has(w)));
 }
 
-/** Every `.txt` under `root` (dream discovery's pruning), keyed by its session id. */
-function sessionFiles(root: string | null | undefined): Map<string, string[]> {
+/** Every `.txt` under `root` (dream discovery's pruning), keyed by its session id; a directory it cannot list goes to `unreadable`. */
+function sessionFiles(root: string | null | undefined, unreadable: string[]): Map<string, string[]> {
   const bySession = new Map<string, string[]>();
   if (!root || !existsSync(root)) return bySession;
   const walk = (dir: string) => {
     let entries: Dirent[];
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { unreadable.push(dir); return; }
     for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) { if (pruneDir(entry.name, dir)) walk(full); }
@@ -161,20 +165,22 @@ export async function classifyCapturedFacts(db: BrainEngine, sourceIds: string[]
      WHERE f.source_id=ANY($1::text[]) AND f.source=ANY($2::text[]) AND f.expired_at IS NULL AND f.superseded_by IS NULL
        AND ($3::bigint[] IS NULL OR f.id=ANY($3::bigint[]))
      ORDER BY f.source_id, f.id`, [sourceIds, [...CAPTURE_LANES], opts.ids ?? null]);
-  if (!rows.length) return { candidates: [], unclassifiable: 0, not_suspect: 0 };
+  if (!rows.length) return { candidates: [], unclassifiable: 0, not_suspect: 0, unreadable_corpus_files: [] };
   const projectsRoot = opts.projectsRoot ?? claudeProjectsDir();
   const selfDirs = claudeCliSelfProjectDirs(projectsRoot);
   const known = harnessSessionIds(projectsRoot);
   const corpusDir = opts.corpusDir === undefined ? await db.getConfig(CORPUS_KEY) : opts.corpusDir;
-  const corpus = sessionFiles(corpusDir);
-  const quarantine = sessionFiles(corpusDir ? join(dirname(corpusDir), `${basename(corpusDir)}.quarantine`) : null);
+  const unreadable: string[] = [];
+  const corpus = sessionFiles(corpusDir, unreadable);
+  const quarantine = sessionFiles(corpusDir ? join(dirname(corpusDir), `${basename(corpusDir)}.quarantine`) : null, unreadable);
+  const unreadSessions = new Set<string>();
   const pasteWords = new Map<string, { file: string; paste: Set<string> } | null>();
   const pasteOnlyWords = (session: string) => {
     if (pasteWords.has(session)) return pasteWords.get(session)!;
     let found: { file: string; paste: Set<string> } | null = null;
     for (const file of corpus.get(session) ?? []) {
       let raw: string;
-      try { raw = readFileSync(file, 'utf8'); } catch { continue; }
+      try { raw = readFileSync(file, 'utf8'); } catch { unreadable.push(file); unreadSessions.add(session); continue; }
       if (!raw.includes('<pasted_content')) continue;
       const own = words(corpusTextForExtraction(file, raw));
       const paste = new Set([...words(raw)].filter(w => !own.has(w)));
@@ -202,7 +208,7 @@ export async function classifyCapturedFacts(db: BrainEngine, sourceIds: string[]
         return { klass: 'ambiguous', reason: 'paste_heuristic', session, evidence: `${basename(paste.file)}: ${covered}/${claim.length} words only in paste blocks` };
       }
     }
-    return corpus.has(session) || known.has(session) ? 'not_suspect' : 'unclassifiable';
+    return !unreadSessions.has(session) && (corpus.has(session) || known.has(session)) ? 'not_suspect' : 'unclassifiable';
   });
   // A suspect claim that also has an active copy not proven suspect (another lane, or any other capture row) is kept.
   const twinKey = (row: FactRow) => JSON.stringify([row.source_id, row.visibility, row.entity_slug, row.fingerprint]);
@@ -217,7 +223,8 @@ export async function classifyCapturedFacts(db: BrainEngine, sourceIds: string[]
       evidence: hit.evidence, fact_hash: factHash(row) });
   });
   candidates.sort((a, b) => a.source_id.localeCompare(b.source_id) || a.slug.localeCompare(b.slug) || a.id - b.id);
-  return { candidates, unclassifiable: classified.filter(c => c === 'unclassifiable').length, not_suspect: classified.filter(c => c === 'not_suspect').length };
+  return { candidates, unclassifiable: classified.filter(c => c === 'unclassifiable').length, not_suspect: classified.filter(c => c === 'not_suspect').length,
+    unreadable_corpus_files: unreadable.map(path => !corpusDir ? path : path.startsWith(`${corpusDir}/`) ? relative(corpusDir, path) : relative(dirname(corpusDir), path)) };
 }
 
 function previewCommand(scope: RepairScope, all: string[], includeAmbiguous: boolean): string {
@@ -241,7 +248,7 @@ export const capturedFactsRepair: RepairHandler = {
     const includeAmbiguous = opts?.includeAmbiguous === true;
     const command = previewCommand(scope, await activeSources(engine), includeAmbiguous);
     if (!opts?.apply) {
-      const { candidates, unclassifiable, not_suspect } = await classifyCapturedFacts(engine, scope.source_ids);
+      const { candidates, unclassifiable, not_suspect, unreadable_corpus_files } = await classifyCapturedFacts(engine, scope.source_ids);
       const [brain] = await engine.executeRaw<{ brain_id: string }>('SELECT brain_id FROM persistence_brain WHERE singleton=1').catch(() => []);
       const hash = previewHash(['captured-facts-v1', brain?.brain_id ?? 'host', scope.source_ids, includeAmbiguous,
         candidates.map(c => [c.id, c.class, c.reason, c.fact_hash])]);
@@ -258,15 +265,22 @@ export const capturedFactsRepair: RepairHandler = {
       const count = (klass: CapturedFactClass) => candidates.filter(c => c.class === klass).length;
       const listing: RepairListing[] = candidates.map(c => ({ item: `${c.source_id}:${c.slug}#${c.id}`,
         class: c.class === 'excluded' ? c.reason : c.class, detail: `${c.reason === 'paste_heuristic' ? 'paste candidate' : c.reason}; session ${c.session}; ${c.evidence}` }));
+      for (const path of unreadable_corpus_files) listing.push({ item: path, class: 'unreadable_corpus_file',
+        detail: 'not read (check its permissions); facts of its sessions are counted unclassifiable and kept' });
       return { items: approved.map((page, i) => pageItem(page, hash, i, i === approved.length - 1)), preview_hash: hash, listing,
-        residuals: { evidenced: count('evidenced'), ambiguous: count('ambiguous'), excluded: count('excluded'), unclassifiable, not_suspect } };
+        residuals: { evidenced: count('evidenced'), ambiguous: count('ambiguous'), excluded: count('excluded'), unclassifiable, not_suspect,
+          ...(unreadable_corpus_files.length ? { unreadable_corpus_files: unreadable_corpus_files.length } : {}) } };
     }
     if (!opts.expect) {
       throw new OperationError('invalid_params', 'gbrain repair captured-facts --apply expires only the set a preview printed.',
         `Preview first: ${command} — then run the apply command it prints: ${command} --apply --expect <preview-hash>`,
         'docs/guides/repair.md#explicit-only-repair-kinds');
     }
-    const approved = await loadApprovedSet<CapturedFactsPage>(engine, { command: 'captured-facts', hash: opts.expect, previewCommand: command });
+    const approved = await loadApprovedSet<CapturedFactsPage>(engine, { command: 'captured-facts', hash: opts.expect, previewCommand: command,
+      emptyHash: async () => {
+        const [brain] = await engine.executeRaw<{ brain_id: string }>('SELECT brain_id FROM persistence_brain WHERE singleton=1').catch(() => []);
+        return previewHash(['captured-facts-v1', brain?.brain_id ?? 'host', scope.source_ids, includeAmbiguous, []]);
+      } });
     const scopeKey = JSON.stringify(scope.source_ids);
     if (approved.items.some(page => page.include_ambiguous !== includeAmbiguous || JSON.stringify(page.scope) !== scopeKey)) {
       throw previewChangedError(opts.expect, command);
@@ -309,7 +323,7 @@ const expireRows = (tx: BrainEngine, sourceId: string, ids: number[]) => tx.exec
  * unmanaged brain one transaction.
  */
 async function expireDatabaseRows(engine: BrainEngine, page: CapturedFactsPage, hash: string, ids: number[]): Promise<number[]> {
-  if (!await managedPersistenceEnabled(engine)) return (await engine.transaction(tx => expireRows(tx, page.source_id, ids))).map(row => Number(row.id));
+  if (!await managedPersistenceEnabled(engine)) return (await maintenanceTransaction(engine, tx => expireRows(tx, page.source_id, ids))).map(row => Number(row.id));
   const authority = (await maintenancePreflight(engine, page.source_id))!;
   const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
   const h = digest(['captured-facts-expire-v1', hash, page.source_id, page.slug, ids, snapshot?.revision ?? null]);
@@ -322,7 +336,11 @@ async function expireDatabaseRows(engine: BrainEngine, page: CapturedFactsPage, 
 /** Preparer for `managed_maintenance_expire_captured_facts`: expires the named database-only rows of the source. */
 export async function prepareCapturedFactsExpiry(engine: BrainEngine, row: WriteRequest): Promise<PreparedMutation> {
   const ids = (row.intent as { fact_ids?: unknown } | null)?.fact_ids;
-  if (!Array.isArray(ids) || !ids.every(id => Number.isSafeInteger(id))) throw new OperationError('invalid_params', 'The captured facts expiry intent does not name its facts.');
+  if (!Array.isArray(ids) || !ids.every(id => Number.isSafeInteger(id))) {
+    throw opError('invalid_params', 'The captured facts expiry intent does not name its facts.',
+      `Request ${row.request_id} in source ${row.source_id} does not name the facts to expire, so nothing changed. Preview the repair again and apply the new preview after the user approves.`,
+      { fix: readFix('Previews the captured-facts repair without changing anything.', { argv: ['gbrain', 'repair', 'captured-facts', '--source', row.source_id, '--json'] }) });
+  }
   const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
   await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
   return { observedRevision: snapshot?.revision ?? null, noop: true,

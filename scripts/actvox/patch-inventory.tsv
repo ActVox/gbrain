@@ -58,39 +58,32 @@ src/commands/extract.ts	code	253	proposed upstream issue garrytan/gbrain#5904
 src/commands/schema.ts	code	5	review	
 src/commands/serve-http-oauth.ts	code	10	review	
 src/commands/serve-http.ts	code	3	review	
-src/core/cycle/patterns.ts	code	7	review	
 src/core/db-lock.ts	code	43	review	
-src/core/git-remote.ts	code	14	review	
 src/core/minions/handlers/extract.ts	code	22	proposed upstream issue garrytan/gbrain#5904	
 src/core/minions/supervisor.ts	code	19	review	
-src/core/process-watchdog.ts	code	50	review: worker diagnostics watchdog	
+src/core/process-watchdog.ts	code	63	review: worker diagnostics watchdog (stop notice on fd 1 also bounded since v0.60.428.0)	
 src/core/schema-pack/load-active.ts	code	19	review	
 src/core/schema-pack/redos-guard.ts	code	12	review	
-src/core/search/hybrid.ts	code	2	review	
+src/core/search/hybrid.ts	code	3	review	
 src/core/search/hybrid/arms.ts	code	3	review	
 src/core/search/hybrid/keyword-only.ts	code	5	review	
-src/core/search/hybrid/rank.ts	code	3	review	
-test/admin-embed-spawn.serial.test.ts	test	26	with its code patch	
+src/core/search/hybrid/rank.ts	code	6	review (sizeReturnPool takes exactLookupOpts since v0.60.428.0)	
+test/admin-embed-spawn.test.ts	test	26	with its code patch	
 test/attendance-retrieval.test.ts	test	39	with its code patch	
-test/cjk.test.ts	test	1	with its code patch	
-test/cycle-patterns-child-outcome.test.ts	test	9	with its code patch	
 test/db-lock-heartbeat-takeover.test.ts	test	26	with its code patch	
 test/doctor-hidden-by-search-policy.test.ts	test	13	with its code patch	
 test/e2e/serve-http-oauth.test.ts	test	4	with its code patch	
 test/extract-stale.test.ts	test	21	with its code patch	
 test/extract-timeline-from-meetings.test.ts	test	33	with its code patch	
 test/fixtures/watchdog-harness.ts	test	20	with its code patch	
-test/git-remote.test.ts	test	10	with its code patch	
 test/handlers.test.ts	test	34	with its code patch	
 test/helpers/doctor-json-golden.ts	test	17	with its code patch	
-test/process-watchdog.serial.test.ts	test	41	with its code patch	
+test/process-watchdog-harness.test.ts	test	41	with its code patch	
 test/redos-hardening.test.ts	test	6	with its code patch	
 test/release-workflow.test.ts	test	31	with its code patch	
 test/scripts/build-schema-migrations.test.ts	test	28	with its code patch	
-test/scripts/ci-gates.test.ts	test	20	with its code patch	
-test/scripts/ci-pr-scope.test.ts	test	30	upstream PR garrytan/gbrain#5900 (generic hunks; Bun-matrix title stays fork)	
-test/scripts/ci-runner-routing.test.ts	test	34	with its code patch	
-test/scripts/heavy-door-workflow.test.ts	test	51	with its code patch	
+test/scripts/ci-runner-routing.test.ts	test	19	no (ActVox runner/CI policy)	hosted runner labels only
+test/scripts/run-verify-parallel.test.ts	test	2	no (ActVox runner/CI policy)	verify job runner label pin
 test/search-multimodal-no-embed.serial.test.ts	test	49	with its code patch	
 test/serve-http-cors.test.ts	test	71	with its code patch	
 test/serve-http-route-golden.test.ts	test	9	with its code patch	
@@ -98,13 +91,23 @@ test/serve-http-route-runtime-golden.test.ts	test	14	with its code patch
 test/tool-catalog.test.ts	test	2	with its code patch	
 .github/actionlint.yaml	ci	9	no (ActVox runner/CI policy)	
 .github/workflows/actionlint.yml	ci	2	no (ActVox runner/CI policy)	
-.github/workflows/e2e.yml	ci	58	proposed upstream issue garrytan/gbrain#5903; runner labels stay fork policy	
-.github/workflows/heavy-tests.yml	ci	45	proposed upstream issue garrytan/gbrain#5903; runner labels stay fork policy	
+.github/workflows/e2e.yml	ci	34	no (ActVox runner/CI policy)	runner labels only; paid opt-in dropped at v0.60.428.0 (upstream #5903 GBRAIN_PAID_LANES)
+.github/workflows/heavy-tests.yml	ci	14	no (ActVox runner/CI policy)	runner labels only; paid opt-in dropped at v0.60.428.0 (upstream #5903 GBRAIN_PAID_LANES)
 .github/workflows/native-locks.yml	ci	6	no (ActVox runner/CI policy)	
-.github/workflows/persistence-validation.yml	ci	8	no (ActVox runner/CI policy)	
-.github/workflows/semgrep.yml	ci	29	no (fork integration baseline selector)	
-.github/workflows/test.yml	ci	46	upstream PR garrytan/gbrain#5900 (scope step); runner labels stay fork policy	
-.gitignore	ci	1	no (ActVox runner/CI policy)	
+.github/workflows/persistence-validation.yml	ci	14	no (ActVox runner/CI policy)	
+.github/workflows/semgrep.yml	ci	30	no (fork integration baseline selector)	
+.github/workflows/test.yml	ci	40	no (ActVox runner/CI policy)	runner labels only (security matrix rewrite dropped at v0.60.428.0: the label swap routes ubuntu-latest to ubuntu-24.04)
+.github/workflows/ci-health.yml	ci	2	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/convergence-nightly.yml	ci	2	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/fix-wave-closeout.yml	ci	2	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/fix-wave-gate.yml	ci	4	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/full-ci.yml	ci	2	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/production-soak.yml	ci	4	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/scale-tier.yml	ci	4	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/stress.yml	ci	6	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/sync-freshness-gate.yml	ci	2	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/tla-spec.yml	ci	2	no (ActVox runner/CI policy)	runner labels only
+.github/workflows/nightly-watch.yml	ci	5	no (ActVox runner/CI policy)	runner labels + Upstream Watcher in workflow_run.workflows
 scripts/run-heavy.sh	ci	7	no (ActVox runner/CI policy)	
 docs/TESTING.md	docs	70	review	
 docs/architecture/key-files/commands-5.md	docs	2	review	
@@ -113,9 +116,8 @@ admin/e2e/fixtures.ts	brand	6	no (ActVox dashboard brand)
 admin/index.html	brand	8	no (ActVox dashboard brand)	
 admin/src/App.tsx	brand	21	no (ActVox dashboard brand)	
 admin/src/main.tsx	brand	1	no (ActVox dashboard brand)	
-admin/src/pages/Dashboard.tsx	brand	191	no (ActVox dashboard brand)	
+admin/src/pages/Dashboard.tsx	brand	193	no (ActVox dashboard brand)	
 scripts/check-tool-catalog-fresh.sh	tooling	2	review	
 scripts/generate-tool-catalog.ts	tooling	5	review	
-scripts/llms-config.ts	tooling	4	review	
+scripts/llms-config.ts	tooling	6	review	ActVox repo URLs; llms-full budget +1000 for the fork CLAUDE.md paragraph (upstream bundle is 799964 of 800000 bytes at v0.60.428.0)
 scripts/check-key-files-current-state.sh	tooling	4	no (ActVox: CLAUDE.md cap +1000 for the fork paragraph; re-check after each integration)	
-test/ai/gateway-chat.test.ts	test	7	yes (upstream test-isolation fix: restore the gateway baseline after the file)	

@@ -1,7 +1,8 @@
 /** `gbrain jobs stats` (dispatched by runJobs in src/commands/jobs.ts). */
 import { hasFlag, parseFlag, type JobsCommandContext } from './shared.ts';
 import { formatNice, getEffectiveNiceness } from '../../core/minions/niceness.ts';
-import { deriveWedgeSignal } from '../../core/minions/queue.ts';
+import { DREAM_INLINE_PRIVATE_QUEUE_PREFIX, deriveWedgeSignal } from '../../core/minions/queue.ts';
+import type { QueueFamilyStats } from '../../core/minions/queue-families.ts';
 
 export async function runJobsStats({ args, engine, queue }: JobsCommandContext): Promise<void> {
   try { await queue.ensureSchema(); }
@@ -48,10 +49,15 @@ export async function runJobsStats({ args, engine, queue }: JobsCommandContext):
   const { sanitizeTypeForDisplay: sanitizeName } = await import('../../core/schema-pack/type-usage.ts');
   const { safeConfigSegment } = await import('../../core/minions/admission.ts');
 
+  const { queueWorkerAlive } = await import('../../core/minions/no-worker.ts');
+  const signal = deriveWedgeSignal(stats.wedge, { workerAlive: queueWorkerAlive(stats.wedge.queue) });
+
   if (hasFlag(args, '--json')) {
     console.log(JSON.stringify({
       queue: statsQueue,
       ...stats,
+      wedged: signal.wedged,
+      no_worker: signal.no_worker,
       divergent: divergent.map(t => ({
         name: t.name,
         intake_24h: t.total,
@@ -79,6 +85,7 @@ export async function runJobsStats({ args, engine, queue }: JobsCommandContext):
     console.log('  No jobs in the last 24 hours.');
   }
   console.log(`\n  Queue health: ${stats.queue_health.waiting} waiting, ${stats.queue_health.active} active, ${stats.queue_health.stalled} stalled`);
+  printQueueFamilies(stats.by_queue, sanitizeName);
 
   // DIVERGENT-queue scream: intake structurally exceeds useful drain and a
   // real backlog is sitting there. This is the default-on protection layer
@@ -137,7 +144,7 @@ export async function runJobsStats({ args, engine, queue }: JobsCommandContext):
     const mins = w.minutes_since_completion;
     // Shared derivation (queue.ts deriveWedgeSignal) so this line, the
     // doctor wedged_queue check, and the get_job_stats op agree (#1801).
-    const { wedged, wedge_threshold_minutes: wedgeMins, private_queue } = deriveWedgeSignal(w);
+    const { wedged, no_worker, wedge_threshold_minutes: wedgeMins, private_queue } = signal;
     // Parent-owned dream-inline queue: no shared worker can EVER claim it,
     // so the supervisor-restart advice below would be a dead end (the
     // incident bug class). Gate the ABANDONED line on the SAME classifier
@@ -155,6 +162,8 @@ export async function runJobsStats({ args, engine, queue }: JobsCommandContext):
           ? `     Auto-recovery cancels it at the next worker spawn or dream-cycle start.`
           : `     Legacy unowned queue: preview \`gbrain dream retriage --help\` before manual cancellation.`),
       );
+    } else if (no_worker) {
+      await printNoWorker(engine.kind, w.queue, w.waiting);
     } else if (wedged) {
       const since = mins === null ? 'no completions on record' : `${mins}m since last completion`;
       console.log(
@@ -291,5 +300,25 @@ export async function runJobsStats({ args, engine, queue }: JobsCommandContext):
         console.error(`[jobs stats] cluster-errors skipped: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
+  }
+}
+
+/** Queue honesty (agent-first operator wave E5): waiting work with no worker is not a wedge; name the fix. */
+async function printNoWorker(engineKind: string, queue: string, waiting: number): Promise<void> {
+  const { runWaitingJobsFix } = await import('../../core/minions/no-worker.ts');
+  const { shellQuote } = await import('../../core/agent-output.ts');
+  const fix = runWaitingJobsFix(engineKind, queue);
+  console.log(
+    `\n  ⚠  NO WORKER for queue '${queue}': ${waiting} waiting and no worker is running` +
+    `${engineKind === 'pglite' ? ' (PGLite has no background worker)' : ''}; nothing is stuck, nothing is running them.\n` +
+    `     Fix: ${shellQuote(fix.argv ?? [])}   # ${fix.why}`,
+  );
+}
+
+/** #7241: one line per queue; the per-run dream-inline-* queues share one line (`--queue <name>` scopes the wedge lines to one). */
+function printQueueFamilies(families: QueueFamilyStats[], sanitizeName: (name: string) => string): void {
+  for (const q of families) {
+    const label = `${q.queue}-` === DREAM_INLINE_PRIVATE_QUEUE_PREFIX ? `${q.queue} (${q.queues} queue${q.queues === 1 ? '' : 's'})` : sanitizeName(q.queue);
+    console.log(`    ${label.padEnd(26)} ${q.waiting_now} waiting, ${q.active_now} active, ${q.total} total, ${q.completed} done, ${q.failed} failed, ${q.dead} dead`);
   }
 }

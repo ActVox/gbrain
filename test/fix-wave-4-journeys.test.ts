@@ -16,7 +16,7 @@
  * `fetch`), plus the checkpoint-validation statement timeout that PGLite cannot
  * raise. Wall time per journey is printed for the PR body, not asserted.
  */
-import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,7 +29,7 @@ import { parsePersistenceAdminArgs } from '../src/commands/persistence-admin.ts'
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
-import { INCOMPLETE_SYNC_RECEIPT_SQL } from '../src/core/persistence/checkpoint-validation.ts';
+import { OPEN_PASS_WORK_SQL } from '../src/core/persistence/checkpoint-validation.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
 import { currentExitCode, setCliExitVerdict } from '../src/core/cli-force-exit.ts';
 import { createConnectorFixture, withGoogleAccount } from './helpers/connector-fixture.ts';
@@ -38,6 +38,7 @@ import { managedBrain } from './helpers/managed-brain.ts';
 import { put } from './helpers/wave-fixture.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { stampByCheckpoint } from './helpers/pass-fold.ts';
 import { __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 
 /** The embedding provider, simulated like the network: the printed sync commands run as on a brain with a working key. */
@@ -49,6 +50,7 @@ const { engines, source, home } = fixture;
 const env = fixture.env;
 beforeAll(fixture.setup, 120_000);
 afterAll(fixture.teardown);
+afterEach(() => __setEmbedTransportForTests(null));
 
 class CliExit extends Error { constructor(readonly code: number) { super(`process.exit(${code})`); } }
 
@@ -202,6 +204,7 @@ test('journey (b): orphan-bindings, from the doctor finding to a clear finding, 
 }), 240_000);
 
 test('journey (b): connector-fences, from the sync refusal to a sync that carries the fence, in four commands', async () => withEnv(env, async () => {
+  embedStub();
   const fence = '<!--- gbrain:facts:begin -->\n| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |\n'
     + '|---|-------|------|------------|------------|------------|------------|-------------|--------|---------|\n'
     + '| 1 | Ships weekly | fact | 1.0 | world | high | 2026-01-01 |  | remember |  |\n<!--- gbrain:facts:end -->';
@@ -238,7 +241,7 @@ function timeoutOnce(engine: BrainEngine): () => void {
   engine.transaction = async function<T>(this: BrainEngine, run: (tx: BrainEngine) => Promise<T>): Promise<T> {
     return transaction.call(this, tx => run(new Proxy(tx, { get(target, property) {
       if (property === 'executeRaw') return async (sql: string, params?: unknown[]) => {
-        if (sql !== INCOMPLETE_SYNC_RECEIPT_SQL || fired) return target.executeRaw(sql, params);
+        if (sql !== OPEN_PASS_WORK_SQL || fired) return target.executeRaw(sql, params);
         fired = true;
         if (engine.kind === 'postgres') return target.executeRaw('SELECT pg_sleep(8)::text AS request_id');
         throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
@@ -269,18 +272,22 @@ test('journey (c): a checkpoint timeout with a dropped index recovers with the r
     const j = journey('checkpoint timeout with a dropped index');
     const restore = timeoutOnce(engine);
     let refused: { text: string; exit: number };
+    // The checkpoint request's validation times out: this run stamps by its request, not folded into its last import (#6926).
     try {
-      refused = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
-      // A real 5 s statement timeout outlasts the sync's own wait; the terminal refusal is then reported by the same command's receipt.
-      for (let waited = 0; !refused.text.includes('checkpoint_validation_timeout') && waited < 30_000; waited += 500) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        const [row] = await engine.executeRaw<{ state: string }>("SELECT state FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_checkpoint'", [id]);
-        if (row?.state === 'failed') refused = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
-      }
+      refused = await stampByCheckpoint(async () => {
+        let ran = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
+        // A real 5 s statement timeout outlasts the sync's own wait; the terminal refusal is then reported by the same command's receipt.
+        for (let waited = 0; !ran.text.includes('checkpoint_validation_timeout') && waited < 30_000; waited += 500) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const [row] = await engine.executeRaw<{ state: string }>("SELECT state FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_checkpoint'", [id]);
+          if (row?.state === 'failed') ran = await j.run(engine, `gbrain sync --source ${id} --no-pull --no-embed --no-extract`);
+        }
+        return ran;
+      });
     } finally { restore(); }
     expect(refused.text).toContain('checkpoint_validation_timeout');
     expect((await j.run(engine, printed(refused.text, 'gbrain repair request-indexes'))).exit).toBe(0);
-    const retried = await j.run(engine, printed(refused.text, `gbrain sync --source ${id} --no-pull --retry-failed`));
+    const retried = await j.run(engine, printed(refused.text, `gbrain sync --source ${id} --no-pull`));
     expect(retried.exit).toBe(0);
     expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND state<>'committed' AND state<>'failed'", [id])).toEqual([]);
     expect((await engine.getPage('a', { sourceId: id }))?.title).toBe('a');
