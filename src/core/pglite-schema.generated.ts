@@ -233,6 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_links_origin ON links(origin_page_id);
 CREATE OR REPLACE VIEW page_links AS
   SELECT id, from_page_id, to_page_id FROM links;
 
+CREATE INDEX IF NOT EXISTS idx_links_supersedes_to ON links (to_page_id) WHERE link_type = 'supersedes';
 
 CREATE TABLE IF NOT EXISTS wanted_links (
   id               BIGSERIAL PRIMARY KEY,

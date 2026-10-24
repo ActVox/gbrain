@@ -12,6 +12,7 @@
  * scope, and on PGLite, nothing changes.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { throwIfRequestAborted } from '../request-signal.ts';
 
 /** The most pooled connections one search or query op holds at once. */
 export const SEARCH_CONNECTION_LIMIT = 4;
@@ -42,6 +43,7 @@ export async function holdSearchConnection<T>(fn: () => Promise<T>): Promise<T> 
   if (budget.free > 0) budget.free -= 1;
   else await new Promise<void>(resolve => (urgency.getStore() ? budget.urgent : budget.waiters).push(resolve));
   try {
+    throwIfRequestAborted();
     return await budgets.run(null, fn);
   } finally {
     const next = budget.urgent.shift() ?? budget.waiters.shift();

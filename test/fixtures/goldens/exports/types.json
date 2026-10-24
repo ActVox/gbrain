@@ -4145,6 +4145,7 @@
         "members": [
           "pipelineEarly?: ((statement: string) => boolean) | undefined",
           "pipelineFirst?: ((statement: string) => boolean) | undefined",
+          "readOnly?: boolean | undefined",
           "signal?: AbortSignal | undefined"
         ],
         "name": "TransactionOptions"
@@ -8046,6 +8047,13 @@
         "name": "RRF_K",
         "signature": [
           "60"
+        ]
+      },
+      {
+        "kind": "variable",
+        "name": "SUPERSEDE_EDGE_PROBE_SQL",
+        "signature": [
+          "\"SELECT 1 AS one FROM links WHERE link_type = 'supersedes' LIMIT 1\""
         ]
       },
       {

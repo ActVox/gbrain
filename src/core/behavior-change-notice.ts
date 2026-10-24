@@ -1258,8 +1258,8 @@ export function behaviorChangesNotice(chain: ChainDisclosure | null, opts: { rem
 export async function withTrustClaimAsk(engine: BrainEngine, notice: Notice | null): Promise<Notice | null> {
   if (!notice || (notice.fix?.argv && notice.fix.argv.join(' ') !== DOCTOR_ARGV.join(' '))) return notice;
   try {
-    const { claimSourcesFix, readUnclaimedLegacySources, CLAIM_USER_MESSAGE } = await import('./trust/claim.ts');
-    if ((await readUnclaimedLegacySources(engine)).unclaimed.length === 0) return notice;
+    const { claimSourcesFix, hasUnclaimedLegacySources, CLAIM_USER_MESSAGE } = await import('./trust/claim.ts');
+    if (!(await hasUnclaimedLegacySources(engine))) return notice;
     return { ...notice, fix: claimSourcesFix(), user_message: CLAIM_USER_MESSAGE };
   } catch {
     return notice;

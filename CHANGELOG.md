@@ -10,6 +10,57 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.419.0] - 2026-10-24
+
+**A warm CLI search that a serve can't finish now stops cleanly, and the warm socket refuses fewer callers and says so when it does.** When a search's client disconnects, or the call reaches its round-trip cap, the serve cancels the rest of that search and frees its connections and search slot. At the cap the CLI prints a retryable `timeout` error and exits 124 instead of running the whole call again on the cold path. Idle maintenance sweeps no longer start while warm searches are coming in. Search read transactions open `BEGIN READ ONLY`.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A warm search reaches the socket's round-trip cap | the CLI reran the call cold, roughly doubling its time | a retryable `timeout` error (reason `cli_socket_round_trip_cap`), exit 124; the envelope goes to stdout under `--json`, and an [AGENT] block goes to stdout otherwise |
+| The client goes away mid-search, or the cap is reached | the serve kept running the search and holding its connections | the request's signal aborts its read transactions and frees its search slot; disconnects are logged |
+| The CLI's environment has a routing variable for a provider neither side can call (for example an Azure API version without an Azure endpoint) | refused, so the call quietly took the cold path | answered warm. A provider's routing values still count when either side can call that provider, and credentials are still compared by name |
+| A call is refused because of identity | silent unless `GBRAIN_DEBUG=1` | a `socket_identity_mismatch` degraded notice naming the part (never its value); `gbrain doctor --only cli_socket_refusals` counts refusals per part |
+| An idle-sweep tick while warm CLI searches are flowing | the sweep could start beside them | the tick counts them as activity and waits, as it already did for MCP stdin |
+| The writes a search makes for itself (`page_retrievals`, eval capture, semantic-cache store) | could start before the answer was written | start after the socket writes the answer |
+| A search read transaction | `BEGIN READ WRITE` | `BEGIN READ ONLY`, so a write inside one fails instead of committing |
+
+### What to watch for after you upgrade
+
+- The identity check is not an access control. Who may connect to the socket is unchanged: it is bound 0600 in a 0700 directory, and the serve rejects any peer whose kernel uid differs, even when that peer presents the serve's exact identity.
+- Migration v269 builds the partial index `idx_links_supersedes_to` concurrently on Postgres.
+- The upgrade notice's trust-claim check now runs one existence check per unclaimed source instead of counting every source's rows.
+- `GBRAIN_SWEEP_IDLE_INTERVAL_MS` (at least 1000) shortens the idle-sweep interval for benchmarks. Each sweep logs when it starts and how long it took.
+- `scripts/bench/production-soak/socket-probe.ts` measures warm CLI searches against a soak fixture. It reports round trips, sequential round trips and stage timings. Its `--sweep` option forces sweeps to run beside searches.
+- Measured on a synthetic 50k-page brain at a 58 ms round trip: steady-state warm search latency is unchanged (wall p50 1549 ms on master, 1575 ms here). With forced sweeps beside bursts of 3 and 8 concurrent searches, there were no errors, no search reached the cap, and none was starved.
+
+### Itemized changes
+
+- `src/core/cli-socket/identity.ts`, `refusals.ts`, `server.ts`, `execute.ts`, `protocol.ts`, `src/cli/cli-socket-client.ts`: narrowed identity, refusal counts, cancellation, the round-trip cap error.
+- `src/commands/doctor/checks/cli-socket-refusals.ts`: the new doctor check.
+- `src/core/request-signal.ts`, `src/core/postgres-engine.ts`, `src/core/engine.ts`, `src/core/search/connection-budget.ts`: request cancellation and `TransactionOptions.readOnly`.
+- `src/core/foreground-activity.ts`, `src/commands/serve.ts`: idle-sweep gating and sweep logs.
+- `src/core/background-work.ts`, `src/core/last-retrieved.ts`, `src/core/eval-capture.ts`, `src/core/search/hybrid.ts`: writes deferred until after the answer.
+- `src/core/schema-migrations/v269-links-supersedes-index.ts`, `src/schema.sql`: the supersedes index. `src/core/trust/claim.ts`: the existence check.
+- Tests: `test/cli-socket.test.ts`, `test/e2e/cli-socket-postgres.test.ts`, `test/sweep.test.ts`, `test/trust-claim.test.ts`, `test/response-deferral.test.ts`, `test/e2e/search-read-pipeline-postgres.test.ts`, and the catalog, migration-record and doctor goldens.
+
+## [0.60.418.0] - 2026-10-24
+
+**The drain lease that keeps two `gbrain sync` drainers off one source now has a TLA+ model that CI checks on every change to it, and mutants that tie each guard the model relies on to the code line that implements it and the test that pins it.** No product code changes.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A change to the drain lease's fence, takeover, renewal or release | caught only when a hand-written test happened to cover that interleaving | TLC checks every interleaving of two drainers (fenced transactions, the pass stamp, renewal, takeover, release, sleep, crash) at small bounds, and fails the PR on a lost lease or two drainers with fenced work open |
+| A guard loses the test that pins it | nothing noticed | its code mutant runs that test with the guard removed and fails the PR when the test still passes |
+
+### What to watch for after you upgrade
+
+- Nothing changes at runtime.
+- Contributors: `bun run test:tla` runs TLC on every config and every mutant locally (Java 11 or later; the TLC jar is downloaded and checked against its pinned sha256). `spec/tla/README.md` explains each failure code.
+
 ## [0.60.417.0] - 2026-10-24
 
 **A killed gbrain process no longer leaves its Git, embedding or facts effects stuck for two minutes, legacy pages stop being held `file_drift` each time their files are committed, and a pending-import refusal no longer tells agents to start a competing sync.**
