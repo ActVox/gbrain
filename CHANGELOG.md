@@ -10,6 +10,42 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.423.0] - 2026-10-24
+
+**`gbrain sync status` tells you what a busy or stuck source is really doing, and a sync that commits nothing says it stalled instead of claiming progress.** On a large brain, status used to print every held file (thousands of rows, megabytes of JSON), so the useful part was buried. A catch-up could also look alive for hours: screening unchanged files counted as progress, so a run that wrote nothing kept extending its deadline. Now status prints a short summary of holds, names the process doing the work, and only counts committed pages as progress.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sync status --json` on a source with thousands of holds | every hold inline | `holds_summary` counts plus the first 20 holds, needs-human first; `--detail` pages them |
+| Who is syncing this source right now? | not shown | `live` names the drain-lease holder (serve pass, sync job, CLI sync or cycle) with heartbeat and `stalled` |
+| An old error after a later pass moved past it | still drove `state` and `next` | reads `superseded` with `by` and `age_seconds`, and no longer drives `state` or `next` |
+| A sync that reaches its deadline having committed nothing | extended as "still progressing" | stops with `sync_deadline_stalled` and a read-only status fix, once at least one progress window has passed since it started |
+| A drain holder that has committed nothing for 5 minutes | the commit notifier deferred silently | counted as a failed attempt (`drain_holder_stalled`), so status and doctor show the sync-now fix |
+| A pass checkpoint whose pass already ended | `revision_conflict`, recorded as a failure | `sync_pass_superseded`, not a failure |
+| A pooler's client cap (`EMAXCONNSESSION`, "too many clients already") during a managed write | terminal `storage_error` | released as contention and retried, like SQLSTATE 53300 |
+
+### How to use it
+
+- `gbrain sync status --source <id> --json` shows `holds_summary`, the first 20 holds, `last_commit`, `last_sync_at`, `last_committed_at`, `live` and `freshness.waiting_commits`.
+- `gbrain sync status --source <id> --detail` pages holds 100 at a time; `--limit <n>`, `--cursor <next_cursor>`, `--all` and `--hold-state needs_human|actionable|held` narrow it.
+- A managed pass prints `[sync] pass round N: read ...` and `... importing N file(s) ...` before its import walk, and a serve pass that stops short names why on its `[serve-sync] done` line (`stop=<reason>`) with a `next` line.
+
+### What to watch for after you upgrade
+
+- Scripts that read every hold from plain `sync status --json` should page with `--detail --all` or follow `holds_page.next_command`. A source whose holds fit on one page prints them as before.
+- A sync that used to run on while committing nothing now stops with `sync_deadline_stalled` and exits non-zero. Read `gbrain sync status --source <id> --json` for the cause.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- New codes `sync_deadline_stalled`, `drain_holder_stalled` and `sync_pass_superseded`, and reason `owner_restart_required` on `drain_stalled`; `docs/reference/error-codes.md` is regenerated.
+- `gbrain sync status` adds `holds_summary`, `holds_page`, `live`, `last_commit`, `last_sync_at`, `last_committed_at`, `convergence.converged_target`, `freshness.waiting_commits` and `last_error.superseded`; the notifier block adds `recorded_resident`.
+- A governor-stopped drain drops the abandoned pass's late progress events; a stop whose head owner reports restart_required reads `owner_restart_required` with the owner's heartbeat row.
+- The commit notifier counts a resumable sync that committed pages as progress before `last_commit` moves.
+- A resident notifier's background runs write their lines to the serve log (`[serve-sync] job=<id> ...`).
+
 ## [0.60.422.0] - 2026-10-24
 
 **The Postgres crash-robot ceilings are tightened now that a dead owner's effect claim is released early: 620 s on pull requests and 880 s on every other event.**

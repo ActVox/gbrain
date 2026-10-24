@@ -1,7 +1,7 @@
 import type { BrainEngine, ReservedConnection } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, publicationGroupKey, syncGroup, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, vacuumPersistenceQueues, independentGroup, sweepSegmentStorage, yieldToEventLoop } from './journal.ts';
-import { finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, transientDatabaseFailure, type PreparedMutation } from './coordinator.ts';
+import { connectionCapFailure, finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, transientDatabaseFailure, type PreparedMutation } from './coordinator.ts';
 import { localHostId } from './identity.ts';
 import { executeClaimedGroup, PAGE_BATCH_GROUP_MAX, publishSingleWrite, singleWrite } from './group-publish.ts';
 import { preparationConfigView } from './config-snapshot.ts';
@@ -972,12 +972,13 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     this.lastError = { code: typeof code === 'string' && (/^[A-Z0-9]{5}$/.test(code) || isWriteErrorCode(code)) ? code : 'storage_error', at: new Date().toISOString(),
       ...(this.lastPhaseError ? { phase: this.lastPhaseError } : {}) };
     if (this.opts.onError) this.opts.onError(error);
-    else this.log(this.lastPhaseError ?? 'execution', this.lastError.code, errorDetail(error), this.lastPhaseError ? this.lastPhaseTiming : undefined, row);
+    // GBRA-133: a pooler's client cap names itself and its fix beside the code the pooler sent.
+    else this.log(this.lastPhaseError ?? 'execution', this.lastError.code, errorDetail(error), this.lastPhaseError ? this.lastPhaseTiming : undefined, row, connectionCapFailure(error));
     this.lastPhaseError = undefined;
     this.lastPhaseTiming = undefined;
   }
   /** #6543 F1: a line about one request is throttled per request (30 s per phase and code); other lines keep the shared throttle. */
-  private log(phase: string, code: string, detail?: string, timing = '', row?: WriteRequest): void {
+  private log(phase: string, code: string, detail?: string, timing = '', row?: WriteRequest, poolCap = false): void {
     const key = `${phase}:${code}`, at = Date.now();
     if (row) {
       const requestKey = `${key}:${row.id}`;
@@ -989,8 +990,10 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       if (this.lastLog && (at - this.lastLog.at < 1000 || this.lastLog.key === key && at - this.lastLog.at < 30_000)) return;
       this.lastLog = { key, at };
     }
-    if (!this.opts.onError) process.stderr.write(`[persistence] phase=${phase} reason=${code}${detail ? ` message="${detail}"` : ''}${timing}${row ? requestLogFields(row) : ''}`
-      + '; unfinished work remains tracked; fix: gbrain sources writer status --json; docs: docs/ENGINES.md#persistence-consumer-log\n');
+    if (!this.opts.onError) process.stderr.write(`[persistence] phase=${phase} reason=${code}${poolCap ? ' cause=pool_exhausted' : ''}${detail ? ` message="${detail}"` : ''}${timing}${row ? requestLogFields(row) : ''}`
+      + '; unfinished work remains tracked; fix: gbrain sources writer status --json'
+      + `${poolCap ? '; pool: every gbrain process on this database shares the pooler\'s client limit, so run fewer long-running ones (share one gbrain serve --http) or raise the limit (docs/ENGINES.md#pool-sizing)' : ''}`
+      + '; docs: docs/ENGINES.md#persistence-consumer-log\n');
   }
   /** #5373: tracks work that outlived its claim until it settles; the returned promise never rejects. */
   /**
