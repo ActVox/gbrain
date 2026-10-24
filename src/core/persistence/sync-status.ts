@@ -45,7 +45,7 @@ import { sha256 } from './digest.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { passConvergence, passStatusNext, passStatusState } from './sync-pass-status.ts';
 import { MANAGED_SYNC_PASS_OP, readPassRow, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
-import { SYNC_ADMISSION_SETTING_PARAMS, syncAdmissionSettingSql, syncAdmissionStatus } from './sync-admission.ts';
+import { SYNC_ADMISSION_SETTING_PARAMS, syncAdmissionEffectParams, syncAdmissionEffectSql, syncAdmissionSettingSql, syncAdmissionStatus } from './sync-admission.ts';
 import type { DeletesWithheld } from './sync-markers.ts';
 import { listIdentityDowngrades, withIdentityRemedies } from '../sync-identity-downgrades.ts';
 import { GIT_PUSH_CODES, readGitPushHolds, type GitPushHold } from './git-push-holds.ts';
@@ -173,6 +173,12 @@ export interface SyncStatus {
   connector_last_error: import('./connector-status.ts').ConnectorLastError | null;
   /** #7010: Git effects of the source whose local commit has not reached the remote (retrying or parked on a push code), with the fix; `next` falls back to a parked or conflicted one's fix. */
   git_push_holds: GitPushHold[];
+  /**
+   * GBRA-161 PR 2: pages of the source whose facts or takes fence the generation primitive held (`fence_absent`: the
+   * page was written without the fence, so its rows stayed live), at most 20, each with the ask-the-user fix. `next`
+   * falls back to the first one's fix.
+   */
+  fence_holds: import('../generations/fence.ts').FenceHoldEntry[];
   next: Action | null;
   /**
    * #6712 PR 2 (L5): the source's state in the sync outcome vocabulary (`synced` | `resumable` | `blocked`) and why
@@ -215,7 +221,9 @@ export type SyncStatusState = 'synced' | 'resumable' | 'blocked';
 export const SYNC_STATUS_REASONS = ['nothing_pending', 'held_by_design', 'held_needs_human', 'cursor_unfinished', 'live_job', 'last_error', 'holds_actionable', 'recovery_pending', 'request_pending',
   'status_unknown', 'needs_human', 'head_blocked', 'recovery_blocked',
   // #6712 PR 4b (design v3.2 §9): the live pass's reasons.
-  'pass_unfinished', 'not_converged', 'settle_mismatch', 'deletes_withheld', 'selection_scoped', 'admission_paused', 'writeback_failed'] as const;
+  'pass_unfinished', 'not_converged', 'settle_mismatch', 'deletes_withheld', 'selection_scoped', 'admission_paused', 'writeback_failed',
+  // #7355: passes keep stopping before they end.
+  'pass_abandoned'] as const;
 export type SyncStatusReason = typeof SYNC_STATUS_REASONS[number];
 export type SyncStatusRead = { status: 'read' } | { status: 'not_read'; fix: Action };
 /** The bound of each default probe (the oldest blocker, the recovery records). */
@@ -310,23 +318,25 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   // #6712 PR 4b (design §9): the pass row and the withheld-delete record ride the source read (primary-key probes), so the plain status keeps its statement budget.
   const admissionSql = syncAdmissionSettingSql(4);
   const [source] = await engine.executeRaw<{ incarnation: string; last_commit: string | null; last_sync_at: Date | string | null; drain_lock: boolean; pass_value: PassRow['value'] | null; pass_updated_at: Date | string | null; withheld: DeletesWithheld | null;
-    admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null; writeback_failed: string | null }>(
-    `SELECT s.incarnation::text AS incarnation, s.last_commit, s.last_sync_at, EXISTS (SELECT 1 FROM gbrain_cycle_locks l WHERE l.id=$${4 + SYNC_ADMISSION_SETTING_PARAMS.length}) AS drain_lock,
-      p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns},
+    admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null; admission_pinned: boolean | null; admission_destructive: boolean | null;
+    writeback_failed: string | null }>(
+    `SELECT s.incarnation::text AS incarnation, s.last_commit, s.last_sync_at, EXISTS (SELECT 1 FROM gbrain_cycle_locks l WHERE l.id=$7) AS drain_lock,
+      p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns}, ${syncAdmissionEffectSql(7, 's')},
       (SELECT r.request_id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE e.kind='git' AND e.state='failed'
         AND e.request_id IN (SELECT id::uuid FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(p.completed_keys->0->'obligations'->'converged'->'writeback')='array'
           THEN p.completed_keys->0->'obligations'->'converged'->'writeback' ELSE '[]'::jsonb END) AS w(id)) ORDER BY e.id LIMIT 1) AS writeback_failed FROM sources s
       LEFT JOIN op_checkpoints p ON p.op=$2 AND p.fingerprint=s.id||':'||s.incarnation::text
       LEFT JOIN op_checkpoints w ON w.op=$3 AND w.fingerprint=s.id||':'||s.incarnation::text
       ${admissionSql.joins}
-      WHERE s.id=$1 AND s.archived IS NOT TRUE`, [sourceId, MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, ...SYNC_ADMISSION_SETTING_PARAMS, syncLockId(sourceId)]);
+      WHERE s.id=$1 AND s.archived IS NOT TRUE`, [sourceId, MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, ...SYNC_ADMISSION_SETTING_PARAMS, ...syncAdmissionEffectParams(sourceId)]);
   if (!source) throw Object.assign(new Error(`Source ${sourceId} does not exist.`), { code: 'not_found' });
   const failures = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
   const selected = await cursorHeader(engine, sourceId, source.incarnation, failures[0]?.cursor_key ?? null);
   const header = selected?.header ?? null;
-  // #7010: the push-hold probe rides this statement, so a source with no held Git effect costs no extra round trip.
-  const [committed] = await engine.executeRaw<{ n: number | string; git_push_held: boolean; last_committed_at: Date | string | null }>(`SELECT count(*) AS n, EXISTS (SELECT 1 FROM persistence_effects e
+  // #7010: the push-hold probe rides this statement, so a source with no held Git effect costs no extra round trip (GBRA-161 PR 2: so does the fence-hold probe).
+  const [committed] = await engine.executeRaw<{ n: number | string; git_push_held: boolean; fence_held: boolean; last_committed_at: Date | string | null }>(`SELECT count(*) AS n, EXISTS (SELECT 1 FROM persistence_effects e
       WHERE e.source_id=$1 AND e.kind='git' AND e.state IN ('queued','running','failed') AND e.error_code IN ('targets_parked', ${GIT_PUSH_CODES.map(code => `'${code}'`).join(',')})) AS git_push_held,
+      EXISTS (SELECT 1 FROM derived_generations g WHERE g.source_id=$1 AND g.kind IN ('fact_fence','take_fence') AND g.state='held') AS fence_held,
       (SELECT max(r.completed_at) FROM persistence_source_bindings b JOIN persistence_requests r ON r.worktree_id=b.worktree_id AND r.source_incarnation=b.source_incarnation
         WHERE b.source_id=$1 AND r.state='committed' AND COALESCE(r.intent->>'kind','') LIKE 'managed_sync_%') AS last_committed_at
     FROM persistence_requests WHERE source_id=$1 AND state='committed'
@@ -419,20 +429,21 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
     : { status: 'unknown' as const, reason: 'not_read: run sync status with --detail', recovery_next: recovery.status === 'ok' && recovery.first ? recoveryAction(sourceId, recovery.first) : undefined };
   const connectorLastError = await (await import('./connector-status.ts')).readConnectorLastError(engine, sourceId);
   const gitPushHolds = committed?.git_push_held ? await readGitPushHolds(engine, [sourceId]) : [];
+  const fenceHolds = committed?.fence_held ? await (await import('../generations/fence.ts')).fenceHoldEntries(engine, [sourceId]) : [];
   const [state, stateReason] = statusState({ human: !!(liveError?.needs_human), heldForHuman: holds.some(hold => hold.needs_human), oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!liveError, actionable: actionable.length > 0, holds: holds.length > 0, pass: passState });
   const admission = await syncAdmissionStatus(engine, sourceId, source.incarnation,
-    { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at });
+    { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at, pinned: source.admission_pinned, destructive: source.admission_destructive });
   const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume, source.writeback_failed) : null;
   return { source_id: sourceId, last_commit: source.last_commit, last_sync_at: iso(source.last_sync_at), last_committed_at: iso(committed?.last_committed_at), live: holder ? { ...holder, job_id: holderJob, stalled: holderStalled(holder) } : null, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob ?? holderJob, holds, identity_downgrades: await withIdentityRemedies(engine, await listIdentityDowngrades(engine, [sourceId])), last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     needs_human_from: !human ? null : 'path' in human && 'held_since' in human ? { kind: 'hold', path: human.path, slug: human.slug, code: human.code } : { kind: 'last_error', code: human.code },
     resume_argv: resume, ...blockers, cursors: detail ? await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures) : [],
-    terminal_failures: terminal, connector_last_error: connectorLastError, git_push_holds: gitPushHolds, next: next ?? recovery_next ?? passNext ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
+    terminal_failures: terminal, connector_last_error: connectorLastError, git_push_holds: gitPushHolds, fence_holds: fenceHolds, next: next ?? recovery_next ?? passNext ?? (stateReason === 'request_pending' && oldest.status === 'ok' && oldest.request ? { argv: ['gbrain', 'sync', ...resume], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `Write request ${oldest.request.request_id} of this source is still ${oldest.request.state}${oldest.request.step ? ` (step ${oldest.request.step})` : ''}; a running owner finishes it on its own, and the next sync of this source drains it.` } satisfies Action
       : stateReason === 'status_unknown' ? { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
       why: `The oldest-blocker or recovery probe did not answer within ${SYNC_STATUS_PROBE_MS / 1000} s, so this status does not know the state (it is not reported synced). Rerun it after a short wait; gbrain doctor --json checks the database if it keeps timing out.` } satisfies Action
-      : gitPushHolds.find(hold => hold.conflict || hold.parked)?.fix ?? null),
+      : gitPushHolds.find(hold => hold.conflict || hold.parked)?.fix ?? fenceHolds[0]?.fix ?? null),
     state, reason: stateReason,
     oldest_blocker: oldest, recovery, checkpoint_blockers_read: detail ? { status: 'read' } : notRead('checkpoint blocker list'),
     cursors_read: detail ? { status: 'read' } : notRead('live cursor'), terminal_failures_read: detail ? { status: 'read' } : notRead('terminal-failure summary'),

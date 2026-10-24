@@ -425,8 +425,8 @@ export async function runDrain(input: DrainInput): Promise<SyncResult> {
     if (event.phase === 'managed_sync.group' && typeof event.group === 'number') { groups++; groupedPages += event.group; largestGroup = Math.max(largestGroup, event.group); }
     if (event.phase === 'managed_sync.group_ahead') admittedAhead += typeof event.group === 'number' ? 1 : 0;
     if (event.phase === 'managed_sync.lanes' && event.lanes) lanes = { effective: event.lanes.effective, stepDown: event.lanes.stepDown, overlapped: event.lanes.overlapped, fallbacks: event.lanes.fallbacks };
-    // #6696 C4: the checkpoint commit is a commit. GBRA-108: a legacy-sweep slice keeps the governor from calling the pass hung; GBRA-133 PR 3a: it is no commit.
-    if (event.phase === 'managed_sync.finish') { lastCommitAt = clock(); drops = 0; noteCommittedProgress(); return; } else if (event.phase === 'managed_sync.legacy_swept') { lastSweptAt = clock(); return; }
+    // #6696 C4: the checkpoint commit is a commit. GBRA-108 / #7355: a legacy-sweep slice or a level read still working keeps the governor from calling the pass hung; GBRA-133 PR 3a: neither is a commit.
+    if (event.phase === 'managed_sync.finish') { lastCommitAt = clock(); drops = 0; noteCommittedProgress(); return; } else if (event.phase === 'managed_sync.legacy_swept' || event.phase === 'managed_sync.level_progress') { lastSweptAt = clock(); return; }
     if (event.phase !== 'managed_sync.page_committed') return;
     if (event.waived) waived++; else written++;
     lastCommitAt = clock(); drops = 0;

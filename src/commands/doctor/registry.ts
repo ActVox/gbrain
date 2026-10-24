@@ -60,6 +60,7 @@ import {
 } from './checks/embedding-health.ts';
 import { projectionResidentEntry } from './checks/projection-readiness.ts';
 import {
+  derivedVisibilityEntry,
   graphCoverageEntry,
   orphanRatioEntry,
   staleMentionsEntry,
@@ -95,6 +96,7 @@ import { linksExtractionLagEntry, syncFreshnessEntry, searchModeEntry } from './
 import { persistenceConsumersEntry, serveBuildDriftEntry } from './checks/persistence-consumers.ts';
 import { runtimeBuildSkewEntry } from './checks/runtime-build-skew.ts';
 import { gitConvergenceEntry } from './checks/git-convergence.ts';
+import { gitWriterEntry } from './checks/git-writer.ts';
 import { retrievalFeedbackEntry } from './checks/retrieval-feedback.ts';
 import { transcriptSecretExposureEntry } from './checks/transcript-secrets.ts';
 import { autoChronicleEntry } from './checks/auto-chronicle.ts';
@@ -106,6 +108,7 @@ import { factAdmissionFloorsEntry } from './checks/fact-admission-floors.ts';
 import { unlinkedFactsEntry } from './checks/unlinked-facts.ts';
 import { edgeValidityEntry } from './checks/edge-validity.ts';
 import { coreMemoryEntry } from './checks/core-memory.ts';
+import { personTitleDuplicatesEntry } from './checks/entity-duplicates.ts';
 import { plannerStatsEntry } from './checks/planner-stats.ts';
 import { revisionBackfillEntry } from './checks/revision-backfill.ts';
 import { beliefLedgerEntry } from './checks/belief-ledger.ts';
@@ -121,6 +124,7 @@ import { fenceIntegrityEntry } from './checks/fence-integrity.ts';
 import { syncConfigKeysEntry } from './checks/sync-config-keys.ts';
 import { ghostPagesEntry } from './checks/ghost-pages.ts';
 import { originTwinsEntry } from './checks/origin-twins.ts';
+import { slugPathMismatchEntry } from './checks/slug-path-mismatch.ts';
 import { renameIdentityDowngradesEntry } from './checks/rename-identity-downgrades.ts';
 import { unindexedFilesEntry } from './checks/unindexed-files.ts';
 import { syncLandingGapsEntry } from './checks/landing-gaps.ts';
@@ -195,6 +199,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   partialEmbeddingEntry,
   syncLandingGapsEntry,
   pgvectorEntry,
+  // #7276: the privacy check next, with its own entry budget, before any full scan.
+  derivedVisibilityEntry,
   rlsEntry,
   schemaVersionEntry,
   rlsEventTriggerEntry,
@@ -243,6 +249,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   managedSyncLatencyEntry,
   commitNotifierEntry,
   gitConvergenceEntry,
+  gitWriterEntry,
   decideHealthEntry,
   unlinkedFactsEntry,
   edgeValidityEntry,
@@ -264,6 +271,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   extractionInputTruncatedEntry,
   ghostPagesEntry,
   originTwinsEntry,
+  slugPathMismatchEntry,
   renameIdentityDowngradesEntry,
   purgeParkedPagesEntry,
   missingRecordedFilesEntry,
@@ -273,6 +281,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   syncConfigKeysEntry,
   // #6712 PR 4a: the read-only convergence shadow (deep tier: a full level read per source).
   managedSyncConvergenceEntry,
+  // #7160: title-prefixed person pages next to the unprefixed page (read-only, preview-first).
+  personTitleDuplicatesEntry,
   fenceIntegrityEntry,
   searchModeEntry,
 ];

@@ -46,6 +46,7 @@ import { managedSyncResumeArgs } from '../sync-reconcile.ts';
 import { laneApplyMsPerMember, lanePolicy, openLanes } from './sync-lanes.ts';
 import { isRetryableConnError, isStatementTimeoutError } from '../retry-matcher.ts';
 import { SYNC_READ_BOUND, type TreeBlob } from './sync-blobs.ts';
+import { readDryRunWriterState } from './sync-dry-run-writer.ts';
 import { driftBaselineContent, dryRunScreen, heldImageEntry, isSyncReadBound, loadSyncScreenRun, originConflictHold, oversizeHold, pinnedBlob, pinnedContent, pinnedImageBytes, preparationStalledHold, prepareTimeFenceHold, screenFrozenImport, streamedRefusalHold, unreadableFileHold, type HeldEntry, type SyncScreenRun } from './sync-screen.ts';
 import { frozenImageIntent, sameImageBytes } from './sync-image.ts';
 import { fenceReceiptLocation } from '../fence-repair/refusal.ts';
@@ -462,7 +463,7 @@ async function freezeEntryOnce(engine: BrainEngine, cursor: Cursor, key: string,
     // #6712 PR 1: an import whose page moved since its file was last imported runs only as a proven no-op (sync-prescreen.ts).
     if (entry.drift && !occupantRebound && content !== null && snapshot && !(image ? sameImageBytes(imageBytes, snapshot.page)
       : await sameContentAtOrigin(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly, run.signal) || await sameContentAtOrigin(engine, cursor, entry, key, snapshot, driftBaselineContent(cursor.gitRoot, entry), null, false, run.signal, true))) {
-      if (!holdsOn) throw syncRunRefusal('file_drift', 'An import would overwrite a database version of the page that sync never saw.', retry, `Page ${slug} in source ${cursor.sourceId} changed in the database since ${entry.path} was last imported, and the file differs from it, so the run stopped before admitting it (sync.holds=fail).`);
+      if (!holdsOn) throw syncRunRefusal('file_drift', 'An import would overwrite a database version of the page that sync never saw.', retry, `Page ${slug} in source ${cursor.sourceId} ${entry.drift === 'unknown' ? `differs from ${entry.path} and has no import record to tell whether the file or the database changed` : `changed in the database since ${entry.path} was last imported, and the file differs from it`}, so the run stopped before admitting it (sync.holds=fail).`);
       const proof = await pageChangeProof(engine, { sourceId: cursor.sourceId, incarnation: cursor.incarnation, pageId, expectedRevision: null }); assertActive();
       return { hold: fileDriftHold(entry, slug, pageId, frozenIntent, { sides: entry.drift, revision: snapshot.revision, proof, sharedOrigin: await sharedOriginSurvivor(engine, cursor.sourceId, entry.sourcePath) }) };
     }
@@ -479,7 +480,7 @@ async function freezeEntryOnce(engine: BrainEngine, cursor: Cursor, key: string,
   const passLevel = cursor.passId ? (entry as PassEntry | undefined)?.level ?? (entry ? null : cursor.target) : undefined;
   return remember(frozenSnapshot, { requestId: cursor.passId ? passRequestId(cursor.passId, entry?.path ?? slug, passLevel!) : randomUUID(), slug, pageId, ...(occupantRebound ? { rebound: true as const } : {}), intent: { kind: !entry ? 'managed_sync_checkpoint' : entry.action === 'import' ? 'managed_sync_import' : 'managed_sync_delete',
     expected_revision: revision, sourcePath: entry?.sourcePath ?? null, path: entry?.path ?? null, rawHash, content, lineEndingOnly, ...(bodyRef ? { body_ref: bodyRef } : {}),
-    ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}),
+    ...(entry?.unownedDeletion ? { unownedDeletion: true } : {}), ...(entry?.heldDeletion ? { heldDeletion: entry.heldDeletion } : {}),
     ...(entry?.renameFrom ? { renameFrom: entry.renameFrom } : {}),
     ...(run.observedAt ? { holdObservedAt: run.observedAt } : {}), ...(blob ? { blobOid: blob.oid } : {}), ...(entry && run.embedDeferred ? { embedDeferred: true } : {}),
     ...(!entry && cursor.releasedHolds?.length ? { releasedHolds: cursor.releasedHolds } : {}),
@@ -548,7 +549,7 @@ async function adoptCursor(engine: BrainEngine, key: string, cursor: Cursor, inp
 async function managedDryRun(engine: BrainEngine, value: Cursor, base: Cursor, run: { company: boolean; processingOptions: SyncProcessingOptions;
   syncOptions: SyncCursorOptions; repoPath?: string; remote: boolean }): Promise<SyncResult> {
   const screen = run.company ? null : await loadSyncScreenRun(engine, value.sourceId, value.processingOptions ?? run.processingOptions, run.remote);
-  return { ...result(base, 'dry_run'), ...await dryRunScreen(engine, value, screen,
+  return { ...result(base, 'dry_run'), writer: await readDryRunWriterState(engine, value.sourceId), ...await dryRunScreen(engine, value, screen,
     checkpointRetryCommand({ sourceId: value.sourceId, processingOptions: value.processingOptions, syncOptions: value.syncOptions ?? run.syncOptions, repoPath: run.repoPath })) };
 }
 
