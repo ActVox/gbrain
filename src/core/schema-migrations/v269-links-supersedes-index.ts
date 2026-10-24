@@ -19,13 +19,13 @@ export const LINKS_SUPERSEDES_INDEX = {
   sql: "CREATE INDEX IF NOT EXISTS idx_links_supersedes_to ON links (to_page_id) WHERE link_type = 'supersedes'",
 };
 
-export const v268: Migration = {
-  version: 268,
+export const v269: Migration = {
+  version: 269,
   name: 'links_supersedes_index',
   idempotent: true,
   transaction: false,
   sql: '',
   handler: async engine => {
-    await buildIndexOnline(engine, 268, LINKS_SUPERSEDES_INDEX, { notice: migrationNotice });
+    await buildIndexOnline(engine, 269, LINKS_SUPERSEDES_INDEX, { notice: migrationNotice });
   },
 };
