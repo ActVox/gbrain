@@ -10,6 +10,29 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.420.0] - 2026-10-24
+
+**`gbrain sources writer git-durability --enable` now works when the remote branch has commits the checkout lacks, and a facts write retried under its own `request_id` keeps returning its recorded outcome.** The enable check's read-only `git push --dry-run` refused a remote that had moved, but the Git effect already publishes that case without touching the checkout. A caller retrying a facts write with an explicit request id could get its retained file refusal rechecked rather than receive the outcome it recorded.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `--enable` when the remote branch moved since the last fetch (`[rejected] (fetch first)` or `(non-fast-forward)`) | refused with `git_push_unavailable` | enabled, and `push_probe` reports `remote_moved: true`. The Git effect merges the remote commits in memory and pushes the merge without pulling into the checkout. A change to the same file on both sides is held as `integrate_conflict` for the user to choose |
+| `--enable` when the push fails on authentication, permission, a protected branch or an unreachable remote | refused | still refused |
+| A managed facts write retried with the caller's own `request_id` after a file refusal | could recheck the refusal once the hold cleared | returns that request's recorded outcome. Page-triggered and re-admitted facts batches still recheck once the hold clears |
+
+### What to watch for after you upgrade
+
+- No migration, and nothing is rewritten on upgrade.
+- A brain that refused `--enable` only because its remote had moved can rerun the same command.
+
+### Itemized changes
+
+- `src/core/persistence/git-durability-administration.ts`: `probeDurabilityPush` passes a moved-remote rejection with `remote_moved`. `src/core/persistence/effect-git.ts` exports the `NON_FAST_FORWARD` match it shares with the push path.
+- `src/core/persistence/facts-maintenance.ts`: `fileRefusalRetry` is off under an explicit `request_id`. Contributed by @Masashi-Ono0611 (#7402).
+- Tests: `test/git-durability-probe-remote-moved-gbra133.test.ts`, `test/facts-absorb-held-replay-7364.test.ts`.
+
 ## [0.60.419.0] - 2026-10-24
 
 **A warm CLI search that a serve can't finish now stops cleanly, and the warm socket refuses fewer callers and says so when it does.** When a search's client disconnects, or the call reaches its round-trip cap, the serve cancels the rest of that search and frees its connections and search slot. At the cap the CLI prints a retryable `timeout` error and exits 124 instead of running the whole call again on the cold path. Idle maintenance sweeps no longer start while warm searches are coming in. Search read transactions open `BEGIN READ ONLY`.
