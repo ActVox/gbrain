@@ -61,7 +61,8 @@ describe("ci:ubicloud teardown", () => {
       throw new Error(`ci-ubicloud exited ${code} before the probe signal\n${await stdout}\n${await stderr}`);
     });
     await Promise.race([waitForEvent(api, /^created \S+-ci01/, 120_000), exitedEarly]);
-    await Promise.race([waitForEvent(api, /^create-start \S+-ci03/, 10_000), exitedEarly]);
+    // ci02 and ci03 are spawned together but their creates reach the API in either order, so wait for both.
+    for (const vm of [/^create-start \S+-ci02/, /^create-start \S+-ci03/]) await Promise.race([waitForEvent(api, vm, 10_000), exitedEarly]);
     exitedEarly.catch(() => {});
     expect(api.events.some((e) => /^created \S+-ci0[23]/.test(e))).toBe(false);
     child.kill(signal);
