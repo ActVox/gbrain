@@ -1173,6 +1173,8 @@ CREATE INDEX IF NOT EXISTS idx_file_migration_ledger_status
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
+-- GBRA-156 (v267): the title arm's title-only predicate reads the weight-A slice (the title alone).
+CREATE INDEX IF NOT EXISTS idx_pages_title_search ON pages USING GIN (ts_filter(search_vector, '{a}'));
 
 -- Function to rebuild search_vector for a page
 -- #2704: compiled_truth (unbounded whole-page body) deliberately NOT

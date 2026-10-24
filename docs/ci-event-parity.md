@@ -33,7 +33,7 @@ checks ([below](#full-ci-on-pull-requests)), never per-cell matrix names.
 | `persistence-validation.yml` | `convergence` selected on pull requests by `scripts/ci-convergence-scope.sh` (test.yml `changes`; never by `package.json` alone) | Named exception | Every merge-queue run and every push to master; the nightly cell runs in `convergence-nightly.yml` |
 | `convergence-nightly.yml` | The convergence gate's nightly cell (2,000 pages, 50 ms, 20 kills, run-id seed): schedule and dispatch only, outside `test-status`; the PR cell (200 pages, 10 ms, 6 kills, seed 6650) runs in `persistence-validation.yml` | Named exception | Itself (nightly Convergence schedule) |
 | `persistence-validation.yml` | `SOAK_OPERATIONS` 2,500 vs 10,000 | Named exception | Every push to master and the nightly Test schedule |
-| `persistence-validation.yml` | `ROBOT_SECONDS` 150 vs 600 | Named exception | Every push to master and the nightly Test schedule |
+| `persistence-validation.yml` | Crash robot `--robot-scope=pr` (Postgres lease-bound seams skipped, 820 s PGLite and 1020 s Postgres ceilings) vs `full` (1200 s PGLite, 1800 s Postgres; [ceilings](#crash-robot-ceilings)); the nightly adds that day's exploration seeds | Named exception | The full-ci dispatch, every push to master (same fixed list, so it may reuse that run) and the nightly Test schedule |
 | `native-locks.yml` | `inputs.scope` (OpenClaw, musl, Windows probes, Bun 1.4.0 and cross-target cells) | Named exception | Every push to master and the nightly Test schedule (`full`) |
 | `e2e.yml` | Doc-only merge-queue entry selects no E2E file | Named exception | Every push to master (whole corpus) and the nightly E2E schedule |
 | `e2e.yml` | Full-corpus coverage lanes and their `e2e-status` checks | Named exception | Nightly E2E schedule (or a `full_corpus` dispatch) |
@@ -110,6 +110,49 @@ a push-to-master red opens the Test `master-red` issue, a scheduled red the
 `nightly-red` issue. The repair PR bumps, overrides, patches or removes the
 dependency. When no fix exists, an ignore entry needs Garry's approval and an
 expiry date.
+
+## Crash robot ceilings
+
+Every crash-robot run executes one fixed schedule list (`scripts/persistence/robot-driver.ts`
+`ROBOT_RANDOM_SEEDS`), so a master push can reuse a passed run of its tree. `--robot-seconds`
+is a ceiling, not a budget: a run past it fails with `over_budget` instead of covering less.
+Each cell writes its elapsed time as a share of its ceiling to the job summary, so drift
+shows long before a run fails.
+
+Measured on ubicloud-standard-4, full scope, run 39996381819:
+
+| Cell | Wall | Cross-boundary crashes | Process faults | 8 random seeds |
+|---|---|---|---|---|
+| pglite / Bun 1.4.0 | 724 s | 89 runs, 494 s | 67 s | 128 s |
+| pglite / Bun 1.4.4 | 880 s | 89 runs, 618 s | 72 s | 157 s |
+| postgres / Bun 1.4.0 | 1,290 s | 27 runs, 884 s | 188 s | 190 s |
+| postgres / Bun 1.4.4 | 967 s | 27 runs, 767 s | 68 s | 100 s |
+
+- **PGLite, 1200 s.** The slowest cell ran 880 s. The nightly's two exploration seeds
+  add about 45 s, and the slower cells in the previous week's manifests project to
+  about 985 s. 1200 s is that projection plus about 20%.
+- **Postgres, 1800 s.** The slowest cell ran 1,290 s, including one 128 s wait for a
+  dead owner's effect-claim lease on a random seed. A nightly with two such waits
+  lands near 1,550 s, and 1800 s is that plus about 15%.
+- **Pull requests, 820 s PGLite and 1020 s Postgres.** Scope `pr` crashes each seam once
+  and skips the Postgres lease-bound seams. PGLite measured 510 s and 427 s (run
+  40003479271), then 529 s and 474 s (run 40018836178); 820 s is the slowest plus about 30%.
+  A Postgres crash run takes about 10 s, or about 130 s when the killed process held an
+  effect claim: recovery waits out that claim's 2-minute lease, since only request claims
+  of a provably dead owner are released early. Three crashes can land there: random-5113's
+  `consumer:preparing` #2 (every run), and the fixed list's `consumer:preparing` #31 and
+  `effect_recovery:before_clear` #1 (about half the runs each). A cell is its base time plus
+  one to three such waits:
+
+  | Run | Cell | Time | Lease waits |
+  |---|---|---|---|
+  | 40003479271 | postgres / Bun 1.4.0 | 567 s | 1 |
+  | 40003479271 | postgres / Bun 1.4.4 | 632 s | 2 |
+  | 40018836178 | postgres / Bun 1.4.0 | 701 s | 2 |
+  | 40018836178 | postgres / Bun 1.4.4 | 785 s | 3 |
+
+  1020 s is the slowest plus about 30%. Re-tighten it after dead-owner effect-claim release
+  lands: the waits then drop to seconds.
 
 ## Cost of parity
 

@@ -36,7 +36,7 @@ import { readSyncFile, syncGitPath, type SyncDiscovery, type SyncEntry, type Syn
 import { readTreeBlobs } from './sync-blobs.ts';
 import type { SyncIntent } from './sync-prepare.ts';
 import type { HeldEntry } from './sync-screen.ts';
-import type { GitHoldMeta, GitHoldRecord, PageWriteFailureMeta } from './sync-holds.ts';
+import { FILE_DRIFT_VERSION, type GitHoldMeta, type GitHoldRecord, type PageWriteFailureMeta } from './sync-holds.ts';
 import { classifyTerminal } from './terminal-classify.ts';
 import { VERSION } from '../../version.ts';
 import { concurrentWriteHold, concurrentWriteProof } from './sync-concurrent-write.ts';
@@ -151,7 +151,7 @@ export function fileDriftHold(entry: HoldEntry, slug: string, pageId: number | n
     : 'there is no import record to tell which side changed';
   return base(entry, slug, pageId, 'file_drift',
     `${entry.path}: ${by} since the file was last imported and ${file}, so sync held the import instead of overwriting the database version; the rest of the source synced.`,
-    intent.content ?? null, intent.blobOid, { sides: observed.sides, ...(observed.sides !== 'database' ? { side: observed.sides } : {}), ...(observed.revision ? { page_revision: observed.revision } : {}),
+    intent.content ?? null, intent.blobOid, { sides: observed.sides, drift_version: FILE_DRIFT_VERSION, ...(observed.sides !== 'database' ? { side: observed.sides } : {}), ...(observed.revision ? { page_revision: observed.revision } : {}),
       ...(observed.proof ? { competing_request_id: observed.proof.request_id, competing_operation: observed.proof.operation } : {}),
       ...(observed.sharedOrigin ? { shared_origin: true as const } : {}) });
 }

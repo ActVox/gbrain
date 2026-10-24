@@ -11,9 +11,10 @@
  * - **Takeover.** `tryAcquireDbLock`'s rules, the same as `--break-lock`'s safe path: a TTL that expired with no
  *   heartbeat inside the steal grace, or a same-host holder whose pid is provably dead and whose lease is older than
  *   `HOLDER_TAKEOVER_GRACE_MS`.
- * - **Fencing.** `assertDrainLease` reads the lock row with this pass's token `FOR SHARE` inside every transaction
- *   that admits sync work or swaps the cursor, so a pass that lost the lease admits nothing and advances no
- *   checkpoint: the row is gone or carries another token, and a takeover waits for the share lock.
+ * - **Fencing.** `assertDrainLease` reads the lock row with this pass's token (`fenceLockRow`, `FOR KEY SHARE`) inside every
+ *   transaction that admits sync work or swaps the cursor, so a pass that lost the lease admits nothing and advances no
+ *   checkpoint: the row is gone or carries another token, and a takeover waits for the fence. The lease's own renewal
+ *   does not (#7442), so no fenced transaction, however long or overlapping, can lapse a live lease.
  * - **Cancellation.** The caller's signal aborts the pass; the lease is released in `withRefreshingLock`'s finally.
  * - **Reentrancy.** A pass inside a lease (the drain's passes, staged stages, a company catch-up) runs under it. A CLI
  *   run hands itself to a serve before it takes the lease (`maybeDelegateManagedSyncToServe` runs first), so the serve's
@@ -35,7 +36,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncResult } from '../../commands/sync.ts';
 import type { Action } from '../agent-output.ts';
-import { inspectLock, LockStolenError, LockUnavailableError, syncLockId, withRefreshingLock } from '../db-lock.ts';
+import { fenceLockRow, inspectLock, LockStolenError, LockUnavailableError, syncLockId, withRefreshingLock } from '../db-lock.ts';
 import { currentRunDeadline, lastForwardProgressAt, noteForwardProgress } from '../forward-progress.ts';
 import { faultPoint } from './fault-points.ts';
 import { MANAGED_SYNC_PASS_OP } from './sync-pass-row.ts';
@@ -89,18 +90,18 @@ export async function assertDrainLease(tx: Pick<BrainEngine, 'executeRaw'>, sour
   if (!lease) return;
   // A renewal that failed aborts the lease's signal before its row is released; an expired row is lost even untaken.
   if (lease.signal.aborted) throw new LockStolenError(lease.lockId, `the drain lease of source ${sourceId} lapsed in this pass`);
-  const rows = await tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE', [lease.lockId, lease.token]);
+  const rows = await fenceLockRow(tx, lease.lockId, lease.token);
   if (!rows.length) throw new LockStolenError(lease.lockId, `the drain lease of source ${sourceId} is no longer held by this pass`);
 }
 
-/** GBRA-133: the longest a transaction holding the fence stays open (plus the item that crosses it); a renewal times out after 30 s. */
+/** GBRA-133: the longest a transaction holding the fence stays open (plus the item that crosses it); a takeover or release waits for it. */
 export const FENCED_SLICE_MS = 5_000;
 
 /**
  * GBRA-133: `write` for each item in fenced transactions of at most `FENCED_SLICE_MS`. The fence holds the lock row
- * `FOR SHARE`, which blocks this lease's own renewal and release until the transaction ends: one transaction that wrote a
- * round's holds at 65 ms per round trip stayed open for 14 minutes, every renewal timed out and the lease lapsed under the
- * pass. Each slice is fenced again, so a lapsed lease stops the writes at the next slice. `committed` sees each slice once it commits.
+ * until the transaction ends, so the lease's release and any takeover wait for it: one transaction that wrote a round's holds
+ * at 65 ms per round trip stayed open for 14 minutes (when the fence was `FOR SHARE` it also blocked every renewal and lapsed
+ * the lease, #7442). Each slice is fenced again, so a lapsed lease stops the writes at the next slice. `committed` sees each slice once it commits.
  */
 export async function inFencedSlices<T>(engine: BrainEngine, sourceId: string, items: readonly T[],
   write: (tx: BrainEngine, item: T) => Promise<void>, committed?: (slice: readonly T[]) => void): Promise<void> {
