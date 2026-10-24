@@ -8051,6 +8051,13 @@
       },
       {
         "kind": "variable",
+        "name": "SUPERSEDE_EDGE_PROBE_SQL",
+        "signature": [
+          "\"SELECT 1 AS one FROM links WHERE link_type = 'supersedes' LIMIT 1\""
+        ]
+      },
+      {
+        "kind": "variable",
         "name": "SUPERSEDE_PENALTY",
         "signature": [
           "0.5"

@@ -727,15 +727,20 @@ export function _resetSupersedeProbeForTests(): void {
   supersedeEdgeProbe = new WeakMap();
 }
 
+/**
+ * The supersede-edge probe. `link_type` stays a literal so the planner matches the partial index
+ * idx_links_supersedes_to (migration links_supersedes_index) by its predicate; a bind parameter can leave a generic plan that does not, and with no matching row the
+ * probe would read the whole composite links index (test/e2e/supersedes-probe-index-postgres.test.ts).
+ */
+export const SUPERSEDE_EDGE_PROBE_SQL = `SELECT 1 AS one FROM links WHERE link_type = 'supersedes' LIMIT 1`;
+
 async function hasAnySupersedeEdges(
   engine: import('../engine.ts').BrainEngine,
 ): Promise<boolean> {
   const cached = supersedeEdgeProbe.get(engine);
   if (cached && Date.now() - cached.at < SUPERSEDE_PROBE_TTL_MS) return cached.exists;
   try {
-    const rows = await engine.executeRaw<{ one: number }>(
-      `SELECT 1 AS one FROM links WHERE link_type = 'supersedes' LIMIT 1`,
-    );
+    const rows = await engine.executeRaw<{ one: number }>(SUPERSEDE_EDGE_PROBE_SQL);
     const exists = rows.length > 0;
     supersedeEdgeProbe.set(engine, { at: Date.now(), exists });
     return exists;
