@@ -34,6 +34,32 @@ const suites = [
 ];
 
 describe('data-safety native CI coverage', () => {
+  test('the darwin-x64 cell posts diag/native-heartbeat statuses from its first step to its last, never on a fork pull request', () => {
+    const job = workflow.jobs.native as typeof workflow.jobs.native & { permissions?: Record<string, string> };
+    expect(job.permissions).toEqual({ contents: 'read', statuses: 'write' });
+    const names = job.steps.map(step => step.name ?? step.uses ?? '');
+    const start = job.steps.findIndex(step => step.name === 'Start the diagnostic heartbeat');
+    const stop = job.steps.findIndex(step => step.name === 'Stop the diagnostic heartbeat');
+    expect(names[start - 1]).toStartWith('actions/checkout@');
+    expect(stop).toBe(job.steps.length - 1);
+    const env = {
+      GH_TOKEN: '${{ github.token }}',
+      GBRAIN_HEARTBEAT_ENABLED: "${{ (github.event.pull_request.head.repo.full_name || github.repository) == github.repository && '1' || '0' }}",
+      GBRAIN_HEARTBEAT_SHA: '${{ github.event.pull_request.head.sha || github.sha }}',
+      GBRAIN_HEARTBEAT_CELL: '${{ matrix.target }}/${{ matrix.bun }}',
+    };
+    expect(job.steps[start]).toEqual({ name: 'Start the diagnostic heartbeat', if: "matrix.target == 'darwin-x64'", env, run: 'bash scripts/native/heartbeat.sh start' });
+    expect(job.steps[stop]).toEqual({ name: 'Stop the diagnostic heartbeat', if: "always() && matrix.target == 'darwin-x64'", env,
+      run: 'bash scripts/native/heartbeat.sh stop "${{ job.status }}"' });
+    for (const step of job.steps) if (step !== job.steps[start] && step !== job.steps[stop]) expect(JSON.stringify(step)).not.toContain('github.token');
+    const safety = job.steps.find(entry => entry.name === 'Verify native data-safety contracts')!;
+    expect(safety.run).toContain('  GBRAIN_HEARTBEAT_ENABLED=1 bash scripts/native/heartbeat.sh mark "$1" || true\n  bun --no-env-file test --timeout=180000 "$1" &');
+    const caller = (load(readFileSync(join(import.meta.dir, '../../.github/workflows/test.yml'), 'utf8')) as {
+      jobs: Record<string, { uses?: string; permissions?: Record<string, string> }> }).jobs['native-locks']!;
+    expect(caller.uses).toBe('./.github/workflows/native-locks.yml');
+    expect(caller.permissions).toEqual({ contents: 'read', statuses: 'write' });
+  });
+
   test('the opt-in console diagnostic has an isolated Windows matrix without filtering the acceptance suites', () => {
     const job = workflow.jobs['windows-backup-console'];
     expect(job['runs-on']).toBe('${{ matrix.runner }}');
