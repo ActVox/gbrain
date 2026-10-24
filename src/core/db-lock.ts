@@ -215,6 +215,17 @@ export function isLockHolderLive(snap: LockSnapshot, ttlMinutes: number = DEFAUL
  * `CONNECTION_ENDED`, which turned a finished sync into a thrown error and left
  * its lock row behind until the TTL lapsed.
  */
+/**
+ * #7442: the fence on a lock row: the row with this token, unexpired, `FOR KEY SHARE`. KEY SHARE lets the holder's own
+ * renewal (an UPDATE of non-key columns) through while a fenced transaction is open, so fenced transactions, however long
+ * or overlapping, can no longer starve it and lapse a live lease. A takeover still waits for the fence: its upsert also
+ * writes the key (`id = EXCLUDED.id` in `tryAcquireDbLock`), which takes the row lock KEY SHARE conflicts with, as every
+ * DELETE (release, break-lock) does. Returns the row when the fence holds, none when the lease is gone.
+ */
+export function fenceLockRow(tx: Pick<BrainEngine, 'executeRaw'>, lockId: string, token: string): Promise<unknown[]> {
+  return tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR KEY SHARE', [lockId, token]);
+}
+
 export async function tryAcquireDbLock(
   engine: BrainEngine,
   lockId: string,
@@ -256,7 +267,8 @@ export async function tryAcquireDbLock(
       INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at, last_refreshed_at, acquisition_token)
       VALUES (${lockId}, ${pid}, ${host}, NOW(), NOW() + ${ttl}::interval, NOW(), ${acquisitionToken}::uuid)
       ON CONFLICT (id) DO UPDATE
-        SET holder_pid = ${pid},
+        SET id = EXCLUDED.id,
+            holder_pid = ${pid},
             holder_host = ${host},
             acquired_at = NOW(),
             acquisition_token = ${acquisitionToken}::uuid,
@@ -316,7 +328,8 @@ export async function tryAcquireDbLock(
       `INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at, last_refreshed_at, acquisition_token)
        VALUES ($1, $2, $3, NOW(), NOW() + $4::interval, NOW(), $6::uuid)
        ON CONFLICT (id) DO UPDATE
-         SET holder_pid = $2,
+         SET id = EXCLUDED.id,
+             holder_pid = $2,
              holder_host = $3,
              acquired_at = NOW(),
              acquisition_token = $6::uuid,

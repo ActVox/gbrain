@@ -25,6 +25,18 @@ const TREE_REUSE_MIN_DIFF_BOUND = 2_000;
 interface TreeReuseEntry { head: string; tree: Map<string, GitTreeEntry>; at: number; expiry: ReturnType<typeof setTimeout> }
 const entries = new Map<string, TreeReuseEntry>();
 
+/**
+ * #7358: the drop timer of a kept value, created here so its callback closes over only `map`, `key` and `value`. A timer made
+ * inside the reading function closed over that function's scope (the previous entry and the pass's options, its loop yield
+ * and through it the whole pass), and a cleared timer still holds its callback: every pass of a resident process stayed
+ * reachable from the newest timer.
+ */
+function dropWhenIdle<V>(map: Map<string, { value?: unknown; tree?: unknown }>, key: string, field: 'value' | 'tree', value: V): ReturnType<typeof setTimeout> {
+  const expiry = setTimeout(() => { if (map.get(key)?.[field] === value) map.delete(key); }, TREE_REUSE_MAX_AGE_MS);
+  expiry.unref?.();
+  return expiry;
+}
+
 export class LevelReuseMismatch extends Error {
   readonly code = 'level_reuse_mismatch';
   constructor(read: string, detail: string) { super(`sync level reuse: the reused ${read} differs from a whole read (${detail})`); this.name = 'LevelReuseMismatch'; }
@@ -44,11 +56,7 @@ export async function readTreeLevelReusing(gitRoot: string, head: string, scope:
   const key = JSON.stringify([...opts.key, gitRoot, scope]);
   const prior = opts.allowed ? entries.get(key) : undefined;
   if (prior) { clearTimeout(prior.expiry); entries.delete(key); }
-  const keep = (tree: Map<string, GitTreeEntry>) => () => {
-    const expiry = setTimeout(() => { if (entries.get(key)?.tree === tree) entries.delete(key); }, TREE_REUSE_MAX_AGE_MS);
-    expiry.unref?.();
-    entries.set(key, { head, tree, at: Date.now(), expiry });
-  };
+  const keep = (tree: Map<string, GitTreeEntry>) => () => { entries.set(key, { head, tree, at: Date.now(), expiry: dropWhenIdle(entries, key, 'tree', tree) }); };
   const whole = async () => { const tree = await readTreeLevel(gitRoot, head, scope, opts.shared); return { tree, reuse: 'read' as const, keep: opts.allowed ? keep(tree) : () => {} }; };
   if (!opts.allowed || !prior || Date.now() - prior.at > TREE_REUSE_MAX_AGE_MS || /[\\[*?]|^:/.test(scope)) return whole();
   let reuse: TreeReuse = 'same';
@@ -86,9 +94,7 @@ export function keepPassPages<T extends object>(key: readonly string[], value: T
   const k = JSON.stringify(key);
   const prior = passPages.get(k);
   if (prior) clearTimeout(prior.expiry);
-  const expiry = setTimeout(() => { if (passPages.get(k)?.value === value) passPages.delete(k); }, TREE_REUSE_MAX_AGE_MS);
-  expiry.unref?.();
-  passPages.set(k, { value, at: Date.now(), expiry });
+  passPages.set(k, { value, at: Date.now(), expiry: dropWhenIdle(passPages, k, 'value', value) });
 }
 export function takePassPages<T>(key: readonly string[]): T | undefined {
   const k = JSON.stringify(key), entry = passPages.get(k);

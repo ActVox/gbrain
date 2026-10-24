@@ -10,6 +10,9 @@
  *     larger than the bound, a scope with pathspec magic and a missing commit all read whole.
  *   - A managed pass on PGLite (and Postgres when DATABASE_URL is set) patches the listing on its next commit, imports
  *     the same pages, and reads whole under `sync.level_reuse false`.
+ *   - #7358: a kept listing holds only its commit and tree. Its drop timer once closed over the reading function's scope
+ *     (the previous entry and the pass's options), and a cleared timer keeps its callback, so a resident serve kept every
+ *     pass it ran. Each read's loop yield and each managed pass's progress callback is collectable after the next pass.
  * Before: every pass listed the whole tree.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from 'bun:test';
@@ -21,6 +24,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { installFaultHook } from '../src/core/persistence/fault-points.ts';
 import { readTreeLevel, type GitTreeEntry } from '../src/core/persistence/sync-git-stream.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
+import { loopYield } from '../src/core/persistence/sync-yield.ts';
 import { __resetTreeReuseForTests, LevelReuseMismatch, readTreeLevelReusing, TREE_REUSE_MAX_AGE_MS } from '../src/core/persistence/sync-tree-reuse.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
@@ -121,6 +125,26 @@ describe('readTreeLevelReusing: T across passes', () => {
     expect((await pass('brain/bulk/b1*')).reuse).toBe('read');
   }, 120_000);
 
+  test('#7358: a kept listing holds only its commit and tree; the options and loop yield of every earlier read are collectable', async () => {
+    const refs: Array<WeakRef<object>> = [];
+    const read = async () => {
+      const shared = loopYield();
+      refs.push(new WeakRef(shared));
+      const got = await readTreeLevelReusing(root, git(root, 'rev-parse', 'HEAD'), 'brain', { key: KEY, allowed: true, shared });
+      got.keep();
+      return got.reuse;
+    };
+    expect(await read()).toBe('read');
+    for (let i = 0; i < 3; i++) {
+      writeFileSync(join(root, 'brain/notes/n12.md'), `collectable probe ${i}`);
+      commit(root, `collectable probe ${i}`);
+      expect(await read()).toBe('patched');
+    }
+    Bun.gc(true);
+    // The newest may still be reachable from its own stream's timers until they fire; every earlier one must be gone.
+    expect(refs.slice(0, -1).map(ref => ref.deref() === undefined)).toEqual([true, true, true]);
+  });
+
   test('the oracle: GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1 throws when a kept listing differs from a whole read (forced probe)', async () => {
     await withEnv({ GBRAIN_SYNC_LEVEL_REUSE_VERIFY: '1' }, async () => {
       const first = await pass('brain');
@@ -185,4 +209,22 @@ for (const backend of testBackends()) describe(`[${backend}] GBRA-133: a managed
     expect(reuse.at(-1)).toBe('patched');
     expect((await live(engine)).map(([slug]) => slug)).toEqual(['notes/a', 'notes/c', 'notes/d', 'notes/e']);
   }, { databaseUrl, setup })), 300_000);
+
+  test('#7358: the kept listing holds none of its pass; every earlier pass of the process is collectable', () => managedBrain(async ({ engine, root }) => {
+    const refs: Array<WeakRef<object>> = [];
+    const sync = async () => {
+      const onProgress = () => {};
+      refs.push(new WeakRef(onProgress));
+      return (await performManagedSync(engine, { ...OPTS, onProgress })).status;
+    };
+    expect(await sync()).toBe('first_sync');
+    for (const name of ['a', 'b', 'c']) {
+      writeFileSync(join(root, `notes/${name}.md`), note(name, `The edited body of ${name}.`));
+      commit(root, `edit ${name}`);
+      expect(await sync()).toBe('synced');
+    }
+    Bun.gc(true);
+    // The newest may still be reachable from its own stream's timers until they fire; every earlier one must be gone.
+    expect(refs.slice(0, -1).map(ref => ref.deref() === undefined)).toEqual([true, true, true]);
+  }, { databaseUrl, setup }), 300_000);
 });

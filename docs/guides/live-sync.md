@@ -139,16 +139,17 @@ Timing knobs the drain uses:
 ### Level reuse
 
 A long-running process (the serve, `gbrain sync --watch`) keeps the tree
-listing of the commit its last pass read. The next pass lists only what
-changed since (`git diff-tree`) and still judges every path. It also keeps
-the pages-and-import-records read (`I⋈P`) of its last synced pass and, in its
-own snapshot, re-reads only rows any writer changed since. Any doubt reads
-whole: a new process, another source, a failed or unsynced pass, a read older
-than 10 minutes, a change over a quarter of the tree or source (and over
-2,000), counts that do not add up (a deletion leaves no other trace), a wide
-transaction-id span, pathspec characters in scope, or any error. Holds,
-markers, open work and the Git level are read every round.
-`gbrain config set sync.level_reuse false` turns both off.
+listing of the commit its last pass read and lists only what changed since
+(`git diff-tree`), still judging every path. It also keeps its last synced
+pass's pages-and-import-records read (`I⋈P`) and re-reads in its own
+snapshot only rows changed since. Any doubt reads whole: a new
+process, another source, a failed or unsynced pass, a read older than 10
+minutes, a change over a quarter of the tree or source (and over 2,000), counts
+that do not add up, a wide transaction-id span, pathspec characters in scope,
+or any error. Holds, markers, open work and the Git level are read every round.
+Clean probes persist on disk, so a new process rehashes only files
+whose stat or tree entry moved. `gbrain config set sync.level_reuse false`
+turns all three off.
 `GBRAIN_SYNC_LEVEL_REUSE_VERIFY=1` also reads whole and fails the pass on any
 difference (tests and the nightly freshness cell).
 
