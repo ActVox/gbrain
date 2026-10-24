@@ -502,16 +502,6 @@ export function resolveParsedSubtype(
 }
 
 /**
- * #6429: the v0.13.1 grandfather stamped `validate: false` into the database; on an unmanaged brain that path never wrote
- * the file, so the file lacks a key the database carries. The mechanical stamp authors nothing (grandfather.ts): a file
- * without a `validate:` key keeps the stored stamp. GBRA-133: import and sync compare and store it the same way as the
- * write guard, so a legacy page carrying the stamp is not a database edit sync cannot place.
- */
-export function keepGrandfatherStamp(frontmatter: Record<string, unknown>, existing?: { frontmatter?: Record<string, unknown> | null } | null): void {
-  if (!Object.hasOwn(frontmatter, 'validate') && existing?.frontmatter?.validate === false) frontmatter.validate = false;
-}
-
-/**
  * #5988 hold codes: deterministic content refusals. Ingestion holds the one
  * file and keeps going instead of failing the whole sync. Defined once here;
  * managed and legacy sync, import and `validate --importable` share it.
