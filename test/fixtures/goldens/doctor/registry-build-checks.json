@@ -918,6 +918,10 @@
         "name": "runtime_build_skew"
       },
       {
+        "category": "ops",
+        "name": "cli_socket_refusals"
+      },
+      {
         "category": "brain",
         "name": "extract_atoms_held_failed"
       },
