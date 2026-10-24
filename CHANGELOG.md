@@ -10,6 +10,23 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.422.0] - 2026-10-24
+
+**The Postgres crash-robot ceilings are tightened now that a dead owner's effect claim is released early: 620 s on pull requests and 880 s on every other event.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Crash robot, Postgres, pull requests and merge queue | 1020 s ceiling, sized around one to three 2-minute effect-claim lease waits per cell (567–785 s) | 620 s; after #7454 the cells measured 357–475 s with no lease wait |
+| Crash robot, Postgres, every other event | 1800 s ceiling, sized around lease waits (slowest cell 1,290 s) | 880 s; a full-scope run after #7454 measured 391 s and 679 s |
+
+PGLite ceilings are unchanged (820 s on pull requests, 1200 s elsewhere). Each ceiling is the slowest measured cell plus about 30%, and a run past it still fails with `over_budget` and prints its share of the ceiling. The measurements are in `docs/ci-event-parity.md`.
+
+### What to watch for after you upgrade
+
+- Nothing changes at runtime: this release only changes CI ceilings and their docs. Nothing is rewritten on upgrade, and there is no schema migration.
+
 ## [0.60.421.0] - 2026-10-24
 
 **`search.evidence_tail_trim` (default off) trims low-scoring conversation blocks from the tail of an `auto` evidence delivery, and keeps any block that restates the question's terms.** With the key on, `search` and `query` drop whole-conversation blocks past the top 3 whose search score is under half of rank one's. A block that holds at least 80% of rank one's share of the query's terms is kept, because a low-scoring session can carry the earlier value a knowledge-update question needs. Nothing changes unless you turn the key on.
