@@ -69,6 +69,43 @@ describe('a deadline never extends a run that committed nothing', () => {
     } finally { deadline.dispose(); }
   });
 
+  test('the delegated deadline: a first slice still running at the deadline is waited for, and its commits extend the run', async () => {
+    const lines: string[] = [];
+    const deadline = new DelegatedSyncDeadline(100, 600, line => lines.push(line));
+    try {
+      await sleep(250);
+      expect(deadline.stop.signal.aborted).toBe(false);
+      deadline.noteSlice({ ...screened(3), added: 2 });
+      expect(deadline.stop.signal.aborted).toBe(false);
+      expect(deadline.stalled).toBe(false);
+      expect(lines.join('\n')).toContain('still progressing');
+    } finally { deadline.dispose(); }
+  });
+
+  test('the delegated deadline: a first slice that returns past the deadline having committed nothing stops the run then, as a stall', async () => {
+    const lines: string[] = [];
+    const deadline = new DelegatedSyncDeadline(100, 5_000, line => lines.push(line));
+    try {
+      await sleep(250);
+      expect(deadline.stop.signal.aborted).toBe(false);
+      deadline.noteSlice(screened(40));
+      expect(deadline.stop.signal.aborted).toBe(true);
+      expect(deadline.stalled).toBe(true);
+      expect(lines.join('\n')).toContain('code=sync_deadline_stalled');
+    } finally { deadline.dispose(); }
+  });
+
+  test('the delegated deadline: a first slice that never returns stops the run one progress window after it started, as a stall', async () => {
+    const deadline = new DelegatedSyncDeadline(100, 300, () => undefined);
+    try {
+      await sleep(200);
+      expect(deadline.stop.signal.aborted).toBe(false);
+      await sleep(200);
+      expect(deadline.stop.signal.aborted).toBe(true);
+      expect(deadline.stalled).toBe(true);
+    } finally { deadline.dispose(); }
+  });
+
   test('the sync watchdog listens for commits only and carries a coded stall notice (human and --json)', () => {
     const res = { deadlineMs: 3_600_000, graceMs: 30_000, reason: 'non-TTY default', progressWindowMs: 900_000 };
     const plan = syncWatchdogPlan(['--source', 'source-a', '--no-pull'], res);

@@ -70,7 +70,9 @@ export function delegatedProgressWindowMs(args:string[],env:Record<string,string
  * work (a cursor that advanced, or a pass that wrote, deleted or renamed pages),
  * and stops only after a full window without it. GBRA-133 PR 3a: a run that
  * committed nothing never extends; its stop is a stall (`stalled`), and a pass
- * that only settled paths (screened them unchanged) is not progress.
+ * that only settled paths (screened them unchanged) is not progress. A slice
+ * reports only when it returns, so a first slice still running at the deadline
+ * is waited for, up to one progress window from the start, and decides then.
  */
 export class DelegatedSyncDeadline {
   readonly stop=new AbortController();
@@ -80,10 +82,13 @@ export class DelegatedSyncDeadline {
   private timer:ReturnType<typeof setTimeout>|undefined;
   private extended=false;
   private progressed=false;
+  private readonly startedAt:number;
+  private sliceSeen=false;
+  private waitingFirstSlice=false;
   /** True when the deadline stopped a run that committed nothing (`sync_deadline_stalled`). */
   stalled=false;
   constructor(timeoutMs:number,private readonly progressWindowMs:number|undefined,private readonly log:(line:string)=>void=line=>console.error(line)) {
-    this.lastProgressAt=performance.now();
+    this.lastProgressAt=this.startedAt=performance.now();
     this.at=timeoutMs>0?this.lastProgressAt+timeoutMs:Infinity;
     this.arm();
   }
@@ -101,11 +106,20 @@ export class DelegatedSyncDeadline {
   /** Call with each slice's result; an advanced cursor index, or a pass that committed pages, is progress. */
   noteSlice(slice:Pick<SyncResult,'managedCursor'|'pass'|'added'|'modified'|'deleted'|'renamed'>):void {
     const index=slice.managedCursor?.index;
+    this.sliceSeen=true;
     if(index!==undefined&&index>this.lastIndex)this.lastIndex=index;
-    else if(!slice.pass||slice.added+slice.modified+slice.deleted+(slice.renamed??0)===0)return;
+    else if(!slice.pass||slice.added+slice.modified+slice.deleted+(slice.renamed??0)===0)return this.firstSliceReturned();
     this.progressed=true;
     this.lastProgressAt=performance.now();
     noteCommittedProgress();
+    this.firstSliceReturned();
+  }
+  /** The deadline passed while the first slice ran: decide now that it reported. */
+  private firstSliceReturned():void {
+    if(!this.waitingFirstSlice)return;
+    this.waitingFirstSlice=false;
+    this.dispose();
+    this.check();
   }
   dispose():void { if(this.timer)clearTimeout(this.timer); }
   private arm():void {
@@ -115,6 +129,13 @@ export class DelegatedSyncDeadline {
   }
   private check():void {
     const now=performance.now();
+    // A slice reports only when it returns: a first slice still running at the deadline is waited for, up to one progress window.
+    if(this.progressWindowMs&&!this.sliceSeen&&now-this.startedAt<this.progressWindowMs) {
+      this.waitingFirstSlice=true;
+      this.at=this.startedAt+this.progressWindowMs;
+      this.arm();
+      return;
+    }
     if(this.progressWindowMs&&this.progressed&&now-this.lastProgressAt<this.progressWindowMs) {
       this.at=this.lastProgressAt+this.progressWindowMs;
       if(!this.extended){this.extended=true;this.log(`[sync] past the delegated deadline and still progressing; extends while the owner keeps committing pages (stops after ${Math.round(this.progressWindowMs/1000)}s without progress).`);}
