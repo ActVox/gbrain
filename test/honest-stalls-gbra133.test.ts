@@ -36,6 +36,9 @@ describe('a deadline never extends a run that committed nothing', () => {
     expect(progressDeadlineDecision(5000, 1000, 0, 500, true)).toBe('extend');
     expect(progressDeadlineDecision(5000, 1000, 0, 500, false)).toBe('stop');
     expect(progressDeadlineDecision(999, 1000, 0, 500, false)).toBe('wait');
+    // A run that has committed nothing yet gets one window from its start (its first unit of work may still be running).
+    expect(progressDeadlineDecision(1200, 1000, 1200, 60_000, false)).toBe('extend');
+    expect(progressDeadlineDecision(61_000, 1000, 0, 60_000, false)).toBe('stop');
   });
 
   test('the delegated deadline: passes that only screen paths stop the run at the deadline as sync_deadline_stalled', async () => {

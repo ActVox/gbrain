@@ -63,7 +63,8 @@ export type ProgressDeadlineAction = 'wait' | 'extend' | 'stop';
  * last progress note is younger than `windowMs`, and stops the run only after
  * a full window with no progress. `windowMs <= 0` keeps the plain wall-clock
  * deadline. GBRA-133 PR 3a: `progressed` false (a run that must commit to
- * count, and has committed nothing) never extends: the deadline stops it.
+ * count, and has committed nothing) gets one window from its start, never an
+ * extension from a later note: past the deadline and that window, it stops.
  *   elapsed < deadline                       -> 'wait'
  *   deadline passed, progress within window  -> 'extend'
  *   deadline passed, no progress for window  -> 'stop' (SIGTERM, then SIGKILL after grace)
@@ -72,7 +73,7 @@ export function progressDeadlineDecision(
   elapsedMs: number, deadlineMs: number, sinceProgressMs: number, windowMs: number, progressed = true,
 ): ProgressDeadlineAction {
   if (elapsedMs < deadlineMs) return 'wait';
-  if (windowMs > 0 && progressed && sinceProgressMs < windowMs) return 'extend';
+  if (windowMs > 0 && (progressed ? sinceProgressMs : elapsedMs) < windowMs) return 'extend';
   return 'stop';
 }
 
@@ -104,8 +105,8 @@ export interface ProcessWatchdogOpts {
   /**
    * GBRA-133 PR 3a: which notes count as progress. `committed` listens to
    * `noteCommittedProgress()` only (pages written, a cursor advanced), and a
-   * run that reaches its deadline having committed nothing stops at once
-   * instead of getting a window; `stallNotice` is then written instead of
+   * run that has committed nothing gets one window from its start and no
+   * extension, and stops past its deadline and that window; `stallNotice` is then written instead of
    * `stopNotice`. Default `forward`.
    */
   progressSignal?: 'forward' | 'committed';
@@ -219,8 +220,10 @@ function check() {
   const since = now - lastProgress;
   // mirrors progressDeadlineDecision
   if (now - t0 < deadlineMs) { setTimeout(check, deadlineMs - (now - t0)); return; }
-  if (progressWindowMs > 0 && progressed && since < progressWindowMs) {
-    if (!extended) w('deadline reached (' + Math.round(deadlineMs/1000) + 's) but the run is still progressing (last progress ' + Math.round(since / 1000) + 's ago) — extending; it stops after ' + Math.round(progressWindowMs / 1000) + 's without progress');
+  if (progressWindowMs > 0 && since < progressWindowMs) {
+    if (!extended) w(progressed
+      ? 'deadline reached (' + Math.round(deadlineMs/1000) + 's) but the run is still progressing (last progress ' + Math.round(since / 1000) + 's ago) — extending; it stops after ' + Math.round(progressWindowMs / 1000) + 's without progress'
+      : 'deadline reached (' + Math.round(deadlineMs/1000) + 's) before the run committed anything; it stops as a stall unless it commits within ' + Math.round(progressWindowMs / 1000) + 's of its start');
     extended = true;
     setTimeout(check, progressWindowMs - since);
     return;
