@@ -104,10 +104,12 @@ describe('GBRA-133 Git effect catch-up under cross-process worktree contention',
       expect(doctor.details).toMatchObject({ parked_effects: 0, stalled_catchups: [{ source_id: 'default', stalled_effects: 3 }] });
     } finally { await held.release(); }
 
-    // Once the worktree is free the backlog commits and its busy streak no longer counts.
+    // Once the worktree is free the backlog commits and its busy streak no longer counts. The committed effects keep no busy
+    // bookkeeping: an effect's data is part of its request's receipt bytes, which must not depend on how often it met contention.
     await release(engine);
     await pass(engine);
     expect(await gitStates(engine)).toEqual({ committed: 3 });
     expect(await readStalledCatchups(engine)).toEqual([]);
+    expect(await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM persistence_effects WHERE kind='git' AND (data ? 'busy_retries' OR data ? 'busy_since' OR data ? 'busy_at')")).toEqual([{ n: 0 }]);
   }), 180_000);
 });

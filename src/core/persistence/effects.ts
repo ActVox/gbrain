@@ -994,7 +994,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
       await engine.executeRaw(`UPDATE persistence_effects e SET
         state=CASE WHEN jsonb_array_length(COALESCE(e.data->'parked','[]'::jsonb))>0 THEN 'failed' ELSE 'committed' END,
         error_code=CASE WHEN jsonb_array_length(COALESCE(e.data->'parked','[]'::jsonb))>0 THEN 'targets_parked' END,
-        data=e.data-'retry_slugs'-'target_failures'-'failing_target',execution_token=NULL,claim_expires_at=NULL,claim_owner=NULL,
+        data=e.data-'retry_slugs'-'target_failures'-'failing_target'-'busy_retries'-'busy_since'-'busy_at',execution_token=NULL,claim_expires_at=NULL,claim_owner=NULL,
         outcome=$2::text::jsonb,updated_at=now()
         FROM jsonb_to_recordset($1::text::jsonb) AS t(id bigint,token uuid)
         WHERE e.id=t.id AND e.execution_token=t.token AND e.recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE}`,

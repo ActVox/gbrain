@@ -36,7 +36,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - `src/core/persistence/worktree-lease.ts`: waiter markers (`noteWaiting`, `clearWaiting`, `foreignWaiterAhead`); lane leases drain and lane takes yield to a foreign waiter that has waited 1 s.
 - `src/core/persistence/ownership.ts`: a no-wait `acquireWorktree` yields to a foreign waiter; new `acquireWorktreeWaiting` for the effect worker.
-- `src/core/persistence/effects.ts`, `effect-journal.ts`, `effect-model.ts`: effects wait for a contended worktree once per root per pass; `writer_busy` backs off (`retryBusyEffect`) and records `busy_retries`, `busy_since` and `busy_at`.
+- `src/core/persistence/effects.ts`, `effect-journal.ts`, `effect-model.ts`: effects wait for a contended worktree once per root per pass; `writer_busy` backs off (`retryBusyEffect`) and records `busy_retries`, `busy_since` and `busy_at` while the effect waits; completion drops them, so a receipt's size never depends on contention.
 - `src/core/persistence/effect-catchup.ts` (new): `readStalledCatchups`, used by doctor `parked_effects` and writer status.
 - `src/core/hardened-git.ts`: a Git stream that has settled no longer keeps its caller's options and chunk handler reachable through its idle timer.
 
