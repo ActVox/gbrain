@@ -10,6 +10,83 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.423.0] - 2026-10-24
+
+**`gbrain sync status` tells you what a busy or stuck source is really doing, and a sync that commits nothing says it stalled instead of claiming progress.** On a large brain, status used to print every held file (thousands of rows, megabytes of JSON), so the useful part was buried. A catch-up could also look alive for hours: screening unchanged files counted as progress, so a run that wrote nothing kept extending its deadline. Now status prints a short summary of holds, names the process doing the work, and only counts committed pages as progress.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sync status --json` on a source with thousands of holds | every hold inline | `holds_summary` counts plus the first 20 holds, needs-human first; `--detail` pages them |
+| Who is syncing this source right now? | not shown | `live` names the drain-lease holder (serve pass, sync job, CLI sync or cycle) with heartbeat and `stalled` |
+| An old error after a later pass moved past it | still drove `state` and `next` | reads `superseded` with `by` and `age_seconds`, and no longer drives `state` or `next` |
+| A sync that reaches its deadline having committed nothing | extended as "still progressing" | stops with `sync_deadline_stalled` and a read-only status fix, once at least one progress window has passed since it started |
+| A drain holder that has committed nothing for 5 minutes | the commit notifier deferred silently | counted as a failed attempt (`drain_holder_stalled`), so status and doctor show the sync-now fix |
+| A pass checkpoint whose pass already ended | `revision_conflict`, recorded as a failure | `sync_pass_superseded`, not a failure |
+| A pooler's client cap (`EMAXCONNSESSION`, "too many clients already") during a managed write | terminal `storage_error` | released as contention and retried, like SQLSTATE 53300 |
+
+### How to use it
+
+- `gbrain sync status --source <id> --json` shows `holds_summary`, the first 20 holds, `last_commit`, `last_sync_at`, `last_committed_at`, `live` and `freshness.waiting_commits`.
+- `gbrain sync status --source <id> --detail` pages holds 100 at a time; `--limit <n>`, `--cursor <next_cursor>`, `--all` and `--hold-state needs_human|actionable|held` narrow it.
+- A managed pass prints `[sync] pass round N: read ...` and `... importing N file(s) ...` before its import walk, and a serve pass that stops short names why on its `[serve-sync] done` line (`stop=<reason>`) with a `next` line.
+
+### What to watch for after you upgrade
+
+- Scripts that read every hold from plain `sync status --json` should page with `--detail --all` or follow `holds_page.next_command`. A source whose holds fit on one page prints them as before.
+- A sync that used to run on while committing nothing now stops with `sync_deadline_stalled` and exits non-zero. Read `gbrain sync status --source <id> --json` for the cause.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
+### Itemized changes
+
+- New codes `sync_deadline_stalled`, `drain_holder_stalled` and `sync_pass_superseded`, and reason `owner_restart_required` on `drain_stalled`; `docs/reference/error-codes.md` is regenerated.
+- `gbrain sync status` adds `holds_summary`, `holds_page`, `live`, `last_commit`, `last_sync_at`, `last_committed_at`, `convergence.converged_target`, `freshness.waiting_commits` and `last_error.superseded`; the notifier block adds `recorded_resident`.
+- A governor-stopped drain drops the abandoned pass's late progress events; a stop whose head owner reports restart_required reads `owner_restart_required` with the owner's heartbeat row.
+- The commit notifier counts a resumable sync that committed pages as progress before `last_commit` moves.
+- A resident notifier's background runs write their lines to the serve log (`[serve-sync] job=<id> ...`).
+
+## [0.60.422.0] - 2026-10-24
+
+**The Postgres crash-robot ceilings are tightened now that a dead owner's effect claim is released early: 620 s on pull requests and 880 s on every other event.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| Crash robot, Postgres, pull requests and merge queue | 1020 s ceiling, sized around one to three 2-minute effect-claim lease waits per cell (567–785 s) | 620 s; after #7454 the cells measured 357–475 s with no lease wait |
+| Crash robot, Postgres, every other event | 1800 s ceiling, sized around lease waits (slowest cell 1,290 s) | 880 s; a full-scope run after #7454 measured 391 s and 679 s |
+
+PGLite ceilings are unchanged (820 s on pull requests, 1200 s elsewhere). Each ceiling is the slowest measured cell plus about 30%, and a run past it still fails with `over_budget` and prints its share of the ceiling. The measurements are in `docs/ci-event-parity.md`.
+
+### What to watch for after you upgrade
+
+- Nothing changes at runtime: this release only changes CI ceilings and their docs. Nothing is rewritten on upgrade, and there is no schema migration.
+
+## [0.60.421.0] - 2026-10-24
+
+**`search.evidence_tail_trim` (default off) trims low-scoring conversation blocks from the tail of an `auto` evidence delivery, and keeps any block that restates the question's terms.** With the key on, `search` and `query` drop whole-conversation blocks past the top 3 whose search score is under half of rank one's. A block that holds at least 80% of rank one's share of the query's terms is kept, because a low-scoring session can carry the earlier value a knowledge-update question needs. Nothing changes unless you turn the key on.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `auto` delivery for `search` / `query` with `search.evidence_tail_trim` on | every whole-conversation block in the result list was delivered | blocks past rank 3 scoring under half of rank one are dropped, unless they hold the query's terms nearly as fully as rank one |
+| The same call with the key off (the default) | unchanged | unchanged, byte for byte |
+| Ranked chunks, saved facts, long pages, a call without a query or without a usable score on every row | delivered | delivered, never trimmed |
+
+### What to watch for after you upgrade
+
+- Turn it on with `gbrain config set search.evidence_tail_trim true`. `delivery.tail_trim` reports `{ dropped, kept_by_query_terms }`, and `dropped_reasons.tail_trim` counts the dropped blocks.
+- On LongMemEval-S, a replay of frozen evidence with no paid calls cut delivered tokens by about 36% on the questions the trim touched. Accuracy was not measurably lower on Sonnet 5.5, GPT-6.1 Sol or Opus 5.5. This is development evidence, on data retrieval was tuned on, and the verdict is mirrored in gbrain-evals#186.
+- The trim adds about 1 ms of server time per call. The response payload on the touched questions shrinks by about a third.
+
+### Itemized changes
+
+- `src/core/search/evidence-tail-trim.ts`, `src/core/search/evidence-delivery.ts`, `src/core/ops/search.ts`, `src/core/config.ts`: the trim, its delivery meta and the config key. The library `assembleEvidenceForHits` accepts `query` and a per-hit `score`. The `assemble_evidence` op passes neither, so its output is unchanged.
+- `docs/evidence-delivery.md`: the new "Tail trim" section. The evidence-date entry moves into `docs/architecture/key-files/core-search-evidence.md`.
+- Tests: `test/evidence-tail-trim.test.ts` and the export-surface golden.
+
 ## [0.60.420.0] - 2026-10-24
 
 **`gbrain sources writer git-durability --enable` now works when the remote branch has commits the checkout lacks, and a facts write retried under its own `request_id` keeps returning its recorded outcome.** The enable check's read-only `git push --dry-run` refused a remote that had moved, but the Git effect already publishes that case without touching the checkout. A caller retrying a facts write with an explicit request id could get its retained file refusal rechecked rather than receive the outcome it recorded.
