@@ -11,7 +11,7 @@ import { readFileSync, statSync, lstatSync } from 'fs';
 import { basename, extname, resolve } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine, FileSpec } from './engine.ts';
-import { classifyImportHold, parseMarkdown, resolveParsedSubtype, type ParseOpts, type ParsedMarkdown } from './markdown.ts';
+import { classifyImportHold, keepGrandfatherStamp, parseMarkdown, resolveParsedSubtype, type ParseOpts, type ParsedMarkdown } from './markdown.ts';
 import { CODE_FILE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
 import { importSizeLimit, MAX_FILE_SIZE, screenImportContent, settleContentDisposition, stripGateOwnedMarkers, type ContentRefusal, type FenceScreen } from './import-screen.ts';
 import type { WriteGateAssessment, WriteGateInput } from './write-gate.ts';
@@ -482,6 +482,7 @@ export async function importFromContent(
     parsed.type = existing.type;
   }
   resolveParsedSubtype(parsed, existing);
+  keepGrandfatherStamp(parsed.frontmatter, existing);
   // Alias-footgun visibility: an explicit frontmatter `type:` that is an
   // ALIAS of a canonical pack type (or entirely undeclared) is stored
   // literally and never re-normalized — different agents can silently file
