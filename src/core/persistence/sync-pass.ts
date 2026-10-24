@@ -32,7 +32,7 @@ import { sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { colonFileRefusal, COLON_REFUSAL_MESSAGES, readSyncFile, resolveManagedSyncContext, syncExcludePatterns, syncGitAsync, type ManagedSyncContext, type SyncFileRefusal } from './sync-discovery.ts';
 import { isWindowsColonTarget } from './native-file-target.ts';
 import { confirmedSyncDelta } from '../sync-rename-identity.ts';
-import { holdBasisMoved, holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
+import { fileDriftSide, holdBasisMoved, holdRescreenDue, type DeletionCandidate, readGitHoldRetryPaths, readGitSourceHolds, SYNC_IMPORT_PROVENANCE_OP, syncImportParser, syncImportParsers,
   type GitHoldRecord, type SyncImportParser, type SyncImportProvenance } from './sync-holds.ts';
 import { movedDriftHolds, sameParser } from './sync-prescreen.ts';
 import { sameSyncOrigin, selectOriginClaimant, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
@@ -268,6 +268,11 @@ export interface ShadowLevel {
   heldRenames: Array<{ path: string; rename: { sourcePath: string; slug: string; pageId: number; revision: string } }>;
   /** Holds on paths outside the level's domain (no file at L, no page, or no longer eligible): the stamp releases them, as discovery did (#6278 B7). */
   releasableHolds: string[];
+  /**
+   * GBRA-133: deleted-side `file_drift` holds whose file is gone from `L` and the disk. The stamp releases each whose page is
+   * no longer live (`settledDeletionHolds`): a soft delete, a purge or the file's removal decided it.
+   */
+  deletionCandidates: DeletionCandidate[];
   /** Working mode: the stat cache this round's rehash left (`hashWorkingLevel`); the stamp's round is the one a pass remembers. */
   workingCache: WorkingStatCache | null;
   /** Live file-backed pages whose origin is eligible: the mass-delete valve's denominator (#2828). */
@@ -599,6 +604,12 @@ async function reclassifyByOrigin(gitRoot: string, tips: Array<string | null | u
   return true;
 }
 
+/** GBRA-133: the deleted-side `file_drift` holds whose file is gone (`gone`, on the Git path); the stamp releases those whose page is no longer live. */
+function deletionCandidates(holds: readonly GitHoldRecord[], gone: (path: string) => boolean, toGit: (path: string) => string): DeletionCandidate[] {
+  return holds.filter(hold => hold.code === 'file_drift' && fileDriftSide(hold.meta) === 'deleted' && gone(toGit(hold.path)))
+    .map(hold => ({ path: hold.path, page_id: hold.page_id ?? null, slug: hold.slug ?? null }));
+}
+
 /**
  * The shadow level of a managed source: every path classified, nothing written. Null for a company-brain source, which
  * keeps its frozen manifest (design v3.2 §3.6).
@@ -852,7 +863,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
     t = timer();
     const candidateIndex = new Map<string, GitIndexEntry>();
     for (const path of candidates) { if (step.due()) await step.pause(); const entry = indexed(path); if (entry) candidateIndex.set(path, entry); }
-    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex, { step });
+    const probed = await probeDirtiness(root, gitRoot, candidates, tree, candidateIndex, { step, persist: input.pass?.levelReuse === true,
+      ...(levelReuseVerify() ? { verify: (reused: number, differs: string | null) => { if (reused) reportLevelReuseCheck('dirtiness probes', `${reused} reused`, differs); } } : {}) });
     timings.Dp = (timings.Dp ?? 0) + t();
     t = timer();
     for (const [k, path] of candidates.entries()) {
@@ -894,6 +906,8 @@ export async function readShadowLevel(engine: BrainEngine, input: { sourceId: st
   return { sourceId, incarnation, root, gitRoot, scope, slugMode, mode, head, baselineCommit, full: input.full === true, kind: kind.kind, kindBlockers: kind.blockers,
     heldRenames: holds.flatMap(hold => hold.meta.rename_from ? [{ path: toGit(hold.path), rename: hold.meta.rename_from }] : []),
     releasableHolds: holds.filter(hold => !domain.has(toGit(hold.path))).map(hold => hold.path),
+    deletionCandidates: deletionCandidates(holds, path => domain.has(path) && !tree.has(path)
+      && !(mode === 'working' && (untracked.has(path) || index.has(path))) && !readPresent(root, path, scope), toGit),
     paths, reconcilable, ...(colon.refusals.size ? { fileRefusals: [...colon.refusals.values()] } : {}), timings_ms: timings, statements: statements + attestationStatements + 3,
     ...(confirm ? { confirm: narrow ? { ...confirm, narrow: narrow === 'taken' && !reuse ? 'classified' : narrow } : confirm } : {}), ...(reuse ? { reused } : {}), ...(treeReuse ? { treeReuse } : {}), pack: pack?.identity ?? null,
     selection: { exclude: [...exclude].sort(), includeHidden: [...includeHidden].sort(), strategy, srcSubpath: scope || null, mode },

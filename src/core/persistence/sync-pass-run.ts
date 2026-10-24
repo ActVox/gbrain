@@ -42,7 +42,7 @@ import { assertDrainLease, currentDrainLease } from './sync-lease.ts';
 import { idleClear, readIdleFacts } from './sync-idle-skips.ts';
 import { digest } from './digest.ts';
 import { readSyncTail } from './sync-tail-record.ts';
-import { clearGitHold, clearGitHoldRetryPaths, holdRescreenDue, readGitHoldRetryPaths, readSyncHoldPolicy, readGitSourceHolds, readSyncImportProvenances, syncImportParserFor } from './sync-holds.ts';
+import { clearGitHold, clearGitHoldRetryPaths, holdRescreenDue, readGitHoldRetryPaths, readSyncHoldPolicy, readGitSourceHolds, readSyncImportProvenances, settledDeletionHolds, syncImportParserFor } from './sync-holds.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { loadConfig } from '../config.ts';
 import { startPersistenceConsumer } from './service.ts';
@@ -551,7 +551,7 @@ async function stampUnchangedPass(engine: BrainEngine, input: SyncPassInput, rou
     await assertDrainLease(tx, sourceId);
     await tx.executeRaw('UPDATE sources SET last_sync_at=now() WHERE id=$1 AND incarnation=$2::uuid', [sourceId, incarnation]);
     // Holds on paths that left the level go with it here too, as a stamp releases them.
-    for (const path of level.releasableHolds) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
+    for (const path of [...level.releasableHolds, ...await settledDeletionHolds(tx, sourceId, level.deletionCandidates)]) await clearGitHold(tx, { sourceId, incarnation, path, observedAt: startedAt });
     await recordPassFenceTrend(tx, { worktreeId: context.binding.worktree_id, sourceId, passId, since: converged?.request_hwm ?? null });
     const watermark = await readConvergedWatermark(tx, { worktreeId: context.binding.worktree_id, sourceId, incarnation }, null, OPEN_AT_STAMP_CAP, { prior: converged?.writeback });
     value.obligations.converged = { target: head, at, ...watermark, parser_fp: parserFp, pack, selection_fp: selectionFp,
@@ -623,7 +623,7 @@ async function passStampFor(engine: BrainEngine, input: { context: ManagedSyncCo
   const closesEpisode = closure?.closes === true;
   if (closure?.released) counts.episodeReleased = closure.released;
   return { leaseToken: input.leaseToken, incarnation: context.incarnation, configured, stampChunker: configured && (context.source.last_commit === null || (closesEpisode && !!episode?.full_id && closure!.stampChunker)),
-    closesEpisode, retryTaken: [...input.retry], releasedHolds: input.level.releasableHolds, selectionFp: input.selectionFp, parserFp: input.parserFp, pack: input.pack, full: input.full,
+    closesEpisode, retryTaken: [...input.retry], releasedHolds: input.level.releasableHolds, ...(input.level.deletionCandidates.length ? { deletionCandidates: input.level.deletionCandidates } : {}), selectionFp: input.selectionFp, parserFp: input.parserFp, pack: input.pack, full: input.full,
     changed: counts.added + counts.modified + counts.deleted + counts.renamed, extract: input.extract, since: input.since, ...(input.rescreen ? { rescreen: true as const } : {}) };
 }
 
