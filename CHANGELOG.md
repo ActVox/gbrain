@@ -10,6 +10,30 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.421.0] - 2026-10-24
+
+**`search.evidence_tail_trim` (default off) trims low-scoring conversation blocks from the tail of an `auto` evidence delivery, and keeps any block that restates the question's terms.** With the key on, `search` and `query` drop whole-conversation blocks past the top 3 whose search score is under half of rank one's. A block that holds at least 80% of rank one's share of the query's terms is kept, because a low-scoring session can carry the earlier value a knowledge-update question needs. Nothing changes unless you turn the key on.
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| `auto` delivery for `search` / `query` with `search.evidence_tail_trim` on | every whole-conversation block in the result list was delivered | blocks past rank 3 scoring under half of rank one are dropped, unless they hold the query's terms nearly as fully as rank one |
+| The same call with the key off (the default) | unchanged | unchanged, byte for byte |
+| Ranked chunks, saved facts, long pages, a call without a query or without a usable score on every row | delivered | delivered, never trimmed |
+
+### What to watch for after you upgrade
+
+- Turn it on with `gbrain config set search.evidence_tail_trim true`. `delivery.tail_trim` reports `{ dropped, kept_by_query_terms }`, and `dropped_reasons.tail_trim` counts the dropped blocks.
+- On LongMemEval-S, a replay of frozen evidence with no paid calls cut delivered tokens by about 36% on the questions the trim touched. Accuracy was not measurably lower on Sonnet 5.5, GPT-6.1 Sol or Opus 5.5. This is development evidence, on data retrieval was tuned on, and the verdict is mirrored in gbrain-evals#186.
+- The trim adds about 1 ms of server time per call. The response payload on the touched questions shrinks by about a third.
+
+### Itemized changes
+
+- `src/core/search/evidence-tail-trim.ts`, `src/core/search/evidence-delivery.ts`, `src/core/ops/search.ts`, `src/core/config.ts`: the trim, its delivery meta and the config key. The library `assembleEvidenceForHits` accepts `query` and a per-hit `score`. The `assemble_evidence` op passes neither, so its output is unchanged.
+- `docs/evidence-delivery.md`: the new "Tail trim" section. The evidence-date entry moves into `docs/architecture/key-files/core-search-evidence.md`.
+- Tests: `test/evidence-tail-trim.test.ts` and the export-surface golden.
+
 ## [0.60.407.0] - 2026-10-23
 
 **A long-running sync process (the serve, `gbrain sync --watch`) no longer reads the whole Git tree and the whole pages-and-import-records join on every pass: it patches the last pass's reads with what changed. A remote `list_jobs` call is capped at 500 jobs, so `jobs list --limit 100000` on a thin client can no longer run the serve out of memory.** Both reuses fail closed to a whole read on any doubt, and `gbrain config set sync.level_reuse false` turns them off.
