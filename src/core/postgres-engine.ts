@@ -698,7 +698,8 @@ export class PostgresEngine implements BrainEngine {
       const mode = opts?.readOnly ? { mode: 'read only' } : {};
       const begin = (run: (handle: unknown) => Promise<unknown>) => this._pageTransaction ? conn.begin(run)
         : opts?.pipelineEarly ? conn.begin({ ...mode, early: opts.pipelineEarly }, run)
-        : opts?.pipelineFirst ? conn.begin({ ...mode, first: opts.pipelineFirst }, run) : conn.begin(mode, run);
+        : opts?.pipelineFirst ? conn.begin({ ...mode, first: opts.pipelineFirst }, run)
+        : opts?.readOnly ? conn.begin('read only', run) : conn.begin(run);
       return await holdSearchConnection(() => withCommitChecks(checks => withTransactionAbort(opts?.signal, attach => withHeldPageKeys(this._pageTransaction ? this._heldPageKeys : null, held => begin(async (handle) => {
         attach(handle as Discardable);
         if (!this._pageTransaction) this.checkoutGauge.checkedOut();

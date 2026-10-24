@@ -27,7 +27,7 @@ export const MAX_ROUND_TRIP_MS = 30_000;
  */
 export function warmRoundTripTimeout(command: string, ms: number, side: 'serve' | 'cli'): OperationError {
   return opError('timeout', `gbrain ${command} did not finish within ${ms} ms on the warm CLI socket${side === 'serve' ? '; the serve cancelled it' : ' (the serve did not answer)'}.`,
-    'Retry the same command. If it keeps timing out, check the serve log (gbrain serve) for a request still running, or add --timeout to bound the call.',
+    'Retry the same command; pass --timeout <ms> to bound it. If it keeps timing out, look in the serve\'s stderr log for a request still running.',
     { reason: 'cli_socket_round_trip_cap', retryable: true, docs: 'docs/guides/cli-socket.md',
       why: `The warm CLI socket caps one call at ${ms} ms so a caller never waits on a request without a bound; the call returned this error instead of starting over on the slower cold path.` });
 }
