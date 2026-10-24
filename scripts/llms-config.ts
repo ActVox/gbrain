@@ -488,4 +488,4 @@ export const INLINE_TIPS = [
 // bundle, so it stays inlined; the budget tracks its legitimate growth. Still fits
 // comfortably in 200k+ context models.
 // Generator prints a WARN if exceeded; ship with includeInFull=false exclusions.
-export const FULL_SIZE_BUDGET = 800_000;
+export const FULL_SIZE_BUDGET = 801_000; // ActVox fork: +1000 for the fork CLAUDE.md paragraph (docs/operations/actvox-claude-md-snippet.md)

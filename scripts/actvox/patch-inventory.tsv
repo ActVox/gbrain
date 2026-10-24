@@ -119,5 +119,5 @@ admin/src/main.tsx	brand	1	no (ActVox dashboard brand)
 admin/src/pages/Dashboard.tsx	brand	193	no (ActVox dashboard brand)	
 scripts/check-tool-catalog-fresh.sh	tooling	2	review	
 scripts/generate-tool-catalog.ts	tooling	5	review	
-scripts/llms-config.ts	tooling	4	review	
+scripts/llms-config.ts	tooling	6	review	ActVox repo URLs; llms-full budget +1000 for the fork CLAUDE.md paragraph (upstream bundle is 799964 of 800000 bytes at v0.60.428.0)
 scripts/check-key-files-current-state.sh	tooling	4	no (ActVox: CLAUDE.md cap +1000 for the fork paragraph; re-check after each integration)	
