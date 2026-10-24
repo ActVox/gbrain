@@ -81,6 +81,10 @@ export interface PersistenceEffect {
     commit_trailer?: string;
     /** Consecutive execution failures of the current Git or withdrawal target. */
     target_failures?: number;
+    /** GBRA-133: consecutive `writer_busy` retries of this streak, when the streak began and when its last retry was recorded (ISO). */
+    busy_retries?: number;
+    busy_since?: string;
+    busy_at?: string;
     /** The target `target_failures` belongs to; a different target starts from zero. */
     failing_target?: string;
     /** Targets set aside after repeated failures; a slugless entry parks the whole effect. */

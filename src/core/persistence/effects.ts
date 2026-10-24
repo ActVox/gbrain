@@ -30,14 +30,15 @@ import { EMBEDDING_ZERO_NORM, isEmbeddingZeroNormError, type EmbeddingZeroNormEr
 import { isAIInvocationPolicyError, withAIInvocationPreflight } from '../ai/invocation-guard.ts';
 import { quoteIdentifier } from '../search/embedding-column.ts';
 import type { ResolvedColumn } from '../types.ts';
-import { acquireWorktree, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
+import { acquireWorktree, acquireWorktreeWaiting, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
+import { clearWaiting } from './worktree-lease.ts';
 import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts';
 import { sha256 } from './digest.ts';
 import { prepareFileTarget, unreadPageFile } from './page-prepare.ts';
 import { isStreamedContent, type StreamedFileContent } from './large-file.ts';
 import { atomicStagingPath } from '../atomic-write.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
-import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, effectClaimStamp, effectClaimKeeper, failEffect, hasRearmableTargets, mirrorGates, parkEffect, rearmWithheldTargets, renewPersistenceEffectClaim, requeueEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
+import { advanceEffectCursor, claimCoalescedGitEffects, claimPersistenceEffect, completeEffect, effectClaimStamp, effectClaimKeeper, failEffect, hasRearmableTargets, mirrorGates, parkEffect, rearmWithheldTargets, renewPersistenceEffectClaim, requeueEffect, retryBusyEffect, retryEffect, singleFileGitEffect, type MirrorGate } from './effect-journal.ts';
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
 import { commitGitTargets, DURABILITY_NOT_ENABLED, gitRootAhead, publishGitEffect, pushGitRoot, type GitEffectOwner } from './effect-git.ts';
 import { retryIndexLockParks } from './effect-retry.ts';
@@ -670,6 +671,7 @@ async function recordFailure(engine: BrainEngine, effect: PersistenceEffect, err
       : transientBackoffMs(attempt - 1);
     await retryEffect(engine, effect, reason, delay); return;
   }
+  if (code === 'writer_busy') { await retryBusyEffect(engine, effect); return; }
   if (CONTENTION_CODES.includes(code)) { await retryEffect(engine, effect, code, 250); return; }
   // A lost connection, a failed transaction or an abort is never the effect's own failure (GBRA-130); for links and
   // facts-backstop effects neither is a run-scoped refusal.
@@ -749,6 +751,8 @@ async function parkEffectTarget(engine: BrainEngine, effect: PersistenceEffect, 
     ...(remaining.length ? { retry_slugs: remaining, target_failures: PARK_AFTER_FAILURES - 1 } : {}) }, code, 0);
 }
 
+/** GBRA-133: how long one effect pass waits for a contended worktree before its effects back off as writer_busy. */
+const EFFECT_LOCK_WAIT_MS = 5_000;
 /** #5530: at most this many single-file Git effects share one commit. */
 const GIT_GROUP_SIZE = 100;
 /** A short Git group yields to queued publications at most this many claims, GIT_YIELD_MS apart. */
@@ -781,8 +785,10 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
   // #6696 (A1): every request whose effect this pass claimed is trued up after the pass, outside the settling transactions.
   const touched = new Set<string>();
   const derived: DerivedFailures = { run: new ItemRun('effects.derived_retry_budget'), counted: [] };
-  try { return await runEffectPass(engine, config, opts, touched, derived); }
+  const waited = new Set<string>();
+  try { return await runEffectPass(engine, config, opts, touched, derived, waited); }
   finally {
+    for (const path of waited) clearWaiting(path);
     await settleDerivedFailures(engine, derived).catch(() => { /* an unsettled claim expires and the effect is claimed again */ });
     await (async () => { if (await hasRearmableTargets(engine, [...touched])) await engine.transaction(tx => rearmWithheldTargets(tx, [...touched])); })()
       .catch(() => { /* idempotent; the next pass touching the request retries it */ });
@@ -790,8 +796,20 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
   }
 }
 
-async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: EffectWorkerOptions, touched: Set<string>, derived: DerivedFailures): Promise<number> {
+async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: EffectWorkerOptions, touched: Set<string>, derived: DerivedFailures,
+  waited: Set<string>): Promise<number> {
   const limit = Math.max(1, Math.min(opts.limit ?? 2, 20));
+  // GBRA-133: a Git or mirror effect waits for a contended worktree (other processes yield to it after a grace) instead of
+  // trying once per claim; a root this pass already waited out is tried once, so one busy root costs the pass one wait.
+  const stalled = new Set<string>();
+  const takeLock = async (binding: WorktreeBinding) => {
+    const path = binding.coordination_path ?? '';
+    if (stalled.has(path)) return acquireWorktree(binding, 0, undefined, engine);
+    waited.add(path);
+    const lock = await acquireWorktreeWaiting(binding, engine, EFFECT_LOCK_WAIT_MS, opts.signal);
+    if (!lock) stalled.add(path);
+    return lock;
+  };
   await resumeGatedMirrors(engine, opts.hostId);
   const recoveries = await selectEffectRecoveries(engine, opts.hostId, limit);
   let attempted = 0;
@@ -817,7 +835,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
     try {
       if (effect.worktree_id && !['embedding', 'facts-backstop', 'links'].includes(effect.kind)) {
         if (!binding) throw ownerUnavailable(effect);
-        lock = await acquireWorktree(binding, 0, undefined, engine);
+        lock = await takeLock(binding);
         if (!lock) throw writerBusy(effect);
         if (recordOnly) { await lock.release(); lock = null; }
       }
@@ -880,7 +898,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
     let gates: Map<string, MirrorGate>;
     try {
       gates = await mirrorGates(engine, effects.map(effect => effect.request_id));
-      lock = await acquireWorktree(binding, 0, undefined, engine);
+      lock = await takeLock(binding);
       if (!lock) throw writerBusy(effects[0]!);
     } catch (error) {
       for (const effect of effects) await recordFailure(engine, effect, error, opts.signal);
@@ -1029,7 +1047,7 @@ async function runEffectPass(engine: BrainEngine, config: GBrainConfig, opts: Ef
     let failure: unknown;
     let lock: Awaited<ReturnType<typeof acquireWorktree>> = null;
     try {
-      lock = await acquireWorktree(binding, 0, undefined, engine);
+      lock = await takeLock(binding);
       if (!lock) throw writerBusy(items[0]!.effect);
       pushed = await pushGitRoot(root, opts.signal);
     } catch (error) { failure = error; } finally { await lock?.release(); }
