@@ -14,7 +14,7 @@ import { shrinkRun } from './shrink.ts';
 export interface ValidationOptions {
   engine: 'pglite' | 'postgres'; schedules?: number; operations?: number; seed?: number;
   crashes?: boolean; databaseUrl?: string; manifest?: string;
-  /** Crash-robot ceiling in seconds: a run past it fails; omitted or 0 skips the phase (the CLI defaults to 1200 on PGLite, 1800 on Postgres). */
+  /** Crash-robot ceiling in seconds: a run past it fails; omitted or 0 skips the phase (the CLI defaults to 1200 on PGLite, 880 on Postgres). */
   robotSeconds?: number;
   /** `pr` skips the Postgres lease-bound seams; `full` (default) crashes every seam. */
   robotScope?: RobotScope;
@@ -291,7 +291,7 @@ if (import.meta.main) {
   assert(['pr', 'full'].includes(args.get('robot-scope') ?? 'full'), '--robot-scope is pr or full');
   const result = await runValidation({ engine, schedules: Number(args.get('schedules') ?? 1000), operations: Number(args.get('operations') ?? 10_000),
     seed: Number(args.get('seed') ?? 5105), crashes: !args.has('no-crashes'), databaseUrl: process.env.DATABASE_URL,
-    robotSeconds: Number(args.get('robot-seconds') ?? (engine === 'postgres' ? 1800 : 1200)),
+    robotSeconds: Number(args.get('robot-seconds') ?? (engine === 'postgres' ? 880 : 1200)),
     robotScope: (args.get('robot-scope') ?? 'full') as RobotScope, exploreDay: args.has('explore-day') ? Number(args.get('explore-day')) : undefined, replay: args.get('replay') || undefined, shrink: args.get('shrink') || undefined,
     manifest: args.get('manifest') ?? `.context/persistence-${engine}-manifest.json` });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

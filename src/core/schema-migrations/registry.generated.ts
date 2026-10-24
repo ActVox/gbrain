@@ -269,6 +269,7 @@ import { v265 } from './v265-derived-generations.ts';
 import { v266 } from './v266-derived-generation-activations.ts';
 import { v267 } from './v267-pages-title-search-index.ts';
 import { v268 } from './v268-effect-claim-owner.ts';
+import { v269 } from './v269-links-supersedes-index.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -536,4 +537,5 @@ export const MIGRATIONS: Migration[] = [
   v266,
   v267,
   v268,
+  v269,
 ];
