@@ -10,6 +10,26 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.427.0] - 2026-10-24
+
+**A managed cycle whose sync gave it no page list now drains stale links within its budget instead of running past the job timeout, a gitignored Git target parks at once naming the ignore rule, and more gbrain state follows GBRAIN_HOME.**
+
+### What changed
+
+| Situation | Before | Now |
+|---|---|---|
+| A managed cycle's extract phase gets no changed-page list (sync left out of the phases, or sync failed) on a source that is mostly stale | the stale-page pass ran over every stale page with no deadline, overran the cycle job's timeout, and retried from the same place every cycle | the pass stops at the cycle's 3-minute stale-drain budget, reports `stale_backlog`, and the rest drains across later cycles |
+| A sync holding a source's drain lease is killed before it releases the lease | its holder record (queue `gbrain-drain-lease`) stayed `active` until the next sync of that source, shown as a stalled sync job | the job stall sweep deletes a holder record whose lease lock is gone or expired; a live holder's record is never touched |
+| A Git effect's target file is excluded by a `.gitignore` rule | it retried through the full schedule, parked as `git_target_unsafe`, and suggested a per-request retry that could not succeed | it parks on its first attempt as `git_target_ignored` naming the rule (`<file>:<line>: <pattern>`). doctor `parked_effects` and `gbrain sources writer status` group parked targets per source and code with one bulk command each, and `gbrain sources retry-effects <source> --parked-code <code>` retries a group |
+| A process whose gbrain home has no host identity runs a worktree refresh | the owner check created a new `persistence/host.json` and then refused as a different host | it refuses `refresh_not_owner` without writing anything, naming the identity file it read, the HOME and GBRAIN_HOME it resolved and the owner it expected |
+| GBRAIN_HOME is set | feature offers, upgrade state and errors, `mounts.json` and the mounts cache, the brain-pull log, the default supervisor pid file, skillopt captures, the harvest pattern file, notability eval files and the greenfield audit directory were still written under `$HOME/.gbrain` | they live under `<GBRAIN_HOME>/.gbrain` |
+
+### What to watch for after you upgrade
+
+- With GBRAIN_HOME unset nothing moves. A host that sets GBRAIN_HOME keeps its old copies under `$HOME/.gbrain`: move them by hand if you want the old offers, mounts or upgrade history, and restart a supervisor started before the upgrade so `gbrain jobs supervisor status` finds its pid file.
+- Parked `git_target_ignored` effects stay parked while the rule stands. Remove or narrow the rule, then run the group's bulk retry.
+- Nothing is rewritten on upgrade, and there is no schema migration.
+
 ## [0.60.426.0] - 2026-10-24
 
 **With `--job-isolation process`, `--max-rss` now caps each job child as well as the worker. A child whose memory runs away is stopped before it can exhaust the host, and a job that grows the same way on every retry ends at its `max_attempts` instead of restarting the box over and over.**
