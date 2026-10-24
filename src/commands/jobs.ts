@@ -38,6 +38,7 @@ import { makeSyncHandler } from '../core/minions/handlers/sync.ts';
 import { makeUnifyTypesHandler } from '../core/minions/handlers/unify-types.ts';
 import { runJobsAuthorizeLegacy } from './jobs/authorize-legacy.ts';
 import { runJobsSubmit } from './jobs/submit.ts';
+import { runJobsWait } from './jobs/wait.ts';
 import { runJobsList } from './jobs/list.ts';
 import { runJobsGet } from './jobs/get.ts';
 import { runJobsCancel } from './jobs/cancel.ts';
@@ -162,11 +163,15 @@ USAGE
                             [--backoff-jitter 0..1] [--timeout-ms Nms]
                             [--lock-duration-ms Nms]
                             [--idempotency-key K] [--queue Q] [--dry-run]
+                            [--yes] [--max-usd USD|off]  (enrich, subagent: paid)
                             [--redact-secrets]   (shell only; scrubs inherit
                                                   values from stdout/stderr)
   gbrain jobs list [--status S] [--queue Q] [--limit N] [--json]
+  gbrain jobs list --finished-since ISO|CURSOR [--queue Q] [--name N] [--json]
+  gbrain jobs list --group SPEND_GROUP [--json]
   gbrain jobs get <id> [--json]
-  gbrain jobs cancel <id>
+  gbrain jobs wait <id> [--timeout 10m] [--json]  (exit 0 completed, 1 failed/dead/cancelled, 124 still running)
+  gbrain jobs cancel <id> | --group SPEND_GROUP
   gbrain jobs cancel --select "status=waiting|paused,name=synthesize" [--expect <hash> --yes] [--json]
   gbrain jobs retry <id>
   gbrain jobs prune [--older-than 30d] [--dry-run]
@@ -210,8 +215,12 @@ USAGE
       status       Read PID file + audit log, report running / last_start
                    / crashes_24h / max_crashes_exceeded as JSON or human.
                    Exits 0 if running, 1 if not.
-      stop         Send SIGTERM to the supervisor, wait up to 40s for
-                   graceful drain, report outcome. Exits 0 on clean stop.
+      stop         Send SIGTERM to the supervisor, wait up to 45s for
+                   graceful drain, report outcome (--queue names the
+                   queue lock to verify when the audit log cannot).
+                   Exits 0 only on a verified drain: the supervisor's own
+                   stopped row says drained, its workers are gone and its
+                   lock is released; otherwise exits 1 naming the check.
 
     EXIT CODES (start)
       0  clean shutdown (SIGTERM/SIGINT received, worker drained)
@@ -227,7 +236,7 @@ USAGE
       gbrain jobs supervisor --json --allow-shell-jobs  # JSONL events + shell-exec on
 
 HANDLER TYPES (built in)
-  sync              Pull and embed new pages from the repo
+  sync              Pull and import new pages from the repo; on a managed brain it drains to the job's deadline (--timeout-ms)
   embed             (Re-)embed pages; --params '{"slug":...}' or '{"all":true}'
   lint              Run page linter; --params '{"dir":"...","fix":true}'
   import            Bulk import markdown; --params '{"dir":"..."}'
@@ -250,7 +259,7 @@ Other subcommands are fully described above.
  * without an entry fall back to JOBS_HELP, which documents them fully.
  */
 const JOBS_SUBCOMMAND_HELP: Record<string, string> = {
-  work: `gbrain jobs work — start a worker daemon (Postgres only)
+  work: `gbrain jobs work — start a worker daemon (PGLite: drain the queue and exit)
 
 USAGE
   gbrain jobs work [--queue Q] [--concurrency N] [--max-rss MB]
@@ -287,8 +296,9 @@ OPTIONS
                        Negative values need root.
 
 NOTES
-  Requires the Postgres engine — PGLite's exclusive file lock cannot host
-  a long-lived daemon. For crash-resilient operation prefer:
+  PGLite's exclusive file lock cannot host a long-lived daemon: there it runs
+  the waiting jobs in the foreground and exits once the queue is drained
+  (stop any running \`gbrain serve\` first). On Postgres prefer:
     gbrain jobs supervisor start --detach --json
 `,
   supervisor: `gbrain jobs supervisor — auto-restarting wrapper around 'gbrain jobs work'
@@ -337,14 +347,15 @@ USAGE
                             [--backoff-type fixed|exponential] [--backoff-delay Nms]
                             [--backoff-jitter 0..1] [--timeout-ms Nms]
                             [--lock-duration-ms Nms]
-                            [--idempotency-key K] [--queue Q] [--dry-run]
-                            [--redact-secrets]
+                            [--idempotency-key K] [--queue Q] [--queue-only]
+                            [--dry-run] [--redact-secrets]
 
 OPTIONS
   --params JSON        Job payload (handler-specific; see HANDLER TYPES in
                        'gbrain jobs --help')
-  --follow             Run inline and stream progress (constructs a real
-                       worker; works on both engines)
+  --follow             Run inline and stream progress (works on both engines;
+                       required on PGLite, which has no background worker)
+  --queue-only         PGLite: queue without running (\`gbrain jobs work\` drains)
   --priority N         Lower runs first (default 0)
   --delay Nms          Delay before the job becomes claimable (default 0)
   --max-attempts N     Retry budget (default 3)
@@ -392,7 +403,7 @@ authorized. IDs, data, schedule and retries persist.
   cancel: `gbrain jobs cancel — cancel a job, or preview-bound bulk cancel of legacy jobs
 
 USAGE
-  gbrain jobs cancel <id>
+  gbrain jobs cancel <id> | --group SPEND_GROUP   (--group: every unfinished job of one paid command's approval)
   gbrain jobs cancel --select "status=waiting|paused,name=synthesize" [--json]
   gbrain jobs cancel --select "status=waiting|paused,name=synthesize" --expect <hash> --yes
 
@@ -403,6 +414,22 @@ Without --yes it only previews: counts by job name and status, the first 20 ids,
 parents that return to waiting, and the preview hash. The apply cancels exactly
 the previewed set; a selection that would cascade to a job outside it refuses.
 Stop producers and workers and cancel active jobs (gbrain jobs cancel <id>) first.
+`,
+  wait: `gbrain jobs wait — block until a job is completed, failed, dead or cancelled
+
+USAGE
+  gbrain jobs wait <id> [--timeout 10m] [--json]
+
+OPTIONS
+  --timeout DUR  Stop waiting after DUR (60, 60s, 10m, 1h; default 24h). The
+                 job is never cancelled; it keeps running.
+  --json         Print the final row like \`jobs get --json\`.
+
+EXIT CODES
+  0    completed
+  1    failed, dead or cancelled (error_text on stderr), or no such job
+  2    usage error
+  124  the timeout elapsed and the job is still running
 `,
   prune: `gbrain jobs prune — delete old terminal jobs
 
@@ -423,6 +450,7 @@ const JOBS_SUBCOMMANDS: Record<string, (ctx: JobsCommandContext) => Promise<void
   submit: runJobsSubmit,
   list: runJobsList,
   get: runJobsGet,
+  wait: runJobsWait,
   cancel: runJobsCancel,
   retry: runJobsRetry,
   delete: runJobsDelete,
@@ -462,7 +490,7 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
   // routing bug upstream of this function — refuse instead of crashing
   // inside MinionQueue.
   const localSupervisorStatus = sub === 'supervisor' && args[1] === 'status';
-  if (!engineOrNull && sub !== 'list' && sub !== 'get' && !localSupervisorStatus) {
+  if (!engineOrNull && sub !== 'list' && sub !== 'get' && sub !== 'wait' && !localSupervisorStatus) {
     console.error(`\`gbrain jobs ${sub ?? ''}\` needs a local engine and cannot run on a thin client.`);
     process.exit(1);
   }
@@ -591,6 +619,7 @@ export async function registerBuiltinHandlers(
   worker.register('reindex', makeReindexHandler(engine));
   worker.register('repair-jsonb', repairJsonbHandler);
   worker.register('orphans', makeOrphansHandler(engine));
+  worker.register('doctor-refresh', async () => (await import('./doctor/last-known.ts')).runDoctorRefresh(engine));
   worker.register('integrity', integrityHandler);
   worker.register('purge', makePurgeHandler(engine));
 

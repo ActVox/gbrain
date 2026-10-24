@@ -1,9 +1,13 @@
 name: Semgrep
 
 # Static analysis (SAST) with Semgrep Community Edition (#2272). Tokenless:
-# uses the public registry rulesets, needs zero secrets. Findings print in
-# the job log; no code-scanning/SARIF upload by design (keeps permissions
-# read-only, no security-events: write).
+# uses the public registry rulesets, needs zero secrets.
+# - Pull requests (job `semgrep`, read-only): fail only on findings new since
+#   the merge base.
+# - Weekly schedule and dispatch (job `semgrep-full`): full-tree scan, report
+#   only, uploaded as SARIF to code scanning (Security -> Code scanning), so
+#   the findings land somewhere a reviewer reads them. Only this job holds
+#   security-events: write.
 
 on:
   pull_request:
@@ -15,12 +19,16 @@ on:
 permissions:
   contents: read
 
+# Event parity (docs/TESTING.md#event-parity): grouping only.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   semgrep:
+    # Named exception (docs/TESTING.md#event-parity): pull requests gate on findings
+    # new since the merge base; the weekly full-tree scan below covers the rest.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     container:
@@ -46,18 +54,35 @@ jobs:
           # The container user differs from checkout's owner. Trust only this
           # workspace so our merge-base lookup works before Semgrep starts.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if [ -n "$BASE_SHA" ]; then
-            bash scripts/test-select-semgrep-baseline.sh
-            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-            BASELINE="$(bash scripts/select-semgrep-baseline.sh "$BASE_SHA" "$HEAD_SHA")"
-            test -n "$BASELINE"
-            if [ "$BASELINE" != "$MERGE_BASE" ]; then
-              echo "Exact-tag upstream integration — full-tree report-only audit"
-              semgrep scan --config p/default --config p/typescript || true
-            fi
-            echo "PR scan — blocking only on fork-overlay findings new since $BASELINE"
-            semgrep scan --config p/default --config p/typescript --error --baseline-commit "$BASELINE"
-          else
-            echo "Full-tree scan (schedule/dispatch) — report-only"
+          bash scripts/test-select-semgrep-baseline.sh
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          BASELINE="$(bash scripts/select-semgrep-baseline.sh "$BASE_SHA" "$HEAD_SHA")"
+          test -n "$BASELINE"
+          if [ "$BASELINE" != "$MERGE_BASE" ]; then
+            echo "Exact-tag upstream integration — full-tree report-only audit"
             semgrep scan --config p/default --config p/typescript || true
           fi
+          echo "PR scan — blocking only on fork-overlay findings new since $BASELINE"
+          semgrep scan --config p/default --config p/typescript --error --baseline-commit "$BASELINE"
+
+  semgrep-full:
+    # Named exception (docs/TESTING.md#event-parity): the weekly schedule and dispatch.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep:1.170.0@sha256:c98f8829eea377274ee4b10656458b078b88232469b2ff913f091c2317347c9d
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Semgrep full-tree scan (report-only, SARIF)
+        run: |
+          semgrep scan --config p/default --config p/typescript --sarif-output=semgrep.sarif || true
+          test -s semgrep.sarif || { echo "::error::semgrep wrote no SARIF. Why: the scan crashed before reporting. Fix: rerun with gh workflow run semgrep.yml and read the scan log above."; exit 1; }
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep

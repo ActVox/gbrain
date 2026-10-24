@@ -25,7 +25,7 @@
  * not one-time schema+backfill work.
  */
 
-import { execSync } from 'child_process';
+import { execSync } from '../../core/spawn.ts';
 import { gbrainChildCommand, runGbrainSubprocess } from './in-process.ts';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 // Bug 3 — ledger writes moved to the runner (apply-migrations.ts). The
@@ -147,6 +147,7 @@ function finalizeResult(phases: OrchestratorPhaseResult[], status: 'complete' | 
 
 export const v0_13_0: Migration = {
   version: '0.13.0',
+  fresh_install_noop: true,
   featurePitch: {
     headline: 'Frontmatter becomes a graph — company, investors, attendees now create typed edges automatically',
     description:

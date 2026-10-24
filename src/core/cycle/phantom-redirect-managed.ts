@@ -19,12 +19,14 @@ import type { GBrainConfig } from '../config.ts';
 import type { Page } from '../types.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
-import { OperationError } from '../ops/contract.ts';
+import { opError } from '../ops/contract.ts';
+import { readFix } from '../ops/op-fix.ts';
 import { parseFactsFence } from '../facts-fence.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { logPhantomEvent } from '../facts/phantom-audit.ts';
 import { MOVE_WITHDRAWAL_SUBJECT_SQL } from '../facts/withdrawal-schema.ts';
 import { recordRenameAlias } from '../page-state/rename-alias.ts';
+import { noteBelief } from '../belief/ledger.ts';
 import { preparePageMutation } from '../persistence/page-prepare.ts';
 import { maintenancePreflight, submitMaintenanceIntent } from '../persistence/prepared-maintenance.ts';
 import { mergePhantomFenceRows, mergePhantomLinks, movePhantomFacts, phantomHasResidue, type RedirectResult } from './phantom-redirect.ts';
@@ -44,7 +46,11 @@ export async function redirectManagedPhantom(engine: BrainEngine, page: Page, ca
 
   const [dbMax] = await engine.executeRaw<{ n: number | string | null }>(
     'SELECT MAX(row_num) AS n FROM facts WHERE source_id = $1 AND source_markdown_slug = $2', [sourceId, canonical]);
-  const merged = mergePhantomFenceRows(target.page.compiled_truth, parseFactsFence(page.compiled_truth ?? '').facts, Number(dbMax?.n ?? 0));
+  // #6385 R12: a fence that parses with warnings would lose its skipped rows, the phantom's with the deleted page and the canonical's in the re-render.
+  const phantomFence = parseFactsFence(page.compiled_truth ?? '');
+  if (phantomFence.warnings.length > 0) return drift('phantom facts fence does not parse cleanly');
+  if (parseFactsFence(target.page.compiled_truth).warnings.length > 0) return drift('canonical facts fence does not parse cleanly');
+  const merged = mergePhantomFenceRows(target.page.compiled_truth, phantomFence.facts, Number(dbMax?.n ?? 0));
   if (merged.body !== null && parseFactsFence(merged.body).warnings.length > 0) return drift('rendered fence failed re-parse');
   const outcome = await submitMaintenanceIntent(engine, authority, canonical, {
     kind: 'managed_maintenance_phantom_merge', expected_revision: target.revision,
@@ -74,7 +80,9 @@ export async function preparePhantomMerge(engine: BrainEngine, row: WriteRequest
   const phantomUnchanged = async (db: BrainEngine) => {
     const phantom = await db.readPageSnapshot(phantomSlug, { sourceId: row.source_id });
     if (!phantom || phantom.page.id !== phantomId || phantom.revision !== p.phantom_revision || await phantomHasResidue(db, phantom.page)) {
-      throw new OperationError('revision_conflict', 'The phantom page changed before its redirect.');
+      throw opError('revision_conflict', 'The phantom page changed before its redirect.',
+        `Phantom page ${phantomSlug} in source ${row.source_id} changed before request ${row.request_id} could redirect it, so nothing was merged. Review the page; the next cycle re-evaluates it.`,
+        { fix: readFix(`Shows page ${phantomSlug} as it is now, read-only.`, { argv: ['gbrain', 'get', '--source', row.source_id, '--', phantomSlug] }) });
     }
   };
   await phantomUnchanged(engine);
@@ -85,10 +93,18 @@ export async function preparePhantomMerge(engine: BrainEngine, row: WriteRequest
       // Withdrawals move first so the trigger honors them as the rows take the
       // canonical subject; moved rows then match the published fence rows.
       await tx.executeRaw(MOVE_WITHDRAWAL_SUBJECT_SQL, [row.source_id, phantomSlug, row.slug]);
+      const phantomLinks = await tx.executeRaw<{ id: number }>('SELECT id FROM links WHERE from_page_id = $1 AND origin_page_id IS NULL', [phantomId]);
+      const phantomFacts = await tx.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id = $1 AND source_markdown_slug = $2 AND expired_at IS NULL', [row.source_id, phantomSlug]);
       const moved = await movePhantomFacts(tx, row.source_id, phantomSlug, row.slug, rowMap);
       const outcome = await page.apply(tx);
       await mergePhantomLinks(tx, phantomId, Number(row.page_id));
       await recordRenameAlias(tx, row.source_id, phantomSlug, row.slug);
+      // W1 #6783 §3: a merge is not a rename; each assertion that moved to the canonical page is one *.transferred from the phantom's lifetime.
+      const movedFacts = await tx.executeRaw<{ id: number }>('SELECT id FROM facts WHERE id = ANY($1::bigint[]) AND source_markdown_slug = $2 AND expired_at IS NULL',
+        [phantomFacts.map(f => Number(f.id)), row.slug]);
+      const movedLinks = await tx.executeRaw<{ id: number }>('SELECT id FROM links WHERE id = ANY($1::int[]) AND from_page_id = $2', [phantomLinks.map(l => Number(l.id)), Number(row.page_id)]);
+      noteBelief({ kind: 'transferred', fromSlug: phantomSlug, table: 'facts', ids: movedFacts.map(f => Number(f.id)) });
+      noteBelief({ kind: 'transferred', fromSlug: phantomSlug, table: 'links', ids: movedLinks.map(l => Number(l.id)) });
       return { ...outcome, facts_moved: moved };
     } };
 }
@@ -103,7 +119,9 @@ export async function preparePhantomDelete(engine: BrainEngine, row: WriteReques
   const canonicalSlug = String(row.intent!.canonical_slug);
   const noTimeline = async (db: BrainEngine) => {
     if ((await db.executeRaw('SELECT 1 FROM timeline_entries WHERE page_id=$1 LIMIT 1', [row.page_id])).length) {
-      throw new OperationError('revision_conflict', 'The phantom gained timeline rows after its merge.');
+      throw opError('revision_conflict', 'The phantom gained timeline rows after its merge.',
+        `Phantom page ${row.slug} in source ${row.source_id} gained timeline entries after its merge, so request ${row.request_id} did not delete it. Review those entries; the next cycle re-evaluates the phantom.`,
+        { fix: readFix(`Shows page ${row.slug} with its timeline, read-only.`, { argv: ['gbrain', 'get', '--source', row.source_id, '--', row.slug] }) });
     }
   };
   await noTimeline(engine);
@@ -112,7 +130,10 @@ export async function preparePhantomDelete(engine: BrainEngine, row: WriteReques
     validate: async tx => { await page.validate?.(tx); await noTimeline(tx); },
     apply: async tx => {
       const canonical = await tx.readPageSnapshot(canonicalSlug, { sourceId: row.source_id });
-      if (!canonical) throw new OperationError('page_not_found', 'The redirect target disappeared before the phantom delete.');
+      if (!canonical) {
+        throw opError('page_not_found', 'The redirect target disappeared before the phantom delete.',
+          `Canonical page ${canonicalSlug} in source ${row.source_id} was deleted before request ${row.request_id} could redirect phantom ${row.slug} to it, so the transaction rolled back and the phantom stays. No manual step is needed; the next cycle re-evaluates it.`);
+      }
       await mergePhantomLinks(tx, Number(row.page_id), canonical.page.id);
       return page.apply(tx);
     } };

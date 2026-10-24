@@ -29,7 +29,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -48,7 +48,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -67,7 +67,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -95,8 +95,95 @@
           }
         ]
       },
+      "getChunkPage": {
+        "default": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "sourceIds+excludePrivate": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "getChunkWindows": {
         "default": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 8,
             "unsafeOptions": {
@@ -108,6 +195,15 @@
           }
         ],
         "scopedPrivateSafe": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 9,
             "unsafeOptions": {
@@ -125,7 +221,16 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -145,7 +250,16 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -165,7 +279,16 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -185,7 +308,16 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -205,7 +337,16 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -225,7 +366,16 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -293,7 +443,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -302,7 +452,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -311,7 +461,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -322,7 +472,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -331,7 +481,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -340,7 +490,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -353,7 +503,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -362,7 +512,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -371,7 +521,7 @@
             "paramCount": 4,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -382,7 +532,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -391,7 +541,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -400,7 +550,7 @@
             "paramCount": 5,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -429,13 +579,55 @@
           }
         ]
       },
+      "listEmbeddingStateRows": {
+        "default": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "sourceIds": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 5,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "listStaleChunks": {
         "default": [
           {
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -455,7 +647,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -475,7 +667,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -495,7 +687,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -515,7 +707,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -535,13 +727,111 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
           },
           {
             "paramCount": 8,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "readEmbeddingStateCounts": {
+        "full": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "full+sourceIds": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "ops": [
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -570,7 +860,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -589,7 +879,7 @@
             "paramCount": 0,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": true
             },
             "via": "unsafe"
@@ -610,34 +900,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -654,7 +917,8 @@
           {
             "paramCount": 2,
             "unsafeOptions": {
-              "prepare": false,
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -678,9 +942,45 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 15,
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -691,34 +991,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -735,7 +1008,8 @@
           {
             "paramCount": 2,
             "unsafeOptions": {
-              "prepare": false,
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -759,9 +1033,45 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 18,
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -772,34 +1082,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -816,7 +1099,8 @@
           {
             "paramCount": 2,
             "unsafeOptions": {
-              "prepare": false,
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -831,9 +1115,45 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 17,
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -844,34 +1164,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -887,6 +1180,33 @@
           },
           {
             "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
               "simple": false
@@ -908,7 +1228,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -917,7 +1237,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -926,7 +1246,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -935,7 +1255,33 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -949,6 +1295,15 @@
             "via": "unsafe"
           },
           {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
@@ -960,33 +1315,8 @@
           {
             "paramCount": 2,
             "unsafeOptions": {
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 0,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": true,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 15,
-            "unsafeOptions": {
-              "prepare": false,
               "simple": false
             },
             "via": "unsafe"
@@ -998,8 +1328,30 @@
       "searchKeyword": {
         "cjk": [
           {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 0,
-            "via": "tagged"
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 8,
@@ -1012,8 +1364,30 @@
         ],
         "cjk+sourceIds+detailLow": [
           {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 0,
-            "via": "tagged"
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 10,
@@ -1029,7 +1403,20 @@
         "cjk": [
           {
             "paramCount": 0,
-            "via": "tagged"
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 7,
@@ -1043,7 +1430,20 @@
         "cjk+sourceId": [
           {
             "paramCount": 0,
-            "via": "tagged"
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "prepare": false,
+              "simple": false
+            },
+            "via": "unsafe"
           },
           {
             "paramCount": 8,
@@ -1120,6 +1520,17 @@
             "via": "unsafe"
           }
         ],
+        "chunkId": [
+          {
+            "paramCount": 5,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
         "default": [
           {
             "paramCount": 3,
@@ -1144,6 +1555,17 @@
         ]
       },
       "getCallersOf": {
+        "chunkId": [
+          {
+            "paramCount": 5,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
         "default": [
           {
             "paramCount": 3,
@@ -1435,7 +1857,7 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 20,
+            "paramCount": 21,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1450,7 +1872,7 @@
             "via": "tagged"
           },
           {
-            "paramCount": 20,
+            "paramCount": 21,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1474,7 +1896,7 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 19,
+            "paramCount": 20,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1483,7 +1905,7 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 2,
+            "paramCount": 5,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1500,7 +1922,25 @@
             "via": "tagged"
           },
           {
-            "paramCount": 24,
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1524,7 +1964,7 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 24,
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1533,7 +1973,7 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 23,
+            "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1542,7 +1982,7 @@
             "via": "unsafe"
           },
           {
-            "paramCount": 3,
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -1589,6 +2029,41 @@
           }
         ],
         "default": [
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "listFactsKeyset": {
+        "default": [
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "keyset": [
+          {
+            "paramCount": 5,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "strictTime": [
           {
             "paramCount": 4,
             "unsafeOptions": {
@@ -1691,6 +2166,15 @@
       "migrateFactsToCanonical": {
         "default": [
           {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 6,
             "via": "tagged"
           }
@@ -1758,7 +2242,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -1990,7 +2474,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2001,9 +2485,13 @@
         "default": [
           {
             "paramCount": 1,
+            "via": "tagged"
+          },
+          {
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2012,7 +2500,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2021,7 +2509,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2030,60 +2518,19 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
           },
           {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 2,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
+            "paramCount": 1,
+            "via": "tagged"
           },
           {
             "paramCount": 3,
             "unsafeOptions": {
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 1,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
-              "simple": false
-            },
-            "via": "unsafe"
-          },
-          {
-            "paramCount": 1,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2092,7 +2539,16 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2101,7 +2557,214 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "via": "tagged"
+          },
+          {
+            "paramCount": 1,
+            "via": "tagged"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "replaceDerivedLinksBatch": {
+        "default": [
+          {
+            "paramCount": 1,
+            "via": "tagged"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "via": "tagged"
+          },
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "via": "tagged"
+          },
+          {
+            "paramCount": 1,
+            "via": "tagged"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2110,28 +2773,6 @@
       },
       "traverseGraph": {
         "default": [
-          {
-            "paramCount": 3,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": true,
-              "simple": false
-            },
-            "via": "unsafe"
-          }
-        ],
-        "excludePrivate": [
-          {
-            "paramCount": 3,
-            "unsafeOptions": {
-              "cancelFence": false,
-              "prepare": true,
-              "simple": false
-            },
-            "via": "unsafe"
-          }
-        ],
-        "frontierCap": [
           {
             "paramCount": 4,
             "unsafeOptions": {
@@ -2142,9 +2783,31 @@
             "via": "unsafe"
           }
         ],
+        "excludePrivate": [
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "frontierCap": [
+          {
+            "paramCount": 5,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
         "sourceId": [
           {
-            "paramCount": 6,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2155,7 +2818,7 @@
         ],
         "sourceIds": [
           {
-            "paramCount": 6,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2168,7 +2831,7 @@
       "traversePaths": {
         "default": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2181,7 +2844,7 @@
       "traversePathsDetailed": {
         "both": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2192,7 +2855,7 @@
         ],
         "both+sourceIds+excludePrivate": [
           {
-            "paramCount": 14,
+            "paramCount": 12,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2203,7 +2866,7 @@
         ],
         "default": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2214,7 +2877,7 @@
         ],
         "in": [
           {
-            "paramCount": 10,
+            "paramCount": 7,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2225,7 +2888,7 @@
         ],
         "out+sourceId+linkType": [
           {
-            "paramCount": 13,
+            "paramCount": 12,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2237,6 +2900,19 @@
       }
     },
     "pages": {
+      "countStaleFrontmatterKeyPages": {
+        "default": [
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "countStalePagesForExtraction": {
         "attendance-blocked+sourceId": [
           {
@@ -2285,7 +2961,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2294,7 +2970,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2303,7 +2979,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2312,7 +2988,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2320,7 +2996,7 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2329,7 +3005,7 @@
             "paramCount": 10,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2410,6 +3086,19 @@
           }
         ]
       },
+      "findDuplicatePages": {
+        "default": [
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "getAllSlugs": {
         "default": [
           {
@@ -2439,7 +3128,7 @@
           {
             "paramCount": 2,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2449,7 +3138,7 @@
           {
             "paramCount": 2,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2459,7 +3148,7 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2469,7 +3158,7 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2504,6 +3193,28 @@
         "excludePrivate": [
           {
             "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "limit": [
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ],
+        "metadataOnly": [
+          {
+            "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -2750,6 +3461,19 @@
           }
         ]
       },
+      "listStaleFrontmatterKeyPages": {
+        "default": [
+          {
+            "paramCount": 5,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "listStalePagesForExtraction": {
         "afterPageId+versionTs+sourceId": [
           {
@@ -2778,7 +3502,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2787,7 +3511,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2796,7 +3520,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2805,7 +3529,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2848,6 +3572,15 @@
               "simple": false
             },
             "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
           }
         ],
         "dryRun": [
@@ -2868,7 +3601,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2877,7 +3610,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2886,7 +3619,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2895,7 +3628,16 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2924,7 +3666,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2933,7 +3675,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2942,7 +3684,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2951,7 +3693,16 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2971,7 +3722,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2980,7 +3731,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2989,7 +3740,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -2998,7 +3749,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3006,7 +3757,16 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3027,7 +3787,7 @@
           {
             "paramCount": 2,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3037,7 +3797,19 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
+      "readPageSnapshotsBatch": {
+        "default": [
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3203,6 +3975,15 @@
       "restorePage": {
         "default": [
           {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
@@ -3213,6 +3994,15 @@
           }
         ],
         "sourceId": [
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 2,
             "unsafeOptions": {
@@ -3234,9 +4024,27 @@
               "simple": false
             },
             "via": "unsafe"
+          },
+          {
+            "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
           }
         ],
         "sourceId": [
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
           {
             "paramCount": 3,
             "unsafeOptions": {
@@ -3254,7 +4062,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3263,7 +4071,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3272,7 +4080,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3281,7 +4089,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3290,7 +4098,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3299,7 +4107,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3310,7 +4118,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3319,7 +4127,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3328,7 +4136,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3337,7 +4145,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3346,7 +4154,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3390,6 +4198,19 @@
           }
         ]
       },
+      "stripStaleFrontmatterKeys": {
+        "default": [
+          {
+            "paramCount": 4,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          }
+        ]
+      },
       "updatePageContextualRetrievalState": {
         "default": [
           {
@@ -3408,8 +4229,25 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 10,
+            "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3418,7 +4256,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3427,7 +4265,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3436,7 +4274,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3445,7 +4283,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3454,7 +4292,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3463,7 +4301,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3472,7 +4310,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3481,7 +4319,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3490,7 +4328,25 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3500,8 +4356,25 @@
           {
             "paramCount": 3,
             "unsafeOptions": {
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 10,
+            "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3770,7 +4643,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3779,7 +4652,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3788,7 +4661,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3797,7 +4670,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3806,7 +4679,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3815,7 +4688,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3826,7 +4699,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3835,7 +4708,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3844,7 +4717,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3853,7 +4726,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3862,7 +4735,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3871,7 +4744,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3919,7 +4792,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3928,7 +4801,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3937,7 +4810,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3946,7 +4819,7 @@
             "paramCount": 2,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3955,7 +4828,7 @@
             "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3983,7 +4856,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -3993,7 +4866,7 @@
       "countStaleTakes": {
         "default": [
           {
-            "paramCount": 0,
+            "paramCount": 6,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4126,7 +4999,7 @@
       "listStaleTakes": {
         "default": [
           {
-            "paramCount": 0,
+            "paramCount": 6,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4139,7 +5012,7 @@
       "listTakes": {
         "default": [
           {
-            "paramCount": 20,
+            "paramCount": 25,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4150,7 +5023,7 @@
         ],
         "sourceId": [
           {
-            "paramCount": 21,
+            "paramCount": 26,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4161,7 +5034,7 @@
         ],
         "sourceIds+excludePrivate": [
           {
-            "paramCount": 21,
+            "paramCount": 26,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4372,7 +5245,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -4400,7 +5273,7 @@
             "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
-              "prepare": false,
+              "prepare": true,
               "simple": false
             },
             "via": "unsafe"
@@ -4495,7 +5368,7 @@
       "getTimeline": {
         "default": [
           {
-            "paramCount": 2,
+            "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
@@ -4506,7 +5379,7 @@
         ],
         "excludePrivate": [
           {
-            "paramCount": 2,
+            "paramCount": 3,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,

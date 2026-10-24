@@ -752,8 +752,11 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
     expect(data.page_count).toBeUndefined();
     expect(data.chunk_count).toBeUndefined();
     expect(data.embedded_count).toBeUndefined();
-    // Body shape is exactly {status, version, engine}.
-    expect(Object.keys(data).sort()).toEqual(['engine', 'status', 'version']);
+    // Body shape is exactly {status, version, engine, build}; #7245's build carries versions only, never a path.
+    expect(Object.keys(data).sort()).toEqual(['build', 'engine', 'status', 'version']);
+    expect(Object.keys(data.build).sort()).toEqual(['installed_version', 'restart_pending', 'version']);
+    expect(data.build.version).toBe(data.version);
+    expect(typeof data.build.restart_pending).toBe('boolean');
   });
 
   test('v0.28.10: /admin/api/full-stats without admin cookie returns 401', async () => {
@@ -1544,10 +1547,18 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
       arguments: { slug: 'e2e-c4-denied', content: '---\ntitle: t\n---\nbody' },
     });
     expect(denied.isError).toBe(true);
-    expect(JSON.parse(denied.content[0].text)).toEqual({
+    // Agent contract v1: legacy keys keep their values; code + the rest of the envelope are additive.
+    expect(JSON.parse(denied.content[0].text)).toMatchObject({
       error: 'insufficient_scope',
+      code: 'insufficient_scope',
       message: "Operation put_page requires 'write' scope",
       your_scopes: ['read'],
+      // B5: the exact grant command, run by the brain host's operator.
+      why: `Client ${id} has scopes [read]; put_page needs 'write'.`,
+      fix: {
+        argv: ['gbrain', 'auth', 'rescope', '--client', id, '--scopes', 'read,write'],
+        consent: ['credentials'], actor: 'host_admin', next: 'tell_user_to_run',
+      },
     });
 
     // Allowed control (anti-vacuity): same token, read op succeeds.
@@ -1593,8 +1604,9 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
       arguments: { slug: 'e2e-c4-agent-denied' },
     });
     expect(denied.isError).toBe(true);
-    expect(JSON.parse(denied.content[0].text)).toEqual({
+    expect(JSON.parse(denied.content[0].text)).toMatchObject({
       error: 'insufficient_scope',
+      code: 'insufficient_scope',
       message: "Operation get_page requires 'read' scope",
       your_scopes: ['agent'],
     });

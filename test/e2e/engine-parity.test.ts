@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { installFixtureChunks } from '../helpers/page-projection.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import { linkFamily, resolveChainAnchors, runRelationalChain } from '../../src/core/search/relational-chain.ts';
 import type { ChunkInput, SearchResult } from '../../src/core/types.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { getSessionContextState, upsertSessionContextState } from '../../src/core/context/session-state.ts';
@@ -26,6 +27,7 @@ import { buildEntityCard } from '../../src/core/verbs/entity-card.ts';
 import { hasDatabase, setupDB, setupLegacyEmbeddingDB, teardownDB, getEngine } from './helpers.ts';
 import { TRAVERSE_PATH_ROW_CAP } from '../../src/core/engine-constants.ts';
 import { DENSE_HUB_SLUG, DENSE_HUB_SPOKES, seedDenseHub } from '../helpers/dense-hub.ts';
+import { timelinePageScans } from '../helpers/timeline-plan.ts';
 
 const SKIP_PG = !hasDatabase();
 const describeBoth = SKIP_PG ? describe.skip : describe;
@@ -1169,9 +1171,9 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
 
   // Chunkless-page safety net (embed --stale detection gap): a page with
   // non-empty content but zero content_chunks rows (e.g. a putPage-only
-  // write) must be found on BOTH engines identically, and quarantined /
-  // embed_skip pages (intentionally chunkless by design) must be excluded
-  // identically on both. Isolated under a dedicated source.
+  // write) must be found on BOTH engines identically, quarantined pages
+  // (chunkless by design) excluded and a chunkless embed_skip page with a
+  // body included (#7174) identically on both. Isolated under a dedicated source.
   test('chunkless-page-with-content detection: Postgres ↔ PGLite parity', async () => {
     const SRC = 'chunkless-parity';
     for (const eng of [pgEngine, pgliteEngine]) {
@@ -1191,20 +1193,20 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
         type: 'note', title: 'Quarantined', compiled_truth: 'junk content',
         frontmatter: { quarantine: { reason: 'junk_pattern', detail: 'parity fixture', assessed_at: new Date().toISOString() } },
       }, { sourceId: SRC });
-      // cp/skipped: chunkless BY DESIGN — must be excluded.
+      // cp/skipped: embed_skip with no chunk rows — included (#7174: writes keep its chunks since #6722).
       await eng.putPage('cp/skipped', {
         type: 'note', title: 'Skipped', compiled_truth: 'x'.repeat(500),
         frontmatter: { embed_skip: { reason: 'oversized', bytes: 500, assessed_at: new Date().toISOString() } },
       }, { sourceId: SRC });
     }
 
-    expect(await pgEngine.countChunklessPagesWithContent({ sourceId: SRC })).toBe(1);
-    expect(await pgliteEngine.countChunklessPagesWithContent({ sourceId: SRC })).toBe(1);
+    expect(await pgEngine.countChunklessPagesWithContent({ sourceId: SRC })).toBe(2);
+    expect(await pgliteEngine.countChunklessPagesWithContent({ sourceId: SRC })).toBe(2);
 
     const pgRows = await pgEngine.listChunklessPagesWithContent({ sourceId: SRC });
     const pgliteRows = await pgliteEngine.listChunklessPagesWithContent({ sourceId: SRC });
-    expect(pgRows.map(r => r.slug)).toEqual(['cp/stub']);
-    expect(pgliteRows.map(r => r.slug)).toEqual(['cp/stub']);
+    expect(pgRows.map(r => r.slug)).toEqual(['cp/stub', 'cp/skipped']);
+    expect(pgliteRows.map(r => r.slug)).toEqual(['cp/stub', 'cp/skipped']);
     expect(pgRows[0].compiled_truth).toBe('stub content, never chunked');
     expect(pgliteRows[0].compiled_truth).toBe(pgRows[0].compiled_truth);
 
@@ -1403,6 +1405,21 @@ describeBoth('Engine parity — relationalFanout', () => {
     const pglite = await pgliteEngine.relationalFanout(seeds, { direction: 'both' });
     expect(shape(pg)).toEqual(shape(pglite));
   });
+
+  test('multi-hop chain (relationalChainHop + runRelationalChain) identical across engines', async () => {
+    await pgEngine.addLink('companies/ep-widget', 'people/ep-emp-c', 'founded by c', 'founded', 'markdown');
+    await pgliteEngine.addLink('companies/ep-widget', 'people/ep-emp-c', 'founded by c', 'founded', 'markdown');
+    const plan = { hops: [{ linkTypes: linkFamily('invested_in'), toward: 'object' as const }, { linkTypes: ['founded'], toward: 'subject' as const }], excludeAnchor: false };
+    const run = async (eng: BrainEngine) => {
+      const anchors = await resolveChainAnchors(eng, 'people/ep-inv-a', {});
+      const { rows, diagnostics } = await runRelationalChain(eng, anchors, plan, {});
+      return { rows: rows.map(r => ({ ...r, page_id: 0, canonical_chunk_id: r.canonical_chunk_id != null })), diagnostics };
+    };
+    const pg = await run(pgEngine);
+    const pglite = await run(pgliteEngine);
+    expect(pg).toEqual(pglite);
+    expect(pg.rows.filter(r => r.role === 'answer').map(r => r.slug)).toEqual(['people/ep-emp-c']);
+  });
 });
 
 // #2200 — federated sourceIds[] on the secondary-fetch reads must behave
@@ -1525,6 +1542,58 @@ describeBoth('Engine parity — federated sourceIds[] secondary reads (#2200)', 
       const pg = (await pgEngine.getTimeline('fed/doc', opts)).map(e => e.summary).sort();
       const pglite = (await pgliteEngine.getTimeline('fed/doc', opts)).map(e => e.summary).sort();
       expect(pg).toEqual(pglite);
+    }
+  });
+});
+
+// Cat7-1: the unscoped getTimeline read probes pages by (source_id, slug) on
+// both engines once statistics exist, and still unions every same-slug page.
+describeBoth('Engine parity — unscoped getTimeline plan (Cat7-1)', () => {
+  let pgEngine: BrainEngine;
+  let pgliteEngine: PGLiteEngine;
+
+  async function seed(eng: BrainEngine) {
+    await eng.executeRaw(`INSERT INTO sources (id, name, local_path) VALUES ('beta', 'beta', '/tmp/beta') ON CONFLICT (id) DO NOTHING`);
+    await eng.executeRaw(`INSERT INTO pages (slug, type, title) SELECT 'people/person-' || g, 'person', 'Person ' || g FROM generate_series(0, 1999) g`);
+    await eng.putPage('people/person-7', { type: 'person', title: 'Person 7 (beta)', compiled_truth: 'beta copy' }, { sourceId: 'beta' });
+    await eng.addTimelineEntry('people/person-7', { date: '2026-02-02', source: 'notes', summary: 'default event' });
+    await eng.addTimelineEntry('people/person-7', { date: '2026-03-03', source: 'notes', summary: 'beta event' }, { sourceId: 'beta' });
+    await eng.executeRaw('ANALYZE sources, pages, timeline_entries');
+  }
+
+  beforeAll(async () => {
+    pgEngine = await setupDB();
+    await seed(pgEngine);
+    pgliteEngine = new PGLiteEngine();
+    await pgliteEngine.connect({});
+    await pgliteEngine.initSchema();
+    await seed(pgliteEngine);
+  }, 90_000);
+
+  afterAll(async () => {
+    await pgliteEngine.disconnect();
+    await teardownDB();
+  }, 30_000);
+
+  test('unscoped getTimeline returns the same cross-source entries on both engines', async () => {
+    for (const slug of ['people/person-7', 'people/person-500']) {
+      const pg = (await pgEngine.getTimeline(slug)).map(e => e.summary);
+      expect(pg).toEqual((await pgliteEngine.getTimeline(slug)).map(e => e.summary));
+    }
+    expect((await pgEngine.getTimeline('people/person-7')).map(e => e.summary)).toEqual(['beta event', 'default event']);
+  });
+
+  test('both engines reach pages only through (source_id, slug) index probes', async () => {
+    for (const eng of [pgEngine, pgliteEngine]) {
+      for (const slug of ['people/person-7', 'people/person-500']) {
+        const scans = await timelinePageScans(eng, slug);
+        expect(scans.length).toBeGreaterThan(0);
+        for (const scan of scans) {
+          expect(scan.node).toMatch(/Index/);
+          expect(scan.cond).toContain('source_id');
+          expect(scan.cond).toContain('slug');
+        }
+      }
     }
   });
 });
@@ -2059,11 +2128,11 @@ describeBoth('Engine parity — traverseGraph / traversePaths (D7)', () => {
       'tg/b>tg/a:cycle-back@1',
       'tg/a>tg/b:cycle-fwd@2',
     ]);
-    // 'both' emits every touched edge in its natural direction; the cycle
-    // pair shows at depth 1 and again from b's frontier at depth 2.
+    // 'both' emits every touched edge once, in its natural direction, one
+    // hop past its shallower walked endpoint: the cycle pair at depth 1 only.
     expect(edgeShape(await pgEngine.traversePaths('tg/a', { depth: 2, direction: 'both' }))).toEqual([
       'tg/a>tg/b:cycle-fwd@1', 'tg/b>tg/a:cycle-back@1',
-      'tg/a>tg/b:cycle-fwd@2', 'tg/b>tg/a:cycle-back@2', 'tg/b>tg/c:step@2', 'tg/b>tg/x:xsrc@2',
+      'tg/b>tg/c:step@2', 'tg/b>tg/x:xsrc@2',
     ]);
   });
 
@@ -2407,6 +2476,42 @@ describeBoth('Engine parity — open_loops loops-store round-trip', () => {
     expect(pg.openAfterCount).toBe(0);
     expect(pg.doneAfterCount).toBe(1);
   });
+
+  async function lookupById(eng: BrainEngine) {
+    const { upsertOpenLoop, closeOpenLoop, listOpenLoops } = await import(
+      '../../src/core/loops/loops-store.ts'
+    );
+    await eng.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('lpid-a', 'lpid-a'), ('lpid-b', 'lpid-b') ON CONFLICT (id) DO NOTHING`,
+      [],
+    );
+    const row = await upsertOpenLoop(eng, {
+      sourceId: 'lpid-a',
+      dedupKey: 'thread:eeee000000000001:unanswered_inbound',
+      loopType: 'unanswered_inbound',
+      counterpartyEmail: 'erin@example.com',
+      summary: 'Reply owed to erin@example.com',
+      evidence: [{ message_id: 'eeee000000000001', quote: 'Any update?' }],
+      threadId: 'eeee000000000001',
+      detector: 'deterministic_thread',
+    });
+    await closeOpenLoop(eng, 'lpid-a', row.id, 'dropped', 'parity-lookup');
+    const hit = await listOpenLoops(eng, { sourceIds: ['lpid-a'], loopId: row.id });
+    return {
+      hitIds: hit.map((r) => r.id === row.id),
+      hitStatus: hit[0]?.status,
+      otherSource: (await listOpenLoops(eng, { sourceIds: ['lpid-b'], loopId: row.id })).length,
+      statusMismatch: (await listOpenLoops(eng, { sourceIds: ['lpid-a'], loopId: row.id, status: 'open' })).length,
+      beyondInt4: (await listOpenLoops(eng, { sourceIds: ['lpid-a'], loopId: 2 ** 40 })).length,
+    };
+  }
+
+  test('loopId lookup finds a closed row inside its source and nothing outside, on both engines', async () => {
+    const pg = await lookupById(pgEngine);
+    const pglite = await lookupById(pgliteEngine);
+    expect(pg).toEqual(pglite);
+    expect(pg).toEqual({ hitIds: [true], hitStatus: 'dropped', otherSource: 0, statusMismatch: 0, beyondInt4: 0 });
+  });
 });
 
 describeBoth('Engine parity — facts TTL read-time validity (WP5)', () => {
@@ -2495,6 +2600,8 @@ describeBoth('Engine parity — facts TTL read-time validity (WP5)', () => {
       bySession: texts(await eng.listFactsBySession(SRC, SESSION)),
       dupRecency: texts(await eng.findCandidateDuplicates(SRC, ENTITY, 'ttl lapsed fact')),
       dupEmbedding: texts(await eng.findCandidateDuplicates(SRC, EMB_ENTITY, 'ttl embed lapsed', { embedding: emb, embeddingModel })),
+      dupKeyword: (await eng.findCandidateDuplicates(SRC, ENTITY, 'ttl lapsed future fact', { k: 5, arm: 'keyword' })).map(r => r.fact),
+      dupKeywordEmbedding: texts(await eng.findCandidateDuplicates(SRC, EMB_ENTITY, 'ttl embed lapsed', { embedding: emb, embeddingModel, arm: 'keyword' })),
       history: texts(await eng.listFactsByEntity(SRC, ENTITY, { activeOnly: false })),
       supersessions: texts(await eng.listSupersessions(SRC)),
       health: {
@@ -2519,6 +2626,10 @@ describeBoth('Engine parity — facts TTL read-time validity (WP5)', () => {
     expect(pg.dupRecency).toEqual(activeEntity);
     // Lapsed row is not a dedup candidate → a re-stated fact re-inserts fresh.
     expect(pg.dupEmbedding).toEqual(['ttl embed live']);
+    // C2 keyword arm: same active-row filters, ranked by shared terms (most shared first).
+    expect(pg.dupKeyword[0]).toBe('ttl future fact');
+    expect([...pg.dupKeyword].sort()).toEqual(activeEntity);
+    expect(pg.dupKeywordEmbedding).toEqual(['ttl embed live']);
     // History (activeOnly:false) still shows every row.
     expect(pg.history).toEqual([
       'ttl durable fact', 'ttl future fact', 'ttl lapsed fact',

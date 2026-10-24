@@ -9,11 +9,11 @@
 # Columns: tsv	key	op	value	reason
 scripts/module-size-limits.tsv	src/commands/extract.ts	add	59	ActVox runExtractDbCore + minion db path (C5; drop when upstreamed)
 scripts/module-size-limits.tsv	src/commands/serve-http.ts	add	1	ActVox serve-http patch
-scripts/module-size-limits.tsv	src/core/search/hybrid.ts	add	2	ActVox operational-memory ranking hook
-scripts/function-size-baseline.tsv	src/commands/extract.ts|runExtract	set	310	runExtractDbCore split shrank runExtract
+scripts/module-size-limits.tsv	src/core/search/hybrid.ts	add	3	ActVox operational-memory ranking hook (+1 at v0.60.428.0: exactLookupOpts to sizeReturnPool)
+scripts/module-size-limits.tsv	src/core/minions/supervisor.ts	row	src/core/minions/supervisor.ts	1514	ratchet	ActVox fork: supervisor boot clears expired gbrain_cycle_locks rows (clearStaleLocks in db-lock.ts; inventory row src/core/minions/supervisor.ts)
+scripts/function-size-baseline.tsv	src/commands/extract.ts|runExtract	set	316	runExtractDbCore delegation keeps runExtract under upstream's 398 (measured 316 at v0.60.428.0)
 scripts/structural-suites.tsv	test/release-workflow.test.ts|forbid-atx-hub-pr-base.yml expression boundary	row	test/release-workflow.test.ts	forbid-atx-hub-pr-base.yml expression boundary	1	readFileSync
 scripts/structural-suites.tsv	test/release-workflow.test.ts|semgrep.yml differential baseline contract	row	test/release-workflow.test.ts	semgrep.yml differential baseline contract	2	readFileSync
-scripts/structural-suites.tsv	test/scripts/heavy-door-workflow.test.ts|heavy door supply chain and coverage gates	set	5	fork heavy-door paid gate adds one structural read
 scripts/structural-suites.tsv	test/scripts/actvox-check-delta.test.ts|fork-delta ratchet	row	test/scripts/actvox-check-delta.test.ts	fork-delta ratchet	6	readFileSync
 scripts/structural-suites.tsv	test/scripts/actvox-create-upstream-pr.test.ts|create-upstream-pr.sh integrates in an isolated worktree	row	test/scripts/actvox-create-upstream-pr.test.ts	create-upstream-pr.sh integrates in an isolated worktree	4	readFileSync
 scripts/structural-suites.tsv	test/scripts/actvox-resolve-upstream-merge.test.ts|resolveMerge on a real conflicted merge	row	test/scripts/actvox-resolve-upstream-merge.test.ts	resolveMerge on a real conflicted merge	1	readFileSync

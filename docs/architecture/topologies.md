@@ -126,7 +126,7 @@ gbrain serve --http --port 3001 --bind 0.0.0.0 # bind explicitly for remote acce
                                                 # (default bind is 127.0.0.1)
 gbrain auth register-client neuromancer \
   --grant-types client_credentials \
-  --scopes read,write,admin                    # admin needed for ping/doctor
+  --scopes read,write,admin                    # admin needed for remote doctor
 
 # source-scoped client (write to one source, federate reads across
 # multiple sources). Omit both flags for an unscoped super-client.
@@ -141,8 +141,8 @@ The `register-client` command prints a `client_id` and `client_secret`.
 Note both. **Scope must include `admin`** for `run_doctor` (used by
 `gbrain remote doctor`) and generic background jobs. `submit_job` accepts
 only `sync`, `import`, `lint`, and `lint-fix` with the authenticated source's
-registered root. `gbrain remote ping` no longer submits an autopilot cycle;
-run maintenance on the brain host. See the
+registered root, so the host refuses the `autopilot-cycle` job that
+`gbrain remote ping` submits; run maintenance on the brain host. See the
 [authorization upgrade guide](../guides/authorization-upgrade.md#generic-remote-background-jobs).
 
 **Step 2 — On the thin client (neuromancer):**
@@ -182,7 +182,6 @@ Example for Claude Desktop's `~/.config/claude/claude_desktop_config.json`:
 
 ```bash
 gbrain doctor             # runs thin-client checks (no local DB needed)
-gbrain remote ping        # triggers an autopilot cycle on the host (Tier B)
 gbrain remote doctor      # asks the host to run its own doctor (Tier B)
 ```
 
@@ -424,6 +423,7 @@ fingerprint. Each non-dry-run action requires both an exact `--admin-intent` and
 | `activate` | `writer_activate` |
 | `transfer prepare` | `writer_transfer_prepare` |
 | `transfer accept` | `writer_transfer_accept` |
+| `transfer cancel` | `writer_transfer_cancel` |
 
 For example, after reviewing the target host and canonical directory:
 
@@ -442,8 +442,23 @@ substitute the new value and retry. Dry runs do not grant permission to apply.
 
 Activation additionally requires every older writer and maintenance process on
 every host to be upgraded and stopped, filesystem sources to have their intended
-owners, and outstanding locks and recovery to be resolved. Preview activation
-with `--confirm-quiesced --dry-run`, then, only when approved:
+owners, and outstanding locks and recovery to be resolved. On a brain whose
+`sync.write_through` is `false` (a database-only brain), a rooted source with no
+owner needs none: `writer status` already reports it `database_only`, and
+activation lists it under `database_only_sources` and goes ahead (#6449). Page
+writes to it publish to the database only (`write_through.skipped:
+disabled_by_config`), `gbrain sync` on it refuses `owner_unavailable` naming the
+claim, and turning `sync.write_through` back on does not claim it, not even on
+PGLite (activation records the listed source ids as a JSON array in the config
+key `persistence.database_only_sources`, deactivation clears it, and
+`gbrain config unset persistence.database_only_sources` is the escape hatch if a
+listing outlives its brain state; it is not a setting to edit by hand): the next write
+refuses with `detail: unbound_source` and the `writer claim` to run (preview
+with `--dry-run`), or stays database-only under
+`persistence.unbound_write=database_only`. With `sync.write_through` on, the
+same source refuses activation with `writer_registration_required`, and the
+suggestion names that claim and the database-only alternative. Preview
+activation with `--confirm-quiesced --dry-run`, then, only when approved:
 
 ```bash
 gbrain sources writer activate --brain host --confirm-quiesced \
@@ -454,6 +469,41 @@ gbrain sources writer activate --brain host --confirm-quiesced \
 intent and state checks. Explicit noninteractive provisioning uses the same
 procedure and preconditions. A transfer still requires the prepared epoch and an
 exact successor manifest; stale heartbeats never authorize takeover.
+
+<a id="transfer-cancel"></a>**Ending a transfer nobody accepts.** `transfer prepare` drains the
+worktree and records `prepared_at` with the manifest; until the successor accepts, maintenance,
+fence repair, managed repair roots and lifecycle changes refuse `owner_unavailable` /
+`transfer_in_progress` (`wait`, then `ask_user` once the drain is 30 minutes old). On the owner
+host, `gbrain sources writer transfer cancel <source> --expected-epoch <n> --admin-intent
+writer_transfer_cancel --expected-state <admin_state>` (preview with `--dry-run`) takes the
+coordination lock, requires the worktree draining at that epoch under this owner, sets it back to
+`active` and clears the prepared manifest; the epoch is kept, so an accept bound to it refuses
+`writer_transfer_conflict`, and the owner may prepare again. Nothing cancels a transfer on its own.
+
+**Content receipts follow the root.** An accept and a `sources set-path` rebind the shared-skills
+content receipt of every moved gbrain-owned content source (nested sources by relative path) in
+their own transaction and report them as `content_receipts`; a receipt an older release left
+behind is rebound by `gbrain repair content-receipt-root` ([repair guide](../guides/repair.md#content-receipt-root)).
+
+<a id="transfer-manifest-scope"></a>**What the manifest covers.** In a Git checkout, the transfer, `sources
+set-path` (rebind), clone and reclone manifest covers the files Git tracks
+(`git ls-files --cached`), hashed from their bytes in the working tree; a
+tracked file missing on disk counts as deleted (#6099). Files Git ignores (such
+as `.env.local` or `node_modules`) are never opened, hashed or stored, and never
+need copying: a clean `git clone` of the same commit verifies. Untracked files
+that Git does not ignore are not covered; `transfer prepare` reports how many as
+`untracked_files` with a warning to commit or ignore them. Git runs with the
+checkout's own hooks, fsmonitor and submodule recursion disabled. Symlinks and
+submodules refuse with `writer_manifest_unsafe`. A directory that is not the top
+of its own Git work tree keeps the exact-copy manifest over every file. A
+mismatch names the first differing paths for a local rebind (tracked paths only
+in a Git checkout). A transfer an older release prepared covers every file,
+ignored ones included; if the successor is a Git checkout and does not match,
+accept refuses `writer_manifest_rescope_required`: prepare the transfer again
+on the owner host instead of copying ignored files. Upgrading removes the
+per-file path and hash maps releases before v0.60.69 stored with prepared
+transfers and clone recovery records (migration v218); only digests and counts
+remain.
 
 Live, young or foreign legacy locks block activation regardless of expiry. For
 exact dead same-host holders only, preview with
@@ -480,10 +530,103 @@ gbrain sources writer transfer accept default --brain host --self-transfer \
 # After separate approval, rerun accept without --dry-run.
 ```
 
+<a id="recreated-root"></a>**Recreated or moved canonical root (#5914).** A
+directory deleted and recreated at its recorded path (a restore from backup, a
+container rebuilt without its volume, a Migration Assistant copy) keeps its
+path but not its inode and birth time, so every verb refused
+`recovery_required`, self-transfer included. Two deliberate exits exist, and
+neither relaxes anything else:
+
+- *Same path, new directory:* add `--confirm-relocated-root` to both
+  self-transfer phases. It waives only the inode and birth-time comparison, and
+  only when the token, brain id, worktree id, root and coordination path of the
+  stamp and the **outside-root reservation** all agree; a copied in-root stamp
+  without the reservation beside the root is never authority. Prepare records
+  `relocated: true` on the durable manifest, accept must repeat the flag (in
+  either direction it refuses `writer_transfer_conflict`), and the reservation
+  is rewritten through a compare-and-swap: a reservation someone else changed
+  between prepare and accept refuses with detail `stale_record`, so prepare
+  again from a fresh status. The flag without `--self-transfer` is a usage
+  error.
+- *Recorded path now a symlink to the moved checkout:* run
+  `gbrain sources set-path <source> <recorded-or-real-path>` on the owner host.
+  When the recorded path resolves to the target and the reservation under the
+  recorded name and the stamp inside the real directory agree on token, brain
+  id and worktree id, the worktree keeps its id: `local_path` and the host
+  binding move to the real directory, the reservation is written under the new
+  `sha256(root)` name, the old one is removed and the stamp names the new root.
+  A token or worktree mismatch keeps the refusal and moves nothing.
+
+`gbrain sources writer deactivate --dry-run` lists a `physical_root` blocker
+exactly when its real run would refuse: the managed run takes the strict
+worktree lock, so a recreated root blocks it until one of the exits above ran;
+the classic (pre-activation) release publishes nothing and needs only the
+native lock plus a reservation naming the worktree whose stamp carries the same
+token, so a recreated root does not block it but a token mismatch does.
+
 For containers, persist the canonical source root, its sibling-reservation
 parent, persistence home and stable lock/coordination directory together across
 recreation. Storage preflight reports each location and can identify Linux
 overlay/tmpfs backing, but a mount shown as present is **not** attested durable.
+When `GBRAIN_HOME` lies inside the checkout, the lock directory is not the persistence
+home (see [where the coordination lock lives](#coordination-lock)): set
+`GBRAIN_COORDINATION_HOME` to a mounted directory outside the checkout so the lock
+survives recreation, because the default `~/.gbrain/persistence` usually sits on the
+container's ephemeral filesystem.
+
+<a id="coordination-lock"></a>**Where the coordination lock lives.** Every
+canonical checkout has one native lock file that all of its writers share, and
+it never lives inside the checkout it protects (a copied checkout must not copy
+its lock). Claim, reservation, reclone and transfer choose it with one rule;
+the first match wins:
+
+1. `reservation`: the path the outside-root reservation
+   (`.gbrain-owner-<sha256(root)>.json` beside the root) already records. A
+   recorded path always wins over the environment, so two processes with
+   different settings still lock the same file.
+2. `binding`: on a transfer, the accepting host binding's recorded path, when it
+   is absolute, canonical and outside the successor checkout.
+3. `persistence_home`: `<persistence home>/locks/<worktree id>.lock`
+   (`$GBRAIN_HOME/.gbrain/persistence`, else `~/.gbrain/persistence`) when that
+   is outside the checkout. This is every ordinary layout.
+4. `coordination_home` / `home_default`: when the persistence home is inside the
+   checkout (`GBRAIN_HOME` is the checkout or lies inside it),
+   `$GBRAIN_COORDINATION_HOME/locks/<namespace>/<worktree id>.lock`, or the same
+   under `~/.gbrain/persistence` when the variable is unset. The namespace is a
+   hash of the canonical checkout path and the host id, so one shared fallback
+   directory can serve several checkouts and hosts.
+5. A result still inside the checkout (for example `GBRAIN_COORDINATION_HOME`
+   pointing into it through a symlink) refuses with `storage_error` before
+   anything is written.
+
+`GBRAIN_COORDINATION_HOME` must be an absolute path without `..` segments and is
+read only when rule 4 applies. It comes from the process environment only: a
+`.env` file in the working directory cannot set it (it is on the cwd `.env`
+quarantine list). `gbrain sources writer status --json` prints
+`onboarding.sources[].coordination_lock` with the resolved `path` and the `rule`
+that chose it; an unclaimed checkout without a reservation reports the
+`directory` a claim would use, and an unreadable setting reports `error`.
+
+<a id="coordination-home-ignored"></a>Because a recorded path wins, changing
+`GBRAIN_COORDINATION_HOME` after a checkout's reservation was written moves
+nothing: every process keeps locking the recorded file. When the variable applies
+to a checkout (rule 4) and names another directory than the recorded lock's,
+`writer status --json` adds `coordination_lock.coordination_home_ignored`
+(`configured_directory`, `recorded_path`, `move_step`) and doctor's
+`coordination_lock_location` warns with the same move step: make the recorded
+lock's directory survive container recreation (mount it), and unset the variable
+for that checkout's processes if it was meant to move the lock. No gbrain command
+relocates a recorded lock yet; never edit or delete the reservation to force one.
+
+A reservation written before this rule existed, for a checkout that contains
+`GBRAIN_HOME`, records its lock inside the checkout, so every claim refused with
+"The stable coordination lock must live outside the canonical checkout". Status
+marks it `old_path_wedge: true`. Upgrade, then run the claim again on the host
+that reserved it: the claim rewrites only the reservation's lock path (same
+token, brain, host and worktree), under a guard file beside the reservation. A
+reservation that names another brain or host, or a worktree the database
+already records, is left unchanged and keeps the refusal; that case needs
+verified writer recovery. Never delete the reservation to get past it.
 
 ### Claim and activate runbook
 
@@ -502,7 +645,8 @@ Quiesce every writer on every host that uses this database before activating:
 3. Stop `gbrain jobs work` workers and supervisors that are not autopilot's.
 4. Disable cron entries, Git hooks and harness hooks that run `gbrain sync`,
    `embed`, `extract`, `dream` or `import`.
-5. Upgrade every remaining host to this release, even ones you only read from.
+5. Upgrade every remaining host to the gbrain version you activate with (v0.60.11.0
+   or newer), even ones you only read from.
 
 Then run the sequence, re-reading status between every step, because
 `admin_state` rotates after every change and a stale value refuses with
@@ -518,10 +662,12 @@ gbrain sources writer activate --brain host --confirm-quiesced \
   --admin-intent writer_activate --expected-state <fresh admin_state> --json
 ```
 
-After activation, managed sync requires `--no-pull` (Git pull/rebase needs an
-explicit drained maintenance window) and refuses `--skip-failed` and
+After activation, managed sync requires `--no-pull` (new upstream commits come in
+through `gbrain sources refresh <source>`, the drained worktree-wide fast-forward,
+which runs inside a resident PGLite owner such as `gbrain serve` when one holds the brain;
+see [worktree refresh refusals](../guides/write-refusals.md#worktree-refresh-refusals)) and refuses `--skip-failed` and
 `--include-gitignored`; after fixing a failed item run
-`gbrain sync --no-pull --retry-failed` with the same source and options. Resume
+the plain `gbrain sync --no-pull` with the same source and options (`--retry-failed` is a deprecated alias of it on a managed brain). Resume
 autopilot with `gbrain autopilot resume` and re-enable the hooks you stopped.
 
 When activation refuses with `writer_not_quiesced` because of queued work, the
@@ -546,6 +692,19 @@ is classic. Reactivation is the normal claim and activate runbook above.
 **Say to your agent:** *"Switch this brain back to classic mode, but show me the
 dry run first."*
 
+<a id="pre-activation-claims"></a>**A source claimed before activation.** Claiming a source fences classic
+`gbrain sync` of it even while managed persistence was never activated, so sync
+refuses `writer_coordinator_required` (#6122). On such a brain, the dry run
+reports the claims as `pre_activation_claims` (with `source_bindings` counting
+them) and, when nothing blocks, an `apply_command`; running it releases every
+claim: the claimed worktrees are retired, source and host bindings are removed
+and a committed `writer_deactivate` receipt (`outcome.pre_activation: true`) is
+recorded. The brain stays classic and its mode epoch does not change; the next
+`gbrain sync` runs in classic mode, and the source can be claimed again later.
+The CLI writer registration that receipt needs is created if the brain has none
+yet, as activation would. The other choice is to finish the claim and activate
+runbook above.
+
 1. Quiesce every writer on every host, as for activation: stop `gbrain serve`,
    pause autopilot with `gbrain autopilot pause --reason "writer deactivation"`,
    and let queued writes finish.
@@ -554,11 +713,19 @@ dry run first."*
 3. Dry run: `gbrain sources writer deactivate --dry-run`. It lists each blocker
    with its exit and what would change, and changes nothing. Blocker exits:
    `gbrain cancel-write-request <request_id>` for a queued write,
-   `gbrain sync --source <id> --no-pull --retry-failed` for one that needs
-   recovery, `gbrain repair embedding-effects --source <id>` for a stuck
-   embedding effect, `gbrain sources writer retry-effects <source> --request-id <id> --dry-run`
-   for a failed Git or withdrawal effect, and `gbrain sources writer unlock` for
-   the writer admin lock. Held Google or GitHub items do not block: deactivate
+   `gbrain sync --source <id> --no-pull` for one that needs
+   recovery, waiting for the owner to drain a queued or running effect (a
+   links or facts-backstop effect that keeps failing settles after five
+   attempts; an embedding effect still queued after an hour is re-queued by
+   `gbrain repair embedding-effects --source <id>`), and
+   `gbrain sources writer unlock` for the writer admin lock. A terminally
+   failed effect does not block: the dry run lists it in `failed_effects` with
+   its code and the exit that retries it
+   (`gbrain sources writer retry-effects <source> --request-id <id> --dry-run`
+   for parked targets and failed Git, withdrawal, links and facts-backstop
+   effects, `gbrain repair embedding-effects --source <id>` for a failed
+   embedding effect, none for a zero-norm refusal or an effect whose source is
+   gone). Held Google or GitHub items do not block: deactivate
    copies each source's managed holds into its classic state file
    (`.google-source.json` or `.github-source.json`), so they stay held, retried
    and reported in classic mode; the dry run lists them as `carried_holds`. Only
@@ -574,29 +741,32 @@ dry run first."*
    It takes no `<source>`: deactivation is brain-wide.
 5. Verify on every host: `gbrain sources writer status` reports `mode: classic`
    and this host's `local_markers`: `cleared`, or `pending` with each path that
-   still needs attention. Older binaries honor local markers without this
-   cleanup, so run a command from this release (for example
+   still needs attention. Binaries older than v0.60.20.0 honor local markers
+   without this cleanup, so run a v0.60.20.0 or newer command (for example
    `gbrain sources writer status`) once on every other host before an older
    binary writes there. That first command removes the markers and registry
    records of the retired epoch; a marker from an unknown or newer epoch (for
    example after restoring an older backup) is kept and reported.
+   On Postgres every filesystem source is now unbound: page writes refuse
+   `unbound_source`, and the write path is the file, a commit and
+   `gbrain sync` ([unbound sources](../guides/write-refusals.md#unbound-sources-on-postgres)).
 
-`min_writer_version` stays deferred: while the brain is managed, the database
+`min_writer_version` is not implemented: while the brain is managed, the database
 writer guard is the enforcement, and after deactivation that guard is inert.
 
 ### Writer admin lock
 
 `gbrain sources writer lock` sets an opt-in, brain-level admin lock; while it
-is set, writer claim, activate, transfer prepare and transfer accept refuse for
+is set, writer claim, activate, transfer prepare, accept and cancel refuse for
 every caller with `writer_admin_locked`, whose hint tells an agent to stop and
-ask the operator. Only these four administrative changes are blocked: ordinary
+ask the operator. Only these administrative changes are blocked: ordinary
 writes continue, including the automatic first-write claim on a PGLite brain.
 There is no `--force`; the escape hatch is the local unlock. Remote callers can
 neither lock nor unlock, and generic `gbrain config set`/`unset` (including
 `--pattern`) refuse the reserved key `persistence.writer_admin_lock`. Dry runs
 of the four operations refuse too. The lock guards against routine or accidental
 agent administration; it is not a security boundary against a caller with the
-same shell. Binaries older than this release do not consult it.
+same shell. Binaries older than v0.60.11.0 do not consult it.
 `gbrain sources writer status` shows `admin_lock` (whether it is set, when, and
 by which host) and the selected brain.
 
@@ -611,10 +781,64 @@ gbrain sources writer lock --brain host
 
 If administration fails midway, still run `gbrain sources writer lock` before
 investigating, so no agent can retry the change meanwhile. `lock` refuses with
-`writer_transfer_conflict` while a transfer is prepared but not accepted; finish
-or abandon the transfer first. Shared-skill setup, which claims a checkout as
+`writer_transfer_conflict` while a transfer is prepared but not accepted; accept
+it on the successor, or cancel it on the owner host with `gbrain sources writer
+transfer cancel <source> --expected-epoch <n>`, first. Shared-skill setup, which claims a checkout as
 administration rather than as an ordinary first write, is refused while locked.
 `lock` and `unlock` are idempotent and print the resulting state.
+
+### Git durability on a managed brain
+
+<a id="git-durability"></a>On a managed brain the persistence owner commits and
+pushes page writes through its Git effect; `gbrain sources push`, `sources
+harden` and `lint --fix` are not its Git writers and refuse with
+`writer_coordinator_required` naming this verb. Whether the owner commits is a
+recorded per-host-binding setting, `git_durability` (`on`, `off` or `unknown` in
+`writer status --json` and in `writer activate`'s listing):
+
+```bash
+gbrain sources writer status <source> --json                  # read git_durability and parked effects first
+gbrain sources writer git-durability <source> --enable --dry-run
+gbrain sources writer git-durability <source> --enable --admin-intent writer_git_durability --expected-state <admin_state>
+gbrain sources writer git-durability <source> --pat-file ~/.config/gbrain/pat --admin-intent writer_git_durability --expected-state <admin_state>
+gbrain sources writer git-durability <source> --disable --admin-intent writer_git_durability --expected-state <admin_state>
+```
+
+`--enable` runs a read-only `git push --dry-run` probe first (`git_branch_unborn`,
+`git_checkout_required` and `git_detached_head` refuse with the git step to take),
+records `enabled` on this host's binding and re-queues the Git effects completed
+`durability_not_enabled` while the setting was off, so the next worker pass commits
+and pushes them. `--pat-file` (a 0600 file; `pat_file_unreadable` otherwise) wires
+the repo-scoped push credential the same way `sources harden` does and retries this
+worktree's parked pushes. `--disable` records `disabled`; the effects complete
+`durability_not_enabled` and are re-queued by a later `--enable`. A binding with
+nothing recorded (`unknown`) keeps consulting the legacy post-commit hook, and a
+probe that cannot read the checkout fails the effect instead of skipping it. Only
+the host that owns the binding can change it (`writer_registration_required`
+elsewhere), and never during a pending recovery or transfer
+(`recovery_required`). The setting is not a backup: the owner still never pulls
+or rebases the checkout.
+
+<a id="files-that-are-not-pages"></a>**Files that are not pages.** The owner's
+Git effect commits only the page paths it wrote (`git commit --only`) and then
+pushes HEAD. Everything else in the checkout (`MEMORY.md`, daily notes,
+`AGENTS.md`, scripts) is the operator's: `git add` and `git commit` it with
+plain git in the checkout. Those commits reach the remote on the owner's next
+push, because the owner pushes HEAD, or sooner with a hand `git push` from the <!-- gbrain-allow-shared-tree-git: managed worktrees refuse gbrain git commit-push; a plain push of HEAD is the documented path for non-page files -->
+checkout; `gbrain sources push` refuses on a managed root and its secret scan
+does not run on a hand push. A hand push and the owner's push race only by
+ordinary Git semantics (both push the same HEAD; a push the remote rejects is
+retried by the owner and, after repeated failures, parked, which
+`writer status --json` shows). Never
+`git pull --rebase`, `git reset` or `git checkout` page paths in the checkout: <!-- gbrain-allow-shared-tree-git: names what never to run -->
+the owner never pulls, and moving files under it is what `source_changed`
+guards against; bring remote commits in with `gbrain sources refresh <source>`.
+The durability block `sources harden` writes into `AGENTS.md`/`RESOLVER.md`
+before activation says the opposite (run the push helper after every write,
+pull before writing), so `writer git-durability <source> --enable` and
+`--pat-file` rewrite that block in place to the managed variant (#5808); the
+preview reports it as `agents`, the rewrite touches nothing outside the
+markers, and the file is left for you to commit.
 
 ### Supported managed work and explicit repair
 
@@ -692,8 +916,8 @@ the canonical page, which moves the phantom's rows by id, then
 the `managed_facts_entity` intent. Each checks its local writer authority (and,
 for file publication, the canonical owner) before model calls. Receipt pages
 for these runs stay unmanaged-only. `unsupported_maintenance` in writer status
-and activation preview is now empty. Do not infer that every dream or job
-writer is restored from the named lanes above.
+and activation preview is empty, but that does not mean dream or job writers
+outside the lanes named above publish on a managed brain.
 
 Google and GitHub API sources route through managed connector checkpoints,
 not a Git cursor. A deliberately unbound API source uses reviewed
@@ -716,7 +940,7 @@ another explicit retry after inspecting and repairing its cause; cancelled
 receipts are not retry-approved. No connector API data is fetched before the
 source/owner and active-work preflight, although deriving exact matching input
 can require a normal API fetch before retry approval.
-For PGLite, `dream` and `jobs --follow` still need exclusive engine access:
+For PGLite, `dream` and `jobs --follow` need exclusive engine access:
 stop the resident owner and any supervisor using their normal shutdown path,
 wait for writes to drain, run the inline command, then restart the owner. The
 disk-brain CLI regression verifies refusal with a live owner, malformed-output

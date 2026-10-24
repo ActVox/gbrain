@@ -52,7 +52,7 @@
  *
  * Lane: serial. Run: `bash scripts/run-serial-tests.sh test/upgrade-bun-link-arc.serial.test.ts`. Moved from test/e2e/
  * by the 2026-09 lane-move pilot (PGLite-only, no DATABASE_URL); see
- * docs/TESTING.md "Lane-move pilot".
+ * docs/test-audit/2026-09-29/implementation/lane-pilot.md.
  */
 
 import { describe, test, expect, afterEach, afterAll } from 'bun:test';
@@ -347,13 +347,14 @@ describe('runUpgrade — bun-link arc (real git vs local bare origin; bun/gbrain
     expect(git(['rev-parse', 'HEAD'], fx.clone).trim()).toBe(fx.originHead);
 
     // Recorder sequence: the bun shim saw the POST-pull HEAD (pull ran first),
-    // then verify → post-upgrade → features, in order, and nothing else.
+    // then verify → post-upgrade → features → the new build's restart (GBRA-175), in order, and nothing else.
     expect(argvLines(fx)).toEqual([
       `bun install ::head=${fx.originHead}`,
       'gbrain --version',
       'gbrain --help',
       'gbrain post-upgrade',
       'gbrain features',
+      'gbrain upgrade --restart-only',
     ]);
 
     // saveUpgradeState checkpoint: $HOME/.gbrain/upgrade-state.json.

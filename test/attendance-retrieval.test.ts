@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { extractLinksForSlugs, runExtract, runExtractCore } from '../src/commands/extract.ts';
-import { prepareAutomaticLinks } from '../src/core/persistence/links-preparation.ts';
+import { LINK_ENDPOINTS_SQL, prepareAutomaticLinks } from '../src/core/persistence/links-preparation.ts';
 import { disposePersistenceConsumer, persistenceConsumerStatus } from '../src/core/persistence/service.ts';
 import { runMaintenanceSweep } from '../src/core/sweep.ts';
 import { buildRelationalArm } from '../src/core/search/relational-recall.ts';
@@ -18,7 +18,8 @@ import { loadActivePackForLocalEngine } from '../src/core/schema-pack/best-effor
 import { installFixtureChunks } from './helpers/page-projection.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
-import { currentExitCode, setCliExitVerdict } from '../src/core/cli-force-exit.ts';
+import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
+import { cpuMs } from './helpers/cpu-time.ts';
 
 const sourceId = 'attendance-fixture';
 const person = 'people/alice-example';
@@ -26,7 +27,7 @@ const meeting = 'meetings/planning';
 const positive = 'Attendees: [Alice](../people/alice-example.md)';
 
 function interceptExtractionExit(): () => void {
-  const priorVerdict = currentExitCode();
+  _resetCliExitVerdictForTests();
   const priorExitCode = process.exitCode;
   const exit = spyOn(process, 'exit').mockImplementation(code => {
     if (typeof code !== 'number') throw new Error('Extraction must exit with an explicit numeric code');
@@ -38,8 +39,8 @@ function interceptExtractionExit(): () => void {
   });
   return () => {
     exit.mockRestore();
-    setCliExitVerdict(priorVerdict);
-    process.exitCode = priorExitCode;
+    _resetCliExitVerdictForTests();
+    process.exitCode = priorExitCode ?? 0;
   };
 }
 
@@ -536,7 +537,7 @@ for (const kind of testBackends()) {
         let armed = true;
         const race = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: BrainEngine, sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) {
           const result = await executeRaw.bind(this)<T>(sql, params, opts);
-          if (armed && sql === 'SELECT slug, source_id, type, knowledge_revision FROM pages WHERE slug=ANY($1::text[]) AND deleted_at IS NULL') {
+          if (armed && sql === LINK_ENDPOINTS_SQL) {
             armed = false;
             if (change === 'delete') await engine.softDeletePage(person, { sourceId });
             else await engine.putPage(person, { type: change === 'retype' ? 'company' : 'person', title: 'Alice Example', compiled_truth: 'A concurrent edit.' }, { sourceId });
@@ -615,7 +616,7 @@ for (const kind of testBackends()) {
       const snapshot = (await engine.readPageSnapshot(meeting, { sourceId }))!;
       const executeRaw = engine.executeRaw;
       const metadata = spyOn(engine, 'executeRaw').mockImplementation(function<T>(this: BrainEngine, sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) {
-        return sql === 'SELECT slug, source_id, type, knowledge_revision FROM pages WHERE slug=ANY($1::text[]) AND deleted_at IS NULL'
+        return sql === LINK_ENDPOINTS_SQL
           ? Promise.resolve<T[]>([]) : executeRaw.bind(this)<T>(sql, params, opts);
       });
       try {
@@ -770,7 +771,12 @@ for (const kind of testBackends()) {
       const replace = engine.replaceDerivedLinks;
       engine.replaceDerivedLinks = async () => { throw new Error('Injected replacement failure'); };
       try {
-        await apply();
+        await expect(apply()).rejects.toMatchObject({
+          code: 'extract_write_lost',
+          failures: expect.arrayContaining([expect.objectContaining({
+            kind: 'links', error: expect.objectContaining({ message: 'Injected replacement failure' }),
+          })]),
+        });
         expect(await stamp()).toEqual(before);
         expect(await attendees()).toEqual([person]);
       } finally { engine.replaceDerivedLinks = replace; }
@@ -912,10 +918,11 @@ for (const kind of testBackends()) {
 describe('shared and filesystem canonical attendance grammar', () => {
   test('large malformed lists are bounded and never accept a valid prefix', async () => {
     const { attendanceEvidenceRanges } = await import('../src/core/link-extraction.ts');
-    const started = performance.now();
-    expect(attendanceEvidenceRanges(`${positive} ${'['.repeat(65_536)}`)).toEqual([]);
-    expect(attendanceEvidenceRanges('Attendees: [nested[Alice](../people/alice-example.md)]')).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(500);
+    const elapsed = cpuMs(() => {
+      expect(attendanceEvidenceRanges(`${positive} ${'['.repeat(65_536)}`)).toEqual([]);
+      expect(attendanceEvidenceRanges('Attendees: [nested[Alice](../people/alice-example.md)]')).toEqual([]);
+    });
+    expect(elapsed).toBeLessThan(500);
   });
   const types = new Map([[person, 'person'], ['people/company-example', 'company'], [meeting, 'meeting']]);
   const resolver = { async resolve(value: string) { return types.has(value) ? value : null; } };

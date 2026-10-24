@@ -34,14 +34,16 @@ import type { BrainEngine } from '../engine.ts';
 import { MinionQueue } from './queue.ts';
 import type { MinionHandler } from './types.ts';
 import { buildJobContext } from './job-context.ts';
+import { runWithJobSpend } from './spend-authorization.ts';
 import { withChatPhase } from '../ai/chat-usage.ts';
 import {
   JOB_CHILD_EXIT_NOT_CLAIMED,
   JOB_CHILD_EXIT_RESULT_WRITE_FAILED,
   WORKER_EXIT_CONFIGURATION,
 } from './worker-exit-codes.ts';
-import { encodeHandlerError, unrefTimer, writeChildOutcomeFile } from './job-isolation.ts';
+import { childConfigurationError, encodeHandlerError, unrefTimer, writeChildOutcomeFile } from './job-isolation.ts';
 import { isLocalConfigurationError } from './configuration-error.ts';
+import { jobChildBuildVerdict } from './child-readiness.ts';
 
 export function writeChildBootstrapError(resultPath: string, error: unknown): number {
   if (!isLocalConfigurationError(error)) return 1;
@@ -56,6 +58,8 @@ export interface RunChildOpts {
   resultPath: string;
   /** Worker pid for the liveness watchdog; 0/absent disables the watchdog. */
   parentPid: number;
+  /** #7245: the worker's build (`CHILD_PARENT_BUILD_ENV`); absent from a worker older than #7245. */
+  parentBuild?: string;
 }
 
 export interface RunChildInjectables {
@@ -158,12 +162,21 @@ export async function runChildJobEntry(
       abort.signal,
       shutdown.signal,
     );
+    // #7245: a build that differs from the worker's is recorded in the job's
+    // history and warned once; a missing protocol or feature refuses the job.
+    const verdict = jobChildBuildVerdict(opts.parentBuild, opts.parentPid);
+    if (verdict) {
+      process.stderr.write(`[run-child] ${verdict.note}\n`);
+      try { await context.log(verdict.note); }
+      catch (error) { process.stderr.write(`[run-child] could not record the build skew on job ${job.id}: ${error instanceof Error ? error.message : String(error)}\n`); }
+      if (verdict.refused) return writeChildBootstrapError(opts.resultPath, childConfigurationError('child_protocol_incompatible'));
+    }
     let outcome;
     try {
       // #4218: same phase attribution as the in-process worker path — the
       // isolated child runs its own gateway, so the wrap must live here too.
       const authority = await authorizeJobExecution(engine, job);
-      const result = await withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => handler(context)), abort.signal);
+      const result = await withSubmissionAuthority(authority, () => withChatPhase(`job:${job.name}`, () => runWithJobSpend(engine, job, context, handler)), abort.signal);
       // completeJob's {value: x} wrap decision must run BEFORE JSON
       // serialization: a JSON round-trip changes typeof for Date /
       // toJSON-bearing results (object → string), which would flip the wrap

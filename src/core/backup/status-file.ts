@@ -72,6 +72,8 @@ export interface BackupAssetVerdict {
   configured_remote?: boolean;
   verification?: {
     state: 'verified' | 'not_checked' | 'unavailable' | 'missing_ref' | 'mismatch' | 'budget_exhausted' | 'stale';
+    /** Why an `unavailable` probe failed: its full slot (`backup.remote_timeout_ms`, default 2 s) ran out, or git exited with an error. */
+    cause?: 'timeout' | 'exit';
     checked_at?: string;
     local_commit?: string;
     remote_commit?: string;
@@ -89,6 +91,8 @@ export interface BackupTotals {
   /** Pages at risk on disk loss (db_only + undeclared DB-only signal). */
   pages_at_risk: number;
   configured_repos?: number;
+  /** #6907: repositories whose remote probe ran out of time: their backup is unconfirmed, not known missing. */
+  remote_timeouts?: number;
 }
 
 export interface BackupStatus {
@@ -109,6 +113,26 @@ export interface BackupStatus {
   degraded?: boolean;
   remote_check_at?: string;
   recovery_scope?: string;
+  /**
+   * E7: how much the brain holds and since when, measured with the verdict.
+   * Backup coaching (doctor warn, MCP notice, CLI rail) waits until the brain
+   * holds >= BACKUP_COACH_MIN_ITEMS pages+facts or is >= BACKUP_COACH_MIN_AGE_DAYS
+   * old; before that doctor reports `severity: 'info'`. Absent on old caches
+   * (treated as mature, the pre-E7 behaviour).
+   */
+  maturity?: { items: number; since: string | null };
+}
+
+export const BACKUP_COACH_MIN_ITEMS = 25;
+export const BACKUP_COACH_MIN_AGE_DAYS = 7;
+
+/** E7: is the brain old or full enough that a missing backup is worth coaching about? */
+export function backupCoachingDue(s: Pick<BackupStatus, 'maturity'>, now: number = Date.now()): boolean {
+  const m = s.maturity;
+  if (!m) return true;
+  if (m.items >= BACKUP_COACH_MIN_ITEMS) return true;
+  const since = m.since ? Date.parse(m.since) : NaN;
+  return Number.isFinite(since) && now - since >= BACKUP_COACH_MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
 }
 
 export const BACKUP_VERIFICATION_MAX_AGE_MS = 60 * 60 * 1000;
@@ -122,6 +146,11 @@ export function isRepoAsset(a: BackupAssetVerdict): boolean {
 /** A clean asset whose HEAD matched the remote within the evidence window. */
 export function isVerifiedRecoverable(a: BackupAssetVerdict): boolean {
   return a.state === 'ok' && a.verification?.state === 'verified';
+}
+
+/** #6907: a remote probe that ran out of its slot; nothing says the remote lacks the commits. */
+export function isRemoteTimeout(a: BackupAssetVerdict): boolean {
+  return a.verification?.state === 'unavailable' && a.verification.cause === 'timeout';
 }
 
 /**
@@ -154,7 +183,7 @@ export function blockingAssetReasons(
     state: a.state,
     reason: a.state === 'no_remote' ? (a.configured_remote === true ? 'remote configured, nothing pushed' : 'no git remote')
       : a.state === 'unknown' ? (surface === 'local' || UNKNOWN_DETAIL_CODES.has(a.detail ?? '') ? a.detail ?? 'unknown' : 'unknown')
-      : a.state === 'ok' ? `remote not verified: ${a.verification?.state ?? 'not_checked'}`
+      : a.state === 'ok' ? (isRemoteTimeout(a) ? 'remote check timed out' : `remote not verified: ${a.verification?.state ?? 'not_checked'}`)
       : a.state,
   }));
 }
@@ -471,7 +500,7 @@ const NOOP_DECISION: BackupNagDecision = { show: false, record: () => {} };
  */
 export function backupNagGate(channel: string, s: BackupStatus, now: number = Date.now()): BackupNagDecision {
   try {
-    if (s.overall !== 'warn' || backupCheckDisabled()) return NOOP_DECISION;
+    if (s.overall !== 'warn' || backupCheckDisabled() || !backupCoachingDue(s, now)) return NOOP_DECISION;
     const state = loadBackupNagState();
     const nowIso = new Date(now).toISOString();
     const month = monthBucket(nowIso);

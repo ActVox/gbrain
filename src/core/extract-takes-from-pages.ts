@@ -28,7 +28,9 @@ import {
   resolveTakesWritePath,
   TakesWriteError,
 } from './takes-write.ts';
-import { managedPersistenceEnabled } from './persistence/ownership.ts';
+import { getWorktreeBinding, managedPersistenceEnabled } from './persistence/ownership.ts';
+import { isWriteThroughDisabled, resolvePageWriteTarget } from './write-through.ts';
+import { isDbOnly, loadStorageConfig } from './storage-config.ts';
 import { serializePageToMarkdown } from './markdown.ts';
 import { BudgetMeter, loadPricingOverrides } from './cycle/budget-meter.ts';
 import { parseTakesFence } from './takes-fence.ts';
@@ -63,6 +65,12 @@ export interface ExtractTakesFromPagesOpts {
   /** Max pages to classify per run (caps cost). Default 50. */
   maxPages?: number;
   /**
+   * Resume point from an earlier run's `next_before` (#5043): only pages
+   * ordered after it (older `updated_at`, or the same instant and a lower id)
+   * are selected.
+   */
+  before?: { updatedAt: string; id: number };
+  /**
    * Also rescan pages that already hold takes (refresh semantics).
    * Default false: bootstrap runs skip covered pages, so repeated runs
    * PROGRESS through a corpus larger than one run's cap instead of
@@ -86,6 +94,15 @@ export interface ExtractTakesFromPagesOpts {
 export interface ExtractTakesFromPagesResult {
   pages_scanned: number;
   claims_extracted: number;
+  /**
+   * Where the next run should resume, as `<updated_at text>,<page id>`: the
+   * position of the last page this run finished with, or null if it finished
+   * none. Pages that yield no claims stay uncovered and would otherwise be
+   * selected first forever (#5043); passing this to `--before` moves past
+   * them. A page a budget stop never reached is not counted as finished, and
+   * one skipped on an error stays uncovered for a run without `--before`.
+   */
+  next_before: string | null;
   /** True if the run was a no-op because bootstrapEnabled is false. */
   consent_gate_blocked: boolean;
   /** True if chat gateway is unavailable (no LLM call possible). */
@@ -124,6 +141,21 @@ interface PageRow {
   type: string;
   compiled_truth: string;
   updated_at: string | Date;
+  /** `<updated_at::text>,<id>`, the value `next_before` reports for this page. */
+  resume_at: string;
+}
+
+/** Whether an unmanaged page's database body is its copy of record: write-through off, or its target in a storage.db_only directory. */
+async function databaseOnlyPage(engine: BrainEngine, slug: string, sourceId: string): Promise<boolean> {
+  if (await isWriteThroughDisabled(engine)) return true;
+  const target = await resolvePageWriteTarget(engine, slug, sourceId);
+  if (!target.ok) return false;
+  try {
+    const storage = loadStorageConfig(target.writeRoot);
+    return storage !== null && isDbOnly(slug, storage);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -158,7 +190,7 @@ export async function extractTakesFromPages(
   engine: BrainEngine,
   opts: ExtractTakesFromPagesOpts,
 ): Promise<ExtractTakesFromPagesResult> {
-  const emptyTail = { pages_skipped: 0, skipped: [], mirror_warnings: 0, budget_exhausted: false, duplicates_skipped: 0 };
+  const emptyTail = { next_before: null, pages_skipped: 0, skipped: [], mirror_warnings: 0, budget_exhausted: false, duplicates_skipped: 0 };
   // A12 consent gate: refuse without bootstrap_enabled even on manual call.
   if (!opts.bootstrapEnabled) {
     return {
@@ -184,8 +216,15 @@ export async function extractTakesFromPages(
   const managedJournalWrites = await managedPersistenceEnabled(engine);
   const maxPages = opts.maxPages ?? 50;
   const holder = opts.holder ?? 'system';
-  const sourceFilter = opts.sourceIdFilter ? `AND source_id = $1` : '';
-  const params = opts.sourceIdFilter ? [opts.sourceIdFilter] : [];
+  const params: unknown[] = [];
+  const bind = (value: unknown): string => `$${params.push(value)}`;
+  const scope: string[] = [];
+  if (opts.sourceIdFilter) scope.push(`source_id = ${bind(opts.sourceIdFilter)}`);
+  // Resume strictly after the caller's position in the (updated_at DESC,
+  // id DESC) order. The timestamp is bound as text and cast in SQL so its
+  // microseconds survive; a parameter typed as timestamptz goes through a JS
+  // Date in postgres.js and loses them.
+  if (opts.before) scope.push(`(updated_at, id) < (${bind(opts.before.updatedAt)}::text::timestamptz, ${bind(opts.before.id)})`);
 
   // Fetch eligible pages. Order by updated_at DESC so recently-edited
   // pages get bootstrapped first.
@@ -199,14 +238,14 @@ export async function extractTakesFromPages(
     ? ''
     : `AND NOT EXISTS (SELECT 1 FROM takes t WHERE t.page_id = pages.id)`;
   const pages = await engine.executeRaw<PageRow>(
-    `SELECT id, slug, source_id, type, compiled_truth, updated_at
+    `SELECT id, slug, source_id, type, compiled_truth, updated_at, updated_at::text || ',' || id AS resume_at
        FROM pages
       WHERE type IN (${typesList})
         AND deleted_at IS NULL
         AND length(COALESCE(compiled_truth, '')) > 200
         ${coveredFilter}
-        ${sourceFilter}
-      ORDER BY updated_at DESC
+        ${scope.map((condition) => `AND ${condition}`).join(' ')}
+      ORDER BY updated_at DESC, id DESC
       LIMIT ${maxPages}`,
     params,
   );
@@ -240,11 +279,22 @@ export async function extractTakesFromPages(
 
     if (!page.compiled_truth || page.compiled_truth.length < 200) continue;
 
-    // #4473: locate the page's markdown home BEFORE the LLM call — a page the
-    // fence writer would refuse must not burn classifier budget (skipped pages
-    // hold no takes, so every future run would re-classify them).
+    // The database is the page's copy of record on a managed brain, and on an
+    // unmanaged one when write-through is off or the page sits in a declared
+    // storage.db_only directory: its takes are composed from the database
+    // snapshot and published through put_page, never from a file. A source
+    // with a canonical owner (bound before the run, or by this run's first
+    // put_page) fences the md-first writer, so its file-backed pages publish
+    // through put_page too.
+    const databaseOnly = !dryRun && await databaseOnlyPage(engine, page.slug, page.source_id);
+    const ownedFileBacked = !dryRun && !managedJournalWrites && !databaseOnly && await getWorktreeBinding(engine, page.source_id) !== null;
+    const fromDatabase = managedJournalWrites || databaseOnly || ownedFileBacked;
+
+    // #4473: locate a file-backed page's markdown home BEFORE the LLM call — a
+    // page the fence writer would refuse must not burn classifier budget
+    // (skipped pages hold no takes, so every future run would re-classify them).
     let mdPath: string | null = null;
-    if (!dryRun) {
+    if (!dryRun && (!fromDatabase || ownedFileBacked)) {
       try {
         const { path } = await resolveTakesWritePath(engine, repoDir, page.slug, page.source_id);
         if (existsSync(path)) mdPath = path;
@@ -257,11 +307,11 @@ export async function extractTakesFromPages(
       }
     }
 
-    // Pin the selected page before spending time on extraction. A managed
-    // publication with a newer revision must skip the whole page atomically.
-    const managedSnapshot = managedJournalWrites && !dryRun
+    // Pin the selected page before spending time on extraction. A publication
+    // with a newer revision must skip the whole page atomically.
+    const managedSnapshot = fromDatabase && !dryRun
       ? await engine.readPageSnapshot(page.slug, { sourceId: page.source_id }) : null;
-    if (managedJournalWrites && !dryRun && (!managedSnapshot || managedSnapshot.page.id !== page.id)) {
+    if (fromDatabase && !dryRun && (!managedSnapshot || managedSnapshot.page.id !== page.id)) {
       skipPage(page.slug, 'page_identity_changed');
       continue;
     }
@@ -324,7 +374,7 @@ export async function extractTakesFromPages(
     // Never append a claim the page's takes fence already holds (a rerun with
     // includeCovered, or a hand-added take): duplicate gradeable takes skew
     // calibration. The fence is canonical, so dedupe against its active rows.
-    const duplicateBody = managedJournalWrites
+    const duplicateBody = fromDatabase
       ? serializePageToMarkdown(managedSnapshot!.page, managedSnapshot!.tags)
       : readFileSync(mdPath!, 'utf-8');
     const held = new Set(parseTakesFence(duplicateBody).takes
@@ -348,7 +398,7 @@ export async function extractTakesFromPages(
           weight: c.weight,
           source: 'cli:takes-bootstrap-from-pages',
         }));
-      if (managedJournalWrites) {
+      if (fromDatabase) {
         const body = await materializeTakeResolutions(engine, managedSnapshot!.page.id, serializePageToMarkdown(managedSnapshot!.page, managedSnapshot!.tags));
         const composed = appendTakesToPageBody(body, rows);
         const { operations } = await import('./operations.ts');
@@ -374,7 +424,8 @@ export async function extractTakesFromPages(
       }
     } catch (err) {
       const code = (err as { code?: string; writeError?: string })?.code ?? (err as { writeError?: string })?.writeError;
-      if (managedJournalWrites && (code === 'revision_conflict' || code === 'page_identity_changed' || code === 'source_changed')) {
+      if (fromDatabase && (code === 'revision_conflict' || code === 'page_identity_changed' || code === 'source_changed'
+        || (!managedJournalWrites && code === 'owner_unavailable'))) {
         skipPage(page.slug, code);
         continue;
       }
@@ -388,9 +439,12 @@ export async function extractTakesFromPages(
     }
   }
 
+  // Every page the loop entered is finished except the one a budget stop broke on.
+  const finished = budgetExhausted ? pagesScanned - 1 : pagesScanned;
   return {
     pages_scanned: pagesScanned,
     claims_extracted: claimsExtracted,
+    next_before: finished > 0 ? pages[finished - 1]!.resume_at : null,
     consent_gate_blocked: false,
     llm_unavailable: false,
     pages_skipped: pagesSkipped,

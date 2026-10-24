@@ -8,11 +8,12 @@
  */
 import { existsSync, realpathSync } from 'fs';
 import { resolve as pathResolve, join } from 'path';
-import { CHUNKER_VERSION } from '../../core/chunkers/code.ts';
+import { chunkerStamp } from '../../core/chunkers/code.ts';
 import { currentCompanyBrainSync } from '../../core/company-brain/profile.ts';
 import { serr, slog } from '../../core/console-prefix.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import { loadOpCheckpoint, clearOpCheckpoint } from '../../core/op-checkpoint.ts';
+import { abortOnCleanupPass } from '../../core/process-cleanup.ts';
 import {
   readSyncAnchor,
   resolveSlugRootMode,
@@ -20,19 +21,20 @@ import {
   readChunkerVersion,
 } from '../../core/sync-anchor.ts';
 import type { SlugRootMode } from '../../core/sync-anchor.ts';
-import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../../core/sync-delta.ts';
+import { buildLosslessWorkingTreeManifest, computeLosslessSyncDelta, mergeSyncManifests, type LosslessDelta } from '../../core/sync-delta.ts';
+import { confirmRenameIdentities, redecideHeldRename, type ConfirmedManifest } from '../../core/sync-rename-identity.ts';
 import {
-  git,
+  gitAsync,
   isWithinRoot,
   gitRelativePath,
-  discoverGitRoot,
+  discoverGitRootAsync,
   createSyncBaselineCommit,
-  isDetachedHead,
+  isDetachedHeadAsync,
   hasOriginRemote,
   unique,
 } from '../../core/sync-git.ts';
 import { buildPartialResult } from '../../core/sync-lock.ts';
-import { massReconcileAllowed, MASS_RECONCILE_RATIO } from '../../core/sync-reconcile.ts';
+import { composeAbortSignals, massReconcileAllowed, MASS_RECONCILE_RATIO, readSyncDeleteCaps, syncDeleteTrip, syncDeleteTripText } from '../../core/sync-reconcile.ts';
 import {
   DEFAULT_SOURCE_ID,
   resolveSlugForPath,
@@ -41,18 +43,25 @@ import {
   unsyncableReason,
   isPoisonedPath,
   sanitizePathForDisplay,
+  isNestedSkipMetafile,
+  readMetafilePagesMode,
 } from '../../core/sync.ts';
-import type { SyncManifest } from '../../core/sync.ts';
+import type { MetafilePagesMode, SyncManifest } from '../../core/sync.ts';
+import { diskMetafileHeads, firstMetafileHead, gitMetafileHeads, listMetafileNamedBlobs, metafileBackfillDue, metafilePagePredicate } from '../../core/sync-metafile-pages.ts';
 import type { SyncResult, SyncOpts } from '../sync.ts';
 import { syncCheckpointKeys, resolveSyncCheckpointEvery } from './checkpoint.ts';
 import { runConnectorSync } from './connector.ts';
 import { performFullSync } from './full.ts';
+import { applyHoldsToManifest, holdUnreadableRenames, planHoldRescreen, redecideUnreadableRenames, wouldHoldFields, type LegacyHolds } from './holds.ts';
 import { sweepOrphanedRenameSentinels } from './rename-reconcile.ts';
 import type { SyncPlan, SyncActivePack } from './sync-run.ts';
+import { holdUnsupportedPaths, NO_BYTE_PATHS, selectBytePaths, type BytePaths } from './unsupported-paths.ts';
+import { formatUrlClonePullBlock, urlClonePullBlock } from '../../core/url-clone.ts';
+import { formatUpstreamNotice, recordUpstreamBeforeFetch, settleUpstreamAfterPull } from '../../core/sync-upstream-rewrite.ts';
 
 export type PreflightOutcome = { readonly done: SyncResult } | { readonly plan: SyncPlan };
 
-export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOpts): Promise<PreflightOutcome> {
+export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOpts, holds: LegacyHolds | null): Promise<PreflightOutcome> {
   const repo = await resolveSyncRepo(engine, opts);
   if ('done' in repo) return repo;
   const { company, repoPath, syncActivePack, gitContextRoot, syncScopeRoot, syncScopeRelPath, scoped, anchorPath, slugRootMode } = repo;
@@ -81,7 +90,7 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
   if (lastCommit) {
     let objectPresent = true;
     try {
-      git(gitContextRoot, ['cat-file', '-t', lastCommit]);
+      await gitAsync(gitContextRoot, ['cat-file', '-t', lastCommit]);
     } catch {
       objectPresent = false;
     }
@@ -90,7 +99,7 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
       // back to the authoritative full reconcile (which now also purges stale
       // pages for deleted files; see performFullSync's delete-reconcile pass).
       serr(`Sync anchor ${lastCommit.slice(0, 8)} object missing (gc'd after history rewrite). Running full reimport.`);
-      return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts) };
+      return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts, holds) };
     }
 
     // Observability only — NOT control flow. A non-ancestor bookmark is still
@@ -98,7 +107,7 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
     // failure mode (#1970) is visible in the logs.
     let isAncestor = true;
     try {
-      git(gitContextRoot, ['merge-base', '--is-ancestor', lastCommit, headCommit]);
+      await gitAsync(gitContextRoot, ['merge-base', '--is-ancestor', lastCommit, headCommit]);
     } catch {
       isAncestor = false;
     }
@@ -113,7 +122,7 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
 
   // First sync
   if (!lastCommit) {
-    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts) };
+    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts, holds) };
   }
 
   if (opts.includeGitignored) {
@@ -121,17 +130,32 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
       `[sync] --include-gitignored: running full filesystem reconcile because ` +
       `git diff cannot report untracked ignored files.`,
     );
-    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts) };
+    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts, holds) };
   }
 
   const { ckpt, checkpointEvery, pin, completedPaths } = await resolveCheckpointPin(engine, opts, company, gitContextRoot, lastCommit, headCommit);
 
+  // GBRA-150: a typed nested metafile is a page; the source backfills its existing ones once per mode it has not applied.
+  const metafilePages = await readMetafilePagesMode(engine);
+  const metafileBackfill = !company && await metafileBackfillDue(engine, opts.sourceId ?? DEFAULT_SOURCE_ID, metafilePages);
   const {
-    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest,
+    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest, workingTreeBytes,
     hasWorkingTreeChanges, uncommittedDrift, inScope, scopeRel, isSelectedForRun, excluded, syncOpts,
-  } = await resolveWorkingTreeScope(engine, opts, { company, gitContextRoot, detachedHead, scoped, syncScopeRelPath });
+  } = await resolveWorkingTreeScope(engine, opts, { company, gitContextRoot, detachedHead, scoped, syncScopeRelPath, holdUnreadable: !!holds?.active,
+    metafilePages, commits: [pin, lastCommit] });
 
-  if (lastCommit === headCommit && !versionMismatch && !versionNeverSet && !(importWorkingTree && hasWorkingTreeChanges)) {
+  // #5988: held files re-screen even when Git did not touch them; a run with
+  // nothing else to do still re-screens them, and clears holds of gone files.
+  const sourceRootMode = scoped && slugRootMode === 'source-root';
+  if (holds) {
+    planHoldRescreen(holds, { root: sourceRootMode ? syncScopeRoot : gitContextRoot, gitRoot: gitContextRoot, touched: new Set(), selected: path => {
+      const gitPath = sourceRootMode ? `${syncScopeRelPath}/${path}` : path;
+      return inScope(gitPath) ? !excluded(gitPath) && isSelectedForRun(gitPath, syncOpts) : null;
+    } });
+  }
+  const holdWork = !!holds && holds.rescreen.length + holds.gone.length + holds.retryTaken.length > 0;
+
+  if (lastCommit === headCommit && !versionMismatch && !versionNeverSet && !(importWorkingTree && hasWorkingTreeChanges) && !holdWork && !metafileBackfill) {
     // #3068: the pull failed and nothing local advanced — this run imported
     // NOTHING and the remote may hold commits we could not fetch. Reporting
     // `up_to_date` here (and bumping the heartbeat below) is exactly the
@@ -203,24 +227,42 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
     // BLOCKED run (losing the retry signal: the next run said up_to_date
     // and the failed re-walk never re-ran) and on a --dry-run PREVIEW
     // (persistent brain-state write from a preview).
-    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts) };
+    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts, holds) };
   }
 
   const delta = await computeFilteredDelta(engine, opts, {
     company, gitContextRoot, syncScopeRoot, lastCommit, headCommit, pin, fullSyncRoots, importWorkingTree,
-    workingTreeManifest, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts,
+    workingTreeManifest, workingTreeBytes, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts, holds,
+    metafileBackfill, syncScopeRelPath,
   });
   if ('done' in delta) return delta;
-  const { manifest, filtered, malformedSkipped, syncImportRoot, modePath, totalChanges } = delta;
+  const { manifest, filtered, malformedSkipped, syncImportRoot, modePath, heldRenames, bytePaths } = delta;
+  if (holds) {
+    const touched = new Set([...filtered.added, ...filtered.modified, ...filtered.deleted, ...filtered.renamed.flatMap(r => [r.from, r.to])]);
+    for (let i = holds.rescreen.length - 1; i >= 0; i--) if (touched.has(holds.rescreen[i]!)) holds.rescreen.splice(i, 1);
+    // GBRA-133 S-51: a pair whose identity the database refused waits as a hold; one held earlier is decided again
+    // once its file changes or a retry asks for it, before the hold replay turns it into a rename.
+    if (!opts.dryRun) {
+      await holdUnreadableRenames(engine, holds, syncImportRoot, heldRenames);
+      await redecideUnreadableRenames(engine, holds, syncImportRoot, filtered, pair => redecideHeldRename(engine, gitContextRoot, pin,
+        { ...pair, gitTo: sourceRootMode ? `${syncScopeRelPath}/${pair.to}` : pair.to }, { sourceId: holds.sourceId, sourcePathOf: scopeRel }));
+    }
+    applyHoldsToManifest(holds, filtered);
+  }
+  const totalChanges = filtered.added.length + filtered.modified.length + filtered.deleted.length + filtered.renamed.length + (holds?.rescreen.length ?? 0);
 
   // Dry run
-  if (opts.dryRun) return { done: dryRunResult({ lastCommit, headCommit, filtered, malformedSkipped, totalChanges }) };
+  if (opts.dryRun) {
+    return { done: { ...dryRunResult({ lastCommit, headCommit, filtered, malformedSkipped, totalChanges }),
+      ...(await wouldHoldFields(engine, holds, syncImportRoot, [...filtered.added, ...filtered.modified, ...filtered.renamed.map(r => r.to), ...(holds?.rescreen ?? [])], syncActivePack)) } };
+  }
+  await holdUnsupportedPaths(engine, holds, bytePaths);
 
   return {
     plan: {
       opts, company, repoPath, gitContextRoot, anchorPath, syncImportRoot, syncActivePack, lastCommit, headCommit, pin,
       pullFailed, ckpt, completedPaths, checkpointEvery, manifest, filtered, malformedSkipped, totalChanges,
-      uncommittedDrift, inScope, isSelectedForRun, syncOpts, modePath,
+      uncommittedDrift, inScope, isSelectedForRun, syncOpts, modePath, holds, gitlinks: bytePaths.gitlinks, metafilePages,
     },
   };
 }
@@ -458,7 +500,7 @@ async function discoverSyncGitRoot(
   // function's docstring. `!opts.dryRun`: a preview must never write.
   let gitContextRoot: string;
   try {
-    gitContextRoot = realpathSync(discoverGitRoot(repoPath));
+    gitContextRoot = realpathSync(await discoverGitRootAsync(repoPath));
   } catch (err) {
     if (company) throw err;
     if (
@@ -490,7 +532,7 @@ async function discoverSyncGitRoot(
     // this ever reaches a baseline on a repo that turns out to have commits.
     let reprobedRoot: string | null = null;
     try {
-      reprobedRoot = discoverGitRoot(repoPath);
+      reprobedRoot = await discoverGitRootAsync(repoPath);
     } catch {
       reprobedRoot = null;
     }
@@ -501,9 +543,9 @@ async function discoverSyncGitRoot(
       throw err;
     } else {
       serr(`[gbrain] auto-recovery: git-initializing brain dir ${repoPath} (no git repo found).`);
-      git(repoPath, ['init', '--quiet']);
+      await gitAsync(repoPath, ['init', '--quiet']);
       createSyncBaselineCommit(repoPath);
-      gitContextRoot = realpathSync(discoverGitRoot(repoPath));
+      gitContextRoot = realpathSync(await discoverGitRootAsync(repoPath));
     }
   }
   return gitContextRoot;
@@ -522,7 +564,7 @@ async function pullAndResolveHead(
   // Detect detached HEAD up front so the working-tree fallback fires for both
   // the default sync and `--no-pull` callers. Only the actual git pull is
   // gated on opts.noPull or opts.dryRun.
-  const detachedHead = !company && isDetachedHead(gitContextRoot);
+  const detachedHead = !company && await isDetachedHeadAsync(gitContextRoot);
   if (detachedHead && !opts.noPull) {
     // Print the caller's repoPath spelling (not the realpathed git root) —
     // it's what the operator recognizes, and tests pin it.
@@ -577,35 +619,28 @@ async function pullAndResolveHead(
     const _t0 = Date.now();
     serr(`[gbrain phase] sync.git_pull start`);
     opts.onProgress?.({ phase: 'git_pull' });
+    // Two things can stop this sync while git waits on the remote: opts.signal
+    // (--timeout, SIGINT, a job's timeout or cancel, lost lock) and the
+    // process cleanup pass (the hard-deadline watchdog's SIGTERM, a service
+    // stop). Both stop the pull: a `git pull` still running after this
+    // process exits could fast-forward the tree behind a released lock.
+    const { pullRepo, isStoppedGitPull } = await import('../../core/git-remote.ts');
+    const shutdown = abortOnCleanupPass('sync-git-pull');
+    if (opts.sourceId) await recordUpstreamBeforeFetch(engine, opts.sourceId, gitContextRoot);
     try {
-      const { pullRepo } = await import('../../core/git-remote.ts');
-      // v0.41.13.0 (T3 / D-V4-mech-7): if the operator set --timeout,
-      // bound the pull subprocess to a fraction of the remaining budget.
-      // We pass a safe default (the operator's full --timeout if set, else
-      // pullRepo's own 300s default). The catch below distinguishes
-      // timeout (ETIMEDOUT / SIGTERM on err.cause) from ordinary pull
-      // failure. Pull applies to the whole git repo (gitContextRoot), not
-      // just the sync scope — git has no per-subdir pull.
-      pullRepo(gitContextRoot);
+      // v0.41.13.0 (T3 / D-V4-mech-7): the pull is bounded by the operator's
+      // --timeout through opts.signal, and by pullRepo's own 300s default
+      // when no --timeout is set. Pull applies to the whole git repo
+      // (gitContextRoot), not just the sync scope — git has no per-subdir pull.
+      await pullRepo(gitContextRoot, { signal: composeAbortSignals(opts.signal, shutdown.signal) });
       serr(`[gbrain phase] sync.git_pull done ${Date.now() - _t0}ms`);
+      if (opts.sourceId) await settleUpstreamAfterPull(engine, opts.sourceId, gitContextRoot, true);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       serr(`[gbrain phase] sync.git_pull error ${Date.now() - _t0}ms (${msg.slice(0, 200)})`);
-      // v0.41.13.0 (T3 / D-V4-mech-7): pullRepo wraps execFileSync errors
-      // in GitOperationError, so `error.code === 'ETIMEDOUT'` and
-      // `error.signal === 'SIGTERM'` live on `.cause`, NOT on the top-
-      // level error. Inspect `.cause` to distinguish a real timeout
-      // (return partial reason='pull_timeout') from ordinary failure
-      // (keep the existing warn-and-continue R2 invariant).
-      const cause: unknown = e instanceof Error && 'cause' in e ? (e as { cause?: unknown }).cause : undefined;
-      const causeCode = (cause && typeof cause === 'object' && 'code' in cause)
-        ? (cause as { code?: unknown }).code
-        : undefined;
-      const causeSignal = (cause && typeof cause === 'object' && 'signal' in cause)
-        ? (cause as { signal?: unknown }).signal
-        : undefined;
-      const isTimeout = causeCode === 'ETIMEDOUT' || causeSignal === 'SIGTERM';
-      if (isTimeout) {
+      // A stopped pull returns partial reason='pull_timeout' with the anchor
+      // untouched; any other pull failure keeps the R2 warn-and-continue path.
+      if (isStoppedGitPull(e)) {
         return { done: buildPartialResult({
           fromCommit: lastCommit,
           toCommit: lastCommit ?? '',
@@ -622,13 +657,20 @@ async function pullAndResolveHead(
       } else {
         serr(`Warning: git pull failed: ${msg.slice(0, 200)}`); // #1315 stderr-first
       }
+      const upstream = opts.sourceId ? await settleUpstreamAfterPull(engine, opts.sourceId, gitContextRoot, false) : null;
+      if (upstream) serr(formatUpstreamNotice(upstream));
+      // #6946: an owned clone's own checkout blocks it; name the files and the preview-first repair.
+      const block = opts.sourceId ? await urlClonePullBlock(engine, opts.sourceId) : null;
+      if (block) serr(formatUrlClonePullBlock(block));
+    } finally {
+      shutdown.release();
     }
   }
 
   // Get current HEAD
   let headCommit: string;
   try {
-    headCommit = company?.plan.revision?.commit ?? git(gitContextRoot, ['rev-parse', 'HEAD']);
+    headCommit = company?.plan.revision?.commit ?? await gitAsync(gitContextRoot, ['rev-parse', 'HEAD']);
   } catch {
     // #2964: unborn-HEAD recovery. `.git` exists (discoverGitRoot succeeded
     // above) but there are zero commits — e.g. a prior self-heal `git init`
@@ -654,7 +696,7 @@ async function pullAndResolveHead(
     }
     serr(`[gbrain] auto-recovery: repo has no commits yet, creating baseline commit ${gitContextRoot}.`);
     createSyncBaselineCommit(gitContextRoot);
-    headCommit = git(gitContextRoot, ['rev-parse', 'HEAD']);
+    headCommit = await gitAsync(gitContextRoot, ['rev-parse', 'HEAD']);
   }
 
   // #2964: self-heal deliberately does NOT special-case db_only/.gitignore
@@ -771,7 +813,7 @@ async function resolveCheckpointPin(
       let pinReachable = false;
       try {
         if (company && storedTarget !== company.plan.revision!.commit) throw new Error('Approved revision mismatch');
-        if (!company) git(gitContextRoot, ['merge-base', '--is-ancestor', storedTarget, headCommit]);
+        if (!company) await gitAsync(gitContextRoot, ['merge-base', '--is-ancestor', storedTarget, headCommit]);
         pinReachable = true;
       } catch {
         pinReachable = false;
@@ -811,9 +853,14 @@ async function resolveWorkingTreeScope(
     detachedHead: boolean;
     scoped: boolean;
     syncScopeRelPath: string;
+    /** GBRA-133 S-51: the run can hold a rename pair whose identity the database refused to read. */
+    holdUnreadable: boolean;
+    metafilePages: MetafilePagesMode;
+    /** Where a metafile gone from the checkout was last committed: the pinned target, then the bookmark. */
+    commits: Array<string | null>;
   },
 ) {
-  const { company, gitContextRoot, detachedHead, scoped, syncScopeRelPath } = input;
+  const { company, gitContextRoot, detachedHead, scoped, syncScopeRelPath, holdUnreadable, metafilePages, commits } = input;
   // v0.20.0 Cathedral II Layer 12 (codex SP-1 fix): before returning
   // 'up_to_date' on git-HEAD equality, check the chunker version gate.
   // If sources.chunker_version mismatches CURRENT_CHUNKER_VERSION, force
@@ -822,7 +869,7 @@ async function resolveWorkingTreeScope(
   // population, etc.). Without this, upgraded brains silently stay on
   // the old chunks — the whole reason we bumped the version.
   const storedVersion = await readChunkerVersion(engine, opts.sourceId);
-  const currentVersion = String(CHUNKER_VERSION);
+  const currentVersion = chunkerStamp();
   const versionMismatch = storedVersion !== null && storedVersion !== currentVersion;
   const versionNeverSet = storedVersion === null && opts.sourceId !== undefined;
   // Untracked-gap fix: the working-tree manifest is now built for attached
@@ -851,9 +898,12 @@ async function resolveWorkingTreeScope(
   // counting degrades to empty with a stderr note; an EXPLICIT working-tree
   // import request fails closed with the reason (importing without the
   // manifest would silently skip the very files the caller asked for).
-  let workingTreeManifest: SyncManifest;
+  let workingTreeManifest: ConfirmedManifest;
+  let workingTreeBytes: BytePaths = NO_BYTE_PATHS;
   try {
-    workingTreeManifest = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitContextRoot);
+    const tree: LosslessDelta = company ? { manifest: { added: [], modified: [], deleted: [], renamed: [] }, ...NO_BYTE_PATHS } : await buildLosslessWorkingTreeManifest(gitContextRoot);
+    workingTreeManifest = tree.manifest;
+    workingTreeBytes = tree;
   } catch (e) {
     if (importWorkingTree) {
       throw new Error(
@@ -877,6 +927,10 @@ async function resolveWorkingTreeScope(
   // scoped source thinks in), same form runImport matches on full sync.
   const scopeRel = (p: string): string =>
     scoped && p.startsWith(syncScopeRelPath + '/') ? p.slice(syncScopeRelPath.length + 1) : p;
+  // #6729: an imported dirty tree's inexact renames are confirmed (base HEAD, target the working tree) before any
+  // filter reads them; a manifest only counted as drift decomposes its renames anyway.
+  if (importWorkingTree) workingTreeManifest = await confirmRenameIdentities(engine, gitContextRoot, 'HEAD', null, workingTreeManifest,
+    { sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, sourcePathOf: scopeRel, holdUnreadable });
   const includedPaths = company ? new Set(company.plan.manifest.filter(entry => entry.disposition === 'included').map(entry => entry.path)) : null;
   const storedPaths = company ? new Set((await engine.executeRaw<{ source_path: string }>('SELECT source_path FROM pages WHERE source_id=$1 AND source_path IS NOT NULL', [opts.sourceId!])).map(page => page.source_path)) : null;
   const isSelectedForRun = (path: string, options?: Parameters<typeof isSyncable>[1]): boolean => company
@@ -887,7 +941,11 @@ async function resolveWorkingTreeScope(
   // #4027: includeHidden must ride along wherever isSyncable() consults these
   // opts — dropping it here silently disables --include-hidden on the whole
   // delta path (and the #3974 drift counter) while the flag still parses.
-  const syncOpts = { strategy: opts.strategy, includeHidden: opts.includeHidden };
+  // GBRA-150: manifest paths are Git-root relative; a metafile is judged by the bytes the importer reads (the checkout),
+  // or, gone from it, by its last committed blob, at its depth below the source root.
+  const metafilePage = metafilePagePredicate(metafilePages,
+    firstMetafileHead(diskMetafileHeads(gitContextRoot), gitMetafileHeads(gitContextRoot, commits).read), scopeRel);
+  const syncOpts = { strategy: opts.strategy, includeHidden: opts.includeHidden, metafilePage };
 
   // Filtered working-tree counts. Renames decompose as add(to) + delete(from)
   // — the same decomposition the import path applies — so a rename-only dirty
@@ -921,7 +979,7 @@ async function resolveWorkingTreeScope(
     );
   }
   return {
-    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest,
+    storedVersion, currentVersion, versionMismatch, versionNeverSet, importWorkingTree, workingTreeManifest, workingTreeBytes,
     hasWorkingTreeChanges, uncommittedDrift, inScope, scopeRel, isSelectedForRun, excluded, syncOpts,
   };
 }
@@ -939,7 +997,8 @@ async function computeFilteredDelta(
     pin: string;
     fullSyncRoots: { gitContextRoot: string; syncScopeRoot: string; anchorPath: string; slugRootMode: SlugRootMode };
     importWorkingTree: boolean;
-    workingTreeManifest: SyncManifest;
+    workingTreeManifest: ConfirmedManifest;
+    workingTreeBytes: BytePaths;
     detachedHead: boolean;
     scoped: boolean;
     slugRootMode: SlugRootMode;
@@ -948,14 +1007,20 @@ async function computeFilteredDelta(
     excluded: (p: string) => boolean;
     isSelectedForRun: SyncPlan['isSelectedForRun'];
     syncOpts: SyncPlan['syncOpts'];
+    holds: LegacyHolds | null;
+    /** GBRA-150: the source has not applied `sync.metafile_pages typed`: its tree's metafile-named files join the delta once. */
+    metafileBackfill: boolean;
+    syncScopeRelPath: string;
   },
 ): Promise<
   | { done: SyncResult }
-  | { manifest: SyncManifest; filtered: SyncManifest; malformedSkipped: string[]; syncImportRoot: string; modePath: (p: string) => string; totalChanges: number }
+  | { manifest: SyncManifest; filtered: SyncManifest; malformedSkipped: string[]; syncImportRoot: string; modePath: (p: string) => string; totalChanges: number;
+      heldRenames: Array<{ from: string; to: string; gitTo: string; cause: unknown }>; bytePaths: BytePaths }
 > {
   const {
     company, gitContextRoot, syncScopeRoot, lastCommit, headCommit, pin, fullSyncRoots, importWorkingTree,
-    workingTreeManifest, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts,
+    workingTreeManifest, workingTreeBytes, detachedHead, scoped, slugRootMode, inScope, scopeRel, excluded, isSelectedForRun, syncOpts, holds,
+    metafileBackfill, syncScopeRelPath,
   } = input;
   // Diff using git diff (net result, not per-commit). v0.42.x (#1794): diff
   // against the PINNED target, not live HEAD. With a fixed (lastCommit, pin)
@@ -973,21 +1038,30 @@ async function computeFilteredDelta(
   // buffer, and a gc'd anchor object can't be diffed at all. On either
   // `unavailable`, fall back to the authoritative full reconcile instead of
   // throwing — a slow correct reconcile beats a hard error or a silent walk.
-  const delta = computeSyncDelta(gitContextRoot, lastCommit, pin, {
-    detachedManifest: importWorkingTree ? workingTreeManifest : null,
-  });
+  // #6729: inexact renames keep their page identity only when confirmed, before the company fold, the unsyncable fold
+  // and the hold replay read the manifest; the already-confirmed working-tree manifest merges after.
+  // GBRA-133: read as bytes (diff --raw -z), so a name is exactly Git's; names that are not page paths and gitlinks ride beside the manifest.
+  const delta = await computeLosslessSyncDelta(gitContextRoot, lastCommit, pin);
   if (delta.status === 'unavailable') {
     serr(
       `[sync] delta ${lastCommit.slice(0, 8)}..${pin.slice(0, 8)} unavailable ` +
       `(${delta.reason}) — falling back to full reconcile.`,
     );
-    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts) };
+    return { done: await performFullSync(engine, fullSyncRoots, headCommit, opts, holds) };
   }
-  const manifest = delta.manifest;
+  const confirmed = await confirmRenameIdentities(engine, gitContextRoot, lastCommit, pin, delta.manifest, { sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, sourcePathOf: scopeRel, holdUnreadable: !!holds?.active });
+  const manifest = importWorkingTree ? mergeSyncManifests(confirmed, workingTreeManifest) : confirmed;
   if (company) {
     manifest.added.push(...manifest.renamed.map(rename => rename.to));
     manifest.deleted.push(...manifest.renamed.map(rename => rename.from));
     manifest.renamed = [];
+  }
+  if (metafileBackfill) {
+    // A Git delta never names an unchanged file, so the nested metafiles already in the tree join it once; the filters
+    // below keep the typed ones, and an unchanged page re-imports as a content-hash no-op.
+    const named = new Set([...manifest.added, ...manifest.modified, ...manifest.deleted, ...manifest.renamed.flatMap(rename => [rename.from, rename.to])]);
+    manifest.added.push(...listMetafileNamedBlobs(gitContextRoot, pin, scoped ? syncScopeRelPath : '')
+      .map(blob => blob.path).filter(path => !named.has(path) && isNestedSkipMetafile(scopeRel(path))));
   }
 
   // Scope/exclude/isSyncable filter lambdas (`inScope`/`scopeRel`/`excluded`/
@@ -1054,7 +1128,7 @@ async function computeFilteredDelta(
     filtered.added = filtered.added.map(scopeRel);
     filtered.modified = filtered.modified.map(scopeRel);
     filtered.deleted = filtered.deleted.map(scopeRel);
-    filtered.renamed = filtered.renamed.map(r => ({ from: scopeRel(r.from), to: scopeRel(r.to) }));
+    filtered.renamed = filtered.renamed.map(r => ({ ...r, from: scopeRel(r.from), to: scopeRel(r.to) }));
   }
 
   // Working-tree mass-delete valve: merged working-tree deletes bypass the
@@ -1064,25 +1138,34 @@ async function computeFilteredDelta(
   // ratio + same env escape hatch. Deletes are skipped loudly; adds and
   // modifies still import, and committing the deletions (or
   // GBRAIN_ALLOW_MASS_RECONCILE=1) re-enables them.
-  if (importWorkingTree && !detachedHead && filtered.deleted.length >= 10 && !massReconcileAllowed()) {
-    try {
-      const rows = await engine.executeRaw<{ count: number }>(
-        opts.sourceId
-          ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
-          : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
-        opts.sourceId ? [opts.sourceId] : [],
+  if (importWorkingTree && filtered.deleted.length > 0 && !massReconcileAllowed()) {
+    // #7130: the ratio is of the source's file-backed pages (the pages a missing file can delete). A failed read of the
+    // count or the caps withholds every deletion: the brake cannot be checked, so nothing is deleted.
+    const sid = opts.sourceId ?? DEFAULT_SOURCE_ID;
+    const read = await Promise.all([
+      engine.executeRaw<{ count: number }>(`SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1 AND source_path IS NOT NULL`, [sid]),
+      readSyncDeleteCaps(engine, sid),
+    ]).then(([rows, caps]) => ({ pageCount: Number(rows[0]?.count ?? 0), caps }), (error: unknown) => ({ error }));
+    if ('error' in read) {
+      serr(`\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree sync: the delete limits could not be read (${read.error instanceof Error ? read.error.message : String(read.error)}). Adds/modifies still import; sync again once the database answers.\n`);
+      filtered.deleted = [];
+    }
+    const { pageCount, caps } = 'error' in read ? { pageCount: 0, caps: null } : read;
+    // The absolute caps apply on a detached HEAD too.
+    const trip = caps ? syncDeleteTrip(filtered.deleted.length, pageCount, caps) : null;
+    if (trip && caps) {
+      serr(`\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree sync (${syncDeleteTripText(trip, caps)}). ` +
+        `Commit the deletions and sync again, raise the cap (gbrain config set ${trip === 'max_deletes' ? 'sync.max_deletes' : 'sync.max_delete_ratio'}.source.${sid} <value>), or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`);
+      filtered.deleted = [];
+    } else if (!detachedHead && filtered.deleted.length >= 10 && pageCount > 0 && filtered.deleted.length > pageCount * MASS_RECONCILE_RATIO) {
+      serr(
+        `\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree ` +
+        `sync (> ${Math.round(MASS_RECONCILE_RATIO * 100)}% of ${pageCount} file-backed page(s)). An uncommitted ` +
+        `tree deleting this much is almost always transient (mid-rebase, accidental rm) — commit the ` +
+        `deletions to apply them, or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`,
       );
-      const pageCount = Number(rows[0]?.count ?? 0);
-      if (pageCount > 0 && filtered.deleted.length > pageCount * MASS_RECONCILE_RATIO) {
-        serr(
-          `\n  WARNING: refusing to delete ${filtered.deleted.length} page(s) from a working-tree ` +
-          `sync (> ${Math.round(MASS_RECONCILE_RATIO * 100)}% of ${pageCount} page(s)). An uncommitted ` +
-          `tree deleting this much is almost always transient (mid-rebase, accidental rm) — commit the ` +
-          `deletions to apply them, or re-run with GBRAIN_ALLOW_MASS_RECONCILE=1. Adds/modifies still import.\n`,
-        );
-        filtered.deleted = [];
-      }
-    } catch { /* valve is best-effort — a count failure must not block the sync */ }
+      filtered.deleted = [];
+    }
   }
 
   // NAV-4: warn when --exclude filtered out every candidate change — almost
@@ -1101,7 +1184,15 @@ async function computeFilteredDelta(
 
   const totalChanges = filtered.added.length + filtered.modified.length +
     filtered.deleted.length + filtered.renamed.length;
-  return { manifest, filtered, malformedSkipped, syncImportRoot, modePath, totalChanges };
+  // GBRA-133 S-51: pairs the identity confirmation could not read, in this run's scope, by the mode's page paths.
+  const heldRenames = [...(confirmed.heldRenames ?? []), ...(importWorkingTree ? workingTreeManifest.heldRenames ?? [] : [])]
+    .filter(pair => inScope(pair.to) && !excluded(pair.to) && isSelectedForRun(pair.to, syncOpts))
+    .map(pair => ({ from: modePath(pair.from), to: modePath(pair.to), gitTo: pair.to, cause: pair.cause }));
+  const bytePaths = company ? NO_BYTE_PATHS : selectBytePaths({
+    unsupported: [...delta.unsupported, ...(importWorkingTree ? workingTreeBytes.unsupported : [])],
+    gone: [...delta.gone, ...(importWorkingTree ? workingTreeBytes.gone : [])], gitlinks: delta.gitlinks,
+  }, { inScope, excluded, selected: p => isSelectedForRun(p, syncOpts), modeRel: modePath });
+  return { manifest, filtered, malformedSkipped, syncImportRoot, modePath, totalChanges, heldRenames, bytePaths };
 }
 
 function dryRunResult(input: {
