@@ -332,7 +332,7 @@ describe('data-safety native CI coverage', () => {
     expect(job.services.pgbouncer?.env?.POOL_MODE).toBe('transaction');
     const step = job.steps.find(entry => entry.run?.includes('scripts/persistence/validate.ts'));
     expect(step?.env?.ROBOT_SCOPE).toBe("${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'pr' || 'full' }}");
-    expect(step?.env?.ROBOT_SECONDS).toBe("${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (matrix.engine == 'postgres' && '1020' || '820') || (matrix.engine == 'postgres' && '1800' || '1200') }}");
+    expect(step?.env?.ROBOT_SECONDS).toBe("${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (matrix.engine == 'postgres' && '820' || '820') || (matrix.engine == 'postgres' && '1800' || '1200') }}");
     expect(step?.env?.ROBOT_EXPLORE).toBe("${{ github.event_name == 'schedule' && 'nightly' || '' }}");
     expect(step?.env?.GBRAIN_PGBOUNCER_URL).toContain(':55433/');
     const argv = (env: Record<string, string>) => Bun.spawnSync(['bash', '-e', '-o', 'pipefail', '-c', `

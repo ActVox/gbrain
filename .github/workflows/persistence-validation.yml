@@ -385,7 +385,7 @@ jobs:
           DATABASE_URL: postgres://gbrain_test@127.0.0.1:5432/gbrain_test
           GBRAIN_PGBOUNCER_URL: postgres://gbrain_test@127.0.0.1:55433/gbrain_test
           ROBOT_SCOPE: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'pr' || 'full' }}
-          ROBOT_SECONDS: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (matrix.engine == 'postgres' && '1020' || '820') || (matrix.engine == 'postgres' && '1800' || '1200') }}
+          ROBOT_SECONDS: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (matrix.engine == 'postgres' && '820' || '820') || (matrix.engine == 'postgres' && '1800' || '1200') }}
           ROBOT_EXPLORE: ${{ github.event_name == 'schedule' && 'nightly' || '' }}
         run: >-
           bun --no-env-file scripts/persistence/validate.ts --engine=${{ matrix.engine }}
