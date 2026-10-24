@@ -24,7 +24,7 @@ export { resolveDateBoundary, resolveSearchDateBounds } from './date-bounds.ts';
 import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
 import { embedQuery } from '../embedding.ts';
 import { loadEmbeddingQueryPrefix } from './query-prefix.ts';
-import { registerBackgroundWorkDrainer } from '../background-work.ts';
+import { deferUntilResponse, registerBackgroundWorkDrainer } from '../background-work.ts';
 import { applyAliasHop, isExcludedIdentity, type IdentityTierOpts } from './alias-hop.ts';
 export { applyAliasHop, isExcludedIdentity, type IdentityTierOpts };
 import { dedupResults, segmentRegions } from './dedup.ts';
@@ -1341,7 +1341,7 @@ export async function hybridSearchCached(
     // every 60s); the stamp still rides the stored meta so a hit is honest.
     // Stale unreranked rows after a key appears expire within one TTL.
     const isDegraded = (finalMeta.degraded ?? []).some(affectsRecall);
-    trackCacheWrite(
+    deferUntilResponse(() => trackCacheWrite(
       semanticCache.cache
         .store(query, queryEmbedding, results, finalMeta, {
           sourceId: cacheScopeKey(opts),
@@ -1349,7 +1349,7 @@ export async function hybridSearchCached(
           ...(isDegraded ? { ttlSeconds: DEGRADED_CACHE_TTL_SECONDS } : {}),
         })
         .catch(() => { /* swallow */ }),
-    );
+    ));
   }
 
   return budgeted;

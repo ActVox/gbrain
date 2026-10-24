@@ -153,6 +153,8 @@ export interface TransactionOptions {
    * set_config (`isPipelinableSearchRead`). Ignored by PGLite and inside a transaction.
    */
   pipelineEarly?: (statement: string) => boolean;
+  /** GBRA-156: Postgres opens `BEGIN READ ONLY` (a write inside fails with 25006); search's reads pass it. Ignored by PGLite and when nested. */
+  readOnly?: boolean;
 }
 
 /** Input row for addLinksBatch. Optional fields default to '' (matches NOT NULL DDL). */
