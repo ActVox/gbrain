@@ -45,7 +45,7 @@ import { sha256 } from './digest.ts';
 import { passResumeArgs } from './sync-pass-readers.ts';
 import { passConvergence, passStatusNext, passStatusState } from './sync-pass-status.ts';
 import { MANAGED_SYNC_PASS_OP, readPassRow, SYNC_DELETES_WITHHELD_OP, type PassRow } from './sync-pass-row.ts';
-import { SYNC_ADMISSION_SETTING_PARAMS, syncAdmissionSettingSql, syncAdmissionStatus } from './sync-admission.ts';
+import { SYNC_ADMISSION_SETTING_PARAMS, syncAdmissionEffectParams, syncAdmissionEffectSql, syncAdmissionSettingSql, syncAdmissionStatus } from './sync-admission.ts';
 import type { DeletesWithheld } from './sync-markers.ts';
 import { listIdentityDowngrades, withIdentityRemedies } from '../sync-identity-downgrades.ts';
 import { GIT_PUSH_CODES, readGitPushHolds, type GitPushHold } from './git-push-holds.ts';
@@ -278,15 +278,16 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   // #6712 PR 4b (design §9): the pass row and the withheld-delete record ride the source read (primary-key probes), so the plain status keeps its statement budget.
   const admissionSql = syncAdmissionSettingSql(4);
   const [source] = await engine.executeRaw<{ incarnation: string; pass_value: PassRow['value'] | null; pass_updated_at: Date | string | null; withheld: DeletesWithheld | null;
-    admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null; writeback_failed: string | null }>(
-    `SELECT s.incarnation::text AS incarnation, p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns},
+    admission_stored: string | null; admission_row_value: string | null; admission_set_at: string | null; admission_pinned: boolean | null; admission_destructive: boolean | null;
+    writeback_failed: string | null }>(
+    `SELECT s.incarnation::text AS incarnation, p.completed_keys->0 AS pass_value, p.updated_at AS pass_updated_at, w.completed_keys->0 AS withheld, ${admissionSql.columns}, ${syncAdmissionEffectSql(7, 's')},
       (SELECT r.request_id::text FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE e.kind='git' AND e.state='failed'
         AND e.request_id IN (SELECT id::uuid FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(p.completed_keys->0->'obligations'->'converged'->'writeback')='array'
           THEN p.completed_keys->0->'obligations'->'converged'->'writeback' ELSE '[]'::jsonb END) AS w(id)) ORDER BY e.id LIMIT 1) AS writeback_failed FROM sources s
       LEFT JOIN op_checkpoints p ON p.op=$2 AND p.fingerprint=s.id||':'||s.incarnation::text
       LEFT JOIN op_checkpoints w ON w.op=$3 AND w.fingerprint=s.id||':'||s.incarnation::text
       ${admissionSql.joins}
-      WHERE s.id=$1 AND s.archived IS NOT TRUE`, [sourceId, MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, ...SYNC_ADMISSION_SETTING_PARAMS]);
+      WHERE s.id=$1 AND s.archived IS NOT TRUE`, [sourceId, MANAGED_SYNC_PASS_OP, SYNC_DELETES_WITHHELD_OP, ...SYNC_ADMISSION_SETTING_PARAMS, ...syncAdmissionEffectParams(sourceId)]);
   if (!source) throw Object.assign(new Error(`Source ${sourceId} does not exist.`), { code: 'not_found' });
   const failures = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
   const selected = await cursorHeader(engine, sourceId, source.incarnation, failures[0]?.cursor_key ?? null);
@@ -378,7 +379,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string, opts
   const fenceHolds = committed?.fence_held ? await (await import('../generations/fence.ts')).fenceHoldEntries(engine, [sourceId]) : [];
   const [state, stateReason] = statusState({ human: !!(liveError?.needs_human), heldForHuman: holds.some(hold => hold.needs_human), oldest, recovery, liveJob: liveJob !== null, unfinished, lastError: !!liveError, actionable: actionable.length > 0, holds: holds.length > 0, pass: passState });
   const admission = await syncAdmissionStatus(engine, sourceId, source.incarnation,
-    { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at });
+    { stored: source.admission_stored, row_value: source.admission_row_value, set_at: source.admission_set_at, pinned: source.admission_pinned, destructive: source.admission_destructive });
   const passNext = passRow && passState && passState[1] === stateReason ? passStatusNext(sourceId, passState[1], passRow, resume, source.writeback_failed) : null;
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
