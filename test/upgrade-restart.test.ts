@@ -396,7 +396,7 @@ describe('--dry-run belongs to --restart-only (#2185)', () => {
       expect(currentExitCode()).toBe(exitCodeForCode('invalid_params'));
     } finally {
       process.stderr.write = write;
-      process.exitCode = prevExit;
+      process.exitCode = prevExit ?? 0;
       _resetCliExitVerdictForTests();
     }
     expect(writes.join('')).toContain('--dry-run previews only a restart');
