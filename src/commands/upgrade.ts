@@ -11,7 +11,7 @@ import type { InteractiveProbe } from '../core/interaction.ts';
 import { forwardProgressPast, migrationLedgerSummary, wedgedLedgerHint } from '../core/migration-ledger.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { MIGRATIONS_RUNNING_EXIT_CODE, readMigrationLockHolder } from '../core/migration-orchestration-lock.ts';
-import { loadConfig } from '../core/config.ts';
+import { loadConfig, gbrainPath } from '../core/config.ts';
 import { clearSnooze, clearUpdateCache, writeJustUpgraded, writeSwapReceipt } from '../core/self-upgrade.ts';
 import { MOVEMENT_SUPERVISOR_STEP } from './movement-step.ts';
 import {
@@ -603,7 +603,7 @@ export function recordUpgradeError(record: {
   hint: string;
 }): void {
   try {
-    const dir = join(process.env.HOME || '', '.gbrain');
+    const dir = gbrainPath();
     mkdirSync(dir, { recursive: true });
     const path = join(dir, 'upgrade-errors.jsonl');
     const line = JSON.stringify({
@@ -623,7 +623,7 @@ export function recordUpgradeError(record: {
 
 function saveUpgradeState(oldVersion: string, newVersion: string) {
   try {
-    const dir = join(process.env.HOME || '', '.gbrain');
+    const dir = gbrainPath();
     mkdirSync(dir, { recursive: true });
     const statePath = join(dir, 'upgrade-state.json');
     const state: Record<string, unknown> = existsSync(statePath)
@@ -759,7 +759,7 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
   await applySelfUpgradeSetup(noAutopilotInstall);
   // Cosmetic: print feature pitches for migrations newer than the prior binary.
   try {
-    const statePath = join(process.env.HOME || '', '.gbrain', 'upgrade-state.json');
+    const statePath = gbrainPath('upgrade-state.json');
     if (existsSync(statePath)) {
       const state = JSON.parse(readFileSync(statePath, 'utf-8'));
       const from = state?.last_upgrade?.from;
