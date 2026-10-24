@@ -32,7 +32,7 @@ test('write-triggered facts recover after a preparation hold clears, preserving 
       await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
       await claimWorktree(engine, sourceId, root);
       const config = { engine: engine.kind, embedding_disabled: true };
-      const operation = { engine, sourceId, remote: false, config } as OperationContext;
+      const operation = { engine, sourceId, remote: false, dryRun: false, config, logger: { info() {}, warn() {}, error() {} } } as unknown as OperationContext;
       await submitPageMutation(operation, { operation: 'put_page', params: { slug, request_id: randomUUID(),
         content: '---\ntitle: Example\ntype: company\n---\n# Example\n\nSynthetic roadmap notes.\n' } });
       const [original] = await engine.executeRaw<{ id: string }>(
