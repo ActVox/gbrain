@@ -2306,6 +2306,7 @@
                 "commits": 0,
                 "source_id": "default",
                 "unresolved_commits": 0,
+                "waiting_commits": null,
                 "window_hours": 24
               }
             ],
