@@ -1,6 +1,6 @@
 /**
  * The pass stamp's own drain-lease fences, on both engines. Besides `assertDrainLease`, two transactions read the lease row
- * by token `FOR SHARE`: a folded stamp's proof (`provenStamp`, sync-pass-fold.ts) and the checkpoint request's
+ * by token `FOR KEY SHARE`: a folded stamp's proof (`provenStamp`, sync-pass-fold.ts) and the checkpoint request's
  * (`applyPassCheckpoint`, sync-prepare.ts). A coordinator runs them with the token stamped on the request, so they fence the
  * holder's lease even when they run in another process. The drain lease's model (spec/tla/drain-lease) treats them as
  * fenced transactions of the holder: each token check is a guard mutant in spec/tla/drain-lease/mutants.json, and removing
@@ -91,7 +91,7 @@ for (const backend of testBackends()) {
         return (await tx.executeRaw('DELETE FROM gbrain_cycle_locks WHERE id=$1 RETURNING id', [syncLockId('default')])).length;
       }).catch((error: { code?: string }) => error.code ?? String(error));
 
-      test('a folded stamp holds the lease row FOR SHARE until its import commits, so a takeover waits', () => brain(async ({ engine, root }) => {
+      test('a folded stamp holds the lease row FOR KEY SHARE until its import commits, so a takeover waits', () => brain(async ({ engine, root }) => {
         expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
         writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
         const stamped = new Set<string>();
@@ -108,7 +108,7 @@ for (const backend of testBackends()) {
         expect(during).toBe('55P03');
       }), 180_000);
 
-      test('a checkpoint request holds the lease row FOR SHARE until it commits, so a takeover waits', () => brain(async ({ engine, root }) => {
+      test('a checkpoint request holds the lease row FOR KEY SHARE until it commits, so a takeover waits', () => brain(async ({ engine, root }) => {
         expect((await performManagedSync(engine, OPTS)).status).toBe('first_sync');
         writeFileSync(join(root, 'notes/a.md'), note('notes/a', 'A committed change of notes/a.')); commit(root, 'change a');
         const checkpoints = new Set<string>();

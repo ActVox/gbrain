@@ -18,6 +18,8 @@
 (* sleeps (machine asleep, event loop blocked) owes nothing. That makes    *)
 (* "a live holder keeps its lease" an invariant (NoSpuriousLapse), the     *)
 (* property #7415 broke, conditional on the stated timing assumptions.     *)
+(* The fence takes the row FOR KEY SHARE (#7442): that holds off the       *)
+(* takeover upsert and DELETEs, which write the key, but not the renewal.  *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -30,11 +32,11 @@ CONSTANTS
   RenewTimeoutMs,   \* withRefreshingLock: min(30000, ttl / 3)
   StealGraceMs,     \* resolveStealGraceSeconds(ttl) * 1000
   TakeoverGraceMs,  \* HOLDER_TAKEOVER_GRACE_MS
-  MaxTxMs,          \* assumption: the longest a fenced transaction stays open (FENCED_SLICE_MS plus the item that crosses it)
+  MaxTxMs,          \* the longest a fenced transaction stays open; since #7442 a bound the renewal does not depend on
   CancelMs,         \* assumption: the longest a timed-out renewal takes to settle once cancelled (the database answers the cancel)
-  RenewalWinsGap,   \* assumption: a waiting renewal gets the row before the holder's next fenced transaction begins
+  RenewalWinsGap,   \* a waiting renewal gets the row before the holder's next fenced transaction begins (FALSE drops it)
   UnsafeSteals,     \* a pid probe that calls a live holder dead (pid namespaces sharing a hostname), or --force-break-lock
-  Stamps,           \* model the pass stamp's fence: a coordinator transaction that takes the row FOR SHARE by a stamped token
+  Stamps,           \* model the pass stamp's fence: a coordinator transaction that takes the row FOR KEY SHARE by a stamped token
   MaxTime, MaxTokens, MaxCursor, MaxSleeps, MaxCrashes
 
 CeilDiv(a, b) == (a + b - 1) \div b
@@ -74,11 +76,11 @@ local == <<pc, tok, aborted, deadline, nextRenew, renewAt, cancelling, txAt, txR
 Closed == [l \in LaneIds |-> None]
 OpenTx(p) == {l \in LaneIds : txAt[p][l] # None}
 Renewing(p) == renewAt[p] # None
-\* Processes holding the lock row FOR SHARE.
+\* Processes holding the lock row FOR KEY SHARE.
 Sharers == {p \in Procs : OpenTx(p) # {}}
-\* The coordinator's pass-stamp transaction holds it FOR SHARE.
+\* The coordinator's pass-stamp transaction holds it FOR KEY SHARE.
 StampSharing == stampTok # None
-\* Anything holds the row FOR SHARE: an UPDATE or DELETE of the row waits.
+\* Anything holds the row FOR KEY SHARE: a DELETE, or an UPDATE that writes the key (the takeover upsert), waits.
 RowShared == Sharers # {} \/ StampSharing
 
 TypeOK ==
@@ -105,7 +107,8 @@ Reset(p) ==
 (***************************************************************************)
 (* tryAcquireDbLock. The upsert inserts, or takes over a row whose TTL     *)
 (* expired and whose last refresh is older than the steal grace; the       *)
-(* takeover UPDATEs the row, so it waits for every FOR SHARE.              *)
+(* takeover's upsert writes the key (SET id = EXCLUDED.id), so it waits   *)
+(* for every FOR KEY SHARE.                                                *)
 (***************************************************************************)
 Expired == rowExp < now
 TakeoverAllowed == Expired /\ rowRef + Grace < now
@@ -125,8 +128,8 @@ Acquire(p) ==
 (* tryAcquireDbLock's second path (#1780), and --break-lock's safe path: a *)
 (* row that has not expired, whose same-host pid the probe calls dead and  *)
 (* that is older than the takeover grace, is DELETEd by pid and token      *)
-(* (waiting for every FOR SHARE) and the upsert retried. An honest probe   *)
-(* calls dead only a holder that is gone.                                  *)
+(* (waiting for every FOR KEY SHARE) and the upsert retried. An honest     *)
+(* probe calls dead only a holder that is gone.                            *)
 (***************************************************************************)
 RowOwnerLive == \E q \in Procs : pc[q] # "idle" /\ tok[q] = rowTok
 
@@ -149,10 +152,10 @@ StartRenew(p) ==
   /\ UNCHANGED <<now, rowTok, rowExp, rowRef, rowAcq, cursor, nextTok, pc, tok, aborted, deadline,
                  cancelling, txAt, txRead, disturbed, stampTok, stampAt, sleeps, crashes>>
 
-(* UPDATE ... WHERE id AND holder_pid AND acquisition_token needs the row    *)
-(* exclusively, so it waits while any transaction holds it FOR SHARE, the    *)
-(* holder's own fenced transactions included (#7415).                         *)
-RenewCanLand(p) == pc[p] = "holding" /\ Renewing(p) /\ ~RowShared
+(* UPDATE ... WHERE id AND holder_pid AND acquisition_token writes no key    *)
+(* column, so FOR KEY SHARE does not block it (#7442): the renewal lands     *)
+(* while fenced transactions and the pass stamp hold the row.                *)
+RenewCanLand(p) == pc[p] = "holding" /\ Renewing(p)
 RenewMatches(p) == rowTok = tok[p]
 
 (* The UPDATE lands once the row is free. Its now() is the statement's start, so the row's expiry and   *)
@@ -202,16 +205,15 @@ LocalDeadline(p) ==
 (***************************************************************************)
 (* assertDrainLease, in each transaction that admits work or swaps the     *)
 (* cursor: refuse when the signal aborted, else SELECT the row WHERE token *)
-(* matches AND ttl_expires_at > now() FOR SHARE.                           *)
+(* matches AND ttl_expires_at > now() FOR KEY SHARE (fenceLockRow).       *)
 (***************************************************************************)
 FenceSignal(p) == ~aborted[p]
 FenceToken(p)  == rowTok = tok[p]
 FenceExpiry    == rowExp > now
 FencePasses(p) == FenceSignal(p) /\ FenceToken(p) /\ FenceExpiry
-\* Postgres lets a new FOR SHARE in beside the share locks already held, even while an UPDATE waits on the row; once
-\* every share lock is gone the waiting UPDATE goes first (measured on Postgres 16). So a waiting renewal lands
-\* between serial fenced transactions but can starve under overlapping ones (Lanes > 1). RenewalWinsGap = FALSE drops
-\* even the serial guarantee.
+\* Under FOR SHARE (before #7442) a waiting renewal landed between serial fenced transactions but could starve under
+\* overlapping ones; RenewalWinsGap = TRUE models that queue. With FOR KEY SHARE the renewal does not wait on the fence,
+\* and DrainLease.cfg sets RenewalWinsGap = FALSE.
 FenceQueue(p)  == RenewalWinsGap => (~Renewing(p) \/ RowShared)
 
 BeginFenced(p, l) ==
@@ -242,7 +244,7 @@ Rollback(p, l) ==
 (***************************************************************************)
 (* The pass stamp's fence (provenStamp, applyPassCheckpoint): the write    *)
 (* coordinator, possibly another process, SELECTs the row WHERE the token  *)
-(* stamped on the request matches AND ttl_expires_at > now() FOR SHARE,    *)
+(* stamped on the request matches AND ttl_expires_at > now() FOR KEY SHARE *)
 (* with no lease signal to check. The token may be any issued one (a stale *)
 (* request). A holder's crash does not end it.                             *)
 (***************************************************************************)

@@ -58,11 +58,12 @@ describe('spec/tla/drain-lease configs match the code', () => {
     });
   }
 
-  test('DrainLease.cfg assumes a fenced-transaction bound the code keeps under the renewal timeout', async () => {
+  test('DrainLease.cfg checks liveness with fenced transactions that outlive the renewal timeout and the pass stamp on (#7442)', async () => {
     const { RenewTimeoutMs, RefreshMs, TtlMs } = await code();
-    const maxTx = Number(constants('DrainLease.cfg').MaxTxMs);
-    expect(FENCED_SLICE_MS, `FENCED_SLICE_MS (${FENCED_SLICE_MS}) must stay below MaxTxMs (${maxTx}) in DrainLease.cfg: a slice plus the item that crosses it is what the model assumes`).toBeLessThan(maxTx);
-    expect(maxTx, `MaxTxMs (${maxTx}) must stay below the renewal timeout (${RenewTimeoutMs}): TLC finds a live holder losing its lease once fenced transactions outlive it (mutant fenced-transaction-outlives-renewal-timeout)`).toBeLessThan(RenewTimeoutMs);
+    const c = constants('DrainLease.cfg');
+    expect({ Stamps: c.Stamps, RenewalWinsGap: c.RenewalWinsGap, UnsafeSteals: c.UnsafeSteals }).toEqual({ Stamps: 'TRUE', RenewalWinsGap: 'FALSE', UnsafeSteals: 'FALSE' });
+    expect(Number(c.MaxTxMs)).toBeGreaterThan(RenewTimeoutMs);
+    expect(FENCED_SLICE_MS).toBeLessThan(Number(c.MaxTxMs));
     expect(RefreshMs + RenewTimeoutMs, 'a renewal and its timeout must fit inside the TTL').toBeLessThan(TtlMs);
   });
 

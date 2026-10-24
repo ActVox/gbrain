@@ -50,15 +50,15 @@ copy of the tree there. A failed or interrupted run leaves only partial logs in 
 
 One drainer per source at a time (`src/core/persistence/sync-lease.ts` over `src/core/db-lock.ts`). The lease is one
 `gbrain_cycle_locks` row; its `acquisition_token` is the fencing token. Every transaction that admits sync work or
-swaps the cursor runs `assertDrainLease`, which reads the row by token `FOR SHARE`. The pass stamp takes the same share
-lock with the token stamped on its request: a folded stamp's proof (`provenStamp`) and the checkpoint request
+swaps the cursor runs `assertDrainLease`, which reads the row by token `FOR KEY SHARE` (`fenceLockRow`, #7442). The pass
+stamp takes the same lock with the token stamped on its request: a folded stamp's proof (`provenStamp`) and the checkpoint request
 (`applyPassCheckpoint`), both run by the write coordinator, possibly in another process.
 
 | Config | What it checks |
 | --- | --- |
-| `DrainLease.cfg` | Two drainers, one fenced transaction at a time, the code's timing at 10 s ticks: every property. |
+| `DrainLease.cfg` | Two drainers, one fenced transaction at a time, the code's timing at 10 s ticks, fenced transactions up to 60 s (twice the renewal timeout), no renewal priority and the pass stamp's fence on: every property. |
 | `DrainLeaseSafety.cfg` | Every adverse assumption on (live holders stolen by a lying pid probe or `--force-break-lock`, fenced transactions longer than the renewal timeout, no renewal priority, a cancelled renewal settling late), 20 s ticks: the safety properties, which must hold anyway. |
-| `DrainLeaseStamp.cfg` | The same, plus the pass stamp's fence: a coordinator transaction that holds the row `FOR SHARE` by any issued token, overlaps the holder's and survives its crash. |
+| `DrainLeaseStamp.cfg` | The same, plus the pass stamp's fence: a coordinator transaction that holds the row `FOR KEY SHARE` by any issued token, overlaps the holder's and survives its crash. |
 | `DrainLeaseLanesNightly.cfg` | The safety config with two overlapping fenced transactions per holder, at a shorter clock bound. About 2 minutes on 4 CPUs, so `tlc.sh` runs it only with `TLC_NIGHTLY=1` (the schedule and dispatch). |
 
 `test/spec-drain-lease-constants.test.ts` keeps every config's timing equal to the code's constants and checks the
@@ -78,15 +78,16 @@ ordering the liveness property needs.
 An awake holder runs its timers on time: the clock does not pass a due renewal, a renewal that can land, a renewal
 timeout, its local lease deadline, or a fenced transaction at its bound. On top of that, `NoSpuriousLapse` needs:
 
-- **Every fenced transaction closes in under the renewal timeout** (30 s, `withRefreshingLock`). TLC passes with
-  fenced transactions up to 20 s and finds a lapse at 30 s: the renewal waits on the transaction's share lock, times
-  out just before it ends, and the next fenced transaction starts before the next renewal. `inFencedSlices` keeps its
-  own transactions to 5 s (`FENCED_SLICE_MS`, #7415); see the known gaps for the rest.
 - **A cancelled renewal settles within `CancelMs`** (10 s; the database answers the cancel). The clock runs while it is
   pending, and no new renewal starts until it settles.
-- **Fenced transactions of one holder do not overlap, and the pass stamp's fence does not overlap them** (`Stamps = FALSE`). Postgres 16 lets a new `FOR SHARE` in beside the share locks
-  already held even while an `UPDATE` waits, and gives the row to the waiting `UPDATE` once every share lock is gone.
-  So a waiting renewal lands between serial fenced transactions and can starve under overlapping ones.
+- **Fenced transactions of one holder do not overlap** (`Lanes = 1` in `DrainLease.cfg`; admissions are serial). Two lanes
+  were checked once at `MaxTime = 12` (6,420,020 states, every property); that run is not in CI.
+
+The fence no longer needs a bound on fenced transactions. Before #7442 it took the row `FOR SHARE`, so the renewal's
+`UPDATE` waited behind the holder's own fenced transactions and the pass stamp, and TLC found a live holder losing its lease
+once a fenced transaction outlived the renewal timeout. `FOR KEY SHARE` conflicts only with writes to the key (the takeover
+upsert's `SET id = EXCLUDED.id`) and with `DELETE`, so the renewal lands while the row is fenced; mutant
+`fence-takes-share-lock` puts the old lock back and TLC finds the lapse again.
 
 Times are rounded so the model is never kinder than the code: TTL and graces round down, the refresh interval,
 renewal timeout and transaction bound round up. A renewal's `now()` is its statement's start, so the row's expiry
@@ -96,13 +97,13 @@ counts from the request, not from the moment it got the row.
 
 | Action | Code |
 | --- | --- |
-| `Acquire` | `tryAcquireDbLock`'s upsert: insert, or take over a row whose TTL expired and whose last refresh is older than the steal grace; it waits for every `FOR SHARE` |
+| `Acquire` | `tryAcquireDbLock`'s upsert: insert, or take over a row whose TTL expired and whose last refresh is older than the steal grace; it writes the key (`SET id = EXCLUDED.id`), so it waits for every `FOR KEY SHARE` |
 | `DeadPidTakeover` | `tryAcquireDbLock`'s second path (#1780) and `--break-lock`'s safe path: an unexpired row whose same-host pid the probe calls dead, older than `HOLDER_TAKEOVER_GRACE_MS` |
-| `StampBegin`, `StampEnd` | the pass stamp's fence in `provenStamp` (sync-pass-fold.ts) and `applyPassCheckpoint` (sync-prepare.ts): token and expiry, `FOR SHARE`, no signal check, run by the write coordinator |
-| `StartRenew`, `RenewLand` | `withRefreshingLock`'s interval and `handle.refresh()`: one renewal in flight, `UPDATE ... WHERE id AND holder_pid AND acquisition_token`; a refused renewal aborts the lease signal |
+| `StampBegin`, `StampEnd` | the pass stamp's fence in `provenStamp` (sync-pass-fold.ts) and `applyPassCheckpoint` (sync-prepare.ts): token and expiry, `FOR KEY SHARE` (`fenceLockRow`), no signal check, run by the write coordinator |
+| `StartRenew`, `RenewLand` | `withRefreshingLock`'s interval and `handle.refresh()`: one renewal in flight, `UPDATE ... WHERE id AND holder_pid AND acquisition_token`, which writes no key, so the fence does not block it; a refused renewal aborts the lease signal |
 | `RenewTimeout`, `CancelSettle` | the renewal timeout aborts the query; it settles later and never extends local authority |
 | `LocalDeadline` | the expiry timer: the TTL passed with no confirmed renewal (`renewDeadline`) |
-| `BeginFenced`, `Commit`, `Rollback` | `assertDrainLease` inside a transaction (signal, token, expiry, `FOR SHARE`); lane 1 swaps the cursor. |
+| `BeginFenced`, `Commit`, `Rollback` | `assertDrainLease` inside a transaction (signal, token, expiry, `FOR KEY SHARE`); lane 1 swaps the cursor. |
 | `Release` | `withRefreshingLock`'s finally: wait for the in-flight renewal, then `DELETE ... WHERE id AND holder_pid AND acquisition_token` |
 | `Sleep`, `Wake`, `Crash` | the environment: a sleeping holder keeps its open transaction and share lock; a crash rolls them back |
 
@@ -112,22 +113,20 @@ counts from the request, not from the moment it got the row.
 
 | Mutant | Kind | Caught by | Code and test |
 | --- | --- | --- | --- |
-| `fence-ignores-token` | guard | `FencedTxnsMatchRow` | `assertDrainLease`; `test/persistence-sync-lease.test.ts` |
-| `fold-stamp-ignores-token` | guard | `FencedTxnsMatchRow` (`DrainLeaseStamp.cfg`) | `provenStamp` (sync-pass-fold.ts); `test/drain-lease-stamp-fence.test.ts` and its Postgres twin |
-| `checkpoint-stamp-ignores-token` | guard | `FencedTxnsMatchRow` (`DrainLeaseStamp.cfg`) | `applyPassCheckpoint` (sync-prepare.ts); the same |
+| `fence-ignores-token` | guard | `FencedTxnsMatchRow` | `assertDrainLease`'s `fenceLockRow` call; `test/persistence-sync-lease.test.ts` |
+| `fold-stamp-ignores-token` | guard | `FencedTxnsMatchRow` (`DrainLeaseStamp.cfg`) | `provenStamp`'s `fenceLockRow` call (sync-pass-fold.ts); `test/drain-lease-stamp-fence.test.ts` and its Postgres twin |
+| `checkpoint-stamp-ignores-token` | guard | `FencedTxnsMatchRow` (`DrainLeaseStamp.cfg`) | `applyPassCheckpoint`'s `fenceLockRow` call (sync-prepare.ts); the same |
 | `fold-stamp-without-share-lock` | guard | `FencedTxnsMatchRow` (`DrainLeaseStamp.cfg`) | `provenStamp`; the Postgres twin (a takeover from another connection waits until the import commits) |
 | `checkpoint-stamp-without-share-lock` | guard | `FencedTxnsMatchRow` (`DrainLeaseStamp.cfg`) | `applyPassCheckpoint`; the same |
 | `fence-without-share-lock` | guard | `FencedTxnsMatchRow` | `assertDrainLease`; `test/e2e/drain-lease-fence-postgres.test.ts` |
+| `fence-takes-share-lock` | guard | `NoSpuriousLapse` | `fenceLockRow` takes `FOR SHARE` again (#7442); `test/e2e/drain-lease-key-share-7442-postgres.test.ts` (a renewal commits while a fenced transaction is open) |
+| `takeover-skips-key-write` | guard | `FencedTxnsMatchRow` | both upserts in `tryAcquireDbLock` drop `SET id = EXCLUDED.id`; `test/drain-lease-key-share-7442.test.ts` (the token census) and its Postgres twin (a takeover waits for the fence) |
 | `takeover-ignores-ttl` | guard | `NoSpuriousLapse` | the upsert's `ON CONFLICT ... WHERE`; `test/drain-lease-guards.test.ts` and its Postgres twin |
 | `release-ignores-token` | guard | `NoSpuriousLapse` | `handle.release()`; the same |
 | `renewal-ignores-token` | guard | `NoSpuriousLapse` | `handle.refresh()`: a former holder's late renewal, its `now()` taken when it was sent, would rewind its successor's expiry; the same |
 | `pid-probe-calls-live-holder-dead` | guard | `NoSpuriousLapse` | `classifyHolderLiveness` (EPERM is alive); `test/db-lock-auto-takeover.test.ts` |
-| `fenced-transaction-outlives-renewal-timeout` | guard | `NoSpuriousLapse` | `FENCED_SLICE_MS` (#7415); `test/sync-fenced-slices-gbra133.test.ts` |
-| `fence-skips-queued-renewal` | assumption | `NoSpuriousLapse` | Postgres gives the row to the waiting renewal between serial transactions |
-| `overlapping-fenced-transactions` | assumption | `NoSpuriousLapse` | one fenced transaction per holder at a time |
-| `stamp-overlaps-fence` | assumption | `NoSpuriousLapse` | the pass stamp's fence does not overlap the holder's (known gap 2) |
 | `fence-ignores-signal` | survivor | — | defense in depth: an abort is also visible to the token or expiry check |
-| `fence-ignores-expiry` | survivor | — | defense in depth: `FOR SHARE` blocks a takeover while the transaction is open and the token refuses after it; `test/persistence-sync-lease.test.ts` still pins the refusal |
+| `fence-ignores-expiry` | survivor | — | defense in depth: `FOR KEY SHARE` blocks a takeover while the transaction is open and the token refuses after it; `test/persistence-sync-lease.test.ts` still pins the refusal |
 
 ### Not modelled
 
@@ -141,15 +140,6 @@ length of their transaction, so they count against the renewal timeout like a lo
 
 ### Known gaps
 
-The model shows the lease's liveness rests on two properties the code does not enforce yet:
-
-1. Nothing bounds every fenced transaction under the 30 s renewal timeout. `inFencedSlices` checks its 5 s budget only
-   between items, other call sites of `assertDrainLease` run one transaction over a whole batch, and the pass stamp's
-   checks run inside the coordinator's publication transactions, whose length the lease does not bound.
-2. The holder's own fenced transactions run one after another (admissions are serial), but the pass stamp's checks run
-   in the coordinator's publication transactions alongside them, so the row can stay `FOR SHARE` across a waiting
-   renewal. A fix that weakens the fence to `FOR KEY SHARE` would let the takeover upsert through too
-   (the test behind `fence-without-share-lock` catches that).
-
-Both are tracked in #7442 for the sync lane. The model keeps `NoSpuriousLapse` as stated and names these as assumptions rather
-than weakening the property.
+None in the lease protocol at these bounds. The two gaps this model first found (#7442: fenced transactions not bounded
+under the renewal timeout, and the pass stamp's share lock overlapping the holder's) are closed by the `FOR KEY SHARE`
+fence and the key-writing takeover upsert (#7450); `DrainLease.cfg` now checks `NoSpuriousLapse` with both conditions on.

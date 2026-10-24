@@ -1,5 +1,5 @@
 /**
- * The drain lease's fence (assertDrainLease) holds the lock row FOR SHARE for the life of its transaction, so a takeover,
+ * The drain lease's fence (assertDrainLease) holds the lock row FOR KEY SHARE for the life of its transaction, so a takeover,
  * which must UPDATE or DELETE the row, waits until the transaction ends: a pass that passed its fence cannot have its
  * lease taken from under it before it commits. spec/tla/drain-lease (mutant fence-without-share-lock) depends on it.
  */
@@ -23,7 +23,7 @@ beforeAll(async () => {
 }, 60_000);
 afterAll(async () => { await close?.(); });
 
-run('the fence holds the lease row FOR SHARE, so it blocks a takeover until its transaction ends', async () => {
+run('the fence holds the lease row FOR KEY SHARE, so it blocks a takeover until its transaction ends', async () => {
   const other = postgres(url, { max: 1, prepare: false });
   // A takeover as --break-lock writes it (a DELETE, which conflicts with every row lock a fence can take, FOR KEY SHARE
   // included), from another connection, giving up after 1 s.

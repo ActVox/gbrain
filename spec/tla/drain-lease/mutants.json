@@ -17,8 +17,8 @@
         "edits": [
           {
             "file": "src/core/persistence/sync-lease.ts",
-            "before": "WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
-            "after": "WHERE id=$1 AND $2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE"
+            "before": "fenceLockRow(tx, lease.lockId, lease.token)",
+            "after": "tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND $2::uuid IS NOT NULL AND ttl_expires_at > now() FOR KEY SHARE', [lease.lockId, lease.token])"
           }
         ],
         "tests": [
@@ -43,8 +43,8 @@
         "edits": [
           {
             "file": "src/core/persistence/sync-pass-fold.ts",
-            "before": "acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
-            "after": "$2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE"
+            "before": "fenceLockRow(tx, syncLockId(row.source_id), stamp.leaseToken)",
+            "after": "tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND $2::uuid IS NOT NULL AND ttl_expires_at > now() FOR KEY SHARE', [syncLockId(row.source_id), stamp.leaseToken])"
           }
         ],
         "tests": [
@@ -75,8 +75,8 @@
         "edits": [
           {
             "file": "src/core/persistence/sync-prepare.ts",
-            "before": "acquisition_token=$2::uuid AND ttl_expires_at > now() FOR SHARE",
-            "after": "$2::uuid IS NOT NULL AND ttl_expires_at > now() FOR SHARE"
+            "before": "fenceLockRow(tx, syncLockId(row.source_id), stamp.leaseToken)",
+            "after": "tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND $2::uuid IS NOT NULL AND ttl_expires_at > now() FOR KEY SHARE', [syncLockId(row.source_id), stamp.leaseToken])"
           }
         ],
         "tests": [
@@ -96,7 +96,7 @@
     {
       "id": "fold-stamp-without-share-lock",
       "kind": "guard",
-      "title": "a folded stamp's proof reads the row without FOR SHARE, so a takeover proceeds before its import commits",
+      "title": "a folded stamp's proof reads the row without FOR KEY SHARE, so a takeover proceeds before its import commits",
       "expect": "FencedTxnsMatchRow",
       "config": "DrainLeaseStamp.cfg",
       "spec": {
@@ -108,14 +108,14 @@
         "edits": [
           {
             "file": "src/core/persistence/sync-pass-fold.ts",
-            "before": "ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]",
-            "after": "ttl_expires_at > now()', [syncLockId(row.source_id), stamp.leaseToken]"
+            "before": "fenceLockRow(tx, syncLockId(row.source_id), stamp.leaseToken)",
+            "after": "tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now()', [syncLockId(row.source_id), stamp.leaseToken])"
           }
         ],
         "tests": [
           {
             "test": "test/e2e/drain-lease-stamp-fence-postgres.test.ts",
-            "filter": "a folded stamp holds the lease row FOR SHARE",
+            "filter": "a folded stamp holds the lease row FOR KEY SHARE",
             "postgres": true
           }
         ]
@@ -124,7 +124,7 @@
     {
       "id": "checkpoint-stamp-without-share-lock",
       "kind": "guard",
-      "title": "the checkpoint request reads the row without FOR SHARE, so a takeover proceeds before it commits",
+      "title": "the checkpoint request reads the row without FOR KEY SHARE, so a takeover proceeds before it commits",
       "expect": "FencedTxnsMatchRow",
       "config": "DrainLeaseStamp.cfg",
       "spec": {
@@ -136,14 +136,14 @@
         "edits": [
           {
             "file": "src/core/persistence/sync-prepare.ts",
-            "before": "ttl_expires_at > now() FOR SHARE', [syncLockId(row.source_id), stamp.leaseToken]",
-            "after": "ttl_expires_at > now()', [syncLockId(row.source_id), stamp.leaseToken]"
+            "before": "fenceLockRow(tx, syncLockId(row.source_id), stamp.leaseToken)",
+            "after": "tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now()', [syncLockId(row.source_id), stamp.leaseToken])"
           }
         ],
         "tests": [
           {
             "test": "test/e2e/drain-lease-stamp-fence-postgres.test.ts",
-            "filter": "a checkpoint request holds the lease row FOR SHARE",
+            "filter": "a checkpoint request holds the lease row FOR KEY SHARE",
             "postgres": true
           }
         ]
@@ -152,7 +152,7 @@
     {
       "id": "fence-without-share-lock",
       "kind": "guard",
-      "title": "the fence reads the row without FOR SHARE, so a takeover proceeds under an open transaction",
+      "title": "the fence reads the row without FOR KEY SHARE, so a takeover proceeds under an open transaction",
       "expect": "FencedTxnsMatchRow",
       "spec": {
         "file": "DrainLease.tla",
@@ -163,14 +163,77 @@
         "edits": [
           {
             "file": "src/core/persistence/sync-lease.ts",
-            "before": "AND ttl_expires_at > now() FOR SHARE'",
-            "after": "AND ttl_expires_at > now()'"
+            "before": "fenceLockRow(tx, lease.lockId, lease.token)",
+            "after": "tx.executeRaw('SELECT 1 FROM gbrain_cycle_locks WHERE id=$1 AND acquisition_token=$2::uuid AND ttl_expires_at > now()', [lease.lockId, lease.token])"
           }
         ],
         "tests": [
           {
             "test": "test/e2e/drain-lease-fence-postgres.test.ts",
             "filter": "blocks a takeover",
+            "postgres": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "fence-takes-share-lock",
+      "kind": "guard",
+      "title": "#7442: the fence takes the row FOR SHARE instead of FOR KEY SHARE, so the holder's renewal waits behind its own fenced transactions and the pass stamp until the lease lapses",
+      "expect": "NoSpuriousLapse",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "RenewCanLand(p) == pc[p] = \"holding\" /\\ Renewing(p)\n",
+        "after": "RenewCanLand(p) == pc[p] = \"holding\" /\\ Renewing(p) /\\ ~RowShared\n"
+      },
+      "code": {
+        "edits": [
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "ttl_expires_at > now() FOR KEY SHARE', [lockId, token]",
+            "after": "ttl_expires_at > now() FOR SHARE', [lockId, token]"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/e2e/drain-lease-key-share-7442-postgres.test.ts",
+            "filter": "a renewal commits while a fenced transaction is open",
+            "postgres": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "takeover-skips-key-write",
+      "kind": "guard",
+      "title": "#7442: the takeover upsert changes the token without writing the key, so it does not wait for the fence's FOR KEY SHARE",
+      "expect": "FencedTxnsMatchRow",
+      "spec": {
+        "file": "DrainLease.tla",
+        "before": "  /\\ rowTok = None \\/ (~RowShared /\\ TakeoverAllowed)",
+        "after": "  /\\ rowTok = None \\/ TakeoverAllowed"
+      },
+      "code": {
+        "edits": [
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "        SET id = EXCLUDED.id,\n            holder_pid = ${pid},",
+            "after": "        SET holder_pid = ${pid},"
+          },
+          {
+            "file": "src/core/db-lock.ts",
+            "before": "         SET id = EXCLUDED.id,\n             holder_pid = $2,",
+            "after": "         SET holder_pid = $2,"
+          }
+        ],
+        "tests": [
+          {
+            "test": "test/drain-lease-key-share-7442.test.ts",
+            "filter": "the token changes only in an ON CONFLICT upsert that also writes the key"
+          },
+          {
+            "test": "test/e2e/drain-lease-key-share-7442-postgres.test.ts",
+            "filter": "a takeover of an expired row waits for the fence",
             "postgres": true
           }
         ]
@@ -226,8 +289,8 @@
         "edits": [
           {
             "file": "src/core/db-lock.ts",
-            "before": "      release: async () => {\n        deregister();\n        await (maybePG.sql as any)`\n          DELETE FROM gbrain_cycle_locks\n          WHERE id = ${lockId} AND holder_pid = ${pid} AND acquisition_token = ${acquisitionToken}::uuid",
-            "after": "      release: async () => {\n        deregister();\n        await (maybePG.sql as any)`\n          DELETE FROM gbrain_cycle_locks\n          WHERE id = ${lockId} AND holder_pid = ${pid} AND ${acquisitionToken}::uuid IS NOT NULL"
+            "before": "      release: async () => {\n        deregister();\n        await retryReadOnlyAutocommit(maybePG.sql as any, (sql: any) => sql`\n          DELETE FROM gbrain_cycle_locks\n          WHERE id = ${lockId} AND holder_pid = ${pid} AND acquisition_token = ${acquisitionToken}::uuid",
+            "after": "      release: async () => {\n        deregister();\n        await retryReadOnlyAutocommit(maybePG.sql as any, (sql: any) => sql`\n          DELETE FROM gbrain_cycle_locks\n          WHERE id = ${lockId} AND holder_pid = ${pid} AND ${acquisitionToken}::uuid IS NOT NULL"
           },
           {
             "file": "src/core/db-lock.ts",
@@ -275,43 +338,6 @@
       }
     },
     {
-      "id": "fenced-transaction-outlives-renewal-timeout",
-      "kind": "guard",
-      "title": "#7415: back-to-back fenced transactions that each outlive the renewal timeout starve the renewal until the lease lapses",
-      "expect": "NoSpuriousLapse",
-      "spec": {
-        "file": "DrainLease.cfg",
-        "before": "MaxTxMs = 20000",
-        "after": "MaxTxMs = 30000"
-      },
-      "code": {
-        "edits": [
-          {
-            "file": "src/core/persistence/sync-lease.ts",
-            "before": "export const FENCED_SLICE_MS = 5_000;",
-            "after": "export const FENCED_SLICE_MS = Number.POSITIVE_INFINITY;"
-          }
-        ],
-        "tests": [
-          {
-            "test": "test/sync-fenced-slices-gbra133.test.ts",
-            "filter": "fenced slices"
-          }
-        ]
-      }
-    },
-    {
-      "id": "fence-skips-queued-renewal",
-      "kind": "assumption",
-      "title": "a new fenced transaction overtakes a renewal waiting on the row even between serial transactions (RenewalWinsGap fails)",
-      "expect": "NoSpuriousLapse",
-      "spec": {
-        "file": "DrainLease.cfg",
-        "before": "RenewalWinsGap = TRUE",
-        "after": "RenewalWinsGap = FALSE"
-      }
-    },
-    {
       "id": "renewal-ignores-token",
       "kind": "guard",
       "title": "the renewal extends whatever row exists, so a late renewal from a former holder rewinds its successor's expiry",
@@ -348,28 +374,6 @@
       }
     },
     {
-      "id": "overlapping-fenced-transactions",
-      "kind": "assumption",
-      "title": "a holder keeps the row FOR SHARE from overlapping transactions (sync lanes), so new share locks keep overtaking the waiting renewal until the lease lapses",
-      "expect": "NoSpuriousLapse",
-      "spec": {
-        "file": "DrainLease.cfg",
-        "before": "Lanes = 1",
-        "after": "Lanes = 2"
-      }
-    },
-    {
-      "id": "stamp-overlaps-fence",
-      "kind": "assumption",
-      "title": "the coordinator's pass-stamp transaction holds the row FOR SHARE beside the holder's fenced transactions (#7442)",
-      "expect": "NoSpuriousLapse",
-      "spec": {
-        "file": "DrainLease.cfg",
-        "before": "  Stamps = FALSE",
-        "after": "  Stamps = TRUE"
-      }
-    },
-    {
       "id": "fence-ignores-signal",
       "kind": "survivor",
       "title": "the fence ignores an aborted lease signal",
@@ -386,7 +390,7 @@
       "kind": "survivor",
       "title": "the fence admits under an expired row that nobody took over",
       "expect": "survives",
-      "reason": "Defense in depth: FOR SHARE blocks a takeover while the transaction is open, and the token check refuses after one. test/persistence-sync-lease.test.ts still pins the refusal (\"expired untaken\").",
+      "reason": "Defense in depth: FOR KEY SHARE blocks a takeover while the transaction is open, and the token check refuses after one. test/persistence-sync-lease.test.ts still pins the refusal (\"expired untaken\").",
       "spec": {
         "file": "DrainLease.tla",
         "before": "FenceExpiry    == rowExp > now",
