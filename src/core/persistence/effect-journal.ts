@@ -352,7 +352,7 @@ export async function completeEffect(engine: SqlEngine, effect: PersistenceEffec
   await engine.executeRaw(`UPDATE persistence_effects SET
     state=CASE WHEN jsonb_array_length(COALESCE(data->'parked','[]'::jsonb))>0 THEN 'failed' ELSE 'committed' END,
     error_code=CASE WHEN jsonb_array_length(COALESCE(data->'parked','[]'::jsonb))>0 THEN 'targets_parked' END,
-    data=data-'retry_slugs'-'target_failures'-'failing_target',execution_token=NULL,claim_expires_at=NULL,claim_owner=NULL,
+    data=data-'retry_slugs'-'target_failures'-'failing_target'-'busy_retries'-'busy_since'-'busy_at',execution_token=NULL,claim_expires_at=NULL,claim_owner=NULL,
     outcome=$3::text::jsonb,updated_at=now() WHERE id=$1 AND execution_token=$2::uuid AND recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE}`,
   [effect.id, effect.execution_token, JSON.stringify(outcome)]);
 }
@@ -360,6 +360,22 @@ export async function retryEffect(engine: SqlEngine, effect: PersistenceEffect, 
   await engine.executeRaw(`UPDATE persistence_effects SET state='queued',execution_token=NULL,claim_expires_at=NULL,claim_owner=NULL,error_code=$3,
     next_attempt_at=now()+($4::double precision*interval '1 millisecond'),updated_at=now()
     WHERE id=$1 AND execution_token=$2::uuid AND ${PERSISTENCE_PROTOCOL_PREDICATE}`, [effect.id, effect.execution_token, reason, delayMs]);
+}
+/** GBRA-133: the longest a `writer_busy` effect waits before its next claim. */
+export const BUSY_RETRY_MAX_MS = 60_000;
+/**
+ * GBRA-133: a `writer_busy` retry backs off per consecutive busy retry (250 ms doubling to `BUSY_RETRY_MAX_MS`), so a
+ * catch-up that cannot take the worktree stops claiming its effects several times a second. A streak whose last busy
+ * retry is over two caps old starts again. It never parks: contention says nothing about the target.
+ */
+export async function retryBusyEffect(engine: SqlEngine, effect: PersistenceEffect, now = Date.now()): Promise<void> {
+  const last = Date.parse(effect.data.busy_at ?? '');
+  const streak = Number.isFinite(last) && now - last < 2 * BUSY_RETRY_MAX_MS ? (effect.data.busy_retries ?? 0) + 1 : 1;
+  const busy = { busy_retries: streak, busy_since: streak > 1 && effect.data.busy_since ? effect.data.busy_since : new Date(now).toISOString(), busy_at: new Date(now).toISOString() };
+  await engine.executeRaw(`UPDATE persistence_effects SET state='queued',execution_token=NULL,claim_expires_at=NULL,claim_owner=NULL,error_code='writer_busy',
+    data=data||$3::text::jsonb,next_attempt_at=now()+($4::double precision*interval '1 millisecond'),updated_at=now()
+    WHERE id=$1 AND execution_token=$2::uuid AND ${PERSISTENCE_PROTOCOL_PREDICATE}`,
+  [effect.id, effect.execution_token, JSON.stringify(busy), Math.min(BUSY_RETRY_MAX_MS, 250 * 2 ** Math.min(streak - 1, 8))]);
 }
 /** Release a claim with replacement bookkeeping; parking never applies while recovery is recorded. */
 export async function requeueEffect(engine: SqlEngine, effect: PersistenceEffect, data: PersistenceEffect['data'], reason: string | null, delayMs: number): Promise<void> {
