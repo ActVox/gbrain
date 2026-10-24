@@ -10,7 +10,9 @@ import {
   bunGlobalCopyOf, classifyGbrainCommand, collectHostProcesses, mismatchedBuilds, planRestart, restartProblems, runRestartSteps, supervisorRestartArgv, unverifiedBuilds, verifyRestart,
   type HostProcess, type ProcessSources, type RestartContext, type RestartExecutor, type WarmSocketState,
 } from '../src/core/upgrade-restart.ts';
-import { mismatchFix, restartRefusal } from '../src/commands/upgrade-restart.ts';
+import { handleRestartOnly, mismatchFix, restartRefusal } from '../src/commands/upgrade-restart.ts';
+import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
+import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { exitCodeForCode } from '../src/core/error-catalogue.ts';
 
 const NEW = '0.60.400.0';
@@ -377,5 +379,31 @@ describe('another install on the host (GBRA-175 production finding: serve ran fr
     const reportsNone = fromCopy(111, 'serve', COPY, OLD, { version: null, started_ms: 5_000 });
     expect(mismatchedBuilds(plan, [reportsNone])).toEqual([reportsNone]);
     expect(mismatchedBuilds(plan, [fromCopy(112, 'serve', OWN, NEW, { version: NEW, started_ms: 5_000 })])).toEqual([]);
+  });
+});
+
+describe('--dry-run belongs to --restart-only (#2185)', () => {
+  test('a dry run without --restart-only is refused instead of ignored', async () => {
+    const opts = { stopMcp: false, json: false, rerunArgv: ['gbrain', 'upgrade'] };
+    const writes: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string) => { writes.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    const prevExit = process.exitCode;
+    try {
+      expect(await handleRestartOnly(['--channel', 'stable'], opts)).toBe(false);
+      expect(currentExitCode()).toBe(0);
+      expect(await handleRestartOnly(['--dry-run'], opts)).toBe(true);
+      expect(currentExitCode()).toBe(exitCodeForCode('invalid_params'));
+    } finally {
+      process.stderr.write = write;
+      process.exitCode = prevExit;
+      _resetCliExitVerdictForTests();
+    }
+    expect(writes.join('')).toContain('--dry-run previews only a restart');
+  });
+
+  test('upgrade accepts --dry-run and post-upgrade, which shares its module, does not', () => {
+    expect(CLI_FLAG_REGISTRY['upgrade']).toContain('--dry-run');
+    expect(CLI_FLAG_REGISTRY['post-upgrade']).not.toContain('--dry-run');
   });
 });

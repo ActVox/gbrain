@@ -176,6 +176,21 @@ export function restartRefusal(plan: RestartPlan, rerunArgv: readonly string[], 
 
 export interface HostRestartOptions { stopMcp: boolean; json: boolean; rerunArgv: string[] }
 
+/**
+ * `gbrain upgrade --restart-only [--dry-run]`. `--dry-run` belongs to `--restart-only`: anywhere else it is refused,
+ * never ignored while the upgrade installs for real (#2185). True when this handled the invocation.
+ */
+export async function handleRestartOnly(args: readonly string[], opts: HostRestartOptions): Promise<boolean> {
+  const dryRun = args.includes('--dry-run');
+  if (args.includes('--restart-only')) {
+    await runHostRestart({ ...opts, rerunArgv: ['gbrain', 'upgrade', '--restart-only', ...(opts.stopMcp ? ['--stop-mcp'] : [])], dryRun });
+    return true;
+  }
+  if (!dryRun) return false;
+  setCliExitVerdict(writeCliError(opError('invalid_params', '--dry-run previews only a restart; nothing was installed.', 'Run gbrain upgrade --restart-only --dry-run to preview the restart.'), 'upgrade', { json: opts.json }));
+  return true;
+}
+
 /** The package directory this process loaded its code from (realpath), the install the upgrade replaces. */
 function ownInstallRoot(): string | null {
   const root = runtimeInstallRoot();

@@ -4,13 +4,14 @@
  * installs it; .github/workflows/promote-stable.yml moves the tag.
  */
 import { spawnSync } from './spawn.ts';
+import { gitChildEnv } from './git-env.ts';
 import { isNewerVersion } from './semver.ts';
 import { normalizeChannel, type ReleaseChannel } from './self-upgrade.ts';
 
 const GBRAIN_GIT_URL = 'https://github.com/garrytan/gbrain';
 export type GitRunner = (args: string[]) => { status: number | null; stdout: string };
 const runGit: GitRunner = (args) => {
-  const r = spawnSync('git', args, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 });
+  const r = spawnSync('git', args, { encoding: 'utf-8', env: gitChildEnv(), stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
 };
 

@@ -608,7 +608,7 @@ gh workflow run promote-stable.yml -f version=<VERSION> \
   `https://raw.githubusercontent.com/<owner>/<repo>/stable/VERSION`.
   `refs/tags/stable-v<VERSION>` is an immutable annotated record created on a
   version's first promotion and never moved or deleted. Both carry the same
-  message: a `gbrain stable channel: v<VERSION>` title, then one
+  message: a title line (`gbrain`, then `stable channel: v<VERSION>`), then one
   `key: value` line each for `version`, `commit`, `tree`, `soak_run`,
   `scoreboard`, `promoted_by`, `promoted_at` (UTC), `previous`
   (`none` on the first promotion), `rollback` and `reason` (`-` when
