@@ -65,6 +65,8 @@ async function withBrain(run: (ctx: Ctx) => Promise<void>) {
       const sources = await fixtures(engine, config);
       for (const source of sources) {
         execFileSync('git', ['init', '-q', source.root]);
+        // The Git effect commits with the repository's identity; a runner without a global one needs it here.
+        for (const [key, value] of [['user.name', 't'], ['user.email', 't@example.com']]) execFileSync('git', ['-C', source.root, 'config', key, value]);
         execFileSync('git', ['-C', source.root, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'init']);
       }
       await engine.executeRaw("UPDATE persistence_host_bindings SET git_durability='enabled'");
