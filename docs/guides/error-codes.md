@@ -1731,6 +1731,14 @@ More: [docs/guides/shared-checkout-git.md#stuck-rebase](../../docs/guides/shared
 |---|---|---|---|---|---|---|
 | The canonical commit is durable locally; its push will retry. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
 
+### git_target_ignored
+
+<a id="git_target_ignored"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| A .gitignore rule excludes the canonical file, so its Git effect cannot commit it; the effect parks at once. | The request itself was wrong or no longer matches the brain; nothing was changed. | Remove or narrow the rule and commit that change, then run gbrain sources writer retry-effects <source> --parked-code git_target_ignored; or keep the file out of Git and leave the effect parked. | agent | `repeat the read that failed` | 1 | no |
+
 ### git_target_pending
 
 <a id="git_target_pending"></a>
