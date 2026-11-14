@@ -87,6 +87,7 @@ test/scripts/build-schema-migrations.test.ts	test	28	with its code patch
 test/scripts/ci-runner-routing.test.ts	test	19	no (ActVox runner/CI policy)	hosted runner labels only
 test/scripts/run-verify-parallel.test.ts	test	2	no (ActVox runner/CI policy)	verify job runner label pin
 test/scripts/checkout-stall-workflow.test.ts	test	6	no (ActVox runner/CI policy)	no Ubicloud jobs; asserts none instead of the upstream Ubicloud workflow set
+test/scripts/data-safety-native-workflow.test.ts	test	3	no (ActVox runner/CI policy)	finalize job runner label pin (hosted)
 test/search-multimodal-no-embed.serial.test.ts	test	49	with its code patch	
 test/serve-http-cors.test.ts	test	71	with its code patch	
 test/serve-http-route-golden.test.ts	test	9	with its code patch	
