@@ -1,5 +1,5 @@
 import { submitPageMutation } from '../persistence/page-mutations.ts';
-import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
+import { MERGE_PRECONDITION_PARAMS, WRITE_REQUEST_PARAM } from '../persistence/params.ts';
 /**
  * Timeline operation cluster — pure move from operations.ts (v0.46.x
  * tranche 1). Op consts stay module-private; `timelineOperations` below
@@ -8,8 +8,14 @@ import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
  * (cycle).
  */
 
-import { OperationError, type Operation } from './contract.ts';
-import { readPolicyOpts } from './context.ts';
+import { opError, type Operation, type OperationContext } from './contract.ts';
+import { opTransport } from './op-fix.ts';
+import { parseSourceIdParam, readPolicyOpts } from './context.ts';
+import { parseSourceIdsParam, requestSourceScope, SOURCE_IDS_PARAM } from './search-source-scope.ts';
+import { MIN_TRUST_PARAM, resolveReadEligibility } from '../eligibility/policy.ts';
+import { stampRowTrust } from '../eligibility/stamp.ts';
+import { quoteTimelineRows } from './timeline-quote.ts';
+import { unquoteTranscriptText } from '../search/transcript-quote.ts';
 import {
   enforceSubagentSlugFence,
   enforceClientSlugFence,
@@ -17,17 +23,37 @@ import {
 
 // --- Timeline ---
 
+/**
+ * A timeline date: a strict YYYY-MM-DD with year 1900-2199 and a real calendar day. PG DATE accepts year 5874897
+ * silently, a semantic bug nobody wants. Shared by add_timeline_entry and memory_propose, which checks it before
+ * anything is held.
+ */
+export function assertTimelineDate(ctx: Pick<OperationContext, 'transport' | 'remote'>, value: unknown): void {
+  const date = String(value);
+  const badDate = (message: string) => opError('invalid_params', message,
+    `Nothing was written. Pass ${opTransport(ctx) === 'cli' ? 'the date argument' : '`date`'} as a strict YYYY-MM-DD calendar date (year 1900-2199), for example 2026-04-03.`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw badDate(`Invalid date format "${date}" (expected YYYY-MM-DD)`);
+  const [y, m, d] = date.split('-').map(Number);
+  if (y < 1900 || y > 2199 || m < 1 || m > 12 || d < 1 || d > 31) throw badDate(`Invalid date "${date}" (year 1900-2199, month 1-12, day 1-31)`);
+  // Round-trip through Date to catch e.g. Feb 30.
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) throw badDate(`Invalid calendar date "${date}"`);
+}
+
+
 const add_timeline_entry: Operation = {
   name: 'add_timeline_entry',
+  idempotent: true,
   outputRedaction: 'retrieval',
-  description: 'Append an entry to the canonical Markdown timeline and structured timeline store in one committed write. Exact replay changes neither store.',
+  description: 'Append a dated entry to a page timeline. Replays change nothing; the Timeline section needs no call. To change or remove one, edit its bullet via edit_page with expected_revision.',
   params: {
     request_id: WRITE_REQUEST_PARAM,
-    slug: { type: 'string', required: true, description: 'Slug of the page whose timeline to append to.' },
-    date: { type: 'string', required: true, description: "Entry date, strict YYYY-MM-DD (e.g. '2026-04-03'). Timestamps and non-calendar dates are rejected." },
-    summary: { type: 'string', required: true, description: 'One-line summary of what happened on that date.' },
-    detail: { type: 'string', description: 'Longer free-text detail behind the summary.' },
-    source: { type: 'string', description: "Provenance ref for the entry, e.g. a meeting slug like 'meetings/2026-04-03' or a URL." },
+    ...MERGE_PRECONDITION_PARAMS,
+    slug: { type: 'string', description: 'Page slug.', required: true },
+    date: { type: 'string', required: true, description: 'YYYY-MM-DD.' },
+    summary: { type: 'string', required: true, description: 'One line.' },
+    detail: { type: 'string', description: 'Details.' },
+    source: { type: 'string', description: 'Source slug or URL.' },
   },
   mutating: true,
   scope: 'write',
@@ -39,31 +65,20 @@ const add_timeline_entry: Operation = {
     enforceSubagentSlugFence(ctx, p.slug as string, 'add_timeline_entry');
     enforceClientSlugFence(ctx, p.slug as string, 'add_timeline_entry');
     if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug };
-    const date = p.date as string;
-    // Reject anything that isn't a strict YYYY-MM-DD with year 1900-2199 and
-    // a real calendar day. PG DATE accepts year 5874897 silently — that's a
-    // semantic bug nobody actually wants.
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      throw new OperationError('invalid_params', `Invalid date format "${date}" (expected YYYY-MM-DD)`);
-    }
-    const [y, m, d] = date.split('-').map(Number);
-    if (y < 1900 || y > 2199 || m < 1 || m > 12 || d < 1 || d > 31) {
-      throw new OperationError('invalid_params', `Invalid date "${date}" (year 1900-2199, month 1-12, day 1-31)`);
-    }
-    // Round-trip through Date to catch e.g. Feb 30.
-    const parsed = new Date(date);
-    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
-      throw new OperationError('invalid_params', `Invalid calendar date "${date}"`);
-    }
-    return submitPageMutation(ctx, { operation: 'add_timeline_entry', params: p });
+    assertTimelineDate(ctx, p.date);
+    // #8377: an entry an agent copied out of a quoted read (get_timeline, chronicle) is stored without the fence, so its replay key matches; #8384: its source too.
+    const unquote = (v: unknown) => typeof v === 'string' && ctx.remote !== false ? unquoteTranscriptText(v, String(p.slug).toLowerCase()) : v;
+    return submitPageMutation(ctx, { operation: 'add_timeline_entry', params: { ...p, summary: unquote(p.summary), ...(p.detail !== undefined ? { detail: unquote(p.detail) } : {}), ...(p.source !== undefined ? { source: unquote(p.source) } : {}) } });
   },
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },
 };
 
 const get_timeline: Operation = {
   name: 'get_timeline',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
-  description: 'Get timeline entries for a page, optionally filtered by date window',
+  description: 'Get timeline entries for a page, optionally filtered by date window. To change or remove an entry, edit its bullet in the page\'s Timeline section with edit_page (expected_revision from get_page include_content:true): the row follows the page.',
   params: {
     slug: { type: 'string', required: true, description: 'Slug of the page whose timeline entries to return.' },
     after: { type: 'string', description: 'Return entries on or after this date (YYYY-MM-DD)' },
@@ -71,23 +86,34 @@ const get_timeline: Operation = {
     since: { type: 'string', description: 'Alias for after; accepted for agent callers' },
     until: { type: 'string', description: 'Alias for before; accepted for agent callers' },
     limit: { type: 'number', description: 'Maximum number of timeline entries to return' },
+    min_trust: MIN_TRUST_PARAM,
+    source_id: { type: 'string', description: 'Read only this source.' },
+    source_ids: SOURCE_IDS_PARAM,
   },
   handler: async (ctx, p) => {
     // #2200: route through sourceScopeOpts so a federated grant reaches the
     // engine via TimelineOpts.sourceIds; scalar/unset unchanged.
-    const scope = await readPolicyOpts(ctx);
+    // GST-1158 E1: source_id / source_ids narrow inside the grant, as search does.
+    const sourceIdParam = parseSourceIdParam(p.source_id, 'get_timeline');
+    const sourceIds = parseSourceIdsParam(ctx, 'get_timeline', p.source_ids);
+    const named = sourceIdParam !== undefined || sourceIds !== undefined ? await requestSourceScope(ctx, sourceIdParam, sourceIds) : undefined;
+    if (named?.sourceIds?.length === 0) return [];
+    const scope = await readPolicyOpts(ctx, named);
     // #4352 remediation: a `visibility: private` page's timeline reads
     // exactly like a missing page's ([]) for untrusted callers — no
     // existence oracle.
     const after = typeof p.after === 'string' ? p.after : typeof p.since === 'string' ? p.since : undefined;
     const before = typeof p.before === 'string' ? p.before : typeof p.until === 'string' ? p.until : undefined;
     const limit = typeof p.limit === 'number' ? p.limit : undefined;
-    return ctx.engine.getTimeline(p.slug as string, {
+    const eligibility = await resolveReadEligibility(ctx, { minTrust: p.min_trust });
+    const entries = await ctx.engine.getTimeline(p.slug as string, {
       ...scope,
       ...(after ? { after } : {}),
       ...(before ? { before } : {}),
       ...(limit !== undefined ? { limit } : {}),
+      eligibility,
     });
+    return quoteTimelineRows(ctx, p.slug as string, await stampRowTrust(ctx.engine, 'timeline_entries', entries, e => (e as { id: number }).id));
   },
   scope: 'read',
   cliHints: { name: 'timeline', positional: ['slug'] },

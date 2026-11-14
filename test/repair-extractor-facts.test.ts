@@ -31,15 +31,22 @@ import { runRepairCommand } from '../src/commands/repair.ts';
 import { extractorFactsRepair, EXTRACTOR_FACTS_INTENT } from '../src/core/repair/extractor-facts.ts';
 import { extractorFactsCheck } from '../src/commands/doctor/checks/extractor-facts.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { compactWriteReceipts } from '../src/core/persistence/journal.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
 import { runExtractConversationFactsCore } from '../src/commands/extract-conversation-facts.ts';
 import { writeSingleFact } from '../src/core/facts/write-single.ts';
+import { installFaultHook } from '../src/core/persistence/fault-points.ts';
+import { __setMaintenanceWriteWaitForTests } from '../src/core/persistence/maintenance-wait.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
+import { startPersistenceConsumer } from '../src/core/persistence/service.ts';
+import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
+import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 
 const EXTRACTOR = 'cli:extract-conversation-facts:sess';
 const ENTITY = 'people/alice-example';
@@ -113,12 +120,12 @@ for (const backend of testBackends()) {
       await tx.executeRaw('UPDATE persistence_requests SET completed_at=now(), consumer_version=$2 WHERE id=$1::uuid', [row.id, opts.consumer === undefined ? null : opts.consumer]);
     };
     if ((opts.transaction ?? 'same') === 'same') {
-      await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], async () => { await complete(tx); await expire(tx); }));
+      await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], async () => { await complete(tx); await expire(tx); }, TEST_WRITE_ATTRIBUTION));
     } else {
       await engine.transaction(tx => complete(tx));
       // PGLite's now() has millisecond resolution: a later transaction is at least one tick later.
       await new Promise(resolve => setTimeout(resolve, 5));
-      await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => expire(tx)));
+      await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => expire(tx), TEST_WRITE_ATTRIBUTION));
     }
     return row.id;
   }
@@ -143,10 +150,10 @@ for (const backend of testBackends()) {
           await tx.executeRaw(`INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source, row_num, source_markdown_slug)
             VALUES ('default', $1, 'Alice sends the deck on Friday', 'commitment', 'private', $2, 9, 'conversations/retained')`, [ENTITY, EXTRACTOR]);
           await tx.executeRaw("INSERT INTO fact_withdrawals (source_id, visibility, subject, fact_hash) VALUES ('default', 'private', '*', gbrain_fact_fingerprint('Alice withdrew this claim'))");
-        }));
+        }, TEST_WRITE_ATTRIBUTION));
         await prefixExpire(engine, ctx, 'conversations/retained', { ids: [retainedA, retainedB, superseded, withdrawn, duplicated] });
         await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () =>
-          tx.executeRaw('UPDATE facts SET superseded_by=$1 WHERE id=$2', [retainedA, superseded])));
+          tx.executeRaw('UPDATE facts SET superseded_by=$1 WHERE id=$2', [retainedA, superseded]), TEST_WRITE_ATTRIBUTION));
         const compacted = await prefixExpire(engine, ctx, 'conversations/compacted');
         // Older than the 30-day receipt retention, so compaction drops its intent but keeps its completion.
         await engine.transaction(async tx => {
@@ -155,7 +162,7 @@ for (const backend of testBackends()) {
           await tx.executeRaw("UPDATE persistence_requests SET completed_at=completed_at-interval '40 days' WHERE id=$1::uuid", [compacted]);
         });
         await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () =>
-          tx.executeRaw("UPDATE facts SET expired_at=expired_at-interval '40 days' WHERE source_markdown_slug='conversations/compacted'")));
+          tx.executeRaw("UPDATE facts SET expired_at=expired_at-interval '40 days' WHERE source_markdown_slug='conversations/compacted'"), TEST_WRITE_ATTRIBUTION));
         expect(await compactWriteReceipts(engine, 30)).toBeGreaterThanOrEqual(1);
         expect((await engine.executeRaw<{ compacted: boolean }>('SELECT compacted FROM persistence_requests WHERE id=$1::uuid', [compacted]))[0].compacted).toBe(true);
         await prefixExpire(engine, ctx, 'conversations/separate', { transaction: 'separate' });
@@ -247,7 +254,7 @@ for (const backend of testBackends()) {
         const preview = await repair(engine, null, []);
         expect(preview.results[0].residuals).toEqual({ evidenced: 2, ambiguous: 0, excluded: 0 });
         await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () =>
-          tx.executeRaw("UPDATE facts SET fact='Alice sends the revised deck' WHERE id=$1", [ids[1]])));
+          tx.executeRaw("UPDATE facts SET fact='Alice sends the revised deck' WHERE id=$1", [ids[1]]), TEST_WRITE_ATTRIBUTION));
         const applied = await repair(engine, null, ['--apply', '--expect', hashOf(preview)]);
         expect(applied.results[0]).toMatchObject({ applied: 1, outcomes: { partially_restored: 1 } });
         expect(applied.results[0].outcome_items![0].reason).toBe(`1 of 2 restored; changed since the preview: ${ids[1]}`);
@@ -261,7 +268,7 @@ for (const backend of testBackends()) {
         await prefixExpire(engine, ctx, 'conversations/dupes', { transaction: 'separate' });
         const [{ id: later }] = await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw<{ id: number }>(
           `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source, row_num, source_markdown_slug)
-           VALUES ('default', $1, 'Alice sends the deck', 'commitment', 'private', $2, 5, 'conversations/dupes') RETURNING id::int AS id`, [ENTITY, EXTRACTOR])));
+           VALUES ('default', $1, 'Alice sends the deck', 'commitment', 'private', $2, 5, 'conversations/dupes') RETURNING id::int AS id`, [ENTITY, EXTRACTOR]), TEST_WRITE_ATTRIBUTION));
         await prefixExpire(engine, ctx, 'conversations/dupes', { ids: [Number(later)] });
         const preview = await repair(engine, null, []);
         expect(preview.results[0].listing!.map(entry => [Number(entry.item.split('#')[1]), entry.class])).toEqual([
@@ -298,6 +305,35 @@ for (const backend of testBackends()) {
       }, { databaseUrl, setup: async ({ engine, root }) => {
         seeded.a = await conversation(engine, 'conversations/a', ['Alice sends the deck', 'Alice books the venue'], root);
         seeded.b = await conversation(engine, 'conversations/b', ['Bob reviews the budget'], root);
+      } });
+    }, 120_000);
+
+    test('#6185: a resumed apply replays a still-pending restore with the CLI write wait, not the 5 s agent wait', async () => {
+      const seeded: Record<string, number[]> = {};
+      await managedBrain(async ({ engine, ctx }) => {
+        await prefixExpire(engine, ctx, 'conversations/slow');
+        const hash = hashOf(await repair(engine, null, []));
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        installFaultHook(async point => { if (point === 'consumer:prepared') await gate; });
+        try {
+          const restoreWait = __setMaintenanceWriteWaitForTests(0);
+          let first: RepairJson;
+          try { first = await repair(engine, null, ['--apply', '--expect', hash]); } finally { restoreWait(); }
+          expect((first.results[0] as { stopped?: { reason: string } }).stopped?.reason).toBe('write_pending');
+          // A stopped run sets the CLI exit verdict (and process.exitCode) to 1; this file must still exit 0.
+          expect(currentExitCode()).toBe(1);
+          _resetCliExitVerdictForTests(); process.exitCode = 0;
+          expect(await activeIds(engine, seeded.slow)).toEqual([]);
+          // The publication is still held when the rerun starts and commits 5.5 s into its replay wait.
+          setTimeout(release, 5_500);
+          const resumed = await repair(engine, null, ['--apply', '--expect', hash]);
+          expect((resumed.results[0] as { stopped?: unknown }).stopped).toBeUndefined();
+          expect(resumed.results[0]).toMatchObject({ applied: 1, outcomes: { restored: 1 } });
+          expect(await activeIds(engine, seeded.slow)).toEqual(seeded.slow);
+        } finally { release(); installFaultHook(undefined); }
+      }, { databaseUrl, setup: async ({ engine, root }) => {
+        seeded.slow = await conversation(engine, 'conversations/slow', ['Alice sends the deck'], root);
       } });
     }, 120_000);
 
@@ -393,6 +429,39 @@ for (const backend of testBackends()) {
         mkdirSync(join(root, 'conversations'), { recursive: true });
         writeFileSync(join(root, 'conversations/synthetic-chat.md'), serializePageToMarkdown(snapshot.page, snapshot.tags));
       } });
+    }, 180_000);
+
+    // Nightly full-corpus lane (run 37273083933): with an embedding key in the environment, writeSingleFact embedded
+    // the claim and admitted it under a stub config while the running consumer was keyless, so preparation refused it
+    // with embedding_configuration. A deterministic fake embedder stands in for the key here.
+    test('a keyless consumer admits writeSingleFact without vectors even when the gateway can embed', async () => {
+      const embedded: string[] = [];
+      try {
+        configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: { OPENAI_API_KEY: 'fixture-key' } });
+        __setEmbedTransportForTests((async ({ values }: { values: string[] }) => {
+          embedded.push(...values);
+          return { embeddings: values.map(() => [1, ...Array(LEGACY_EMBEDDING_CONFIG.embedding_dimensions - 1).fill(0)]) };
+        }) as never);
+        await managedBrain(async ({ engine, ctx }) => {
+          expect(ctx.config.embedding_disabled).toBe(true);
+          startPersistenceConsumer(engine, ctx.config);
+          const written = await writeSingleFact(engine, 'default', { fact: CLAIM, provenance: 'fixture', entity: ENTITY, kind: 'commitment' });
+          expect(written).toMatchObject({ status: 'inserted', entity_slug: ENTITY });
+          // The keyless consumer's config is the effective config: the claim never reaches the embedder.
+          expect(embedded).toEqual([]);
+          const [row] = await engine.executeRaw<{ has_vector: boolean }>('SELECT embedding IS NOT NULL AS has_vector FROM facts WHERE id=$1', [written.id]);
+          expect(row.has_vector).toBe(false);
+        }, { databaseUrl, setup: async ({ engine, root }) => {
+          const person = await engine.putPage(ENTITY, { type: 'person', title: 'Alice Example', compiled_truth: '# Alice Example' }, { sourceId: 'default' });
+          await engine.executeRaw('UPDATE pages SET source_path=$1 WHERE id=$2', [`${ENTITY}.md`, person.id]);
+          const snapshot = (await engine.readPageSnapshot(ENTITY, { sourceId: 'default' }))!;
+          mkdirSync(join(root, 'people'), { recursive: true });
+          writeFileSync(join(root, `${ENTITY}.md`), serializePageToMarkdown(snapshot.page, snapshot.tags));
+        } });
+      } finally {
+        __setEmbedTransportForTests(null);
+        resetGateway(); // R5: restore the preload baseline for later tests and files in this shard
+      }
     }, 180_000);
   });
 

@@ -1,7 +1,8 @@
 /**
- * #5856: atom extraction of connector `email` and `meeting` pages is opt-in.
- * While `cycle.extract_atoms.connector_pages` is off (the default), atom
- * discovery and the backlog count skip those pages of Google and GitHub
+ * #5856: atom extraction of connector `email` and `meeting` pages is on by
+ * default and bounded by the per-attempt auto-drain budget. Setting
+ * `cycle.extract_atoms.connector_pages` to false (or 0/off/no) opts out: atom
+ * discovery and the backlog count then skip those pages of Google and GitHub
  * connector sources, so no routine cycle, drain or autopilot auto-drain sends
  * their bodies to the chat model. Other page types of a connector source, and
  * every page of a checkout-backed source, are unaffected.
@@ -13,10 +14,10 @@ export const CONNECTOR_ATOM_PAGES_KEY = 'cycle.extract_atoms.connector_pages';
 export const CONNECTOR_ATOM_PAGE_TYPES = ['email', 'meeting'] as const;
 
 export async function connectorAtomPagesEnabled(engine: BrainEngine): Promise<boolean> {
-  return /^(true|1|on|yes)$/i.test((await engine.getConfig(CONNECTOR_ATOM_PAGES_KEY).catch(() => null)) ?? '');
+  return !/^(false|0|off|no)$/i.test(((await engine.getConfig(CONNECTOR_ATOM_PAGES_KEY).catch(() => null)) ?? '').trim());
 }
 
-/** The discovery/backlog predicate over `pages p`: empty when opted in, else the connector email/meeting exclusion. */
+/** The discovery/backlog predicate over `pages p`: empty unless opted out, else the connector email/meeting exclusion. */
 export async function connectorAtomExclusionSql(engine: BrainEngine): Promise<string> {
   if (await connectorAtomPagesEnabled(engine)) return '';
   const list = (values: readonly string[]) => values.map(v => `'${v}'`).join(',');

@@ -39,6 +39,14 @@ regexTarget = "secret"
 regexes = ['''^(receipt_sha8_corpus|raw/lower/slugified)$''']
 
 [[allowlists]]
+description = "Migration golden: sha256 digests of migration helper function bodies, keyed by helper name"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^test/fixtures/goldens/migrations/records\.json$''']
+regexTarget = "secret"
+regexes = ['''^[0-9a-f]{64}$''']
+
+[[allowlists]]
 description = "Generated admin curl example reads the secret from an environment variable"
 targetRules = ["generic-api-key"]
 condition = "AND"
@@ -61,3 +69,11 @@ condition = "AND"
 paths = ['''^\.claude/skills/gstack/supabase/config\.sh$''']
 regexTarget = "secret"
 regexes = ['''^sb_publishable_[A-Za-z0-9_-]+$''']
+
+[[allowlists]]
+description = "The skill resolver's tokenizer id, a version label named TOKENIZER_ID"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^src/core/skills/resolver/tokenize\.ts$''']
+regexTarget = "secret"
+regexes = ['''^gbrain-skill-lex-v1$''']

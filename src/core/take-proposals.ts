@@ -159,7 +159,7 @@ async function loadProposal(
 
 export interface ProposalActionTarget {
   engine: BrainEngine;
-  /** Brain repo root — accept writes the markdown fence (markdown-canonical). */
+  /** Not read: the takes_add mutation accept submits resolves its write root from the proposal's source (#7271). */
   brainDir?: string;
   /** Source scope: a proposal outside this source reads as not_found. */
   sourceId?: string;
@@ -170,6 +170,9 @@ export interface ProposalActionTarget {
   /** An explicit `--dir`: validated against the source's canonical root, as `takes add --dir` is. */
   localDir?: string;
 }
+
+/** #5214: reviewer edits applied over the proposal at accept; the queue row keeps the original text. */
+export interface ProposalEdits { claim?: string; weight?: number; holder?: string; kind?: string }
 
 /**
  * One write request per claim: derived from the proposal id and the claim's
@@ -208,6 +211,7 @@ async function promoteProposalViaTakesAdd(
   target: ProposalActionTarget,
   proposal: TakeProposalRow,
   requestId: string,
+  edits: ProposalEdits,
 ): Promise<number> {
   const ctx: OperationContext = {
     engine: target.engine,
@@ -217,12 +221,14 @@ async function promoteProposalViaTakesAdd(
     dryRun: false,
     logger: { info: message => console.error(message), warn: message => console.error(message), error: message => console.error(message) },
   };
+  const edited = Object.values(edits).some(value => value !== undefined);
   const params: Record<string, unknown> = {
     slug: proposal.page_slug,
-    claim: proposal.claim_text,
-    kind: coerceProposalKind(proposal.kind),
-    holder: proposal.holder,
-    weight: typeof proposal.weight === 'number' ? proposal.weight : Number(proposal.weight),
+    claim: edits.claim ?? proposal.claim_text,
+    kind: edits.kind ?? coerceProposalKind(proposal.kind),
+    holder: edits.holder ?? proposal.holder,
+    weight: edits.weight ?? (typeof proposal.weight === 'number' ? proposal.weight : Number(proposal.weight)),
+    source: `take_proposals#${proposal.id}${edited ? ' (edited)' : ''}`,
     source_id: proposal.source_id,
     request_id: requestId,
     ...(target.localDir !== undefined ? { local_dir: target.localDir } : {}),
@@ -246,15 +252,10 @@ async function promoteProposalViaTakesAdd(
 export async function acceptProposal(
   target: ProposalActionTarget,
   id: number,
+  edits: ProposalEdits = {},
 ): Promise<{ proposal: TakeProposalRow; rowNum: number }> {
   const { engine } = target;
   const proposal = await loadProposal(engine, id, target.sourceId, { allowStranded: true });
-  if (!target.brainDir) {
-    throw new TakeProposalError(
-      'not_found',
-      'Accept requires a brain directory (takes are markdown-canonical). Pass --dir or configure sync.repo_path.',
-    );
-  }
   // Claim-first CAS: exactly one caller wins the pending row. A claim that is
   // already held without a recorded take resumes under its own request id.
   const claimed = proposal.status === 'accepted'
@@ -303,7 +304,7 @@ export async function acceptProposal(
       // The row's OWN source, never the caller's, is what promoteProposalViaTakesAdd
       // scopes the mutation to — the scoped load above already proved they agree
       // when a caller scope was provided.
-      rowNum = await promoteProposalViaTakesAdd(target, proposal, requestId);
+      rowNum = await promoteProposalViaTakesAdd(target, proposal, requestId, edits);
     } catch (e) {
       // Release the claim only when its write provably cannot commit: no
       // durable request was admitted, or every one settled without committing.

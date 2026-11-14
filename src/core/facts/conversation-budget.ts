@@ -3,6 +3,7 @@ import { getFactsExtractionModel } from './extract.ts';
 import { resolveModel, resolveTierDefault } from '../model-config.ts';
 import { normalizeModelId } from '../model-id.ts';
 import { isModelPriceable, type PricingOverrides } from '../budget/budget-tracker.ts';
+import { pricingSetCommand } from '../budget/no-pricing.ts';
 
 /** Default USD ceilings cannot account for unpriced chat routes. Explicit
  * ceilings stay fail-closed, including either of the cycle's two cost caps.
@@ -22,6 +23,6 @@ export async function conversationFactsCostCap(
   }
   const unpriced = models.find(model => !isModelPriceable(model, 'chat', overrides));
   if (!unpriced) return cap;
-  console.error(`[conversation-facts] ${unpriced} has no pricing; default USD cap is not enforced. Configure pricing.overrides to enforce a USD cap; explicit caps remain fail-closed.`);
+  console.error(`[conversation-facts] ${unpriced} has no pricing; default USD cap is not enforced. To enforce it, look up the model's price and register it: ${pricingSetCommand(unpriced, 'chat')}. Explicit caps remain fail-closed.`);
   return undefined;
 }

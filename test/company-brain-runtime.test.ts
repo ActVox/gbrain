@@ -18,6 +18,7 @@ import { performSync } from '../src/commands/sync.ts';
 import { purgeStaleCheckpoints } from '../src/core/op-checkpoint.ts';
 import { submitEmbedBackfill } from '../src/core/embed-backfill-submit.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { makeGitFixture } from './helpers/git-fixture.ts';
 import * as verification from '../src/core/company-brain/verification.ts';
 
@@ -202,7 +203,7 @@ for (const managed of [false, true]) describe(`company source lifecycle ${manage
       const input = { brainId: 'company-example', sourceId: `company-${randomUUID().slice(0, 8)}`, path: root,
         plan: await inspectCompanyBrain({ path: root, profile: 'company-brain' }), remote: false, requestId: randomUUID() };
       expect((await connectCompanyBrain(engine, input)).ok).toBe(true);
-      await engine.transaction(tx => withCoordinatedWrite(tx, [input.sourceId], () => tx.addTag('customers/account', 'retained-tag', { sourceId: input.sourceId })));
+      await engine.transaction(tx => withCoordinatedWrite(tx, [input.sourceId], () => tx.addTag('customers/account', 'retained-tag', { sourceId: input.sourceId }), TEST_WRITE_ATTRIBUTION));
       const file = join(root, 'customers/account.md');
       const changed = readFileSync(file, 'utf8') + '\nA committed source update.\n';
       writeFileSync(file, changed); git(root, 'add', '.'); git(root, 'commit', '-qm', 'Synthetic source update');
@@ -258,6 +259,33 @@ for (const managed of [false, true]) describe(`company source lifecycle ${manage
       rmSync(future); git(root, 'add', '.'); git(root, 'commit', '-qm', 'Synthetic target deletion');
       expect((await performSync(engine, { sourceId: input.sourceId })).status).toBe('synced');
       expect(await owned()).toHaveLength(0);
+    }
+  }), 120_000);
+});
+
+describe('#8014: a company source keeps database-only pages its manifest lacks', () => {
+  const cases: Array<[string, string, { kept: boolean; stray: boolean }]> = [
+    ['a declared db_only page stays and a stray page outside db_only is deleted', 'storage:\n  db_only: [archive/]\n', { kept: true, stray: false }],
+    ['an invalid gbrain.yml (tiers that overlap) keeps every page whose file is missing', 'storage:\n  db_only:\n    - archive/\n  db_tracked:\n    - archive/\n', { kept: true, stray: true }],
+    ['an uncommitted gbrain.yml does not count: the approved commit decides', 'storage:\n  db_only: [archive/]\n', { kept: false, stray: false }],
+  ];
+  for (const [name, yml, expected] of cases) test(name, async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    for (const engine of engines) {
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      const root = await fixture();
+      const sourceId = `company-${randomUUID().slice(0, 8)}`;
+      const input = { brainId: 'company-example', sourceId, path: root, plan: await inspectCompanyBrain({ path: root, profile: 'company-brain' }), remote: false };
+      expect((await connectCompanyBrain(engine, input)).ok).toBe(true);
+      for (const slug of ['archive/kept', 'notes/stray']) {
+        await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => tx.putPage(slug, { type: 'note', title: slug, compiled_truth: 'Database-only body.', timeline: '' }, { sourceId }), TEST_WRITE_ATTRIBUTION));
+        await engine.executeRaw('UPDATE pages SET source_path=$1 WHERE source_id=$2 AND slug=$3', [`${slug}.md`, sourceId, slug]);
+      }
+      const live = async (slug: string) => (await engine.executeRaw<{ live: boolean }>('SELECT deleted_at IS NULL AS live FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]))[0]?.live;
+      writeFileSync(join(root, 'gbrain.yml'), yml);
+      if (name.startsWith('an uncommitted')) writeFileSync(join(root, 'README.md'), '# Excluded scaffolding, edited\n');
+      git(root, 'add', name.startsWith('an uncommitted') ? 'README.md' : '.'); git(root, 'commit', '-qm', 'Synthetic storage tiers');
+      await performSync(engine, { sourceId });
+      expect({ kept: await live('archive/kept'), stray: await live('notes/stray') }).toEqual(expected);
     }
   }), 120_000);
 });

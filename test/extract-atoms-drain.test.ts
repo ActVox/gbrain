@@ -169,7 +169,7 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
 
 // #1685 GAP D (CODEX #1) — the auto-drain Minion job burns Haiku, so it must be
 // PROTECTED: no MCP/OAuth-scoped caller can submit it; only trusted local
-// callers (autopilot, explicit CLI with --allow-protected) can.
+// callers (autopilot, an explicit `gbrain jobs submit` from the CLI) can.
 describe('extract-atoms-drain protected-name membership', () => {
   it('extract-atoms-drain is PROTECTED', () => {
     expect(isProtectedJobName('extract-atoms-drain')).toBe(true);
@@ -208,12 +208,14 @@ describe('shared wiring helper holds the cycle lock (5A)', () => {
 
 // The register comment is the only place an operator learns how a PROTECTED
 // name gets submitted from the CLI. `jobs submit` sets allowProtectedSubmit
-// itself for protected names; there is no `--allow-protected` flag, and a
+// itself for protected names; there is no allow-protected flag, and a
 // comment advertising one sends operators to a flag that exits "unknown".
+// The repo-wide form of this pin is test/no-allow-protected-flag.test.ts.
 describe('protected-names register comment names the real trust mechanism', () => {
   const src = readFileSync(join(import.meta.dir, '../src/core/minions/protected-names.ts'), 'utf8');
-  it('does not advertise the non-existent --allow-protected flag', () => {
-    expect(src).not.toContain('--allow-protected');
+  const flag = ['--allow', 'protected'].join('-');
+  it('does not advertise the non-existent allow-protected flag', () => {
+    expect(src).not.toContain(flag);
     expect(src).toContain('allowProtectedSubmit');
   });
 });
@@ -282,5 +284,34 @@ describe('#2144: zero-yield tombstone progress semantics', () => {
     expect(result.batches).toBe(1);
     expect(result.remaining).toBe(5);
     expect(batches).toBe(1);
+  });
+  it('#8445: stops no_progress when a batch only skips items the backlog keeps counting', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: async () => 1,
+        runBatch: async () => { batches++; return { extracted: 0, skipped: 1 }; },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000, maxBatches: 20 },
+    );
+    expect(result).toMatchObject({ stopped: 'no_progress', batches: 1, skipped: 1, remaining: 1 });
+    expect(batches).toBe(1);
+  });
+
+  it('#8445: a skip-only batch that shrinks the backlog keeps draining', async () => {
+    let batches = 0;
+    const result = await runExtractAtomsDrain(
+      {
+        withLock: passThroughLock,
+        countRemaining: async () => Math.max(0, 3 - batches),
+        runBatch: async () => { batches++; return { extracted: 0, skipped: 2 }; },
+        now: () => 0,
+      },
+      { windowMs: 1_000_000, maxBatches: 20 },
+    );
+    expect(result).toMatchObject({ stopped: 'drained', batches: 3, skipped: 6, remaining: 0 });
+    expect(batches).toBe(3);
   });
 });

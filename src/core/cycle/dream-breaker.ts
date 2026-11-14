@@ -10,14 +10,52 @@
  * Only dead rows count: a completed job, including a legitimate zero-write
  * completion, is never a death.
  *
- * Not covered: content-hashed keys change whenever a transcript grows, and
- * patterns runs outside maintenance carry no key.
+ * Patterns (#6236): the patterns key digests the reflection set, so it
+ * changes whenever a reflection does. Patterns deaths therefore count under
+ * the stable per-source key `dream:patterns:source:<source id>` (the job's
+ * `source_id`, else `default`), and a patterns child cancelled at its timeout
+ * after paid work (tokens recorded) counts as a death too; one cancelled
+ * before any work does not. A completed patterns run resets its source key,
+ * so only consecutive deaths trip it.
+ *
+ * Content-hashed synthesize keys (W3, #6753/#6924): a synth-v2 key digests
+ * the transcript, so a growing transcript gets a new key on every pass and
+ * its deaths never meet on one key. Each synthesize death therefore also
+ * counts under the stable per-transcript key
+ * `dream:synth-v2:@file:<source id>:<encoded basename>` (the job's
+ * `source_id`, not its incarnation, so a brain that went managed keeps its
+ * count). The same work is "this transcript file in this source", whatever
+ * its length or chunking; the rule stays 3 dead runs in 24 h, and only the
+ * window or `gbrain dream reset-key` clears it ('@' cannot occur in an
+ * encoded identity, so the prefix never collides with a job key). The
+ * per-transcript row exists only once its deaths span two content keys, so a
+ * loop on one unchanged transcript still reports under its own key.
+ *
+ * Not covered: patterns runs outside maintenance carry no key.
  */
+import { basename } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
+import type { PhaseResult } from '../cycle.ts';
 
 export const DREAM_BREAKER_KEY_PREFIXES = ['dream:synth-v2:', 'dream:patterns:'] as const;
+/** Base-key prefix of the per-source patterns count, whatever each run's content key. */
+export const DREAM_PATTERNS_SOURCE_KEY_PREFIX = 'dream:patterns:source:';
+
+/** The stable key every patterns death of this source counts under. */
+export function dreamPatternsSourceKey(sourceId: string): string {
+  return `${DREAM_PATTERNS_SOURCE_KEY_PREFIX}${sourceId}`;
+}
 /** Base-key prefix of a contained cycle-phase failure after paid model calls. */
 export const DREAM_PHASE_KEY_PREFIX = 'dream:phase:';
+/** Base-key prefix of the per-transcript synthesize count, whatever each pass's content hash. */
+export const DREAM_SYNTH_FILE_KEY_PREFIX = 'dream:synth-v2:@file:';
+/** Every key family `gbrain dream reset-key` accepts: the ones `--list` and the breaker refusals print. */
+export const DREAM_RESETTABLE_KEY_PREFIXES = [...DREAM_BREAKER_KEY_PREFIXES, DREAM_PHASE_KEY_PREFIX] as const;
+
+/** The stable key every synthesize death of this transcript counts under (W3). */
+export function dreamSynthFileKey(sourceId: string, transcriptBasename: string): string {
+  return `${DREAM_SYNTH_FILE_KEY_PREFIX}${sourceId}:${encodeURIComponent(transcriptBasename)}`;
+}
 export const DREAM_BREAKER_CONFIG_KEY = 'dream.breaker.max_dead_submissions';
 export const DREAM_BREAKER_RESETS_KEY = 'dream.breaker.resets';
 /** Contained paid phase failures: `{ [base key]: ISO finish times }`, pruned to the 24 h window. */
@@ -61,19 +99,30 @@ async function loadResets(engine: BrainEngine): Promise<Record<string, string>> 
 export async function countDeadDreamSubmissions(engine: BrainEngine): Promise<DeadDreamSubmissions[]> {
   const resets = await loadResets(engine);
   const dead = await engine.executeRaw<DeadDreamSubmissions>(
-    `WITH dead AS (
+    `WITH ended AS (
        SELECT regexp_replace(COALESCE(idempotency_key, data->>'__released_idempotency_key'), ':c[0-9]+of[0-9]+$', '') AS base_key,
-              queue, finished_at
+              COALESCE(data->>'source_id', 'default') AS source_id, status, queue, finished_at
          FROM minion_jobs
-        WHERE name = 'subagent' AND status = 'dead' AND finished_at > now() - interval '24 hours'
+        WHERE name = 'subagent' AND finished_at > now() - interval '24 hours'
+          AND (status = 'dead' OR (status = 'cancelled' AND tokens_input + tokens_output > 0))
+     ), counted AS (
+       SELECT base_key, queue, finished_at, base_key AS content_key FROM ended
+        WHERE status = 'dead' AND left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[0].length}) = $1
+       UNION ALL
+       SELECT $4::text || source_id, queue, finished_at, NULL FROM ended
+        WHERE left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[1].length}) = $2
+       UNION ALL
+       SELECT $5::text || source_id || ':' || substring(base_key from ':filename:([^:]*):[^:]*$'), queue, finished_at, base_key FROM ended
+        WHERE status = 'dead' AND left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[0].length}) = $1 AND base_key ~ ':filename:[^:]*:[^:]*$'
      )
      SELECT base_key, COUNT(DISTINCT queue)::int AS dead_submissions, MAX(finished_at)::text AS last_dead_at
-       FROM dead
-      WHERE (left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[0].length}) = $1 OR left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[1].length}) = $2)
-        AND finished_at > COALESCE(($3::text::jsonb ->> base_key)::timestamptz, '-infinity'::timestamptz)
+       FROM counted
+      WHERE finished_at > COALESCE(($3::text::jsonb ->> base_key)::timestamptz, '-infinity'::timestamptz)
       GROUP BY base_key
+     -- A per-transcript count is its own row only once its deaths span two content keys; one key already counts itself.
+     HAVING left(base_key, length($5::text)) <> $5::text OR COUNT(DISTINCT content_key) > 1
       ORDER BY dead_submissions DESC, base_key`,
-    [DREAM_BREAKER_KEY_PREFIXES[0], DREAM_BREAKER_KEY_PREFIXES[1], JSON.stringify(resets)],
+    [DREAM_BREAKER_KEY_PREFIXES[0], DREAM_BREAKER_KEY_PREFIXES[1], JSON.stringify(resets), DREAM_PATTERNS_SOURCE_KEY_PREFIX, DREAM_SYNTH_FILE_KEY_PREFIX],
   );
   const cutoff = Date.now() - 24 * 3_600_000;
   for (const [baseKey, times] of Object.entries(await loadContained(engine))) {
@@ -141,7 +190,50 @@ export async function loadDreamBreaker(engine: BrainEngine): Promise<DreamBreake
   }
 }
 
+/**
+ * #6236: the patterns phase's skip result when its source key is tripped, or
+ * null (breaker off, count failed, or not tripped). The skip carries the reset
+ * as a paid `fix` and a read-only verify.
+ */
+export async function patternsBreakerSkip(engine: BrainEngine, sourceId: string): Promise<PhaseResult | null> {
+  const breaker = await loadDreamBreaker(engine);
+  const key = dreamPatternsSourceKey(sourceId);
+  const refusal = breaker && dreamBreakerRefusal(breaker, key);
+  if (!refusal) return null;
+  process.stderr.write(`[dream] patterns: ${refusal}\n`);
+  return { phase: 'patterns', status: 'skipped', duration_ms: 0, summary: refusal, details: { reason: 'dream_breaker_tripped', code: 'dream_breaker_tripped',
+    base_key: key, why: 'The patterns phase died (or was cancelled after paid work) that many times in a row for this source within 24 hours, so it is not submitted again until reset.',
+    fix: { argv: ['gbrain', 'dream', 'reset-key', key], consent: ['paid'], actor: 'agent', requires_exclusive: false,
+      why: 'Re-enables patterns runs for this source; the next cycle pays for a run, so fix the cause and ask the user first.',
+      verify: { argv: ['gbrain', 'doctor', '--only', 'dream_paid_loop', '--json'] } } } };
+}
+
+/**
+ * A completed patterns run ends its source's death count, so only consecutive
+ * deaths trip it. A failed reset is logged; the earlier deaths then keep
+ * counting until they leave the 24 h window.
+ */
+export async function clearPatternsSourceDeaths(engine: BrainEngine, sourceId: string): Promise<void> {
+  const key = dreamPatternsSourceKey(sourceId);
+  try {
+    await resetDreamBreakerKey(engine, key);
+  } catch (error) {
+    process.stderr.write(`[dream] patterns: could not clear ${key} after a completed run; its earlier deaths keep counting `
+      + `until they are 24h old (${error instanceof Error ? error.message : String(error)})\n`);
+  }
+}
+
 /** Refusal line for the cycle summary and the autopilot log. */
+/**
+ * The synthesize refusal for one transcript: its content key first, then (W3) its per-transcript key, which catches a
+ * transcript that grew (a new content key) between dying runs.
+ */
+export function synthBreakerRefusal(breaker: DreamBreaker, t: { synthesisIdentity: string; sourceId: string; filePath: string; hash16: string }): string | null {
+  const file = basename(t.filePath);
+  return dreamBreakerRefusal(breaker, `dream:synth-v2:${encodeURIComponent(t.synthesisIdentity)}:filename:${encodeURIComponent(file)}:${t.hash16}`)
+    ?? dreamBreakerRefusal(breaker, dreamSynthFileKey(t.sourceId, file));
+}
+
 export function dreamBreakerRefusal(breaker: DreamBreaker, baseKey: string): string | null {
   const count = breaker.tripped.get(baseKey);
   if (count === undefined) return null;
@@ -161,7 +253,7 @@ export async function resetDreamBreakerKey(engine: BrainEngine, baseKey: string)
        VALUES ($1, jsonb_build_object($2::text, to_char((now() + interval '1 millisecond') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))::text)
      ON CONFLICT (key) DO UPDATE SET value = ((
        SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
-         FROM jsonb_each_text(CASE WHEN config.value IS JSON OBJECT THEN config.value::jsonb ELSE '{}'::jsonb END) entry
+         FROM jsonb_each_text(CASE WHEN jsonb_typeof(gbrain_try_jsonb(config.value)) = 'object' THEN gbrain_try_jsonb(config.value) ELSE '{}'::jsonb END) entry
         WHERE entry.key <> $2::text AND entry.value ~ '^[0-9]{4}-' AND entry.value::timestamptz > now() - interval '24 hours'
      ) || EXCLUDED.value::jsonb)::text`,
     [DREAM_BREAKER_RESETS_KEY, dreamBreakerBaseKey(baseKey)],

@@ -1,14 +1,15 @@
 import type { BrainEngine } from '../engine.ts';
-import { OperationError } from '../ops/contract.ts';
+import { opError, OperationError } from '../ops/contract.ts';
 import { authorizeStoredRequest } from './authority.ts';
 import { completeWrite, getWriteRequest, lockCounters } from './journal.ts';
 import { isTerminal, principalKey, type Principal, type WriteRequest } from './model.ts';
+import { declarePersistenceProtocol } from './protocol.ts';
 
 export async function listWriteRequests(engine: BrainEngine, principal: Principal,
   opts: { sourceId: string; before?: string; limit?: number; slugPrefixes?: string[]; operations?: string[]; slugAllowList?: string[];
     authorize?: (row: WriteRequest) => Promise<boolean> }): Promise<{ requests: WriteRequest[]; next: string | null }> {
   const limit = Math.min(100, Math.max(1, Math.floor(opts.limit ?? 25)));
-  if (opts.before !== undefined && !/^\d+$/.test(opts.before)) throw new OperationError('invalid_params', 'Invalid write request cursor.');
+  if (opts.before !== undefined && !/^\d+$/.test(opts.before)) throw opError('invalid_params', 'Invalid write request cursor.', 'Pass the next cursor exactly as the previous page returned it (a numeric sequence), or omit it to start from the newest requests.');
   // Principal/source restrictions are applied before SQL pagination. Additional
   // current fences filter candidates without leaking counts or foreign cursors.
   const visible: WriteRequest[] = [];
@@ -23,7 +24,7 @@ export async function listWriteRequests(engine: BrainEngine, principal: Principa
         WHERE length(p.prefix)>0 AND (CASE WHEN right(p.prefix,1)='/'
           THEN left(lower(r.slug),length(p.prefix))=p.prefix
           ELSE lower(r.slug)=p.prefix OR left(lower(r.slug),length(p.prefix)+1)=p.prefix||'/' END)))
-      AND ($7::text[] IS NULL OR r.operation=ANY($7::text[]))
+      AND ($7::text[] IS NULL OR COALESCE(r.authority->>'attestedOp', r.operation)=ANY($7::text[]))
       AND ($8::text[] IS NULL OR EXISTS (SELECT 1 FROM unnest($8::text[]) AS a(pattern)
         WHERE CASE WHEN right(a.pattern,2)='/*' THEN left(r.slug,length(a.pattern)-1)=left(a.pattern,length(a.pattern)-1)
           ELSE r.slug=a.pattern END))
@@ -48,6 +49,7 @@ export async function cancelWriteRequest(engine: BrainEngine, principal: Princip
   const row = await getWriteRequest(engine, principal, requestId);
   if (!row) return null;
   return engine.transaction(async tx => {
+    await declarePersistenceProtocol(tx);
     await authorizeStoredRequest(tx, row, true);
     await lockCounters(tx, ['brain', principalKey(principal), ...(row.worktree_id ? [`worktree:${row.worktree_id}`] : [])]);
     const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid FOR UPDATE', [row.id]);

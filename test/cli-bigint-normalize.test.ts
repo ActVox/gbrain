@@ -13,7 +13,7 @@
  *    doesn't crash the serializer the moment a query matches. (#2450 comments)
  */
 import { describe, test, expect } from 'bun:test';
-import { bigintToStringReplacer, CLI_ONLY } from '../src/cli.ts';
+import { bigintToStringReplacer, CLI_ONLY } from '../src/cli/main.ts';
 import { takeHitRowToHit } from '../src/core/utils.ts';
 import { runCall } from '../src/commands/call.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -59,7 +59,7 @@ describe('takeHitRowToHit (#2450 — takes_search MCP path)', () => {
     expect(hit).toEqual({
       take_id: 42, page_id: 7, page_slug: 'people/alice-example', row_num: 3,
       claim: 'Strong DX intuition', kind: 'take', holder: 'garry',
-      weight: 0.8, score: 0.91,
+      weight: 0.8, since_date: null, until_date: null, source: null, score: 0.91,
     });
     expect(() => JSON.stringify(hit)).not.toThrow();
   });

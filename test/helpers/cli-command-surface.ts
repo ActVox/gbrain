@@ -15,7 +15,8 @@
  *
  * Plain helper: no env mutation, no engine, no network.
  */
-import { CLI_ONLY, cliAliases, validateCommandFlags } from '../../src/cli.ts';
+import { routeCommand } from '../../src/cli/command-route.ts';
+import { CLI_ONLY, cliAliases, validateCommandFlags } from '../../src/cli/main.ts';
 import { parseGlobalFlags } from '../../src/core/cli-options.ts';
 import { migrationCliArgumentError } from '../../src/core/embedding-migration-cli.ts';
 import { operations } from '../../src/core/operations.ts';
@@ -90,6 +91,7 @@ export function gbrainInvocations(code: string): Invocation[] {
     const verb = m[1]!;
     if (!/^[a-z][a-z0-9_-]{2,}$/.test(verb)) continue;
     if (!commandPosition(code.slice(0, m.index))) continue;
+    if (verb === 'notice' && code[m.index! - 1] === '[') continue; // `[gbrain notice <code> …]` block prefix, not a command
     out.push({ verb, argv: shellWords(code.slice(m.index! + m[0].length - verb.length)) });
   }
   return out;
@@ -158,9 +160,9 @@ export function flagRejection(inv: Invocation): string | null {
   } catch (e) {
     return (e as Error).message;
   }
-  const [typed, ...subArgs] = rest;
-  if (!typed || subArgs.some((a) => a === '--help' || a === '-h')) return null;
-  const command = typed === 'ask' ? 'query' : typed;
+  const [typed, ...typedArgs] = rest;
+  if (!typed || typedArgs.some((a) => a === '--help' || a === '-h')) return null;
+  const { command, subArgs } = routeCommand(typed === 'ask' ? 'query' : typed, typedArgs);
   if (dispatchedBeforeValidation(command, subArgs)) return null;
   const migrationError = migrationCliArgumentError(command, subArgs);
   if (migrationError) return migrationError.message;

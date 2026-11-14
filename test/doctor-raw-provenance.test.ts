@@ -97,6 +97,21 @@ describe('rawProvenanceCheck (#1978, warn-only v1)', () => {
     expect((await rawProvenanceCheck(engine as unknown as BrainEngine)).status).toBe('ok');
   });
 
+  test('an explicitly false exemption does not exempt (#8039)', async () => {
+    await engine.putPage('synthesis/false-exemption', {
+      type: 'synthesis', title: 'False exemption', compiled_truth: 'body', timeline: '',
+      frontmatter: { raw_trace_exempt: false },
+    });
+    const result = await rawProvenanceCheck(engine as unknown as BrainEngine);
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('synthesis/false-exemption');
+    await engine.executeRaw(
+      `UPDATE pages SET frontmatter = frontmatter || '{"raw_trace_exempt": true, "raw_trace_exempt_reason": "reviewed"}'::jsonb
+        WHERE slug = 'synthesis/false-exemption'`,
+    );
+    expect((await rawProvenanceCheck(engine as unknown as BrainEngine)).status).toBe('ok');
+  });
+
   test('query failure degrades to warn, never throws', async () => {
     const broken = { executeRaw: async () => { throw new Error('boom'); } } as unknown as BrainEngine;
     const result = await rawProvenanceCheck(broken);
@@ -106,5 +121,58 @@ describe('rawProvenanceCheck (#1978, warn-only v1)', () => {
 
   test('raw_provenance is categorized as a brain check', () => {
     expect(categorizeCheck('raw_provenance')).toBe('brain');
+  });
+});
+
+describe('rawProvenanceCheck accepts attributable extract_atoms atoms (#6537)', () => {
+  const atomFm = {
+    atom_type: 'insight', source_hash: 'a1b2c3d4e5f60718', extracted_by: 'extract_atoms-v0.41.2.1',
+    extracted_at: '2026-10-12T00:00:00Z', dream_generated: true,
+  };
+  let atoms: PGLiteEngine;
+  beforeAll(async () => {
+    atoms = new PGLiteEngine();
+    await atoms.connect({});
+    await atoms.initSchema();
+  });
+  afterAll(async () => { await atoms.disconnect(); });
+
+  const flagged = async (): Promise<string> => {
+    const result = await rawProvenanceCheck(atoms as unknown as BrainEngine);
+    return result.status === 'ok' ? '' : result.message;
+  };
+
+  test('page-origin and transcript-origin atoms pass', async () => {
+    await atoms.putPage('wiki/source-page', { type: 'note', title: 'S', compiled_truth: 'body', timeline: '' });
+    await atoms.putPage('atoms/2026-10-12/a-page-atom', {
+      type: 'atom' as never, title: 'A', compiled_truth: 'x', timeline: '',
+      frontmatter: { ...atomFm, source_slug: 'wiki/source-page' },
+    });
+    await atoms.putPage('atoms/2026-10-12/a-transcript-atom', {
+      type: 'atom' as never, title: 'B', compiled_truth: 'y', timeline: '',
+      frontmatter: { ...atomFm, source_path: '/home/u/transcripts/2026-10-12.jsonl' },
+    });
+    expect(await flagged()).toBe('');
+  });
+
+  test('origin keys count only on extract_atoms atoms', async () => {
+    await atoms.putPage('wiki/derived/pattern-with-source-slug', {
+      type: 'note', title: 'P', compiled_truth: 'x', timeline: '',
+      frontmatter: { dream_generated: true, extracted_by: 'extract_atoms-v0.41.2.1', source_slug: 'wiki/source-page' },
+    });
+    await atoms.putPage('atoms/2026-10-12/lookalike-extractor', {
+      type: 'atom' as never, title: 'L', compiled_truth: 'x', timeline: '',
+      frontmatter: { ...atomFm, extracted_by: 'extractXatoms-v1', source_slug: 'wiki/source-page' },
+    });
+    await atoms.putPage('atoms/2026-10-12/no-origin', {
+      type: 'atom' as never, title: 'N', compiled_truth: 'x', timeline: '', frontmatter: atomFm,
+    });
+    const message = await flagged();
+    expect(message).toContain('3 synthesized page(s)');
+    expect(message).toContain('atoms/2026-10-12/lookalike-extractor');
+    expect(message).toContain('atoms/2026-10-12/no-origin');
+    expect(message).toContain('wiki/derived/pattern-with-source-slug');
+    expect(message).not.toContain('a-page-atom');
+    expect(message).not.toContain('a-transcript-atom');
   });
 });

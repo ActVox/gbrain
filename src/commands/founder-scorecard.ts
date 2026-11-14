@@ -207,6 +207,7 @@ Examples:
 `;
 
 function parseArgs(args: string[]): RunOpts | { help: true } | { error: string } {
+  if (args[0] === '--help' || args[0] === '-h') return { help: true };
   if (args[0] !== 'scorecard') {
     return { error: `Unknown founder subcommand: ${args[0] ?? '(none)'}. Did you mean "founder scorecard"?` };
   }
@@ -277,6 +278,7 @@ export async function runFounder(engine: BrainEngine, args: string[]): Promise<v
     const points: TrajectoryPoint[] = trajWire.points.map(p => ({
       fact_id: p.fact_id,
       valid_from: new Date(p.valid_from),
+      valid_until: null,
       metric: p.metric,
       value: p.value,
       unit: p.unit,

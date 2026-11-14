@@ -84,7 +84,11 @@ skill — read its SKILL.md body in full and follow the workflow described there
 useful for scanning every skill and its trigger phrases in one place, and it
 carries the disambiguation rules for overlapping matches. If the two disagree,
 frontmatter wins. (There is no machine-managed block inside `RESOLVER.md` or
-`AGENTS.md`; that pattern was retired.)
+`AGENTS.md`; that pattern was retired.) `RESOLVER.md` ships in the gbrain
+install's `skills/` directory; `gbrain skillpack scaffold` does not copy it,
+and the Claude Code / Codex plugin lanes do not ship it. Where it is absent,
+routing rests on each skill's frontmatter alone (`triggers:`, `description`,
+and the `when_to_use` the plugin lanes add from the triggers).
 
 ## The memory loop
 
@@ -100,7 +104,9 @@ Start with keyless recall and explicit remembering:
 
 Choose verification that can read the intended visibility: trusted local CLI
 can recall private facts; MCP (including stdio) and a thin CLI connected to MCP
-currently recall and withdraw world-visible facts only. Preserve the user's intended privacy.
+recall and withdraw world-visible facts only, except a credential bound to the brain owner, which also recalls
+private facts. Preserve the user's intended privacy; new pages carry no privacy label by default
+(`skills/conventions/page-privacy.md`).
 A committed remote private-write receipt confirms storage, not private recall; explain
 when trusted local readback is unavailable rather than claiming verification or
 widening access. Use only harmless synthetic world-visible facts for an
@@ -139,7 +145,10 @@ gbrain skillpack reference --all
 ```
 
 That sweeps every bundled skill and reports per-skill `identical / differs /
-missing` counts. For each `differs`:
+missing` counts. Skills the user never edited take gbrain's version whole with
+`gbrain skillpack reference --all --update-untouched` (`--dry-run` previews;
+edited or pinned skills are skipped; `gbrain skillpack restore <id>` undoes it).
+For each remaining `differs`:
 
 ```bash
 gbrain skillpack reference <slug>
@@ -207,6 +216,6 @@ This file (`_AGENT_README.md`) is the routing contract — keep it short.
   lookup chain — an unexplained exemption is a conformance failure.
 - **`priority:` is NOT part of the routing contract.** Nothing in the routing
   path consumes it — matching is substring-over-`triggers:` (see "Routing"
-  above), with `RESOLVER.md` disambiguation for overlaps. A `priority:` key is
+  above), with `RESOLVER.md` disambiguation for overlaps where it ships. A `priority:` key is
   inert; don't add one expecting it to reorder matches. Encode precedence in
   trigger specificity and the resolver's disambiguation rules instead.

@@ -20,6 +20,7 @@ import { runExtract } from '../src/commands/extract.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from '../src/core/link-extraction.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-lifecycle-'));
 const engines: BrainEngine[] = [];
@@ -150,9 +151,14 @@ test('a file that replaces its vanished origin at the same slug takes over the p
 
 test('two new files whose paths differ only by case are refused rather than guessed', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   for (const engine of engines) {
-    const f = await fixture(engine, { 'notes/Case.md': note('Upper', 'Upper case spelling.'), 'notes/case.md': note('Lower', 'Lower case spelling.') });
-    await expect(performManagedSync(engine, { sourceId: f.id, noPull: true })).rejects.toMatchObject({ code: 'page_identity_changed' });
+    const f = await fixture(engine, { 'notes/Case.md': note('Upper', 'Upper case spelling.'), 'notes/case.md': note('Lower', 'Lower case spelling.'), 'notes/other.md': note('Other', 'An unrelated note.') });
+    // GBRA-130 B-3 (was: the sync refused page_identity_changed): each spelling is held alone, nothing is imported at either
+    // spelling or their slug, and the rest of the source imports.
+    const result = await performManagedSync(engine, { sourceId: f.id, noPull: true });
+    expect(result.held?.map(hold => [hold.path, hold.code, hold.reason]).sort()).toEqual([['notes/Case.md', 'page_identity_changed', 'spelling'], ['notes/case.md', 'page_identity_changed', 'spelling']]);
     expect(await engine.getPage('notes/case', { sourceId: f.id })).toBeNull();
+    expect(await engine.getPage('notes/other', { sourceId: f.id })).not.toBeNull();
+    expect(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE source_id=$1 AND intent->>'path' IN ('notes/Case.md','notes/case.md')", [f.id])).toEqual([]);
   }
 }), 180_000);
 
@@ -288,7 +294,7 @@ test('a managed brain prunes timeline rows an earlier page version left behind, 
     expect(await summaries()).toEqual(['Joined Acme Example']);
     // A row left over from before timeline reconciliation: an earlier version produced it, the current text does not.
     await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.addTimelineEntry('people/bea-example',
-      { ...left, detail: '' }, { sourceId: f.id })));
+      { ...left, detail: '' }, { sourceId: f.id }), TEST_WRITE_ATTRIBUTION));
     expect(await summaries()).toEqual(['Joined Acme Example', 'Left Acme Example']);
     expect((await timelineHistoryCheck(engine, f.id)).details).toMatchObject({ materializable_rows: 0 });
     const printed: string[] = [];

@@ -34,7 +34,7 @@ import {
   boundWebsearchQuery,
   buildOrFallbackWebsearchQuery,
 } from '../../src/core/search/sql-ranking.ts';
-import { configureGateway } from '../../src/core/ai/gateway.ts';
+import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
@@ -55,12 +55,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
-  // Restore the preload-equivalent gateway for sibling files in this shard.
-  configureGateway({
-    embedding_model: 'openai:text-embedding-3-large',
-    embedding_dimensions: DIM,
-    env: { ...process.env },
-  });
+  // R5: restore the preload baseline for sibling files in this shard; resetGateway()
+  // re-applies the registered baseline factory, so it cannot drift from it.
+  resetGateway();
 });
 
 beforeEach(async () => {
@@ -155,6 +152,28 @@ describe('searchTitles — D1 title candidate arm', () => {
     const tlHits = await engine.searchTitles('Cobalt Meridian Atlas', { limit: 5 });
     const tlHit = tlHits.find(r => r.slug === 'notes/timeline-only')!;
     expect(tlHit.chunk_index).toBe(2); // lowest index when no compiled_truth chunk
+  });
+
+  test('a local OR re-run matches the title only: a timeline word is not a relaxed title hit (#7135)', async () => {
+    await engine.putPage('people/dated-entity', {
+      type: 'person',
+      title: 'Cobalt Meridian Atlas',
+      compiled_truth: 'unrelated body',
+      timeline: '- 2026-10-07: zircon quarry visit',
+    });
+    await installFixtureChunks(engine, 'people/dated-entity', [
+      { chunk_index: 0, chunk_text: 'unrelated body', chunk_source: 'compiled_truth' },
+    ]);
+    const inVector = await (engine as any).db.query(
+      `SELECT search_vector @@ to_tsquery('english', 'zircon') AS hit FROM pages WHERE slug = 'people/dated-entity'`,
+    );
+    expect(inVector.rows[0].hit).toBe(true);
+
+    const slugs = async (q: string) => (await engine.searchTitles(q, { limit: 10 })).map(r => r.slug);
+    expect(await slugs('zircon nebulith')).not.toContain('people/dated-entity');
+    expect(await slugs('quarry nebulith')).not.toContain('people/dated-entity');
+    expect(await slugs('Cobalt Meridian')).toContain('people/dated-entity');
+    expect(await slugs('Cobalt zircon')).toContain('people/dated-entity');
   });
 
   test('respects soft-delete visibility and source scoping', async () => {
@@ -302,6 +321,10 @@ describe('buildOrFallbackWebsearchQuery — pure', () => {
   test('interior hyphens are not operators — still relaxed', () => {
     expect(buildOrFallbackWebsearchQuery('alpha-beta gamma')).toBe('alpha OR beta OR gamma');
   });
+  test('drops repeated words: a repeat adds no match and only multiplies ts_rank work (#7135)', () => {
+    expect(buildOrFallbackWebsearchQuery('idle tab idle reaper')).toBe('idle OR tab OR reaper');
+    expect(buildOrFallbackWebsearchQuery('Idle idle IDLE')).toBeNull();
+  });
   test('drops literal OR/AND words so they cannot re-parse as operators', () => {
     expect(buildOrFallbackWebsearchQuery('alpha or beta')).toBe('alpha OR beta');
     expect(buildOrFallbackWebsearchQuery('alpha AND beta')).toBe('alpha OR beta');
@@ -365,5 +388,52 @@ describe('hybridSearch wiring — title arm reaches the fused result set', () =>
     expect((await engine.searchKeyword(q, { limit: 5 })).length).toBe(0);
     const results = await hybridSearch(engine, q, { limit: 5 });
     expect(results.map(r => r.slug)).toContain('projects/chronomancer');
+  });
+});
+
+describe('hybridSearch wiring — search.qualified_aliases and search.title_qualified (keyless, repo-less)', () => {
+  async function seed(): Promise<void> {
+    await engine.putPage('projects/codename-falcon', { type: 'project', title: 'Codename Falcon', compiled_truth: 'Quarterly figures.' });
+    await engine.setPageAliases('projects/codename-falcon', 'default', ['acme widget project']);
+    await engine.putPage('people/alice-example', { type: 'person', title: 'Alice Example', compiled_truth: 'Leads the widget team at acme. Owns the roadmap and the budget.' });
+    await engine.putPage('notes/status', { type: 'note', title: 'Status', compiled_truth: 'Widget team status at acme with alice example mentioned, roadmap budget roadmap.' });
+    for (const slug of ['projects/codename-falcon', 'people/alice-example', 'notes/status']) {
+      const page = await engine.getPage(slug);
+      await installFixtureChunks(engine, slug, [{ chunk_index: 0, chunk_text: page!.compiled_truth, chunk_source: 'compiled_truth' }]);
+    }
+  }
+  const off = async () => {
+    await engine.setConfig('search.qualified_aliases', 'false');
+    await engine.setConfig('search.title_qualified', 'false');
+  };
+
+  test('qualified_aliases: off leaves the alias page out; on injects it first, with evidence short of exists', async () => {
+    await seed();
+    const q = 'status of the acme widget project today';
+    try {
+      expect((await hybridSearch(engine, q, { limit: 5 })).map(r => r.slug)).not.toContain('projects/codename-falcon');
+      await engine.setConfig('search.qualified_aliases', 'true');
+      const on = await hybridSearch(engine, q, { limit: 5 });
+      expect(on[0].slug).toBe('projects/codename-falcon');
+      expect(on[0].qualified_alias_hit).toBe(true);
+      expect(on[0].alias_hit).toBeUndefined();
+      expect(on[0].evidence).not.toBe('alias_hit');
+      expect(on[0].create_safety).not.toBe('exists');
+    } finally { await off(); }
+  });
+
+  test('title_qualified: a person title inside the query gets title_mention_boost only when on, never an exact-title evidence', async () => {
+    await seed();
+    const q = 'acme widget team lead alice example roadmap budget';
+    try {
+      const before = (await hybridSearch(engine, q, { limit: 5 })).find(r => r.slug === 'people/alice-example');
+      expect(before?.title_mention_boost).toBeUndefined();
+      await engine.setConfig('search.title_qualified', 'true');
+      const after = (await hybridSearch(engine, q, { limit: 5 })).find(r => r.slug === 'people/alice-example');
+      expect(after?.title_mention_boost).toBe(1.25);
+      expect(after?.title_match_boost).toBeUndefined();
+      expect(after?.evidence).not.toBe('exact_title_match');
+      expect(after?.create_safety).not.toBe('exists');
+    } finally { await off(); }
   });
 });

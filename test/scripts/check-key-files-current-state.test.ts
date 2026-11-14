@@ -94,6 +94,16 @@ describe("check-key-files-current-state.sh", () => {
     expect(run({ GBRAIN_CLAUDE_MD_MAX_BYTES: "10000" }).status).toBe(0);
   });
 
+  it("FAILS when docs/TESTING.md exceeds its ratchet cap, naming file, size, cap and the trimming rule", () => {
+    seedClean();
+    writeDoc("docs/TESTING.md", "# Testing\n\n" + "x".repeat(5_000) + "\n");
+    const over = run({ GBRAIN_TESTING_MD_MAX_BYTES: "1000" });
+    expect(over.status).toBe(1);
+    expect(over.stderr).toContain("docs/TESTING.md is 5012 bytes, over the 1000 cap");
+    expect(over.stderr).toContain("move subsystem detail next to its code");
+    expect(run({ GBRAIN_TESTING_MD_MAX_BYTES: "10000" }).status).toBe(0);
+  });
+
   it("soft-warns (non-fatal) on prose history markers", () => {
     seedClean();
     writeDoc(
@@ -141,8 +151,15 @@ describe("check-key-files-current-state.sh", () => {
     expect(result.stderr).toContain("src/core/example.ts");
   });
 
+  it("leaves README.md uncapped", () => {
+    seedClean();
+    writeDoc("README.md", "x".repeat(60000));
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("README.md is");
+  });
+
   it.each([
-    ["README.md", 45000],
     ["docs/architecture/KEY_FILES.md", 10000],
     ["docs/architecture/key-files/engines.md", 60000],
   ] as const)("bounds %s without rejecting the exact cap", (path, cap) => {

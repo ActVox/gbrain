@@ -38,7 +38,7 @@ Managed Markdown sync runs on the registered filesystem owner with
 commit, source incarnation, owner epoch, topology generation and page
 identities/revisions. Attached repositories import committed Git content;
 `--working-tree` opts into uncommitted files and detached repositories include
-them automatically. Source-relative exclusions retain their existing meaning.
+them automatically. Source-relative exclusions apply as they do in classic sync.
 Each file's bytes and fingerprint are frozen before its journal request is
 admitted. Import leaves the original bytes intact unless canonical sanitization
 or retained tags require an explicit recoverable file publication.
@@ -52,8 +52,8 @@ after 25 foreground commits or one second of continuous foreground service, sync
 earns a bounded batch even while new interactive requests continue arriving. Interruption or a pending owner leaves the cursor and source
 checkpoint intact. A later invocation resumes the frozen target; a newer Git
 HEAD is a separate subsequent sync. A revision/file conflict blocks the cursor.
-After inspecting the conflict, `--retry-failed` can start a fresh discovery once
-all earlier admitted requests are terminal. `--skip-failed` cannot advance a
+After inspecting the conflict, the next plain sync can start a fresh discovery once
+all earlier admitted requests are terminal (`--retry-failed` is a deprecated alias of it). `--skip-failed` cannot advance a
 managed checkpoint past failed receipts.
 
 When PGLite already has a resident owner, the CLI authenticates before opening
@@ -66,9 +66,23 @@ the same options resumes the remaining durable cursor.
 The source checkpoint commits only after the entire selected cursor is exhausted
 and every admitted page has a committed receipt. It takes the source-exclusive
 guard before authentication/request/page locks and checks the original anchor,
-source incarnation, topology and owner epoch. Code/image importers, ignored-file
-walks and Git pull/rebase remain explicitly refused in managed mode until their
-own prepared publication and recovery paths exist. Remote sync retains the
+source incarnation, topology and owner epoch. Code/image importers and ignored-file
+walks remain explicitly refused in managed mode until their own prepared
+publication and recovery paths exist. Git pull/rebase stays refused inside sync
+and cycles; the one sanctioned Git writer is `gbrain sources refresh <source>`
+(`src/core/persistence/worktree-refresh.ts`). It refuses new checkout writes for
+every source bound to the worktree at admission (`worktree_refreshing`), waits
+until queued requests and Git effects on the worktree finish, then, holding the
+worktree native lock while claims stop (`fenced`), verifies HEAD and runs
+`git merge --ff-only`. Pages and the source checkpoint advance only through the
+ordinary managed `--no-pull` sync that follows, so every imported page is a
+journaled request. A durable `persistence_worktree_refreshes` row lets a
+restarted owner converge an interrupted refresh without adopting an unverified
+HEAD. With `sources.refresh_publish_diverged` on (unset means on when the
+worktree's Git durability is on; `false` turns it off), a diverged refresh runs the
+keep-checkout publish with a secret scan of the local commits, which
+pushes HEAD merged with the upstream in memory and never moves the checkout or
+writes the database, then fast-forwards as above. Remote sync retains the
 original `submit_job` principal, admin/source/operation ceiling and normalized
 payload; runtime options cannot expand that grant and current revocation is
 checked before publication.
@@ -81,7 +95,8 @@ ancestors are resolved through symlinks, including a not-yet-created target.
 Records are refreshed when an engine connects and remain usable before a second
 process opens local PGLite. Stale records conservatively refuse writes until a
 verified drain and explicit administration cleanup. A shared 0600 refusal marker
-inside git metadata (or `.gbrain-managed` for non-git roots) also protects supported
+inside git metadata (or `.gbrain-managed` for a root no checkout tracks, such as a
+connector clone a dotfiles home only encloses) also protects supported
 commands using another home. Marker existence never grants publication authority.
 
 The native worktree lock and database ownership rows grant authority. Registry

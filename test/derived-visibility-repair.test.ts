@@ -276,7 +276,8 @@ describe('#5525 tighten-only visibility backfill', () => {
         const scope = await resolveRepairScope(engine);
         const preview = await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: false });
         expect(preview.affected).toBe(4);
-        expect(preview.residuals).toEqual({ atoms_origin_gone_to_private: 1, concepts_without_lineage: 1 });
+        expect(preview.residuals).toEqual({ atoms_origin_gone_to_private: 1, concepts_without_lineage: 1, events_origin_gone: 0,
+          world_facts_remotely_readable: 0 });
         expect(await visibilityOf(engine, 'atoms/unstamped-world')).toBeNull();
         const applied = await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: true });
         expect(applied).toMatchObject({ applied: 4, complete: true });
@@ -292,6 +293,28 @@ describe('#5525 tighten-only visibility backfill', () => {
       expect(await remoteSees(engine, 'atoms/leaked-transcript')).toBe(false);
       expect(await remoteSees(engine, 'atoms/leaked-gone-origin')).toBe(false);
       expect(await remoteSees(engine, 'atoms/unstamped-world')).toBe(true);
+      expect((await derivedVisibilityCheck(engine)).status).toBe('ok');
+    }
+  }, 120_000);
+
+  test('an unstamped synthesized concept with no recoverable lineage is stamped private, so the doctor warning clears (#8848)', async () => {
+    for (const engine of engines) {
+      await reset(engine);
+      await seed(engine, 'concepts/unstamped-orphan', 'concept', { synthesized_by: 'synthesize_concepts-v0.41' });
+      await seed(engine, 'concepts/world-orphan', 'concept', { synthesized_by: 'synthesize_concepts-v0.41', visibility: 'world' });
+      expect(await remoteSees(engine, 'concepts/unstamped-orphan')).toBe(false);
+      expect(await derivedVisibilityCheck(engine)).toMatchObject({ status: 'warn', details: { unstamped_concepts: 1 } });
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        const scope = await resolveRepairScope(engine);
+        const preview = await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: false });
+        expect(preview.affected).toBe(1);
+        expect(preview.residuals).toMatchObject({ concepts_without_lineage: 2 });
+        expect(await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: true })).toMatchObject({ applied: 1, complete: true });
+        expect(await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: true })).toMatchObject({ affected: 0, applied: 0, complete: true });
+      });
+      expect(await visibilityOf(engine, 'concepts/unstamped-orphan')).toBe('private');
+      expect(await visibilityOf(engine, 'concepts/world-orphan')).toBe('world');
+      expect(await remoteSees(engine, 'concepts/unstamped-orphan')).toBe(false);
       expect((await derivedVisibilityCheck(engine)).status).toBe('ok');
     }
   }, 120_000);

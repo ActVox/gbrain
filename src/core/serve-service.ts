@@ -50,6 +50,26 @@ export function serveErrPath(dir: string = serveDir()): string { return join(dir
 export function launchdPlistPath(home: string): string { return join(home, 'Library', 'LaunchAgents', `${SERVE_LAUNCHD_LABEL}.plist`); }
 export function systemdUnitPath(home: string): string { return join(home, '.config', 'systemd', 'user', SERVE_SYSTEMD_UNIT); }
 
+/** The installed serve service's restart command on this platform; null when no serve service is installed. */
+export function serveServiceRestartArgv(service: { platform: string; home: string; uid: number }): string[] | null {
+  if (service.platform === 'darwin' && existsSync(launchdPlistPath(service.home))) return ['launchctl', 'kickstart', '-k', `gui/${service.uid}/${SERVE_LAUNCHD_LABEL}`];
+  if (service.platform === 'linux' && existsSync(systemdUnitPath(service.home))) return ['systemctl', '--user', 'restart', SERVE_SYSTEMD_UNIT];
+  return null;
+}
+
+/**
+ * True when the installed serve service starts `wrapper` (this brain's `wrapperPath()` by default). The launchd
+ * label and the systemd unit are one per OS user, so on a host with several brains the service may start another
+ * GBRAIN_HOME's wrapper; false then, and for a missing or unreadable service file.
+ */
+export function serveServiceRunsWrapper(platform: string, home: string, wrapper: string = wrapperPath()): boolean {
+  try {
+    if (platform === 'darwin') return readFileSync(launchdPlistPath(home), 'utf8').includes(`<string>${escapeXml(wrapper)}</string>`);
+    if (platform === 'linux') return readFileSync(systemdUnitPath(home), 'utf8').split('\n').includes(`ExecStart=${systemdArg(wrapper)}`);
+  } catch { /* no readable service file: not this brain's */ }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Target detection (pure — probe results are passed in)
 // ---------------------------------------------------------------------------
@@ -146,13 +166,16 @@ export interface ServeCommandParams {
   port: number;
   publicUrl: string;
   surface?: 'verbs' | 'starter' | 'full';
+  /** `serve --advertise`: what tools/list shows clients without their own surface. */
+  advertise?: 'verbs' | 'starter' | 'full' | null;
   enableDcr?: boolean;
 }
 
-/** `serve --http --port N --public-url URL [--surface X] [--enable-dcr]` as argv. */
+/** `serve --http --port N --public-url URL [--surface X] [--advertise Y] [--enable-dcr]` as argv. */
 export function serveCommandArgv(p: ServeCommandParams): string[] {
   const argv = ['serve', '--http', '--port', String(p.port), '--public-url', p.publicUrl];
   if (p.surface) argv.push('--surface', p.surface);
+  if (p.advertise) argv.push('--advertise', p.advertise);
   if (p.enableDcr) argv.push('--enable-dcr');
   return argv;
 }
@@ -215,7 +238,7 @@ exec "$_gbrain"${programTail ? ` ${programTail}` : ''} ${serveArgs}
 `;
 }
 
-function escapeXml(s: string): string {
+export function escapeXml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
@@ -244,7 +267,7 @@ export function renderServeLaunchdPlist(p: LaunchdParams): string {
 export interface SystemdParams { wrapperPath: string; logPath: string; errPath: string }
 
 /** systemd specifier escaping (`%h` etc. expand in every path-like setting): `%` → `%%`. */
-function systemdSpecifierEscape(s: string): string {
+export function systemdSpecifierEscape(s: string): string {
   return s.replace(/%/g, '%%');
 }
 
@@ -252,7 +275,7 @@ function systemdSpecifierEscape(s: string): string {
  * ExecStart quoting: `%` → `%%` (specifiers), `$` → `$$` (environment
  * expansion), then double-quote when the path carries whitespace or quotes.
  */
-function systemdArg(s: string): string {
+export function systemdArg(s: string): string {
   const escaped = systemdSpecifierEscape(s).replace(/\$/g, '$$$$');
   return /[\s"'\\]/.test(escaped) ? `"${escaped.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : escaped;
 }
@@ -548,6 +571,8 @@ export interface ExposeReceipt {
   admin_url: string;
   mode: 'tailnet' | 'funnel';
   surface: 'verbs' | 'starter' | 'full';
+  /** The serve's `--advertise`; absent on exposures written before the verbs listing default (they list everything). */
+  advertise?: 'verbs' | 'starter' | 'full';
   enable_dcr: boolean;
   tailscale: { binary: string | null; dns_name: string | null; tailscale_version: string | null };
   service: { target: ServiceTarget; unit_path: string | null; plist_path: string | null; wrapper_path: string; state: ServiceState | 'skipped' };

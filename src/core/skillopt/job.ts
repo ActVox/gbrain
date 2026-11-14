@@ -22,13 +22,14 @@ import {
 } from './models-plan.ts';
 import { runSkillOpt } from './orchestrator.ts';
 import { clampRemoteReflectMaxTokens } from './output-cap.ts';
+import { noteSkillOptLoopDeprecated } from './loop-deprecation.ts';
 import type { SkillOptOpts } from './types.ts';
 
 export type SkillOptJobInput = Pick<SkillOptOpts,
   | 'skillsDir' | 'skillName' | 'benchmarkPath' | 'epochs' | 'batchSize' | 'lr' | 'lrSchedule' | 'split'
-  | 'reflectMaxTokens' | 'mode' | 'dryRun' | 'noMutate' | 'allowMutateBundled' | 'heldOutPath'
-  | 'bootstrapReviewed' | 'maxCostUsd' | 'maxRuntimeMin' | 'force'
-> & { models: SkillOptModels; modelFlags: SkillOptModelFlags; modelsStrict: boolean };
+  | 'reflectMaxTokens' | 'mode' | 'optimizerMode' | 'dryRun' | 'noMutate' | 'allowMutateBundled' | 'heldOutPath'
+  | 'bootstrapReviewed' | 'maxCostUsd' | 'maxCostSource' | 'maxRuntimeMin' | 'force'
+> & { benchmarkPath: string; models: SkillOptModels; modelFlags: SkillOptModelFlags; modelsStrict: boolean };
 
 export function buildSkillOptJobData(input: SkillOptJobInput): Record<string, unknown> {
   const flags = input.modelFlags;
@@ -57,12 +58,14 @@ export function buildSkillOptJobData(input: SkillOptJobInput): Record<string, un
     ...(input.modelsStrict ? { models_strict: true } : {}),
     ...(input.reflectMaxTokens !== undefined ? { reflect_max_tokens: input.reflectMaxTokens } : {}),
     mode: input.mode,
+    optimizer_mode: input.optimizerMode,
     dry_run: input.dryRun,
     no_mutate: input.noMutate,
     allow_mutate_bundled: input.allowMutateBundled,
     ...(input.heldOutPath ? { held_out_path: input.heldOutPath } : {}),
     bootstrap_reviewed: input.bootstrapReviewed,
     max_cost_usd: input.maxCostUsd,
+    ...(input.maxCostSource ? { max_cost_source: input.maxCostSource } : {}),
     max_runtime_min: input.maxRuntimeMin,
     force: input.force,
   };
@@ -97,6 +100,9 @@ export async function runSkillOptJob(engine: BrainEngine, rawData: unknown): Pro
     throw new Error(`skillopt handler: missing required job.data fields (skills_dir, skill_name, benchmark_path)`);
   }
   const models = await resolveJobModels(engine, data);
+  // A job queued before one-shot became the default carries no mode: it was queued for the loop.
+  const optimizerMode = data.optimizer_mode === 'one-shot-rewrite' ? 'one-shot-rewrite' : 'reflect';
+  noteSkillOptLoopDeprecated(optimizerMode);
   const result = await runSkillOpt({
     engine,
     skillName,
@@ -111,6 +117,7 @@ export async function runSkillOptJob(engine: BrainEngine, rawData: unknown): Pro
     modelsStrict: data.models_strict === true,
     reflectMaxTokens: clampRemoteReflectMaxTokens(data.reflect_max_tokens),
     mode: (data.mode as 'patch' | 'rewrite') ?? 'patch',
+    optimizerMode,
     dryRun: Boolean(data.dry_run),
     noMutate: Boolean(data.no_mutate),
     allowMutateBundled: Boolean(data.allow_mutate_bundled),
@@ -118,6 +125,7 @@ export async function runSkillOptJob(engine: BrainEngine, rawData: unknown): Pro
     ...(data.held_out_path ? { heldOutPath: String(data.held_out_path) } : {}),
     json: true,
     maxCostUsd: Number(data.max_cost_usd ?? 5.0),
+    maxCostSource: data.max_cost_source === 'default' ? 'default' : 'user',
     maxRuntimeMin: Number(data.max_runtime_min ?? 30),
     force: Boolean(data.force),
   });

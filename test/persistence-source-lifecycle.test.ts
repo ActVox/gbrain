@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { isPhysicalRootMetadata } from '../src/core/persistence/physical-root.ts';
 import { tmpdir } from 'node:os';
@@ -15,7 +15,8 @@ import { admitWrite, claimNextWrite } from '../src/core/persistence/journal.ts';
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { runManagedSourceClone } from '../src/core/persistence/topology-clone.ts';
-import { addSource, removeSource } from '../src/core/sources-ops.ts';
+import { addSource, lfsDownloadsOff, removeSource } from '../src/core/sources-ops.ts';
+import { managedSourceAddInput } from '../src/core/persistence/managed-sources.ts';
 import { softDeleteSource, restoreSource } from '../src/core/destructive-guard.ts';
 import { topologyDirectoryBytes } from '../src/core/persistence/topology-filesystem.ts';
 import { topologyPrincipal } from '../src/core/persistence/topology-locks.ts';
@@ -86,6 +87,32 @@ test('running publication refuses lifecycle before metadata or generation change
   expect((await getWorktreeBinding(engine,source))!.topology_generation).toBe(binding.topology_generation);
   expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(false);
 }),60_000);
+
+test('set-path at the bound checkout repairs a stale sources.local_path instead of no-oping (#5569)',()=>fixture(async(home,source,root)=>{
+  const stale=join(home,'old-location');
+  await engine.transaction(async tx=>{
+    await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");
+    await tx.executeRaw('UPDATE sources SET local_path=$2 WHERE id=$1',[source,stale]);
+  });
+  const result=await runManagedSourceLifecycle(engine,{operation:'rebind',sourceId:source,path:root}) as {noop?:boolean};
+  expect(result.noop).toBeUndefined();
+  const [row]=await engine.executeRaw<{local_path:string}>('SELECT local_path FROM sources WHERE id=$1',[source]);
+  expect(row.local_path).toBe(realpathSync(root));
+  const again=await runManagedSourceLifecycle(engine,{operation:'rebind',sourceId:source,path:root}) as {noop?:boolean};
+  expect(again.noop).toBe(true);
+}));
+
+test('a local_path that is an alias (symlink) of the bound root is current: claim and rebind through it are no-ops',()=>fixture(async(home,source,root)=>{
+  const alias=join(home,'alias-root');symlinkSync(realpathSync(root),alias);
+  await engine.transaction(async tx=>{
+    await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");
+    await tx.executeRaw('UPDATE sources SET local_path=$2 WHERE id=$1',[source,alias]);
+  });
+  for(const operation of ['claim','rebind'] as const){
+    expect(await runManagedSourceLifecycle(engine,{operation,sourceId:source,path:alias})).toMatchObject({state:'committed',noop:true});
+    expect(await engine.executeRaw('SELECT local_path FROM sources WHERE id=$1',[source])).toEqual([{local_path:alias}]);
+  }
+}));
 
 test('rebind requires exact manifest including deletion and old path remains fenced',()=>fixture(async(home,source,root)=>{
   const candidate=join(home,'candidate');cpSync(root,candidate,{recursive:true,filter:path=>!isPhysicalRootMetadata(basename(path))});
@@ -339,6 +366,34 @@ test('remote URL changes during clone preparation refuse publication',()=>fixtur
   expect(readFileSync(join(root,'example.md'),'utf8')).toContain('Canonical');
   const counters=await engine.executeRaw<{key:string;outstanding_count:string;intent_bytes:string;recovery_bytes:string}>('SELECT key,outstanding_count::text,intent_bytes::text,recovery_bytes::text FROM persistence_counters');
   for(const counter of counters){expect(counter.outstanding_count).toBe('0');expect(counter.intent_bytes).toBe('0');expect(counter.recovery_bytes).toBe('0');}
+}),60_000);
+
+
+test('a reclone of a source a remote caller added by URL clones with git-lfs downloads and hooks off',()=>fixture(async(_home,source,root)=>{
+  const seen:Array<{skipLfs?:boolean}|undefined>=[];
+  for(const addedByRemote of [true,false]){
+    await engine.executeRaw('UPDATE sources SET config=$2::text::jsonb WHERE id=$1',[source,JSON.stringify({managed_clone:true,remote_url:'https://example.invalid/brain.git',...(addedByRemote?{added_by_remote_caller:true}:{})})]);
+    const input={operation:'reclone' as const,sourceId:source,requestId:randomUUID()};
+    const result=await runManagedSourceClone(engine,input,await topologyPrincipal(engine),input.requestId,{...input,requestId:undefined,dryRun:undefined},{
+      clone:async(_url,stage,_budget,options)=>{seen.push(options);cpSync(root,stage,{recursive:true,filter:path=>!isPhysicalRootMetadata(basename(path))});},
+    });
+    expect(result).toMatchObject({state:'committed'});
+  }
+  expect(seen.map(options=>options?.skipLfs===true)).toEqual([true,false]);
+}),60_000);
+
+test('a managed add by a remote caller clones with git-lfs downloads and hooks off and records it for later reclones',()=>fixture(async(_home,_source,root)=>{
+  const seen:Array<{skipLfs?:boolean}|undefined>=[];
+  for(const [id,addedByRemoteCaller] of [['remote-a',true],['local-a',false]] as const){
+    const input={...managedSourceAddInput({id,remoteUrl:'https://example.invalid/brain.git',addedByRemoteCaller}),requestId:randomUUID()};
+    const result=await runManagedSourceClone(engine,input,await topologyPrincipal(engine),input.requestId,{...input,requestId:undefined,dryRun:undefined},{
+      clone:async(_url,stage,_budget,options)=>{seen.push(options);cpSync(root,stage,{recursive:true,filter:path=>!isPhysicalRootMetadata(basename(path))});},
+    });
+    expect(result).toMatchObject({state:'committed'});
+    const [row]=await engine.executeRaw<{config:unknown}>('SELECT config FROM sources WHERE id=$1',[id]);
+    expect(lfsDownloadsOff(row!.config)).toBe(addedByRemoteCaller);
+  }
+  expect(seen.map(options=>options?.skipLfs===true)).toEqual([true,false]);
 }),60_000);
 
 });

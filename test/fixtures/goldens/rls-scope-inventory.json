@@ -25,12 +25,12 @@
       },
       "addLinksBatch#default": {
         "flagOffLanes": [
-          "pool"
+          "tx"
         ],
-        "flagOffOpensTransaction": false,
+        "flagOffOpensTransaction": true,
         "flagOn": "unscoped",
         "flagOnLanes": [
-          "pool"
+          "tx"
         ],
         "flagOnScopes": []
       },
@@ -159,6 +159,32 @@
           "src-a"
         ]
       },
+      "countPagesBy#grouped+since+remote": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
+      "countPagesBy#totals": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
+        ]
+      },
       "countStaleChunks#default": {
         "flagOffLanes": [
           "pool"
@@ -195,6 +221,19 @@
         "flagOn": "scoped",
         "flagOnLanes": [
           "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
+      "countStaleFrontmatterKeyPages#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
           "tx"
         ],
         "flagOnScopes": [
@@ -346,12 +385,12 @@
       },
       "deletePages#default": {
         "flagOffLanes": [
-          "pool"
+          "tx"
         ],
-        "flagOffOpensTransaction": false,
+        "flagOffOpensTransaction": true,
         "flagOn": "unscoped",
         "flagOnLanes": [
-          "pool"
+          "tx"
         ],
         "flagOnScopes": []
       },
@@ -500,6 +539,19 @@
           "src-a"
         ]
       },
+      "findDuplicatePages#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
       "findOntologyConflicts#default": {
         "flagOffLanes": [
           "pool"
@@ -565,6 +617,32 @@
           "pool"
         ],
         "flagOnScopes": []
+      },
+      "findPages#glob+types+sourceIds+remote": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a,src-b"
+        ]
+      },
+      "findPages#name": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
+        ]
       },
       "findTrajectory#default": {
         "flagOffLanes": [
@@ -721,6 +799,17 @@
         ],
         "flagOnScopes": []
       },
+      "getCalleesOf#chunkId": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
       "getCalleesOf#default": {
         "flagOffLanes": [
           "pool"
@@ -733,6 +822,17 @@
         "flagOnScopes": []
       },
       "getCalleesOf#sourceId": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "getCallersOf#chunkId": {
         "flagOffLanes": [
           "pool"
         ],
@@ -764,6 +864,34 @@
           "pool"
         ],
         "flagOnScopes": []
+      },
+      "getChunkPage#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "default"
+        ]
+      },
+      "getChunkPage#sourceIds+excludePrivate": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a,src-b"
+        ]
       },
       "getChunkWindows#default": {
         "flagOffLanes": [
@@ -998,9 +1126,10 @@
       },
       "getHealth#default": {
         "flagOffLanes": [
-          "pool"
+          "pool",
+          "tx"
         ],
-        "flagOffOpensTransaction": false,
+        "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
           "pool",
@@ -1466,6 +1595,28 @@
         ],
         "flagOnScopes": []
       },
+      "getVersions#limit": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "getVersions#metadataOnly": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
       "getVersions#sourceId": {
         "flagOffLanes": [
           "pool"
@@ -1701,6 +1852,34 @@
           "src-a"
         ]
       },
+      "listEmbeddingStateRows#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
+        ]
+      },
+      "listEmbeddingStateRows#sourceIds": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
       "listEnrichCandidates#default": {
         "flagOffLanes": [
           "pool"
@@ -1768,6 +1947,39 @@
         "flagOnScopes": []
       },
       "listFactsBySession#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "listFactsKeyset#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "listFactsKeyset#keyset": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "listFactsKeyset#strictTime": {
         "flagOffLanes": [
           "pool"
         ],
@@ -2129,6 +2341,19 @@
           "src-a"
         ]
       },
+      "listStaleFrontmatterKeyPages#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
       "listStalePagesForExtraction#afterPageId+versionTs+sourceId": {
         "flagOffLanes": [
           "pool"
@@ -2311,12 +2536,12 @@
       },
       "purgeDeletedPages#default": {
         "flagOffLanes": [
-          "pool"
+          "tx"
         ],
-        "flagOffOpensTransaction": false,
+        "flagOffOpensTransaction": true,
         "flagOn": "unscoped",
         "flagOnLanes": [
-          "pool"
+          "tx"
         ],
         "flagOnScopes": []
       },
@@ -2378,6 +2603,48 @@
           "default"
         ]
       },
+      "readEmbeddingStateCounts#full": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
+        ]
+      },
+      "readEmbeddingStateCounts#full+sourceIds": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
+      "readEmbeddingStateCounts#ops": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
+        ]
+      },
       "readPageSnapshot#default": {
         "flagOffLanes": [
           "pool"
@@ -2392,6 +2659,19 @@
         ]
       },
       "readPageSnapshot#sourceId": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
+      "readPageSnapshotsBatch#default": {
         "flagOffLanes": [
           "pool"
         ],
@@ -2483,7 +2763,23 @@
       },
       "replaceDerivedLinks#default": {
         "flagOffLanes": [
-          "tx"
+          "tx",
+          "tx>sp"
+        ],
+        "flagOffOpensTransaction": true,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "tx",
+          "tx>sp"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
+      "replaceDerivedLinksBatch#default": {
+        "flagOffLanes": [
+          "tx",
+          "tx>sp"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
@@ -2607,23 +2903,23 @@
       },
       "restorePage#default": {
         "flagOffLanes": [
-          "pool"
+          "tx"
         ],
-        "flagOffOpensTransaction": false,
+        "flagOffOpensTransaction": true,
         "flagOn": "unscoped",
         "flagOnLanes": [
-          "pool"
+          "tx"
         ],
         "flagOnScopes": []
       },
       "restorePage#sourceId": {
         "flagOffLanes": [
-          "pool"
+          "tx"
         ],
-        "flagOffOpensTransaction": false,
+        "flagOffOpensTransaction": true,
         "flagOn": "unscoped",
         "flagOnLanes": [
-          "pool"
+          "tx"
         ],
         "flagOnScopes": []
       },
@@ -2651,11 +2947,13 @@
       },
       "searchKeyword#cjk": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2664,11 +2962,13 @@
       },
       "searchKeyword#cjk+sourceIds+detailLow": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2677,11 +2977,13 @@
       },
       "searchKeyword#fts": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2690,11 +2992,13 @@
       },
       "searchKeyword#fts+orFallback": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2704,11 +3008,13 @@
       },
       "searchKeyword#fts+sourceIds": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2717,11 +3023,13 @@
       },
       "searchKeywordChunks#cjk": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2730,11 +3038,13 @@
       },
       "searchKeywordChunks#cjk+sourceId": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2743,11 +3053,13 @@
       },
       "searchKeywordChunks#fts": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2822,11 +3134,13 @@
       },
       "searchTitles#default": {
         "flagOffLanes": [
+          "pool",
           "tx"
         ],
         "flagOffOpensTransaction": true,
         "flagOn": "scoped",
         "flagOnLanes": [
+          "pool",
           "tx"
         ],
         "flagOnScopes": [
@@ -2846,6 +3160,7 @@
           "tx"
         ],
         "flagOnScopes": [
+          "src-a",
           "src-a",
           "src-a"
         ]
@@ -2924,6 +3239,17 @@
         "flagOnScopes": []
       },
       "softDeletePages#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "unscoped",
+        "flagOnLanes": [
+          "pool"
+        ],
+        "flagOnScopes": []
+      },
+      "stripStaleFrontmatterKeys#default": {
         "flagOffLanes": [
           "pool"
         ],
@@ -3116,23 +3442,28 @@
           "tx>sp"
         ],
         "flagOffOpensTransaction": true,
-        "flagOn": "unscoped",
+        "flagOn": "scoped",
         "flagOnLanes": [
           "tx",
           "tx>sp"
         ],
-        "flagOnScopes": []
+        "flagOnScopes": [
+          "src-a"
+        ]
       },
       "updateSlug#noop": {
         "flagOffLanes": [
           "tx"
         ],
         "flagOffOpensTransaction": true,
-        "flagOn": "unscoped",
+        "flagOn": "scoped",
         "flagOnLanes": [
-          "tx"
+          "tx",
+          "tx>sp"
         ],
-        "flagOnScopes": []
+        "flagOnScopes": [
+          "default"
+        ]
       },
       "updateSourceConfig#default": {
         "flagOffLanes": [
@@ -3271,29 +3602,41 @@
       }
     },
     "static": {
-      "callSites": 23,
+      "callSites": 36,
       "directMethods": {
         "_searchKeywordCJK": 1,
         "countChunklessPagesWithContent": 1,
+        "countKeywordPages": 1,
+        "countPagesBy": 1,
         "countStaleChunks": 1,
+        "countStaleFrontmatterKeyPages": 1,
         "countStalePagesForExtraction": 1,
         "findDuplicatePage": 1,
+        "findDuplicatePages": 1,
+        "findPages": 1,
         "getAllSlugs": 1,
         "getBacklinks": 1,
+        "getChunkPage": 1,
         "getChunkWindows": 1,
         "getChunks": 1,
         "getLinks": 1,
+        "keywordBoundedRead": 1,
         "listChunklessPagesWithContent": 1,
         "listCorpusSample": 1,
+        "listEmbeddingStateRows": 1,
         "listLinkSources": 1,
         "listPages": 1,
         "listPrefixSampledPages": 1,
         "listStaleChunks": 1,
+        "listStaleFrontmatterKeyPages": 1,
         "listStalePagesForExtraction": 1,
+        "readEmbeddingStateCounts": 1,
         "readPageSnapshot": 1,
+        "readPageSnapshotsBatch": 1,
         "runVectorAttempt": 1,
-        "searchKeyword": 1,
+        "searchKeyword": 2,
         "searchKeywordChunks": 1,
+        "searchKeywordPages": 1,
         "searchTitles": 1,
         "searchVector": 1
       },
@@ -3310,17 +3653,23 @@
         "addTakesBatch": "none",
         "addTimelineEntriesBatch": "none",
         "addTimelineEntry": "none",
+        "allocateBodyOccurrenceIds": "none",
         "applyForwardReferenceBootstrap": "none",
         "batchLoadEmotionalInputs": "none",
         "batchRetry": "none",
         "connRetry": "none",
         "connect": "none",
+        "connectedDatabaseUrl": "none",
         "consolidateFact": "none",
         "countChunklessPagesWithContent": "direct",
+        "countKeywordPages": "direct",
+        "countPagesBy": "direct",
         "countStaleChunks": "direct",
+        "countStaleFrontmatterKeyPages": "direct",
         "countStalePagesForExtraction": "direct",
         "countStaleTakes": "none",
         "countUnconsolidatedFacts": "none",
+        "createSegmentedPageShell": "none",
         "createVersion": "none",
         "deleteChunks": "none",
         "deleteCodeEdgesForChunks": "none",
@@ -3341,9 +3690,12 @@
         "findByTitleFuzzy": "none",
         "findCandidateDuplicates": "none",
         "findDuplicatePage": "direct",
+        "findDuplicatePages": "direct",
         "findOntologyConflicts": "none",
         "findOrphanPages": "none",
+        "findPages": "direct",
         "findTrajectory": "none",
+        "flipBodyGeneration": "none",
         "getAdjacencyBoosts": "none",
         "getAllConfig": "none",
         "getAllSlugs": "direct",
@@ -3353,6 +3705,7 @@
         "getCalibrationCurve": "none",
         "getCalleesOf": "none",
         "getCallersOf": "none",
+        "getChunkPage": "direct",
         "getChunkWindows": "direct",
         "getChunks": "direct",
         "getChunksWithEmbeddings": "none",
@@ -3386,28 +3739,35 @@
         "getTimelineForDate": "none",
         "getUnverifiedExtractionPageIds": "none",
         "getVersions": "none",
+        "holdSchemaMigrationLock": "none",
         "initSchema": "none",
         "insertFact": "none",
         "insertFacts": "none",
         "invalidateContentDriftEmbeddings": "none",
         "invalidateStaleSignatureEmbeddings": "none",
+        "jitOffRead": "none",
+        "keywordBoundedRead": "direct",
+        "keywordStatementTimeoutSetting": "none",
         "listActiveTakesForPages": "none",
         "listAllPageRefs": "none",
         "listAllSources": "none",
         "listChunklessPagesWithContent": "direct",
         "listConfigKeys": "none",
         "listCorpusSample": "direct",
+        "listEmbeddingStateRows": "direct",
         "listEnrichCandidates": "none",
         "listEvalCandidates": "none",
         "listEvalCaptureFailures": "none",
         "listFactsByEntity": "none",
         "listFactsBySession": "none",
+        "listFactsKeyset": "none",
         "listFactsSince": "none",
         "listFilesForPage": "none",
         "listLinkSources": "direct",
         "listPages": "direct",
         "listPrefixSampledPages": "direct",
         "listStaleChunks": "direct",
+        "listStaleFrontmatterKeyPages": "direct",
         "listStalePagesForExtraction": "direct",
         "listStaleTakes": "none",
         "listSupersessions": "none",
@@ -3421,20 +3781,30 @@
         "markPagesExtractedBatch": "none",
         "mergeOntologyFact": "none",
         "migrateFactsToCanonical": "none",
+        "onCheckout": "none",
+        "openBodyStaging": "none",
         "purgeDeletedPages": "none",
         "putContradictionCacheEntry": "none",
         "putDreamVerdict": "none",
         "putPage": "none",
         "putRawData": "none",
+        "readEmbeddingStateCounts": "direct",
+        "readManifest": "none",
         "readPageSnapshot": "direct",
+        "readPageSnapshotsBatch": "direct",
+        "readSegmentDerivations": "none",
+        "readSegmentTexts": "none",
+        "readTransaction": "none",
         "reconnect": "none",
         "refreshPageBody": "none",
         "registerBeforeDisconnect": "none",
+        "relationalChainHop": "none",
         "relationalFanout": "none",
         "removeLink": "none",
         "removeLinksByPagesAndSource": "none",
         "removeTag": "none",
         "replaceDerivedLinks": "none",
+        "replaceDerivedLinksBatch": "none",
         "resolveAliases": "none",
         "resolveFactsEmbeddingCast": "none",
         "resolveSlugWithAlias": "none",
@@ -3443,6 +3813,7 @@
         "resolveSlugsByPaths": "none",
         "resolveTake": "none",
         "restorePage": "none",
+        "retireSegmentDerivations": "none",
         "revertToVersion": "none",
         "rewriteLinks": "none",
         "rlsScopeBindingEnabled": "none",
@@ -3451,10 +3822,12 @@
         "runVectorAttempt": "direct",
         "searchKeyword": "direct",
         "searchKeywordChunks": "direct",
+        "searchKeywordPages": "direct",
         "searchTakes": "none",
         "searchTakesVector": "none",
         "searchTitles": "direct",
         "searchVector": "direct",
+        "setBodyStagingState": "none",
         "setConfig": "none",
         "setEmotionalWeightBatch": "none",
         "setPageAliases": "none",
@@ -3462,10 +3835,15 @@
         "softDeletePage": "none",
         "softDeletePages": "none",
         "sql": "none",
+        "stageManifestRows": "none",
+        "stageSegmentChunks": "none",
+        "stageSegmentTexts": "none",
+        "stripStaleFrontmatterKeys": "none",
         "sumStaleChunkChars": "none",
         "supersedeTake": "none",
         "sweepContradictionCache": "none",
         "sweepDreamVerdicts": "none",
+        "sweepSegments": "none",
         "transaction": "none",
         "transactionDirect": "none",
         "transactionOn": "none",
@@ -3481,6 +3859,7 @@
         "upsertChunks": "via:_upsertChunksOnce",
         "upsertEventProjection": "none",
         "upsertFile": "none",
+        "upsertSegmentDerivations": "none",
         "vectorIterativeScanSupported": "none",
         "withReservedConnection": "none",
         "withScopedReadTransaction": "none",

@@ -89,6 +89,12 @@ staleness is measurable and the next sweep skips fresh pages.
 
 A sweep with a failing item is partial: it keeps its cursor and does not stamp
 the source as freshly synced, so `gbrain doctor`'s `sync_freshness` shows it.
+`gbrain sync` prints `Sync PARTIAL [connector_item_failures]` with the failed
+item count and pages written (the failure reasons print above it) and exits 1,
+on `--source`, `--all` and delegated runs alike; a connector that stops early
+without naming a cause prints `[connector_partial]` and also exits 1. Only a
+sweep cut short by `--timeout` or cancellation stays `reason=timeout` with
+exit 0, because the next sweep continues it.
 An item that fails three sweeps in a row is held (below) and the cursor moves
 past it. Autopilot keeps a source synced after its first sync; a source that
 has never synced stays idle until you run `gbrain sync --source <id>` once.
@@ -150,12 +156,16 @@ pull requests, issue comments, PR reviews, PR review comments, labels,
 milestones, assignees, check runs, check suites, workflow runs. Each event
 submits a targeted `sync` job that refreshes exactly the item that changed
 (check events resolve the linked PR from the payload; events without an
-item reference are acknowledged and skipped). Push events keep their
-existing git-source behavior.
+item reference are acknowledged and skipped). When 50 item refreshes are
+already waiting for the source, the event is refused with 429
+`webhook_backlog_full`; redeliver it from the webhook's Recent Deliveries
+once the queue drains, or let the next sweep catch it. A refresh that finds
+another sync of the source running is retried after it. Push events follow the
+git-source behavior.
 
 Without a public URL, use a tunnel (Tailscale Funnel, ngrok, or any HTTPS
 host). The webhook is HMAC-signed per source with the same
-`X-Hub-Signature-256` verification as the existing push webhook. Out-of-scope
+`X-Hub-Signature-256` verification as the push webhook. Out-of-scope
 repos are acknowledged but never materialized.
 
 ## Pages
@@ -181,14 +191,11 @@ comments, reviews and checks). Two behaviors worth knowing:
   stay recallable by those facets. Without a body, the chunk would hold
   only the title, and compound titles tokenize poorly.
 - **Near-identical pages** (the same PR merged across several mirrored
-  repos) are de-duplicated at search time by upstream gbrain (Jaccard
-  similarity, `src/core/search/dedup.ts`). Content recall is unaffected:
+  repos) are de-duplicated at search time (Jaccard similarity,
+  `src/core/search/dedup.ts`). Content recall is unaffected:
   the surviving copy carries the same text, and the hidden copy is still
   reachable via a repo-scoped query or direct slug lookup. If you need
   the per-repo copy to win, include the repo name in the query.
-
-A feature-scoped retrieval bench (brain-bench style, hit@K against a live
-mirror) ships with the QA notes; see `QA-REPORT.md` for the summary.
 
 ## Rate limits
 

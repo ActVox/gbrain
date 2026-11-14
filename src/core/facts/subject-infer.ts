@@ -24,7 +24,7 @@
 import type { BrainEngine } from '../engine.ts';
 import { extractCandidates, isCommonCapitalizedWord } from '../context/entity-salience.ts';
 import { isFactEntityPage, resolveStrictEntityReference, type StrictResolution } from '../entities/resolve.ts';
-import { privatePagesFilterFragment } from '../search/private-visibility.ts';
+import { remoteReadFloorSql } from '../search/private-visibility.ts';
 
 export type InferredVia = 'page' | 'mention';
 export type InferMissReason = 'ambiguous' | 'unverified_match' | 'no_mention' | 'no_page';
@@ -105,42 +105,91 @@ const SENTENCE_OPENERS = new Set([
   'not', 'no', 'yes', 'after', 'before', 'during', 'since', 'until', 'while', 'per', 'via', 're', 'fyi', 'update', 'updated',
   'lunch', 'dinner', 'breakfast', 'coffee', 'drinks', 'call', 'sync', 'standup', 'interview', 'demo', 'pitch', 'board',
   'favorite', 'favourite', 'birthday', 'anniversary', 'allergic', 'vegetarian', 'vegan', 'lives', 'lived', 'works', 'worked',
+  'captured', 'watched', 'reviewed', 'logged',
 ]);
 
-/** Slugs written verbatim in the fact text ("people/alice-example owns the checklist"). */
-const SLUG_IN_TEXT_RE = /(?<![\w/-])[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)+(?![\w/-])/g;
+/**
+ * #7405: record-label openers ("Invoice total ...", "Work session ...", "Notes from ..."). Like SENTENCE_OPENERS they are no name evidence
+ * when they open a sentence and resolve to no page, but they are never shed from a candidate, so "Work Example" stays a name.
+ */
+const LABEL_OPENERS = new Set(['work', 'invoice', 'invoiced', 'billed', 'receipt', 'payment', 'notes', 'capture', 'log', 'review', 'watch']);
+
+/** #7827: the speaker labels the fact extractor writes ("User accepted ...", "Assistant recommended ...", extract.ts ATTRIBUTION_BLOCK). */
+const ATTRIBUTION_LABELS = new Set(['user', 'assistant']);
+
+/** #7405: ISO 4217 codes; one counts as a unit (not a name) only where every use sits next to an amount ("CHF 80", "80 CHF"). */
+const CURRENCY_CODES = new Set(Intl.supportedValuesOf('currency'));
+
+/**
+ * Slugs written verbatim in the fact text ("people/alice-example owns the checklist", "people/例子").
+ * Segments use the lowercase page-slug letters the strict resolver's exact arm accepts (combining
+ * marks are not among them, so a marked literal is never a literal). A literal glued to further
+ * letters or marks on either side is not a literal, so "people/alice-example未知" never resolves to
+ * its ASCII prefix.
+ */
+const SLUG_SEG = '[\\p{Ll}\\p{Lm}\\p{Lo}\\p{N}][\\p{Ll}\\p{Lm}\\p{Lo}\\p{N}_-]*';
+const SLUG_EDGE = '[\\p{L}\\p{M}\\p{N}_/-]';
+const SLUG_IN_TEXT_RE = new RegExp(`(?<!${SLUG_EDGE})${SLUG_SEG}(?:/${SLUG_SEG})+(?!${SLUG_EDGE})`, 'gu');
 
 /** Two distinct entities already make the subject unknown; more resolution is wasted work. */
 const DISTINCT_ENTITY_LIMIT = 2;
 
+/**
+ * #7827: a run of capitalised and digit-led tokens ("Acme 42", "42 Acme"). extractCandidates keeps only the capitalised
+ * words of such a name, so inference tries the whole run as well; it counts only when it resolves to a page.
+ */
+const NAME_TOKEN = "(?:\\p{Lu}[\\p{L}\\p{N}'’-]*|\\p{N}[\\p{L}\\p{N}'’-]*)";
+const DIGIT_NAME_RUN_RE = new RegExp(`(?<![\\p{L}\\p{N}'’-])${NAME_TOKEN}(?:\\s+${NAME_TOKEN}){1,3}(?![\\p{L}\\p{N}'’-])`, 'gu');
+
 export async function inferFactSubject(engine: BrainEngine, sourceId: string, input: InferSubjectInput): Promise<InferResult> {
-  const candidates: Array<{ query: string; sentenceStart?: true }> = [
-    ...[...new Set(input.fact.match(SLUG_IN_TEXT_RE) ?? [])].map(query => ({ query })),
-    ...extractCandidates(input.fact).filter(c => !c.weak).map(shedOpener),
-  ];
-  const resolved = new Set<string>();
-  const misses: Array<Exclude<StrictResolution, { slug: string }>['miss']> = [];
-  let vetoed = false;
   const memo = new Map<string, StrictResolution>();
-  for (const candidate of candidates) {
-    const key = candidate.query.toLowerCase();
+  const resolve = async (query: string): Promise<StrictResolution> => {
+    const key = query.toLowerCase();
     let r = memo.get(key);
     if (!r) {
-      r = await resolveStrictEntityReference(engine, sourceId, candidate.query,
+      r = await resolveStrictEntityReference(engine, sourceId, query,
         { sameName: input.mode === 'relink', excludePrivate: input.excludePrivate });
       memo.set(key, r);
     }
+    return r;
+  };
+  // A digit-led name that resolves replaces the capitalised words inside it, which alone name no page.
+  const digitNames: Array<{ query: string; start: number; end: number }> = [];
+  for (const m of input.fact.matchAll(DIGIT_NAME_RUN_RE)) {
+    const tokens = m[0].split(/\s+/);
+    if (!tokens.some(t => /^\p{N}/u.test(t)) || !tokens.some(t => /^\p{Lu}/u.test(t))) continue;
+    const query = (SENTENCE_OPENERS.has(tokens[0]!.toLowerCase()) ? tokens.slice(1) : tokens).join(' ');
+    if ((await resolve(query)).slug !== null) digitNames.push({ query, start: m.index, end: m.index + m[0].length });
+  }
+  const insideDigitName = (query: string) => {
+    const uses = referenceUses(input.fact, query);
+    return uses.length > 0 && uses.every(at => digitNames.some(d => at >= d.start && at + query.length <= d.end));
+  };
+  const candidates: Array<{ query: string; sentenceStart?: true }> = [
+    ...[...new Set(input.fact.match(SLUG_IN_TEXT_RE) ?? [])].map(query => ({ query })),
+    ...digitNames.map(({ query }) => ({ query })),
+    ...extractCandidates(input.fact).filter(c => !c.weak).map(shedOpener).filter(c => !insideDigitName(c.query)),
+  ];
+  const resolved = new Set<string>();
+  const subjects = new Set<string>();
+  const misses: Array<Exclude<StrictResolution, { slug: string }>['miss']> = [];
+  let vetoed = false;
+  for (const candidate of candidates) {
+    const r = await resolve(candidate.query);
     if (r.slug !== null) {
       resolved.add(r.slug);
+      if (!onlyExampleUses(input.fact, candidate.query)) subjects.add(r.slug);
       if (resolved.size >= DISTINCT_ENTITY_LIMIT) return { slug: null, reason: 'ambiguous', resolved: [...resolved] };
       continue;
     }
     misses.push(r.miss);
     // A name that is not an entity page (a meeting title) does not compete. A
-    // capitalized sentence opener with no page ("Met", "Raised") is no name
-    // evidence; anything else unresolved is a real competing reference.
+    // capitalized sentence opener ("Met", "Raised") or a currency code next to
+    // an amount with no page is no name evidence; anything else unresolved is
+    // a real competing reference.
     if (r.miss === 'not_entity') continue;
-    if (r.miss === 'no_page' && (isNonName(candidate.query) || (candidate.sentenceStart && SENTENCE_OPENERS.has(candidate.query.toLowerCase())))) continue;
+    if (r.miss === 'no_page' && (isNonName(candidate.query) || isAmountUnit(input.fact, candidate.query)
+      || (candidate.sentenceStart && (SENTENCE_OPENERS.has(candidate.query.toLowerCase()) || LABEL_OPENERS.has(candidate.query.toLowerCase()))))) continue;
     vetoed = true;
   }
 
@@ -149,7 +198,7 @@ export async function inferFactSubject(engine: BrainEngine, sourceId: string, in
     if (vetoed || (resolved.size === 1 && !resolved.has(page))) return { slug: null, reason: 'ambiguous', resolved: [...resolved] };
     return { slug: page, via: 'page' };
   }
-  if (resolved.size === 1 && !vetoed) return { slug: [...resolved][0]!, via: 'mention' };
+  if (subjects.size === 1 && !vetoed) return { slug: [...subjects][0]!, via: 'mention' };
   const miss = (reason: InferMissReason): InferResult => ({ slug: null, reason, resolved: [...resolved] });
   if (resolved.size > 0 || misses.includes('ambiguous')) return miss('ambiguous');
   if (misses.includes('unverified')) return miss('unverified_match');
@@ -165,11 +214,45 @@ function shedOpener<T extends { query: string }>(c: T): T {
 
 function isNonName(query: string): boolean {
   if (/\s/.test(query)) return false;
-  return isCommonCapitalizedWord(query) || ROLE_AND_TERM_TOKENS.has(query.toLowerCase());
+  return isCommonCapitalizedWord(query) || ROLE_AND_TERM_TOKENS.has(query.toLowerCase()) || ATTRIBUTION_LABELS.has(query.toLowerCase());
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_/-]/u;
+/** The start offsets of every whole-word use of `query` in the fact, case-insensitive. */
+function referenceUses(fact: string, query: string): number[] {
+  const haystack = fact.toLowerCase(), needle = query.toLowerCase(), starts: number[] = [];
+  if (!needle || haystack.length !== fact.length) return starts;
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
+    if (!WORD_CHAR.test(fact.charAt(at - 1)) && !WORD_CHAR.test(fact.charAt(at + needle.length))) starts.push(at);
+  }
+  return starts;
+}
+
+/**
+ * #7405: a currency code is a unit only when every use is next to an amount ("CHF 80", "80 CHF"), never a date or time
+ * ("2025-01-01 CHF"); resolution runs first, so a page named CHF still competes.
+ */
+const AMOUNT_AFTER = /^\s*\d[\d,.']*(?![\d/:-])/u;
+const AMOUNT_BEFORE = /(?:^|[^\d,.'/:-])\d[\d,.']*\s*$/u;
+function isAmountUnit(fact: string, query: string): boolean {
+  if (!CURRENCY_CODES.has(query)) return false;
+  const uses = referenceUses(fact, query);
+  return uses.length > 0 && uses.every(at => AMOUNT_AFTER.test(fact.slice(at + query.length)) || AMOUNT_BEFORE.test(fact.slice(0, at)));
+}
+
+/**
+ * #7405: an entity named only as an example ("... including Automation Example notes", "for example, Automation Example")
+ * resolves, but cannot be the subject. The example phrase must introduce the mention: only other names of the same list
+ * may sit between them, so "notes including weekly items belong to Alice Example" keeps Alice.
+ */
+const EXAMPLE_LIST_LEAD = /(?:^|[^\p{L}])(?:[Ii]ncluding|[Ss]uch as|[Ff]or example|[Ff]or instance|[Ee]\.g\.)[,:]?\s+(?:\p{Lu}[\p{L}\p{N}'’./-]*(?:\s+\p{Lu}[\p{L}\p{N}'’./-]*)*\s*(?:,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+))*$/u;
+function onlyExampleUses(fact: string, query: string): boolean {
+  const uses = referenceUses(fact, query);
+  return uses.length > 0 && uses.every(at => EXAMPLE_LIST_LEAD.test(fact.slice(0, at)));
 }
 
 async function liveFactEntityPage(engine: BrainEngine, sourceId: string, slug: string, excludePrivate?: boolean): Promise<string | null> {
-  const privacy = excludePrivate ? `AND ${privatePagesFilterFragment('p')}` : '';
+  const privacy = excludePrivate ? `AND ${remoteReadFloorSql('p')}` : '';
   const [row] = await engine.executeRaw<{ slug: string; type: string | null }>(
     `SELECT p.slug, p.type FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL ${privacy} LIMIT 1`,
     [sourceId, slug],

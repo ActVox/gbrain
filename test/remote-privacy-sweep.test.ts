@@ -157,10 +157,16 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   get_page: { slug: WORLD_FENCE_SLUG, include_content: true },
   fetch: { id: WORLD_FENCE_SLUG },
   list_pages: {},
+  find_pages: { pattern: '*' },
   search: { query: 'WORLDSWEEP' },
+  // 'SWEEP_' is inside every PRIVATE sentinel too: the literal scan must still return only world text.
+  search_exact: { phrase: 'SWEEP_' },
   query: { query: 'WORLDSWEEP' },
   assemble_evidence: { hits: [{ source_id: 'default', slug: WORLD_FENCE_SLUG, chunk_id: 0 }], return_unit: 'page' },
   recall: { entity: WORLD_PAGE_SLUG },
+  memory_recall: { query: WORLD.fact },
+  memory_write: { facts: [{ fact: 'fresh sweep fact', provenance: 'sweep' }], idempotency_key: 'sweep-key' },
+  memory_propose: { kind: 'timeline', target: WORLD_PAGE_SLUG, date: '2026-01-01', summary: 'sweep proposal', idempotency_key: 'sweep-propose-key' },
   entity: { name: WORLD_PAGE_SLUG },
   synthesize: { entity: WORLD_PAGE_SLUG },
   delta: { since: SINCE_EPOCH },
@@ -172,9 +178,12 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   get_links: { slug: WORLD_PAGE_SLUG },
   get_backlinks: { slug: WORLD_PAGE_SLUG },
   traverse_graph: { slug: WORLD_PAGE_SLUG },
-  get_versions: { slug: WORLD_FENCE_SLUG },
+  rank_entities: {},
+  get_versions: { slug: WORLD_FENCE_SLUG, include_body: true },
+  get_write_attribution: { slug: WORLD_FENCE_SLUG, versions: true },
   get_chunks: { slug: WORLD_FENCE_SLUG },
   resolve_slugs: { partial: 'world-page' },
+  whois: { query: WORLD.pageTitle },
   volunteer_context: { window: 'Recent discussion about WORLDSWEEP topics and pages.' },
   chronicle_day: { date: '2026-01-02' },
   chronicle_since: { date: '2020-01-01' },
@@ -185,12 +194,26 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   find_contradictions: {},
   search_by_image: {},
   sources_status: { id: 'default' },
+  sources_resolve_path: { id: 'default', paths: ['notes/sweep-example.md'] },
   ontology_get: { entity: WORLD_PAGE_SLUG },
   get_skill: { name: 'query' },
   // Mutating ops target FRESH slugs only — never the seeded corpus. The
   // put_page-into-fence-bearing-page restoration-echo class is explicitly
   // NOT covered here (write-side sweep TODO).
   put_page: { slug: 'notes/sweep-fresh-write', content: '# Fresh write\n\nNew content.\n' },
+  put_pages: { request_id: '6007a5e0-0000-4000-8000-000000000001', pages: [{ slug: 'notes/sweep-fresh-batch', content: '# Fresh batch\n\nNew content.\n' }] },
+  // A stale revision on the fence-bearing page: the refusal must not echo it.
+  edit_page: { slug: WORLD_FENCE_SLUG, expected_revision: '00000000-0000-4000-8000-000000000000', edits: [{ old_text: 'x', new_text: 'y' }] },
+  // A stale revision on the fence-bearing page: the refusal must not echo it or its tail.
+  append_page: { slug: WORLD_FENCE_SLUG, request_id: '6007a5e0-0000-4000-8000-000000000002', expected_revision: '00000000-0000-4000-8000-000000000000', text: 'fresh sweep append' },
+  // An upload replacing the private page: the remote caller cannot see it, so begin answers as put_page does for an
+  // invisible page and stages nothing.
+  begin_page_upload: { slug: PRIV_PAGE_SLUG, mode: 'replace', total_bytes: 32, sha256: '0'.repeat(64), expected_revision: '00000000-0000-4000-8000-000000000000', request_id: '6007a5e0-0000-4000-8000-000000000003' },
+  // A session this caller did not begin: every session op answers upload_not_found.
+  upload_page_part: { upload_id: '6007a5e0-0000-4000-8000-000000000004', part: 0, text: 'fresh sweep part', part_sha256: 'af8002248c8537e357edd4eea4a9cacbaf864c4e5e0e7218f4cd808895fe1363' },
+  get_page_upload: { upload_id: '6007a5e0-0000-4000-8000-000000000004' },
+  commit_page_upload: { upload_id: '6007a5e0-0000-4000-8000-000000000004' },
+  abort_page_upload: { upload_id: '6007a5e0-0000-4000-8000-000000000004' },
   remember: { fact: 'fresh sweep fact', provenance: 'sweep', entity: 'people/sweep-fresh-entity' },
   capture: { content: 'fresh sweep capture' },
   add_tag: { slug: WORLD_PAGE_SLUG, tag: 'sweep-tag' },
@@ -201,6 +224,9 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   takes_add: { slug: WORLD_PAGE_SLUG, claim: 'fresh sweep take', kind: 'take', holder: 'world' },
   delete_page: { slug: 'notes/sweep-fresh-write' },
   restore_page: { slug: 'notes/sweep-fresh-write' },
+  // A valid mode, so the call reaches the publish gate (pinned off in beforeAll) instead of failing validation.
+  set_memory_writeback: { mode: 'off' },
+  memory_conversation_mode: { mode: 'all' },
 };
 
 // Per-(op × shape) overrides for ops whose behavior legitimately differs
@@ -208,7 +234,7 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
 // carries ctx.auth; the scalar shape — like the stdio transport — doesn't).
 // These operations enforce durable write authority inside the shared dispatcher.
 // Other scope checks remain transport-owned and outside this privacy harness.
-const COORDINATED_WRITES = new Set(['put_page', 'capture', 'delete_page', 'restore_page', 'revert_version',
+const COORDINATED_WRITES = new Set(['put_page', 'put_pages', 'capture', 'delete_page', 'restore_page', 'revert_version', 'edit_page', 'append_page',
   'remember', 'forget', 'add_tag', 'remove_tag', 'add_timeline_entry',
   'takes_add', 'takes_update', 'takes_supersede', 'takes_resolve',
   'get_write_request', 'list_write_requests', 'cancel_write_request']);
@@ -216,6 +242,8 @@ const COORDINATED_WRITES = new Set(['put_page', 'capture', 'delete_page', 'resto
 const EXPECTED_BY_SHAPE: Record<string, Partial<Record<Shape, Outcome>>> = {
   whoami: { scalar: 'error', federated: 'ok' },
   list_jobs: { scalar: 'error', federated: 'ok' },
+  // The switch needs a connection that can call remember: the read-only federated grant cannot.
+  memory_conversation_mode: { scalar: 'ok', federated: 'error' },
 };
 
 // ── Expected outcome per op ──────────────────────────────────────────────
@@ -235,10 +263,13 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   get_page: 'data',
   fetch: 'data',
   list_pages: 'data',
+  find_pages: 'data',
   search: 'data',
+  search_exact: 'data',
   query: 'data',
   assemble_evidence: 'data',
   recall: 'data',
+  memory_recall: 'data',
   entity: 'data',
   delta: 'data',
   context_pack: 'data',
@@ -248,8 +279,10 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   get_versions: 'data',
   get_chunks: 'data',
   resolve_slugs: 'data',
+  whois: 'data',
   get_backlinks: 'data',
   traverse_graph: 'data',
+  rank_entities: 'data',
   // reads that succeed without corpus-marker requirement
   get_tags: 'ok',
   get_links: 'ok',
@@ -259,7 +292,9 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   whoami: 'ok', // base unused — per-shape override in EXPECTED_BY_SHAPE (above)
   sources_list: 'ok',
   sources_status: 'ok',
+  sources_resolve_path: 'error',
   find_orphans: 'ok',
+  wanted_pages: 'ok',
   find_contradictions: 'ok',
   find_experts: 'ok',
   find_trajectory: 'ok',
@@ -294,10 +329,12 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   search_stats: 'ok',
   cache_stats: 'ok',
   get_usage: 'ok',
+  get_write_attribution: 'ok',
   get_job_stats: 'ok',
   list_jobs: 'ok', // base unused — per-shape override in EXPECTED_BY_SHAPE (above)
   quarantine_list: 'ok',
   run_doctor: 'ok',
+  get_brain_health: 'ok', // bands only: counts as ranges, no slugs or stored text
   get_ingest_log: 'ok',
   code_callers: 'error',
   code_callees: 'error',
@@ -327,10 +364,27 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   get_skill: 'denied',
   list_brain_skillpack: 'denied',
   advisor: 'denied',
+  set_memory_writeback: 'denied',
+  // Memory settings reads and the per-conversation switch return config and rule text, never corpus data.
+  get_memory_settings: 'ok',
+  memory_conversation_mode: 'ok', // base unused — per-shape override in EXPECTED_BY_SHAPE (above)
   // mutating ops (fresh-slug targets; envelope-echo checks only)
   remember: 'ok',
+  // GST-359 D: memory_write saves only as an attested person; the sweep's callers attest none (actor_required).
+  memory_write: 'error',
+  // memory_propose also needs an attested person; the sweep's callers attest none (actor_required).
+  memory_propose: 'error',
   forget: 'error',
+  purge_fact: 'error',
+  list_page_purges: 'error',
+  unpurge_page: 'error',
+  // Owner confirmation needs a memory_confirm grant; the sweep's connection has none (refused before any read).
+  confirm_memory: 'error',
+  // rate_answer with no answer_id is a validation error; a real answer id only
+  // ever names pages that answer returned to the same client.
+  rate_answer: 'error',
   put_page: 'ok',
+  put_pages: 'ok',
   delete_page: 'ok',
   restore_page: 'ok',
   capture: 'ok',
@@ -341,8 +395,18 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   add_timeline_entry: 'ok',
   get_write_request: 'error',
   list_write_requests: 'ok',
+  list_write_conflicts: 'ok',
   cancel_write_request: 'error',
   revert_version: 'error',
+  edit_page: 'error',
+  append_page: 'error',
+  // Page uploads: begin on the invisible private page refuses page_not_found like put_page (permission_denied under the
+  // read-only federated grant); the session ops refuse upload_not_found in both shapes.
+  begin_page_upload: 'error',
+  upload_page_part: 'error',
+  get_page_upload: 'error',
+  commit_page_upload: 'error',
+  abort_page_upload: 'error',
   put_raw_data: 'error',
   log_ingest: 'error',
   takes_add: 'ok',
@@ -365,9 +429,24 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   loops_close: 'error',
   loops_mute: 'error',
   loops_unmute: 'error',
+  // agent contract v1 A6: the generic invocation omits the required `code` → validation error.
+  mute_notice: 'error',
+  // C4 pinned questions are owner-private: a sweep caller cannot read private
+  // pages, so every questions_* op refuses with question_owner_only (leakage
+  // matrix: test/helpers/pinned-questions-scenarios.ts).
+  questions_pin: 'error',
+  questions_list: 'error',
+  questions_status: 'error',
+  questions_refresh: 'error',
+  questions_unpin: 'error',
   sources_remove: 'error',
   submit_job: 'error',
   get_job: 'error',
+  wait_job: 'error',
+  // Wakeshift is off in the sweep brain: each watch op refuses wakeshift_not_enabled before any read.
+  watch_job: 'error',
+  list_watches: 'error',
+  unwatch: 'error',
   cancel_job: 'error',
   retry_job: 'error',
   get_job_progress: 'error',
@@ -439,6 +518,7 @@ beforeAll(async () => {
   // mcp.publish_* enabled in ~/.gbrain config can't flip the denied arm.
   await engine.setConfig('mcp.publish_skills', 'false');
   await engine.setConfig('mcp.publish_advisor', 'false');
+  await engine.setConfig('mcp.publish_memory_settings', 'false');
 
   // ── Seed the corpus (source: default) ──────────────────────────────
   const put = operationsByName['put_page'];
@@ -772,11 +852,12 @@ describe('known-leak discrimination anchors (#4546 / #4549)', () => {
   // (sentinels never live in slugs — legit "Page not found: <slug>" echoes
   // would false-positive). Ops that return slug LISTS derived from data
   // (not echoes of a requested slug) get targeted anchors instead.
-  it('slug-list arms never name the private page slug (find_anomalies / find_orphans / list_pages / delta / salience)', async () => {
+  it('slug-list arms never name the private page slug (find_anomalies / find_orphans / list_pages / find_pages / delta / salience)', async () => {
     for (const [op, params] of [
       ['find_anomalies', {}],
       ['find_orphans', {}],
       ['list_pages', {}],
+      ['find_pages', { pattern: '*' }],
       ['delta', { since: SINCE_EPOCH }],
       ['get_recent_salience', {}],
     ] as const) {

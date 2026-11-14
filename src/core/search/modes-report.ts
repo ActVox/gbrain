@@ -26,7 +26,7 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
   intentWeighting: 'Zero-LLM intent classifier weight adjustments',
   keywordOrFallback: 'Keyword-arm AND→OR zero-recall fallback',
   tokenBudget: 'Per-call token-budget cap (undefined = no cap)',
-  expansion: 'Core-library default only; query defaults on and search stays off regardless of this row',
+  expansion: 'LLM multi-query expansion: the `query` default when `expand` is unset (`search` never expands)',
   expansion_variant_budget: 'Total RRF weight shared by expansion variant lists (null = legacy weight 1 each; (0, 4])',
   searchLimit: 'Default `limit` for the operation layer',
   reranker_enabled: 'Cross-encoder reranker on/off',
@@ -37,7 +37,10 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
   floor_ratio: 'Floor-ratio gate for metadata boosts (0..1, undefined = off)',
   title_boost: 'Title-phrase boost multiplier (query is a title token-run; 1.0 = off)',
   // v0.46.15 retrieval wave knobs
-  evidence_cosine_floor: 'Cosine floor for evidence high_vector_match (label-only; 0..1)',
+  evidence_cosine_floor: 'Cosine floor for evidence high_vector_match; also decides the rerank gate grade (0..1)',
+  // W3 confidence-gated reranking
+  reranker_gate: 'Confidence-gated reranking: off, or shadow (grade before the reranker, stamp meta.rerank_gate, still rerank)',
+  reranker_gate_min_gap: 'Rerank gate δ: cosine margin rank-1 needs over the best other page to count as a strong vector match (0..1, 0.05 default)',
   autocut_min_top: 'Weak-top floor — autocut no-ops when the top score is below this (0 disables)',
   // v0.36 cross-modal knobs (D3 registry)
   cross_modal_both_text_weight: "D6 'both'-mode RRF weight for text branch (0.6 default)",
@@ -60,6 +63,15 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
   relationalRetrieval: 'Typed-edge relational recall arm (relational queries walk the graph; no-op otherwise)',
   relational_retrieval_depth: 'Max hops for relational traversal (1..3, 2 default)',
   relational_rerank_pin: 'Relational-arm rows re-pinned above reranked text rows in fused order (0 = off; 0..10, 3 default)',
+  relational_planner: 'Multi-hop planner: questions chaining 2-3 typed relations walk typed hop chains with evidence (also keyless recall)',
+  relational_orient_onehop: 'Typed one-hop walks read edges written on either page by the relation type signature (opt-in; null = follow relational_planner)',
+  relational_chain_slots: 'When a multi-hop chain fired, up to this many chain rows (answers, then evidence pages) lead page 1 (0..10; 0 = single evidence slot)',
+  collapse: 'Result-time collapse: same-slug twins in other sources, redirect stubs and copies of one document fold into the best row (listed in collapsed)',
+  rank_priors: 'Rank priors after the reranker: organization over person when no person is named, weak OCR matches, dated over undated rows on when-questions',
+  keyword_phrase: 'Keyword phrase factor (opt-in): a chunk holding the query as one contiguous phrase ranks higher in the keyword arm',
+  qualified_aliases: 'Qualified alias hop (opt-in): a 3-6 word phrase inside the query that is the alias of exactly one readable page leads with that page',
+  title_qualified: 'Qualified title boost (opt-in): a person or company title mentioned inside a longer query gets the title boost',
+  diverse_pool_depth: 'Session-diverse pool before the reranker: each arm fetches at least N candidates, one row per session, the reranker reads at least N (0..100; 0 = off)',
   // Ranker wave (Phase E2) arm-confidence fusion
   keyword_arm_confidence_floor: 'Keyword-arm confidence floor: below this margin ratio the keyword + title lists fuse at half weight (null = off; (0, 1])',
   // Ranker wave (Phase E3) metadata boost gate
@@ -91,18 +103,19 @@ export function formatKnobValue(knob: string, value: unknown): string {
  * the BRAIN-LEVEL planes (config override > mode bundle); per-call
  * SearchOpts overrides on individual searches are not represented here —
  * a live search that passes its own knobs can legitimately differ from
- * this report for that one call. #4601: the `query` op ALWAYS supplies
- * `expand` (default on), so the `expansion` row never governs it — say so
- * here, on the surface operators actually read, or the dashboard gives a
- * confident wrong answer for the primary agent verb.
+ * this report for that one call. The `expansion` row is `query`'s default
+ * when a call leaves `expand` unset, and `search` never expands; say so here,
+ * on the surface operators actually read, so the dashboard answers for the
+ * primary agent verb.
  */
 export const MODES_REPORT_PER_CALL_NOTE =
   'Resolved from config overrides + the active mode bundle. Per-call SearchOpts ' +
   'overrides on individual searches are not shown — a call that passes its own ' +
   'knobs (e.g. expand, autocut, relational) wins for that call only. The `query` ' +
-  'op always passes `expand` (default on in every mode; `--no-expand` or ' +
-  '`expand: false` opts out), while `search` never expands. Neither inherits ' +
-  '`search.expansion`. Expansion needs configured embedding and expansion ' +
+  'op expands when the resolved `expansion` row below is on (off in every ' +
+  'mode by default; `search.expansion` overrides it) unless the call passes `expand` ' +
+  '(`--expand` / `expand: true` forces it, `--no-expand` / `expand: false` ' +
+  'skips it), while `search` never expands. Expansion needs configured embedding and expansion ' +
   'providers; requested expansion is not proof a provider ran. A configured ' +
   'cloud expander receives the query and may charge for the call.';
 
@@ -119,11 +132,29 @@ export interface SearchModesReport {
    * file-plane + process env. Absent only when readiness itself threw.
    */
   reranker_readiness?: RerankerReadinessReport;
+  /**
+   * #8744: when the configured contextual-retrieval tier is per_chunk_synopsis,
+   * how many chunks actually carry synopsis vectors (import and sync embed at
+   * the title tier; the sweep is `gbrain reindex --synopsis`). Brain-wide
+   * counts, so ABSENT on the remote surface.
+   */
+  synopsis_coverage?: SynopsisCoverageReport;
   /** #4604: what this report does NOT include (per-call plane). */
   per_call_note: string;
   _meta?: {
     metric_glossary?: Record<string, string>;
   };
+}
+
+export interface SynopsisCoverageReport {
+  eligible_pages: number;
+  eligible_chunks: number;
+  synopsis_pages: number;
+  synopsis_chunks: number;
+  coverage_pct: number | null;
+  large_title_pages: number;
+  line: string;
+  fix: string;
 }
 
 export interface RerankerReadinessReport {
@@ -152,7 +183,8 @@ export function redactReadinessForRemote(report: SearchModesReport): SearchModes
   // self_hosted is deployment topology (a private base-URL override exists) —
   // not needed for the verdict, so it stays local too.
   const { model, enabled, ready } = rr;
-  return { ...report, reranker_readiness: { model, enabled, ready, self_hosted: false } };
+  const { synopsis_coverage: _brainWide, ...rest } = report;
+  return { ...rest, reranker_readiness: { model, enabled, ready, self_hosted: false } };
 }
 
 export async function buildModesReport(engine: BrainEngine): Promise<SearchModesReport> {
@@ -216,12 +248,24 @@ export async function buildModesReport(engine: BrainEngine): Promise<SearchModes
     };
   }
 
+  let synopsis_coverage: SynopsisCoverageReport | undefined;
+  try {
+    const sweep = await import('../synopsis-sweep.ts');
+    const c = await sweep.readSynopsisCoverage(engine);
+    if (c.config.configured) {
+      synopsis_coverage = { eligible_pages: c.eligible_pages, eligible_chunks: c.eligible_chunks, synopsis_pages: c.synopsis_pages,
+        synopsis_chunks: c.synopsis_chunks, coverage_pct: c.coverage_pct, large_title_pages: c.large_title_pages,
+        line: sweep.formatSynopsisCoverageLine(c), fix: sweep.SYNOPSIS_SWEEP_ARGV.join(' ') };
+    }
+  } catch { /* coverage is advisory; the doctor check synopsis_tier_coverage reports read failures */ }
+
   return {
     schema_version: 2,
     active_mode: resolved.resolved_mode,
     active_mode_valid: resolved.mode_valid,
     resolved: attributions,
     ...(reranker_readiness ? { reranker_readiness } : {}),
+    ...(synopsis_coverage ? { synopsis_coverage } : {}),
     bundles: {
       conservative: { ...MODE_BUNDLES.conservative },
       balanced: { ...MODE_BUNDLES.balanced },

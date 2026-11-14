@@ -10,7 +10,7 @@
 import type {
   BatchOpts,
   TakeBatchInput, Take, TakesListOpts, TakeHit, StaleTakeRow,
-  TakeEmbeddingInput,
+  TakeEmbeddingInput, StaleTakeOpts,
   TakeResolution, SynthesisEvidenceInput,
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
 } from '../engine.ts';
@@ -23,10 +23,12 @@ import { deriveResolutionTuple, finalizeScorecard } from '../takes-resolution.ts
 import { normalizeWeightForStorage } from '../takes-fence.ts';
 import { buildTakeRows } from '../batch-rows.ts';
 import { staleTakeRowToRow, takeRowToTake, takeHitRowToHit, tryParseEmbedding } from '../utils.ts';
-import { privatePagesFilterFragment } from '../search/private-visibility.ts';
+import { privatePagesFilterForCaller } from '../search/private-visibility.ts';
 import { jsonbParam, type SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead } from './brands.ts';
 import { sqlFragment, trustedSql } from './fragment.ts';
+import { projectionEligibleSql } from '../eligibility/sql.ts';
+import type { ReadEligibility } from '../eligibility/policy.ts';
 
 /** The engine's batch retry wrapper (audit JSONL + backoff + reconnect live on the engine). */
 export type BatchRetry = <T>(
@@ -59,11 +61,14 @@ async function _addTakesBatchOnce(exec: SqlExecutor, rowsIn: TakeBatchInput[]): 
     // Weight clamp/round + NUL-stripping live in buildTakeRows (shared w/ PGLite).
     // NOTE: ON CONFLICT here is DO UPDATE (not DO NOTHING) — an intra-batch
     // duplicate (page_id, row_num) errors, identical to the pre-#1861 unnest path.
+    // A stored row that already holds the values is left unwritten (no trigger,
+    // no updated_at bump) and still counts: every row is inserted, updated or
+    // already current, else the statement throws.
     const { rows, weightClamped } = buildTakeRows(rowsIn);
     if (weightClamped > 0) {
       process.stderr.write(`[takes] TAKES_WEIGHT_CLAMPED: ${weightClamped} row(s) had weight outside [0,1]; clamped\n`);
     }
-    const result = await executeRawJsonb(
+    await executeRawJsonb(
       exec,
       `INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, since_date, until_date, source, superseded_by, active)
        SELECT v.page_id, v.row_num, v.claim, v.kind, v.holder, v.weight,
@@ -73,6 +78,10 @@ async function _addTakesBatchOnce(exec: SqlExecutor, rowsIn: TakeBatchInput[]): 
          since_date text, until_date text, source text, superseded_by int, active boolean
        )
        ON CONFLICT (page_id, row_num) DO UPDATE SET
+         embedding          = CASE WHEN takes.claim IS DISTINCT FROM EXCLUDED.claim THEN NULL ELSE takes.embedding END,
+         embedded_at        = CASE WHEN takes.claim IS DISTINCT FROM EXCLUDED.claim THEN NULL ELSE takes.embedded_at END,
+         embedding_model    = CASE WHEN takes.claim IS DISTINCT FROM EXCLUDED.claim THEN NULL ELSE takes.embedding_model END,
+         embedded_text_hash = CASE WHEN takes.claim IS DISTINCT FROM EXCLUDED.claim THEN NULL ELSE takes.embedded_text_hash END,
          claim         = EXCLUDED.claim,
          kind          = EXCLUDED.kind,
          holder        = EXCLUDED.holder,
@@ -83,11 +92,13 @@ async function _addTakesBatchOnce(exec: SqlExecutor, rowsIn: TakeBatchInput[]): 
          superseded_by = EXCLUDED.superseded_by,
          active        = EXCLUDED.active,
          updated_at    = now()
-       RETURNING 1`,
+       WHERE (takes.claim, takes.kind, takes.holder, takes.weight, takes.since_date, takes.until_date, takes.source, takes.superseded_by, takes.active)
+         IS DISTINCT FROM (EXCLUDED.claim, EXCLUDED.kind, EXCLUDED.holder, EXCLUDED.weight, EXCLUDED.since_date, EXCLUDED.until_date,
+           EXCLUDED.source, EXCLUDED.superseded_by, EXCLUDED.active)`,
       [],
       [{ rows }],
     );
-    return result.length;
+    return rows.length;
   }
 
   /**
@@ -275,6 +286,11 @@ export async function sweepContradictionCache(exec: SqlExecutor): Promise<number
     return result.affectedRows;
   }
 
+/** #5575: the read-eligibility predicate over the takes alias `t` when a read op passes a policy. */
+function takeEligibility(policy: ReadEligibility | undefined) {
+  return policy ? sqlFragment` AND ${trustedSql(projectionEligibleSql('takes', 't', policy))}` : sqlFragment``;
+}
+
 export async function listTakes(exec: LegacyUnscopedRead, opts: TakesListOpts = {}): Promise<Take[]> {
     const limit = clampSearchLimit(opts.limit, 100, 500);
     const offset = Math.max(0, Math.floor(opts.offset ?? 0));
@@ -292,7 +308,7 @@ export async function listTakes(exec: LegacyUnscopedRead, opts: TakesListOpts = 
       FROM takes t
       JOIN pages p ON p.id = t.page_id
       WHERE 1=1
-        ${opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+        ${opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterForCaller('p')}`) : sqlFragment``}
         AND (${opts.page_id ?? null}::int   IS NULL OR t.page_id = ${opts.page_id ?? null}::int)
         AND (${opts.page_slug ?? null}::text IS NULL OR p.slug   = ${opts.page_slug ?? null}::text)
         AND (${opts.holder ?? null}::text   IS NULL OR t.holder  = ${opts.holder ?? null}::text)
@@ -307,17 +323,24 @@ export async function listTakes(exec: LegacyUnscopedRead, opts: TakesListOpts = 
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
-        ${sourceFilter}
+        AND (${opts.sinceOnOrBefore ?? null}::text IS NULL OR (t.since_date IS NOT NULL AND NOT (
+          t.since_date ~ '^[0-9]{4}-[0-9]{2}(-[0-9]{2})?$'
+          AND (CASE WHEN length(t.since_date) = 7 THEN t.since_date || '-15' ELSE t.since_date END) > ${opts.sinceOnOrBefore ?? null}::text)))
+        ${sourceFilter}${takeEligibility(opts.eligibility)}
       ORDER BY
+        ${opts.ungradedFirst ? sqlFragment`EXISTS (SELECT 1 FROM take_grade_cache g WHERE g.take_id = t.id
+          AND g.prompt_version = ${opts.ungradedFirst.promptVersion} AND g.judge_model_id = ${opts.ungradedFirst.judgeModelId}),` : sqlFragment``}
+        CASE WHEN ${opts.sortBy ?? 'created_at'} = 'since_date' AND ${opts.oldestFirst ?? false}::boolean THEN t.since_date END ASC NULLS LAST,
         CASE WHEN ${opts.sortBy ?? 'created_at'} = 'weight'      THEN t.weight     END DESC NULLS LAST,
-        CASE WHEN ${opts.sortBy ?? 'created_at'} = 'since_date'  THEN t.since_date END DESC NULLS LAST,
-        CASE WHEN ${opts.sortBy ?? 'created_at'} = 'created_at'  THEN t.created_at END DESC NULLS LAST
+        CASE WHEN ${opts.sortBy ?? 'created_at'} = 'since_date' AND NOT ${opts.oldestFirst ?? false}::boolean THEN t.since_date END DESC NULLS LAST,
+        CASE WHEN ${opts.sortBy ?? 'created_at'} = 'created_at'  THEN t.created_at END DESC NULLS LAST,
+        t.id DESC
       LIMIT ${limit} OFFSET ${offset}
     `)).rows;
     return rows.map((r) => takeRowToTake(r as Record<string, unknown>));
   }
 
-export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[] } = {}): Promise<TakeHit[]> {
+export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[]; eligibility?: ReadEligibility } = {}): Promise<TakeHit[]> {
     const limit = clampSearchLimit(opts.limit, 30, 100);
     const sourceFilter = opts.sourceIds && opts.sourceIds.length > 0
       ? sqlFragment`AND p.source_id = ANY(${opts.sourceIds}::text[])`
@@ -326,18 +349,18 @@ export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts:
         : sqlFragment``;
     const rows = (await exec.run(sqlFragment`
       SELECT t.id AS take_id, t.page_id, p.slug AS page_slug, t.row_num,
-             t.claim, t.kind, t.holder, t.weight,
+             t.claim, t.kind, t.holder, t.weight, t.since_date, t.until_date, t.source,
              word_similarity(${query}, t.claim)::real AS score
       FROM takes t
       JOIN pages p ON p.id = t.page_id
       WHERE t.active
         AND ${query} <% t.claim
-        ${opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+        ${opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterForCaller('p')}`) : sqlFragment``}
         AND (
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
-        ${sourceFilter}
+        ${sourceFilter}${takeEligibility(opts.eligibility)}
       ORDER BY score DESC, t.weight DESC
       LIMIT ${limit}
     `)).rows;
@@ -350,7 +373,7 @@ export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts:
 export async function searchTakesVector(
   exec: LegacyUnscopedRead,
     embedding: Float32Array,
-    opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[] } = {},
+    opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[]; eligibility?: ReadEligibility } = {},
   ): Promise<TakeHit[]> {
     const limit = clampSearchLimit(opts.limit, 30, 100);
     const vec = `[${Array.from(embedding).join(',')}]`;
@@ -361,18 +384,18 @@ export async function searchTakesVector(
         : sqlFragment``;
     const rows = (await exec.run(sqlFragment`
       SELECT t.id AS take_id, t.page_id, p.slug AS page_slug, t.row_num,
-             t.claim, t.kind, t.holder, t.weight,
+             t.claim, t.kind, t.holder, t.weight, t.since_date, t.until_date, t.source,
              (1 - (t.embedding <=> ${vec}::vector))::real AS score
       FROM takes t
       JOIN pages p ON p.id = t.page_id
       WHERE t.active
         AND t.embedding IS NOT NULL
-        ${opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+        ${opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterForCaller('p')}`) : sqlFragment``}
         AND (
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
-        ${sourceFilter}
+        ${sourceFilter}${takeEligibility(opts.eligibility)}
       ORDER BY t.embedding <=> ${vec}::vector
       LIMIT ${limit}
     `)).rows;
@@ -395,19 +418,37 @@ export async function getTakeEmbeddings(exec: LegacyUnscopedRead, ids: number[])
     return out;
   }
 
-export async function countStaleTakes(exec: LegacyUnscopedRead): Promise<number> {
+/**
+ * #5885 take vector lifecycle: an active take on a live page in an
+ * unarchived source is stale when it has no vector, its vector was computed
+ * from other claim text, or (when the caller names the target) another model
+ * or width produced it. Legacy vectors with no recorded provenance are stale.
+ */
+function staleTakeWhere(opts?: StaleTakeOpts) {
+  return sqlFragment`t.active
+        AND p.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM sources s WHERE s.id = p.source_id AND NOT s.archived)
+        AND (${opts?.sourceId ?? null}::text IS NULL OR p.source_id = ${opts?.sourceId ?? null}::text)
+        AND (t.embedding IS NULL
+          OR t.embedded_text_hash IS DISTINCT FROM md5(t.claim)
+          OR (${opts?.model ?? null}::text IS NOT NULL AND t.embedding_model IS DISTINCT FROM ${opts?.model ?? null}::text)
+          OR (${opts?.dims ?? null}::int IS NOT NULL AND vector_dims(t.embedding) <> ${opts?.dims ?? null}::int))`;
+}
+
+export async function countStaleTakes(exec: LegacyUnscopedRead, opts?: StaleTakeOpts): Promise<number> {
     const [row] = (await exec.run(sqlFragment`
-      SELECT count(*)::int AS count FROM takes WHERE active AND embedding IS NULL
+      SELECT count(*)::int AS count FROM takes t JOIN pages p ON p.id = t.page_id
+      WHERE ${staleTakeWhere(opts)}
     `)).rows;
     return Number((row as { count?: number } | undefined)?.count ?? 0);
   }
 
-export async function listStaleTakes(exec: LegacyUnscopedRead): Promise<StaleTakeRow[]> {
+export async function listStaleTakes(exec: LegacyUnscopedRead, opts?: StaleTakeOpts): Promise<StaleTakeRow[]> {
     const rows = (await exec.run(sqlFragment`
       SELECT t.id AS take_id, p.slug AS page_slug, t.row_num, t.claim
       FROM takes t
       JOIN pages p ON p.id = t.page_id
-      WHERE t.active AND t.embedding IS NULL
+      WHERE ${staleTakeWhere(opts)}
       ORDER BY t.id
       LIMIT 100000
     `)).rows;
@@ -434,25 +475,31 @@ async function _updateTakeEmbeddingsOnce(
   rowsIn: TakeEmbeddingInput[],
 ): Promise<number> {
   const seen = new Set<number>();
-  const rows = rowsIn.map(({ take_id, embedding }) => {
+  const rows = rowsIn.map(({ take_id, embedding, claim, model }) => {
     if (!Number.isInteger(take_id) || take_id <= 0) throw new Error(`invalid take_id: ${take_id}`);
     if (seen.has(take_id)) throw new Error(`duplicate take_id in embedding batch: ${take_id}`);
     seen.add(take_id);
+    if (typeof claim !== 'string' || typeof model !== 'string' || model.length === 0) {
+      throw new Error(`take embedding for take_id=${take_id} must name its claim text and model`);
+    }
     const values = Array.from(embedding);
     if (values.length === 0 || values.some(v => !Number.isFinite(v))) {
       throw new Error(`invalid embedding for take_id=${take_id}`);
     }
-    return { take_id, embedding: `[${values.join(',')}]` };
+    return { take_id, embedding: `[${values.join(',')}]`, claim, model };
   });
+  // The claim compare discards a vector whose row was edited while it was in flight.
   const result = await executeRawJsonb(
       exec,
     `WITH updated AS (
        UPDATE takes AS t
           SET embedding = v.embedding::vector,
               embedded_at = now(),
+              embedding_model = v.model,
+              embedded_text_hash = md5(v.claim),
               updated_at = now()
-         FROM jsonb_to_recordset(($1::jsonb)->'rows') AS v(take_id bigint, embedding text)
-        WHERE t.id = v.take_id AND t.active
+         FROM jsonb_to_recordset(($1::jsonb)->'rows') AS v(take_id bigint, embedding text, claim text, model text)
+        WHERE t.id = v.take_id AND t.active AND t.claim = v.claim
         RETURNING t.id
      )
      SELECT id FROM updated`,
@@ -584,7 +631,7 @@ export async function getScorecard(exec: LegacyUnscopedRead, opts: TakesScorecar
         )::float                                                                               AS brier
       FROM takes
       WHERE 1=1 ${holderClause} ${domainClause} ${sinceClause} ${untilClause} ${allowed} ${sourceFilter}
-        ${opts.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.id = takes.page_id AND ${privatePagesFilterFragment('p')})`) : sqlFragment``}
+        ${opts.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.id = takes.page_id AND ${privatePagesFilterForCaller('p')})`) : sqlFragment``}
     `)).rows;
     const r = rows[0] as { total_bets: number; resolved: number; correct: number; incorrect: number; partial: number; unresolvable_count: number; brier: number | null };
     return finalizeScorecard(r);
@@ -625,7 +672,7 @@ export async function getCalibrationCurve(exec: LegacyUnscopedRead, opts: Calibr
         FROM takes
         WHERE resolved_quality IN ('correct','incorrect')
           ${holderClause} ${allowed} ${sourceFilter}
-          ${opts.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.id = takes.page_id AND ${privatePagesFilterFragment('p')})`) : sqlFragment``}
+          ${opts.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.id = takes.page_id AND ${privatePagesFilterForCaller('p')})`) : sqlFragment``}
       )
       SELECT
         (bucket_idx::numeric * ${bucketSize}::numeric)::float       AS bucket_lo,

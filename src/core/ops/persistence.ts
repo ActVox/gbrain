@@ -1,6 +1,8 @@
 /** Own-write receipt controls. UUID knowledge alone never grants access. */
-import { OperationError, type Operation, type OperationContext } from './contract.ts';
-import { enforceBoundClientOpAllowList, enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, parseSourceIdParam } from './context.ts';
+import { OperationError, opError, type Operation, type OperationContext } from './contract.ts';
+import { invalidParam, readFix } from './op-fix.ts';
+import { isValidSourceId } from '../source-id.ts';
+import { enforceBoundClientOpAllowList, enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, parseSourceIdParam, readPolicyOpts, resolveRequestedScope } from './context.ts';
 import { hasScope } from '../scope.ts';
 import { normalizeTokenScopes } from '../legacy-token-scope.ts';
 import { parseWriteRequestId } from '../persistence/preconditions.ts';
@@ -11,9 +13,19 @@ import type { WriteHealthFacts } from '../persistence/health.ts';
 
 const RECEIPT_NAMES = ['get_write_request', 'list_write_requests', 'cancel_write_request'] as const;
 type ReceiptOperation = typeof RECEIPT_NAMES[number];
-const denied = () => new OperationError('permission_denied', 'This writer grant does not include the requested receipt operation.',
+const denied = () => opError('permission_denied', 'This writer grant does not include the requested receipt operation.',
   'Explicitly regrant the required receipt operation. Existing operation snapshots do not expand during upgrades.');
-const missing = () => new OperationError('not_found', 'No accessible write request has that request_id.');
+function callerSource(ctx: OperationContext): string | undefined {
+  const id = ctx.auth?.sourceId ?? ctx.sourceId;
+  return isValidSourceId(id) ? id : undefined;
+}
+/** Foreign, missing and inaccessible requests share one answer (anti-enumeration); the fix lists the caller's own receipts. */
+const missing = (sourceId?: string) => opError('not_found', 'No accessible write request has that request_id.',
+  'Check the request_id; list_write_requests shows the receipts this connection can read in its source, newest first.',
+  { fix: readFix('Lists your own write receipts in this source, newest first.', {
+    argv: ['gbrain', 'write-requests', ...(sourceId ? ['--source', sourceId] : [])],
+    mcp: { tool: 'list_write_requests', arguments: sourceId ? { source_id: sourceId } : {} },
+  }) });
 
 function operationAllowed(operations: unknown, operation: string): boolean {
   return operations == null || Array.isArray(operations) && operations.every(value => typeof value === 'string') && operations.includes(operation);
@@ -89,19 +101,62 @@ async function visible(ctx: OperationContext, row: WriteRequest): Promise<boolea
   }
 }
 
+/**
+ * GST-687: a receipt read later (get_write_request, list_write_requests) echoes the timeline entry it wrote; an untrusted
+ * reader gets that text (`bullet`, `entry.summary`, `entry.detail`) quoted, inner text byte-exact. The write's own response is unchanged.
+ */
+async function quotedOutcome(outcome: Record<string, unknown>, slug: string): Promise<Record<string, unknown>> {
+  const entry = outcome.entry && typeof outcome.entry === 'object' ? outcome.entry as Record<string, unknown> : null;
+  if (typeof outcome.bullet !== 'string' && typeof entry?.summary !== 'string' && typeof entry?.detail !== 'string') return outcome;
+  const { fenceTranscriptText } = await import('../search/transcript-quote.ts');
+  const fenced = (o: Record<string, unknown>, keys: string[]) =>
+    Object.fromEntries(keys.flatMap(k => (typeof o[k] === 'string' && o[k] ? [[k, fenceTranscriptText(o[k] as string, slug)]] : [])));
+  return { ...outcome, ...fenced(outcome, ['bullet']), ...(entry ? { entry: { ...entry, ...fenced(entry, ['summary', 'detail']) } } : {}), quoted: 'transcript' };
+}
+
 async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: WriteHealthFacts): Promise<Record<string, unknown>> {
   const { receiptFor } = await import('../persistence/journal.ts');
-  const { publicEffectsForRequest } = await import('../persistence/effect-journal.ts');
+  const { gitReceiptState, publicEffectsForRequest } = await import('../persistence/effect-journal.ts');
   const { receiptDeliveredHint } = await import('../persistence/connector-errors.ts');
   const { CHECKPOINT_VALIDATION_TIMEOUT, checkpointTimeoutHint } = await import('../persistence/checkpoint-validation.ts');
   const { writeFailureDiagnostic } = await import('../persistence/verb-errors.ts');
   const intent = row.intent as Pick<import('../persistence/sync-prepare.ts').SyncIntent, 'processingOptions' | 'syncOptions' | 'repoPath'> | null;
   const checkpoint = row.error_code === CHECKPOINT_VALIDATION_TIMEOUT ? await checkpointTimeoutHint(ctx.engine, { requestId: row.request_id, sourceId: row.source_id,
     processingOptions: intent?.processingOptions, syncOptions: intent?.syncOptions, repoPath: intent?.repoPath }) : null;
+  // #5929: a trusted local reader learns when the owner that ran the attempt is on another build.
+  const mismatch = ctx.remote === false ? (await import('../persistence/publication-failure.ts')).ownerBuildMismatch(row.error_detail, (await import('../../version.ts')).VERSION) : null;
+  const withdrawn = (await import('../facts/withdrawal.ts')).withdrawnFromDetail(row.error_detail);
+  const diagnostic = isWriteErrorCode(row.error_code) ? writeFailureDiagnostic(row.error_code, row.error_message) : null;
+  // #6650: the classification the receipt's own columns support, with the structured next step (verify is read-only).
+  const terminal = isTerminalOrRecovering(row) ? (await import('../persistence/terminal-classify.ts')).classifyTerminal({ request_id: row.request_id, source_id: row.source_id,
+    slug: row.slug, operation: row.operation, state: row.state, error_code: row.error_code, error_detail: row.error_detail ?? null, recovery: row.recovery,
+    blocked_reason: row.blocked_reason, compacted: row.compacted, publication_started: row.publication_started, error_message: row.error_message,
+    intent_kind: typeof row.intent?.kind === 'string' ? row.intent.kind : null, build: (row as { admitter_version?: string | null }).admitter_version ?? null,
+    schema_behind: await (await import('../persistence/schema-admission.ts')).readSchemaBehind(ctx.engine) }) : null;
+  const { cliRenderContext, renderAction } = await import('../agent-output.ts');
+  const render = ctx.remote === false ? cliRenderContext() : { transport: 'stdio' as const, isCallable: () => false, preapproved: () => false };
+  const { liveSearchable } = await import('../persistence/searchable.ts');
+  const stored = publicWriteReceipt(receiptFor(row, facts));
+  // #9227: a classic write's `git_state: queued` is what its publication stored; the Git effect row says where Git is now.
+  const git = stored.persistence?.git_state === 'queued' ? await gitReceiptState(ctx.engine, row.id) : null;
+  const receipt = git ? { ...stored, persistence: { ...stored.persistence!, ...git } } : stored;
+  // GBRA-217: a reason whose Git effect was superseded is reported as not committed.
+  const settled = await (await import('../persistence/change-reason.ts')).settledReasonRecorded(ctx.engine, row);
+  if (settled) ctx.emitNotice?.(settled.notice);
+  const outcome = settled ? { ...receipt.outcome, reason_recorded: settled.recorded } : receipt.outcome;
   return {
-    ...publicWriteReceipt(receiptFor(row, facts)),
+    ...receipt,
+    ...(ctx.remote !== false && outcome ? { outcome: await quotedOutcome(outcome, String(row.slug ?? '')) } : settled ? { outcome } : {}),
     operation: row.operation, source_id: row.source_id, slug: row.slug,
-    ...(isWriteErrorCode(row.error_code) ? { write_error: row.error_code, write_error_message: writeFailureDiagnostic(row.error_code, row.error_message).message } : {}),
+    ...await liveSearchable(ctx, { request_id: row.request_id, state: row.state, source_id: row.source_id, slug: row.slug, searchable: row.outcome?.searchable }),
+    ...(mismatch ? { owner_build: mismatch } : {}),
+    // #7112: the owner-side detail (an owner exception's class, errno, frame, redacted database error text and statement) for a trusted local reader only.
+    ...(ctx.remote === false && row.error_detail ? { error_detail: row.error_detail } : {}),
+    ...(diagnostic ? { write_error: row.error_code, write_error_message: diagnostic.message, write_error_reason: diagnostic.reason, suggestion: diagnostic.suggestion } : {}),
+    ...(terminal ? { diagnosis: { category: terminal.category, public_category: terminal.public_category, code: terminal.code, class: terminal.class, safe_actions: terminal.safe_actions, needs_human: terminal.needs_human,
+      ...(terminal.human_reason ? { human_reason: terminal.human_reason } : {}), escalate: terminal.escalate, historical: terminal.historical,
+      fix: renderAction(terminal.action, render) } } : {}),
+    ...(withdrawn ? { withdrawn } : {}),
     ...(checkpoint ? { detail: checkpoint.detail, suggestion: checkpoint.suggestion, docs: checkpoint.docs } : {}),
     effects: (await publicEffectsForRequest(ctx.engine, row.id)).map(effect => {
       const hint = effect.reason ? receiptDeliveredHint({ error_code: effect.reason, source_id: row.source_id, slug: row.slug }) : null;
@@ -110,20 +165,49 @@ async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: W
   };
 }
 
+/**
+ * GST-1158: a memory proposal under this request id, when no journal row has it yet: visible to the same principal and the
+ * same attested person only (OV8: not to the live attest ops, so a proposer keeps reading and cancelling its held rows after
+ * memory_propose is revoked); every other caller gets the same not_found as a missing id.
+ */
+async function ownProposal(ctx: OperationContext, principal: Principal, requestId: string) {
+  const { getProposal } = await import('../persistence/memory-proposals.ts');
+  const proposal = await getProposal(ctx.engine, principal, requestId).catch(async error => {
+    if ((await import('../utils.ts')).isMissingSchemaObject(error, 'table', 'memory_proposals')) return null;
+    throw error;
+  });
+  const { sameAttestedActor } = await import('../access/member-facts.ts');
+  return proposal && sameAttestedActor(proposal.authority.actingFor) ? proposal : null;
+}
+
+/** The proposal an approved write came from, on its journal receipt. */
+async function approvedProposal(ctx: OperationContext, principal: Principal, row: WriteRequest): Promise<Record<string, unknown>> {
+  if (row.authority?.attestedOp !== 'memory_propose') return {};
+  const proposal = await ownProposal(ctx, principal, row.request_id);
+  return proposal ? { proposal: { kind: proposal.kind, target: proposal.slug, ...(proposal.to_slug ? { to: proposal.to_slug } : {}), decided_at: proposal.decided_at } } : {};
+}
+
+/** A receipt the terminal classifier reads: ended without committing, or holding a publication recovery record outside an in-flight claim (committed or parked `recovering`). */
+function isTerminalOrRecovering(row: WriteRequest): boolean {
+  return ['failed', 'conflict', 'cancelled'].includes(row.state) || ((row.state === 'committed' || row.state === 'recovering') && row.recovery != null);
+}
+
 function requiredRequestId(value: unknown): string {
   const id = parseWriteRequestId(value);
-  if (!id) throw new OperationError('invalid_params', 'request_id is required.');
+  if (!id) throw opError('invalid_params', 'request_id is required.', 'Pass the request_id you sent with the write, or the one its receipt shows; list_write_requests shows recent ones.');
   return id;
 }
 
-const requestParam = { type: 'string' as const, required: true, description: 'The original request UUID. Only this principal’s currently authorized requests are accessible.' };
+const requestParam = { type: 'string' as const, required: true, description: 'The id you sent, or the receipt\'s.' };
 
 export const persistenceOperations: Operation[] = [
   {
     name: 'get_write_request',
+    idempotent: true,
     outputRedaction: 'no_stored_text',
-    description: 'Read your durable write receipt by request_id. Requires write scope and this operation in the current grant. Foreign, missing, and no-longer-accessible requests return the same not_found error; private journal input and recovery bytes are never returned.',
-    params: { request_id: requestParam },
+    description: 'Your write\'s receipt by request_id (after write_pending or a lost reply). Poll at retry_after_ms until final.',
+    params: { request_id: requestParam,
+      applied: { type: 'boolean', fullSurfaceOnly: true, description: 'Also return applied: searchable yet, the gap, the write watermark.' } },
     scope: 'write', mutating: false, area: 'pages',
     cliHints: { name: 'write-request', positional: ['request_id'] },
     handler: async (ctx, params) => {
@@ -131,18 +215,27 @@ export const persistenceOperations: Operation[] = [
       const { principal } = await receiptAccess(ctx, 'get_write_request');
       const { getWriteRequest, writeHealthFacts } = await import('../persistence/journal.ts');
       const row = await getWriteRequest(ctx.engine, principal, id);
-      if (!row || !await visible(ctx, row)) throw missing();
-      return publicReceipt(ctx, row, (await writeHealthFacts(ctx.engine, [row])).get(row.id));
+      if (!row) {
+        const proposal = await ownProposal(ctx, principal, id);
+        if (!proposal) throw missing(callerSource(ctx));
+        return (await import('../persistence/memory-proposals.ts')).proposalReceipt(proposal);
+      }
+      if (!await visible(ctx, row)) throw missing(callerSource(ctx));
+      const receipt = { ...await publicReceipt(ctx, row, (await writeHealthFacts(ctx.engine, [row])).get(row.id)), ...await approvedProposal(ctx, principal, row) };
+      if (params.applied !== true) return receipt;
+      const applied = await (await import('../persistence/write-applied.ts')).readWriteApplied(ctx.engine, row).catch(() => null);
+      return applied ? { ...receipt, applied } : receipt;
     },
   },
   {
     name: 'list_write_requests',
+    idempotent: true,
     outputRedaction: 'no_stored_text',
-    description: 'List your currently authorized write receipts in one source, newest first. Useful when an acknowledgment was lost. Results and pagination exclude other principals and inaccessible targets; no private payloads or cross-principal queue counts are exposed.',
+    description: 'Your write receipts in one source, newest first (for a lost request_id).',
     params: {
-      source_id: { type: 'string', description: 'Source to inspect. Defaults to the caller’s resolved source.' },
-      limit: { type: 'number', default: 25, description: 'Number of visible receipts, 1–100. Default 25.' },
-      before: { type: 'string', description: 'Opaque next cursor from the previous response.' },
+      source_id: { type: 'string', description: 'Default: yours.' },
+      limit: { type: 'number', default: 25, description: '1-100 (default 25).', fullSurfaceOnly: true },
+      before: { type: 'string', description: "Previous page's next cursor." },
     },
     scope: 'write', mutating: false, area: 'pages',
     cliHints: { name: 'write-requests' },
@@ -150,9 +243,9 @@ export const persistenceOperations: Operation[] = [
       const access = await receiptAccess(ctx, 'list_write_requests');
       const sourceId = parseSourceIdParam(params.source_id ?? ctx.sourceId, 'list_write_requests') ?? 'default';
       const limit = params.limit ?? 25;
-      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new OperationError('invalid_params', 'limit must be an integer from 1 to 100.');
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) throw invalidParam(ctx, 'list_write_requests', 'limit', 'limit must be an integer from 1 to 100.', { example: 25 });
       if (params.before !== undefined && (typeof params.before !== 'string' || !/^\d{1,19}$/.test(params.before)
-        || BigInt(params.before) > 9_223_372_036_854_775_807n)) throw new OperationError('invalid_params', 'Invalid write request cursor.');
+        || BigInt(params.before) > 9_223_372_036_854_775_807n)) throw opError('invalid_params', 'Invalid write request cursor.', 'Pass `before` exactly as the previous response\'s `next` value, or omit it to start from the newest receipt.');
       if (access.sourceIds && !access.sourceIds.includes(sourceId)) return { requests: [], next: null };
       const { listWriteRequests } = await import('../persistence/control.ts');
       const slugAllowList = ctx.viaSubagent !== true ? undefined : ctx.allowedSlugPrefixes?.length ? ctx.allowedSlugPrefixes
@@ -168,9 +261,44 @@ export const persistenceOperations: Operation[] = [
     },
   },
   {
-    name: 'cancel_write_request',
+    // #6643 (B0): the conflict pile grouped by slug. Database-derived fields only for remote callers, filtered by source grant, slug fence
+    // and page visibility in the aggregating SQL; the live file check runs only for the trusted local CLI on the canonical owner host.
+    name: 'list_write_conflicts',
+    idempotent: true,
     outputRedaction: 'no_stored_text',
-    description: 'Cancel your accepted write before publication starts. Returns the actual receipt: running/recovering or already-terminal requests may remain unchanged. Cancellation cannot undo published bytes or a committed fact withdrawal.',
+    description: 'Pages whose writes keep ending in a source_changed conflict, grouped by slug.',
+    params: {
+      source_id: { type: 'string', description: 'Default: yours.' },
+      limit: { type: 'number', minimum: 1, default: 25, description: '1-100 slugs (default 25).' },
+      cursor: { type: 'string', description: "Previous page's next." },
+    },
+    scope: 'read', mutating: false, area: 'pages',
+    cliHints: { name: 'write-conflicts' },
+    handler: async (ctx, params) => {
+      const sourceId = parseSourceIdParam(params.source_id ?? ctx.sourceId, 'list_write_conflicts') ?? 'default';
+      // A remote caller naming a source outside its grant is refused like every source-scoped read (permission_denied, whether or not it exists).
+      if (params.source_id !== undefined) resolveRequestedScope(ctx, sourceId);
+      const limit = params.limit ?? 25;
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) throw invalidParam(ctx, 'list_write_conflicts', 'limit', 'limit must be an integer from 1 to 100.', { example: 25 });
+      if (params.cursor !== undefined && typeof params.cursor !== 'string') throw opError('invalid_params', 'Invalid conflict cursor.', "Pass `cursor` exactly as the previous response's `next` value.");
+      const policy = await readPolicyOpts(ctx);
+      const trusted = ctx.remote === false;
+      const sourceIds = policy.sourceIds ?? (!trusted && policy.sourceId ? [policy.sourceId] : undefined);
+      const subagent = ctx.viaSubagent !== true ? undefined : ctx.allowedSlugPrefixes?.length ? ctx.allowedSlugPrefixes
+        : typeof ctx.subagentId === 'number' ? [`wiki/agents/${ctx.subagentId}/`] : [];
+      const bound = ctx.auth?.boundSlugPrefixes?.map(normalizeSlugPrefix);
+      // Both fences apply: a slug must sit under each confinement this caller carries.
+      const slugPrefixes = bound && subagent ? intersectPrefixes(bound, subagent) : bound ?? subagent?.map(normalizeSlugPrefix);
+      const { auditDriftConflicts } = await import('../persistence/drift-conflicts.ts');
+      return auditDriftConflicts(ctx.engine, sourceId, { trusted, sourceIds, slugPrefixes, excludePrivate: policy.excludePrivate === true },
+        { limit, cursor: params.cursor as string | undefined });
+    },
+  },
+  {
+    name: 'cancel_write_request',
+    idempotent: true,
+    outputRedaction: 'no_stored_text',
+    description: 'Cancel your accepted write before it publishes; returns the receipt.',
     params: { request_id: requestParam },
     scope: 'write', mutating: true, area: 'pages',
     cliHints: { name: 'cancel-write-request', positional: ['request_id'] },
@@ -179,17 +307,24 @@ export const persistenceOperations: Operation[] = [
       const { principal } = await receiptAccess(ctx, 'cancel_write_request');
       const { getWriteRequest, writeHealthFacts } = await import('../persistence/journal.ts');
       const row = await getWriteRequest(ctx.engine, principal, id);
-      if (!row || !await visible(ctx, row)) throw missing();
+      if (!row) {
+        const proposal = await ownProposal(ctx, principal, id);
+        if (!proposal) throw missing(callerSource(ctx));
+        if (ctx.dryRun) return { dry_run: true, action: 'cancel_write_request', request_id: id, state: proposal.state };
+        const { cancelOwnProposal, proposalReceipt } = await import('../persistence/memory-proposals.ts');
+        return proposalReceipt(await cancelOwnProposal(ctx.engine, proposal));
+      }
+      if (!await visible(ctx, row)) throw missing(callerSource(ctx));
       if (ctx.dryRun) return { dry_run: true, action: 'cancel_write_request', request_id: id, state: row.state };
       const { cancelWriteRequest } = await import('../persistence/control.ts');
       const cancelled = await cancelWriteRequest(ctx.engine, principal, id, {
         authorize: async (engine, current) => {
           const lockedCtx = { ...ctx, engine };
           await receiptAccess(lockedCtx, 'cancel_write_request', true);
-          if (!await visible(lockedCtx, current)) throw missing();
+          if (!await visible(lockedCtx, current)) throw missing(callerSource(ctx));
         },
       });
-      if (!cancelled) throw missing();
+      if (!cancelled) throw missing(callerSource(ctx));
       return publicReceipt(ctx, cancelled, (await writeHealthFacts(ctx.engine, [cancelled])).get(cancelled.id));
     },
   },

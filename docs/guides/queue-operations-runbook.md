@@ -43,7 +43,11 @@ gbrain doctor --json | jq '.checks[] | select(.name == "wedged_queue")'
 ```
 
 `wedged_queue` is a per-queue health **error** (0 active_healthy + waiting > 0 +
-stale completions). Manual fix if you ever need it:
+stale completions). While an autopilot pause is in place (`gbrain autopilot
+pause`, or the marker a migration sets), workers claim nothing, so the check
+reports the held queue as a **warning** that names the resume step, and the
+worker's stall watchdog stays quiet. Restarting a worker doesn't help then.
+Manual fix if you ever need it:
 
 ```bash
 # Restart the supervisor with a fresh pool. `start` alone runs in the
@@ -103,7 +107,14 @@ gbrain jobs list --status waiting --limit 50
 
 # What's wrong with a specific job?
 gbrain jobs get <id>
+
+# Which queues hold the work? One line per queue (`by_queue` in --json);
+# the per-run dream-inline-* queues share one `dream-inline (N queues)` line.
+gbrain jobs stats
 ```
+
+`gbrain jobs stats --queue dream-inline-<ms>-<id>` still scopes the wedge and
+ABANDONED PRIVATE QUEUE lines to one per-run queue.
 
 ## Rescue actions (in order of escalation)
 
@@ -199,7 +210,7 @@ deadline math.
 Per-job lease: `gbrain jobs submit --lock-duration-ms N` (clamped
 [5 s, 1 h] — enforced at submit, re-applied to the resolved lease at
 claim, and backed by a database range constraint; `--dry-run` echoes the
-clamped value that will actually be stored); long LLM handlers default to 300 s via
+clamped value that will actually be stored); `sync` and the long LLM handlers default to 300 s via
 `HANDLER_DEFAULT_LOCK_DURATION_MS` in `src/core/minions/handler-timeouts.ts`.
 Renewal cadence is `min(lease/2, 60 s)`. Trade-off: a genuinely dead
 worker's long-lease job requeues after lease + grace + one sweep interval.

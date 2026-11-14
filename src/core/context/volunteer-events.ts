@@ -28,8 +28,10 @@ export const VOLUNTEER_EVENTS_TTL_DAYS = 90;
  * 'openclaw' (2026-08 wave) is the IN-PROCESS OpenClaw reflex lane's volunteer
  * channel — deliberately NOT in HARNESS_CHANNELS below: it is never
  * wire-claimable (a hook client claiming it would spoof production
- * attribution; outside-voice codex-2 #7). */
-export const VOLUNTEER_CHANNELS = ['op', 'reflex', 'watch', 'openclaw', 'claude-code', 'codex', 'opencode'] as const;
+ * attribution; outside-voice codex-2 #7). 'brief' (wave 5 D5) is the
+ * proactive brief's channel, stamped by the serve and likewise never
+ * wire-claimable. */
+export const VOLUNTEER_CHANNELS = ['op', 'reflex', 'watch', 'openclaw', 'claude-code', 'codex', 'opencode', 'brief'] as const;
 export type VolunteerChannel = (typeof VOLUNTEER_CHANNELS)[number];
 
 /** The harness subset — the ONLY channels a wire caller may claim. */
@@ -105,6 +107,30 @@ export function logTurnContextDeliveryFireAndForget(
 }
 
 /**
+ * Wave 5 D5: log a DELIVERED proactive brief, one row per item under channel
+ * 'brief' with match_arm `brief-<trigger>` and the deterministic rationale
+ * `<kind>:<id>` (no stored text). The derived "used" join reads these rows
+ * as a page-open proxy for the item's source slug, not as item use; D6
+ * measures use. Fire-and-forget: never throws into the server.
+ */
+export function logBriefDeliveryFireAndForget(
+  engine: BrainEngine,
+  brief: import('./proactive-brief.ts').BriefView | undefined,
+  sessionId?: string,
+): void {
+  try {
+    if (!brief?.items.length) return;
+    const rows = volunteerEventRowsFrom(
+      brief.items.map((i) => ({ source_id: i.source_id, slug: i.slug, confidence: i.confidence, arm: `brief-${brief.trigger}`, rationale: `${i.kind}:${i.id}` })),
+      { channel: 'brief', session_id: typeof sessionId === 'string' ? sessionId.slice(0, SESSION_ID_MAX_LEN) : null },
+    );
+    logVolunteerEventsFireAndForget(engine, rows);
+  } catch {
+    /* telemetry only */
+  }
+}
+
+/**
  * Map volunteered pages to event rows for one channel — the ONE place the
  * VolunteerEventRow shape is assembled (op / reflex / watch all call this,
  * so adding a column is a one-site change).
@@ -142,6 +168,12 @@ export interface VolunteerEventRow {
  * RTTs ≈ 355ms on a cross-region deployment; eng-review D4). Throws on
  * failure; callers run it through the volunteer-events background-work sink
  * with try/catch so logging can never fail the op.
+ *
+ * #9068: it writes only rows whose page still exists, probed under the
+ * feedback writers' key-share lock on the page row, so a write built before a
+ * page purge and landing after it (or while the purge is open) drops that
+ * page's slug and rationale instead of restoring them (insertEvalCandidate
+ * does the same for eval captures).
  */
 export async function insertVolunteerEvents(
   engine: BrainEngine,
@@ -161,13 +193,14 @@ export async function insertVolunteerEvents(
       r.session_id ?? null,
       r.turn ?? null,
     );
-    const ph = Array.from({ length: 8 }, (_, i) => `$${base + i + 1}`);
-    return `(${ph.join(', ')})`;
+    const types = ['text', 'text', 'float8', 'text', 'text', 'text', 'text', 'int'];
+    return `(${types.map((t, i) => `$${base + i + 1}::${t}`).join(', ')})`;
   });
   await engine.executeRaw(
     `INSERT INTO context_volunteer_events
        (source_id, slug, confidence, match_arm, rationale, channel, session_id, turn)
-     VALUES ${tuples.join(', ')}`,
+     SELECT v.* FROM (VALUES ${tuples.join(', ')}) AS v(source_id, slug, confidence, match_arm, rationale, channel, session_id, turn)
+     WHERE EXISTS (SELECT 1 FROM pages pg WHERE pg.source_id = v.source_id AND pg.slug = v.slug FOR KEY SHARE)`,
     params,
   );
 }

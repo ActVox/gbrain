@@ -10,6 +10,7 @@ import type { OperationContext } from '../../src/core/ops/contract.ts';
 import { submitPageMutation } from '../../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './write-attribution.ts';
 import { runExtract } from '../../src/commands/extract.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../../src/core/cli-force-exit.ts';
 import { managedBrain } from './managed-brain.ts';
@@ -24,7 +25,7 @@ const rows = (engine: BrainEngine, slug: string) => engine.executeRaw<{ date: st
 /** A page published before timeline projection: its stored rows are gone, its body still has the bullets. */
 async function dropStoredTimeline(engine: BrainEngine, slug: string) {
   await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () =>
-    tx.executeRaw('DELETE FROM timeline_entries WHERE page_id = (SELECT id FROM pages WHERE slug = $1)', [slug])));
+    tx.executeRaw('DELETE FROM timeline_entries WHERE page_id = (SELECT id FROM pages WHERE slug = $1)', [slug]), TEST_WRITE_ATTRIBUTION));
 }
 
 async function runCaptured(engine: BrainEngine, args: string[]) {
@@ -93,8 +94,8 @@ export async function managedTimelineDbRefusalExitsNonZero(databaseUrl?: string)
     try {
       const run = await runCaptured(engine, ['timeline', '--source', 'db']);
       expect(run.exitCode).toBe(1);
-      // The coordinator reports a database refusal inside its publication as storage_error.
-      expect(run.stderr).toContain('refused: storage_error; nothing written; existing timeline rows are untouched');
+      // #5974: the coordinator names a guard refusal inside its publication instead of an opaque storage_error.
+      expect(run.stderr).toContain('refused: writer_coordinator_required; nothing written; existing timeline rows are untouched');
       expect(run.stderr).not.toContain('rows lost');
       expect(run.stderr).toContain('1 page(s) not written, 0 written');
       expect(run.stderr).toContain('gbrain extract --stale');

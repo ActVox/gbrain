@@ -25,6 +25,7 @@ import { runRepairCommand } from '../src/commands/repair.ts';
 import { capturedFactsCheck } from '../src/commands/doctor/checks/captured-facts.ts';
 import { runWaveChecks } from '../src/commands/doctor/wave-checks.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { writeSingleFact } from '../src/core/facts/write-single.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
@@ -102,7 +103,7 @@ for (const backend of testBackends()) {
         const normal = await write('Alice Example joined Acme Example in 2024', ALICE, 'hook:writeback', 'sess-normal');
         const gone = await write('Alice Example likes long walks', ALICE, 'hook:writeback', 'sess-gone');
         await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () => tx.executeRaw(`INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, source)
-          VALUES ('default', $1, 'Alice Example lives in Lisbon', 'fact', 'private', 'cli:remember')`, [ALICE])));
+          VALUES ('default', $1, 'Alice Example lives in Lisbon', 'fact', 'private', 'cli:remember')`, [ALICE]), TEST_WRITE_ATTRIBUTION));
 
         const finding = await capturedFactsCheck(engine);
         expect(finding.status).toBe('warn');
@@ -162,7 +163,7 @@ for (const backend of testBackends()) {
         const id = (await writeSingleFact(engine, 'default', { fact: 'Alice Example prefers tea', entity: ALICE, provenance: 'hook:writeback', sessionId: 'sess-self' })).id;
         const preview = await repair(engine, []);
         await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], () =>
-          tx.executeRaw("UPDATE facts SET visibility='world' WHERE id=$1", [id])));
+          tx.executeRaw("UPDATE facts SET visibility='world' WHERE id=$1", [id]), TEST_WRITE_ATTRIBUTION));
         const applied = await repair(engine, applyArgs(preview));
         expect(applied.results[0].outcomes).toEqual({ changed_since_preview: 1 });
         expect(await active(engine, id)).toBe(true);

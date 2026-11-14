@@ -21,13 +21,18 @@
 
 import type { HostSpecTarget } from '../bootstrap/host-specs.ts';
 import type { TranscriptFormat } from '../transcripts/types.ts';
-import type { ConnectorClient, ConnectorFetch } from './client.ts';
-
-/** Re-export alias so the provider interface can name the fetch seam type. */
-export type ConnectorFetchRef = ConnectorFetch;
+import type { ConnectorClient } from './client.ts';
 
 /** Providers with a live connector in v1. Perplexity stays manual-only (no adapter). */
 export type ConnectorProviderName = 'chatgpt' | 'claude';
+
+/** API-token providers that back a source kind (`meetings`, `slack`), captured with `gbrain connectors auth <p> --token -`. */
+export type TokenProviderName = 'fireflies' | 'slack';
+export const TOKEN_PROVIDER_NAMES: readonly TokenProviderName[] = ['fireflies', 'slack'];
+export function isTokenProviderName(name: string): name is TokenProviderName { return (TOKEN_PROVIDER_NAMES as readonly string[]).includes(name); }
+
+/** Every provider with a slot in the credential store. */
+export type CredentialProviderName = ConnectorProviderName | TokenProviderName;
 
 /**
  * Auth strategy axis. `browser-session` (paste-in cookie) is the PRIMARY lane
@@ -44,8 +49,8 @@ export type AuthStrategyKind = 'oauth-pkce' | 'browser-session' | 'export-file';
  * from which a short-lived `accessToken` is re-minted on 401.
  */
 export interface ConnectorCredential {
-  provider: ConnectorProviderName;
-  strategy: 'oauth-pkce' | 'browser-session';
+  provider: CredentialProviderName;
+  strategy: 'oauth-pkce' | 'browser-session' | 'api-token';
   /** Bearer token (session accessToken or oauth access_token). Short-lived. */
   accessToken?: string;
   /** OAuth refresh token (oauth-pkce lane only). */
@@ -54,8 +59,10 @@ export interface ConnectorCredential {
   cookie?: string;
   /** Epoch ms. Absent = unknown; the probe decides validity. */
   expiresAt?: number;
-  /** Claude org uuid / ChatGPT account id (multi-account is a v2 field). */
+  /** Claude org uuid / ChatGPT account id (multi-account is a v2 field); the API-token account's user id. */
   accountId?: string;
+  /** API-token lane: the account the probe reached when the token was saved (an email or workspace name), for status. */
+  accountLabel?: string;
   /** ISO 8601 write time. Compared against auth_error_at by the dispatch gate. */
   savedAt: string;
 }
@@ -73,6 +80,8 @@ export interface ConversationStub {
   /** ISO 8601 UTC last-update time — the axis the watermark compares against. */
   updatedAt: string;
   createdAt?: string;
+  /** The organization that listed it, for providers that route detail fetches by org (claude). */
+  orgId?: string;
 }
 
 /** Verdict from a provider `probe()` — did the credential reach history? */
@@ -80,7 +89,7 @@ export type ProbeResult =
   | { ok: true }
   | {
       ok: false;
-      kind: 'unauthorized' | 'forbidden_fingerprint' | 'network' | 'drift';
+      kind: 'unauthorized' | 'forbidden_fingerprint' | 'rate_limited' | 'invalid_credential' | 'network' | 'drift';
       detail: string;
     };
 
@@ -101,6 +110,12 @@ export interface ChatHistoryProvider {
   /** Compile-time base origin; overridable in tests via `baseUrlOverride`. */
   baseUrl: string;
   /**
+   * True when a detail fetch must name the organization that listed the
+   * conversation (stubs carry `orgId`). A retained failure without a recorded
+   * org is then never retried by id; it waits for a `--full` sync (#6387).
+   */
+  routesByOrg?: boolean;
+  /**
    * Build the auth headers for a request from a resolved credential. Default
    * shape is `{ cookie, authorization: Bearer <accessToken> }` (either/both).
    * The orchestrator wires this into the client's `headers()`.
@@ -108,11 +123,14 @@ export interface ChatHistoryProvider {
   authHeaders(cred: ConnectorCredential): Promise<Record<string, string>>;
   /**
    * Re-mint a short-lived accessToken from the durable cookie (chatgpt:
-   * `GET /api/auth/session`). Mutates `cred` in place, persists it, returns
-   * true on success. Absent when the provider has no re-mint path (claude: the
-   * cookie IS the auth, so a 401 is terminal → auth_required).
+   * `GET /api/auth/session`) through `client`, so the request keeps the
+   * client's origin guard, redirect refusal, pacing and request budget
+   * (#7515). Mutates `cred` in place and returns true on success, false when
+   * the session holds no token; a refusal throws the client's terminal error.
+   * Absent when the provider has no re-mint path (claude: the cookie IS the
+   * auth, so a 401 is terminal → auth_required).
    */
-  refreshAccessToken?(cred: ConnectorCredential, fetchImpl: ConnectorFetchRef): Promise<boolean>;
+  refreshAccessToken?(cred: ConnectorCredential, client: ConnectorClient): Promise<boolean>;
   /** Cheap liveness check — does this credential reach conversation history? */
   probe(client: ConnectorClient, signal?: AbortSignal): Promise<ProbeResult>;
   /**
@@ -128,12 +146,13 @@ export interface ChatHistoryProvider {
    * Fetch one conversation, normalized to the provider's NATIVE EXPORT object
    * shape — the exact shape the `spoolFormat` adapter already parses. Throws a
    * drift error when the payload lacks its required shape (missing `mapping`
-   * for chatgpt, missing `chat_messages` for claude).
+   * for chatgpt, missing `chat_messages` for claude). `orgId` (from the
+   * stub or the failed ledger) routes the fetch on `routesByOrg` providers.
    */
   fetchConversation(
     client: ConnectorClient,
     id: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; orgId?: string },
   ): Promise<Record<string, unknown>>;
   /** Paste-in credential-capture instructions for the browser-session lane. */
   sessionInstructions(): string;

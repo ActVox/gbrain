@@ -38,10 +38,11 @@ mock.module('../../src/core/think/index.ts', () => ({
 
 const { PGLiteEngine } = await import('../../src/core/pglite-engine.ts');
 const { operationsByName } = await import('../../src/core/operations.ts');
-const { formatResult, captureRetrievalMeta, resetRetrievalMetaForTests } = await import('../../src/cli.ts');
+const { formatResult, captureRetrievalMeta, resetRetrievalMetaForTests } = await import('../../src/cli/main.ts');
 const { getCliOptions, setCliOptions, _resetCliOptionsForTest } = await import('../../src/core/cli-options.ts');
 const { resetPgliteState } = await import('../helpers/reset-pglite.ts');
 const { installFixtureChunks } = await import('../helpers/page-projection.ts');
+const { unquoteTranscriptText } = await import('../../src/core/search/transcript-quote.ts');
 let engine: InstanceType<typeof PGLiteEngine>;
 
 function row(): SearchResult {
@@ -211,7 +212,8 @@ describe('retrieval output boundary', () => {
     const { ctx } = context();
     const result = await operationsByName.search.handler(ctx, { query: 'synthetic', snippet_chars: 12 }) as SearchResult[];
     expect(result[0].chunk_text.includes(syntheticKey.slice(0, 12))).toBe(false);
-    expect(result[0].chunk_text.startsWith('<REDACTED:')).toBe(true);
+    expect(result[0].quoted).toBe('transcript');
+    expect(unquoteTranscriptText(result[0].chunk_text, 'notes/synthetic').startsWith('<REDACTED:')).toBe(true);
     expect(rows[0].chunk_text).toBe(syntheticKey + ' safe suffix');
   });
 

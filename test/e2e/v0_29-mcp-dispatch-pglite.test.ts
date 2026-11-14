@@ -129,7 +129,10 @@ describe('v0.29 E2E — dispatchToolCall for the three new ops', () => {
     const err = JSON.parse(result.content[0].text);
     // OperationError.toJSON() serializes the code as `error:`, not `code:`.
     expect(err.error).toBe('permission_denied');
-    expect(err.message.toLowerCase()).toContain('local-only');
+    // Agent contract v1 (F5): refused at dispatch with the exact CLI command.
+    expect(err.code).toBe('trusted_local_only');
+    expect(err.message.toLowerCase()).toContain('trusted local cli');
+    expect(err.fix.command).toBe('gbrain transcripts recent --brain host --source default');
   });
 
   test('get_recent_transcripts is denied fail-closed (unknown_tool) when the transport marker is unset', async () => {
@@ -202,6 +205,10 @@ describe('dispatch source-scope guard — remote callers must carry a resolved s
 
 describe('ingest log source scoping — log_ingest threads ctx.sourceId, get_ingest_log honors the grant', () => {
   beforeAll(async () => {
+    for (const [sourceId, slug] of [['u-alice', 'people/carol'], ['u-bob', 'people/dave']] as const) {
+      await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1) ON CONFLICT DO NOTHING', [sourceId]);
+      await engine.putPage(slug, { type: 'person', title: slug, compiled_truth: 'Ingested page.', timeline: '', frontmatter: {} }, { sourceId });
+    }
     await dispatchToolCall(engine, 'log_ingest', {
       source_type: 'chat', source_ref: 'alice-conv-1', pages_updated: ['people/carol'], summary: 'alice private context',
     }, { remote: true, sourceId: 'u-alice' });

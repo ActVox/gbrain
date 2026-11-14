@@ -95,7 +95,7 @@ Keep the fork current through a pinned upstream commit and a separate integratio
 
 For an exact-release integration, verify the upstream release tag resolves to the pinned second parent, then mirror it to the fork as `upstream/v<VERSION>` without force. Reserve bare `v<VERSION>` tags for fork releases so identical version numbers cannot collide. Stop on a conflicting existing namespaced tag. The Semgrep baseline selector requires exact-parent provenance and blocks when it is missing; historical bare upstream tags remain compatible. Mirroring a tag does not mark the fork release deployed.
 
-Hosted builds pin Bun 1.4.2 and suppress root install lifecycle scripts. Database migrations belong in the coordinated cutover, never in a build that can overlap an older running service. Build the application explicitly after dependency installation.
+Hosted builds pin Bun 1.4.4 (upstream floor since v0.60.468.0) and suppress root install lifecycle scripts. Database migrations belong in the coordinated cutover, never in a build that can overlap an older running service. Build the application explicitly after dependency installation.
 
 Keep automatic deployment disabled on all four services. Promote the same reviewed commit through a coordinated rollout; merging production code must not independently restart one old/new writer pair. Preserve the live nine-source roster and sync/embed schedule. A runtime update does not enable additional enrichment jobs or repeat initial bulk indexing.
 

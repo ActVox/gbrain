@@ -34,7 +34,7 @@ describe('release.yml ↔ binary-self-update asset contract', () => {
   test('release compiler is covered by the required native runtime matrix', () => {
     const build = WORKFLOW.slice(WORKFLOW.indexOf('  build:'), WORKFLOW.indexOf('  release:'));
     const compiler = build.match(/bun-version:\s*(\S+)/)?.[1];
-    expect(compiler).toBe('1.4.2');
+    expect(compiler).toBe('1.4.4');
     const native = readFileSync(join(ROOT, '.github/workflows/native-locks.yml'), 'utf8');
     const matrices = [...native.matchAll(/bun:\s*\[([^\]]+)\]/g)];
     expect(matrices).toHaveLength(4);
@@ -48,6 +48,15 @@ describe('release.yml ↔ binary-self-update asset contract', () => {
     expect(native).toContain('bun test --timeout=60000 test/openclaw-context-engine-native.serial.test.ts');
     expect(build).toContain('codesign --verify --strict --verbose=2');
     expect(build.indexOf('codesign --verify')).toBeLessThan(build.indexOf('Smoke-test the compiled binary'));
+    expect(build).toContain('bun scripts/native/compiled-admin-smoke.ts --binary bin/${{ matrix.artifact }}');
+    expect(native).toContain('bun scripts/native/compiled-admin-smoke.ts --binary bin/gbrain-native-validation');
+  });
+
+  test('the compiled admin smoke makes a fresh bootstrap token each run instead of committing one', () => {
+    const smoke = readFileSync(join(ROOT, 'scripts/native/compiled-admin-smoke.ts'), 'utf8');
+    expect(smoke).not.toMatch(/GBRAIN_ADMIN_BOOTSTRAP_TOKEN:\s*['"`]/);
+    expect(smoke).toMatch(/const bootstrapToken = randomBytes\(\d+\)\.toString\('hex'\);/);
+    expect(smoke).toContain('GBRAIN_ADMIN_BOOTSTRAP_TOKEN: bootstrapToken,');
   });
 
   test('workflow build matrix produces exactly the assets the updater requests', () => {
@@ -212,5 +221,30 @@ Release summary line.
   test('a version that is a string prefix of another does not false-match', () => {
     // "0.42.67" is a prefix of "0.42.67.0" but has no entry of its own.
     expect(run('0.42.67').code).not.toBe(0);
+  });
+});
+
+describe('release.yml publish-template skip is visible (D-10)', () => {
+  test('an empty TEMPLATE_REPO_PAT warns with the owner-only fix and writes a step summary', async () => {
+    const { load } = await import('js-yaml');
+    const wf = load(WORKFLOW) as { jobs: Record<string, { steps: Array<{ id?: string; run?: string }> }> };
+    const gate = wf.jobs['publish-template']!.steps.find(s => s.id === 'gate')!.run!;
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-publish-template-gate-'));
+    try {
+      const output = join(dir, 'output');
+      const summary = join(dir, 'summary');
+      writeFileSync(output, '');
+      const stdout = execFileSync('bash', ['-euo', 'pipefail', '-c', gate], {
+        cwd: ROOT, encoding: 'utf8',
+        env: { PATH: process.env.PATH, TEMPLATE_REPO_PAT: '', TEMPLATE_REPO: 'owner/template-example', GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: summary },
+      });
+      expect(readFileSync(output, 'utf8')).toContain('publish=false');
+      expect(stdout).toContain('::warning::Agent template NOT published to owner/template-example');
+      expect(stdout).toContain('Fix (owner-only): gh secret set TEMPLATE_REPO_PAT');
+      expect(readFileSync(summary, 'utf8')).toContain('## Agent template not published');
+      expect(stdout).not.toContain('SKIP:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

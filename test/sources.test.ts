@@ -34,6 +34,7 @@ function makeStub(rowsByPattern: Record<string, unknown[]> = {}): {
     for (const [pattern, rows] of Object.entries(rowsByPattern)) {
       if (sql.includes(pattern)) return rows as never;
     }
+    if (sql.includes('FROM persistence_brain')) return [{ enabled: false }] as never; // #6482: the strict mode reader needs one well-formed unmanaged row.
     return [] as never;
   };
 
@@ -46,6 +47,7 @@ function makeStub(rowsByPattern: Record<string, unknown[]> = {}): {
     kind: 'pglite' as const,
     executeRaw,
     setConfig,
+    transaction: async (fn: (tx: BrainEngine) => Promise<unknown>) => fn(engine),
     // Unused methods throw if called accidentally during these tests.
     getConfig: async () => null,
   } as unknown as BrainEngine;
@@ -269,7 +271,7 @@ describe('sources remove', () => {
   test("refuses to remove the 'default' source", async () => {
     const { engine } = makeStub();
     const code = await withExitCapture(() => runSources(engine, ['remove', 'default', '--yes']));
-    expect(code).toBe(3);
+    expect(code).toBe(2); // agent contract v1 A3: invalid input exits 2 (3 is confirmation_required)
   });
 
   test('refuses without --yes', async () => {

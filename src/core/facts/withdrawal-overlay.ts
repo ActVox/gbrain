@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
-import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence, renderFactsTable, type ParsedFact } from '../facts-fence.ts';
+import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence, parseFactsFenceFor, renderFactsTable, type ParsedFact } from '../facts-fence.ts';
 import type { PageWithdrawal } from '../page-state/types.ts';
 import { OperationError } from '../ops/contract.ts';
 import { normalizeLoweredClaim } from './withdrawal-schema.ts';
 
 export const WITHDRAWAL_MARKER_LIMIT = 16_384;
+/** A withdrawal reads a held row's `entity` cell wherever writes let it be (memory/unattributed, GST-2492). */
+const READER = { reader: true } as const;
 
 /** Preserve historical expiry and context while emitting the parser's explicit withdrawal marker. */
 export function withdrawnFact(fact: ParsedFact, date: string, reason = 'memory withdrawn'): ParsedFact {
@@ -27,7 +29,7 @@ export function withdrawalFenceBlocks(body: string): Array<{ start: number; end:
       continue;
     }
     if (!open) continue;
-    blocks.push({ start: open.start, end: marker.end, parsed: parseFactsFence(body.slice(open.start, marker.end)) });
+    blocks.push({ start: open.start, end: marker.end, parsed: parseFactsFenceFor(body.slice(open.start, marker.end), READER) });
     open = undefined;
   }
   const inline: typeof blocks = [];
@@ -67,7 +69,7 @@ function inlineCodeFenceBlocks(body: string, markers: FenceMarker[]): Array<{ st
   for (let i = 0; i < markers.length; i++) {
     const begin = markers[i], end = markers[i + 1];
     if (begin.kind !== 'begin' || end?.kind !== 'end' || !(begin.inlineCode || end.inlineCode)) continue;
-    const parsed = parseFactsFence(body.slice(begin.start, end.end));
+    const parsed = parseFactsFenceFor(body.slice(begin.start, end.end), READER);
     if (parsed.facts.length || parsed.warnings.length) blocks.push({ start: begin.start, end: end.end, parsed });
   }
   return blocks;
@@ -94,7 +96,7 @@ export function ambiguousWithdrawalFenceSegments(body: string): string[] {
       continue;
     }
     const segment = body.slice(open.start, marker.end);
-    if (parseFactsFence(segment).warnings.length) segments.push(segment);
+    if (parseFactsFenceFor(segment, READER).warnings.length) segments.push(segment);
     boundary = marker.end;
     open = undefined;
   }
@@ -110,24 +112,66 @@ export function hasAmbiguousWithdrawalFence(body: string): boolean {
   return ambiguousWithdrawalFenceSegments(body).length > 0;
 }
 
+/** Both fingerprints `overlayWithdrawalBody` looks a fence row's claim up by: the normalized claim and the raw normalized-line claim. */
+export function fenceClaimHashes(normalizedTexts: readonly string[]): string[] {
+  const hashes = new Set<string>();
+  for (const text of normalizedTexts) {
+    if (!text.includes('gbrain:facts:begin')) continue;
+    for (const block of withdrawalFenceBlocks(text)) {
+      for (const f of block.parsed.facts) {
+        hashes.add(createHash('sha256').update(normalizeLoweredClaim(f.claim)).digest('hex'));
+        hashes.add(createHash('sha256').update(f.claim).digest('hex'));
+      }
+    }
+  }
+  return [...hashes];
+}
+
+/**
+ * Wave B: the per-segment form of the overlay's block walk. A segment is overlaid alone (`overlayWithdrawalBody` over
+ * its text, so the WITHDRAWAL_MARKER_LIMIT applies to one segment), which is exact for every block inside it: the
+ * segmenter never cuts inside a fence block except at a forced cut. Returns the runs of a block a forced cut splits,
+ * which a lone segment cannot overlay: `[0, head)`, the end of a block opened in an earlier segment (`entryOpen`), and
+ * `[tail, length)`, a block still open at the segment's end (`tail = 0` when the whole segment is inside one).
+ */
+export function partialFenceRuns(text: string, entryOpen: boolean): { head: number; tail: number } {
+  let open: number | null = entryOpen ? -1 : null;
+  let head = 0;
+  for (const marker of literalFenceMarkers(text)) {
+    if (marker.kind === 'begin') {
+      if (!marker.inlineCode) open = marker.start;
+      continue;
+    }
+    if (open === null) continue;
+    if (open === -1) head = marker.end;
+    open = null;
+  }
+  return { head, tail: open === null ? text.length : Math.max(open, 0) };
+}
+
 /** Apply hashes from DB-normalized companion text to the original Markdown. */
 export function overlayWithdrawalBody(body: string, normalizedBody: string, withdrawals: PageWithdrawal[]): string {
   if (!withdrawals.length || !body.includes('gbrain:facts:begin')) return body;
-  const ledger = new Map(withdrawals.map(w => [`${w.visibility}:${w.fact_hash}`, w.withdrawn_at]));
+  const ledger = new Map<string, PageWithdrawal>();
+  for (const w of withdrawals) {
+    const key = `${w.visibility}:${w.fact_hash}`;
+    if (!ledger.get(key)?.purged) ledger.set(key, w);
+  }
   const blocks = withdrawalFenceBlocks(body), normalized = withdrawalFenceBlocks(normalizedBody);
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i], norm = normalized[i];
     if (!norm || block.parsed.warnings.length || norm.parsed.warnings.length) continue;
     const claims = new Map(norm.parsed.facts.map(f => [f.rowNum, f.claim]));
     let changed = false;
-    const facts = block.parsed.facts.map(f => {
+    // A purge tombstone drops the row (the claim leaves the canonical text); a withdrawal strikes it.
+    const facts = block.parsed.facts.flatMap(f => {
       const claim = claims.get(f.rowNum);
-      if (claim === undefined) return f;
-      const at = ledger.get(`${f.visibility}:${createHash('sha256').update(normalizeLoweredClaim(claim)).digest('hex')}`)
+      if (claim === undefined) return [f];
+      const entry = ledger.get(`${f.visibility}:${createHash('sha256').update(normalizeLoweredClaim(claim)).digest('hex')}`)
         ?? ledger.get(`${f.visibility}:${createHash('sha256').update(claim).digest('hex')}`);
-      if (!at) return f;
+      if (!entry) return [f];
       changed = true;
-      return withdrawnFact(f, new Date(at).toISOString().slice(0, 10));
+      return entry.purged ? [] : [withdrawnFact(f, new Date(entry.withdrawn_at).toISOString().slice(0, 10))];
     });
     if (changed) body = body.slice(0, block.start) + renderFactsTable(facts) + body.slice(block.end);
   }

@@ -26,6 +26,9 @@
  *     back committed vectors and never holds the cache write lock across a
  *     network round-trip.
  *   - `LME_FLAGS` drives parsing and help from the same table.
+ *   - `--call-plan FILE` returns right after the run's flags, pins and models
+ *     resolve: before the resume skip, any client, engine or embed call
+ *     (src/eval/longmemeval/call-plan.ts writes the plan).
  *   - `--judge` (Phase D) judges the reader's answer with the official
  *     LongMemEval prompts (src/eval/longmemeval/judge.ts) through the shared
  *     judge runner; a judge malfunction is a `judge_error`, never an
@@ -39,7 +42,7 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync } from '../core/spawn.ts';
 import { brainRecycler, createBenchmarkBrain, LME_BRAIN_RECYCLE_EVERY, resetTables } from '../eval/longmemeval/harness.ts';
 export { LME_BRAIN_RECYCLE_EVERY };
 import { haystackToPages, normalizeSessions } from '../eval/longmemeval/adapter.ts';
@@ -129,6 +132,10 @@ import {
 } from '../core/search/mode.ts';
 import { buildCaptureExtras } from '../eval/longmemeval/capture.ts';
 import * as decideLane from '../eval/longmemeval/decide-lane.ts';
+import * as retrievalArms from '../eval/longmemeval/retrieval-arms.ts';
+import * as viaOperation from '../eval/longmemeval/via-operation.ts';
+import * as synopsisTier from '../eval/longmemeval/synopsis-tier.ts';
+import * as callPlan from '../eval/longmemeval/call-plan.ts';
 import { resolveModel } from '../core/model-config.ts';
 import type { ThinkLLMClient } from '../core/think/index.ts';
 import { createProgress } from '../core/progress.ts';
@@ -143,6 +150,7 @@ import {
   makeAliasMap,
   resetExtractorState,
   getCacheStats,
+  trajectoryMethodologyNote,
   type AliasMap,
 } from '../eval/longmemeval/extract.ts';
 import { normalizeModelId } from '../core/model-id.ts';
@@ -154,13 +162,6 @@ import { persistRunRecord, type EvalRunRecord } from './eval-run-all.ts';
 // Back-compat re-exports (these used to live here; tests + consumers import from the harness).
 export { loadResumeSet } from '../eval/longmemeval/resume.ts';
 export { emitByTypeSummary } from '../eval/longmemeval/emit.ts';
-
-/**
- * v0.40.2.0 — methodology disclosure marker. Stamped on every row when
- * trajectory routing is enabled so downstream readers see the preprocessing
- * step is in the pipeline ("gbrain + Haiku-preprocess" vs "gbrain alone").
- */
-const TRAJECTORY_METHODOLOGY_NOTE = 'extractor=haiku-preprocess-full-haystack-v1';
 
 const HUGGINGFACE_URL = 'https://huggingface.co/datasets/xiaowu0162/longmemeval';
 
@@ -212,7 +213,9 @@ interface ParsedArgs {
   judgeConcurrency: number;
   allowIncompleteJudgments: boolean;
   /** System One arm (`--decide*`, src/eval/decide-eval-flags.ts) and the eval-only `--eval-pool-depth`. */
-  decide: decideLane.DecideEvalOptions; evalPoolDepth?: number;
+  decide: decideLane.DecideEvalOptions; evalPoolDepth?: number; arms: retrievalArms.RetrievalArmOptions; synopsis: synopsisTier.SynopsisTierOptions; viaOp: viaOperation.ViaOperationOptions;
+  /** `--call-plan FILE` / `--call-plan-gate CMD`: write the gstack eval call plan instead of running (src/eval/longmemeval/call-plan.ts). */
+  callPlanPath?: string; callPlanGate?: string;
 }
 
 interface LmeFlag {
@@ -391,7 +394,15 @@ const LME_FLAGS: LmeFlag[] = [
       'such a run is NOT publishable (stderr FAIL line + exit 1) — re-run with',
       '--judge --resume-from FILE until all three are 0.'],
     apply: (o) => { o.allowIncompleteJudgments = true; } },
+  { name: '--call-plan', arg: 'FILE', help: [
+      'Write the gstack eval call plan (GSTACK_EVAL_CALLS v1) for the run these',
+      'flags describe to FILE and exit 0: per-lane calls and token bounds, no',
+      'provider call, no brain. A lane it cannot bound refuses (exit 1).'],
+    apply: (o, v) => { o.callPlanPath = v; } },
+  { name: '--call-plan-gate', arg: 'CMD', help: ['The GSTACK_EVAL_GATE line for --call-plan (default: this command without --call-plan).'],
+    apply: (o, v) => { o.callPlanGate = v; } },
   ...decideLane.LME_DECIDE_FLAGS,
+  ...retrievalArms.LME_RETRIEVAL_ARM_FLAGS, ...synopsisTier.LME_SYNOPSIS_FLAGS, ...viaOperation.LME_VIA_OPERATION_FLAGS,
 ];
 
 function parseArgs(args: string[]): ParsedArgs {
@@ -416,7 +427,7 @@ function parseArgs(args: string[]): ParsedArgs {
     yes: false,
     judgeConcurrency: 1,
     allowIncompleteJudgments: false,
-    decide: decideLane.newDecideEvalOptions(),
+    decide: decideLane.newDecideEvalOptions(), arms: retrievalArms.newRetrievalArmOptions(), synopsis: synopsisTier.newSynopsisTierOptions(), viaOp: viaOperation.newViaOperationOptions(),
   };
   const byName = new Map(LME_FLAGS.map(f => [f.name, f]));
   for (let i = 0; i < args.length; i++) {
@@ -427,6 +438,7 @@ function parseArgs(args: string[]): ParsedArgs {
       const name = eq >= 0 ? a.slice(0, eq) : a;
       const flag = byName.get(name);
       if (!flag) throw new Error(`unknown flag ${name} for 'gbrain eval longmemeval' (see --help)`);
+      if (flag.arg === undefined && eq >= 0) throw new Error(`${name} is a switch and takes no value (write ${name} on its own)`);
       let value = '';
       if (flag.arg !== undefined) {
         value = eq >= 0 ? a.slice(eq + 1) : (args[++i] ?? '');
@@ -441,6 +453,8 @@ function parseArgs(args: string[]): ParsedArgs {
   if (out.judge && out.retrievalOnly) {
     throw new Error('--judge cannot be combined with --retrieval-only (there is no reader hypothesis to judge)');
   }
+  viaOperation.validateViaOperation(out);
+  if (out.callPlanGate !== undefined && !out.callPlanPath) throw new Error('--call-plan-gate needs --call-plan FILE');
   return out;
 }
 
@@ -486,9 +500,9 @@ export interface RunOpts {
   exitOnError?: boolean;
   /** Inject a chat client for tests; defaults to the gateway-routed client (#4636). */
   client?: ThinkLLMClient;
-  /** Separate stub for the Haiku claim extractor (defaults to the same gateway client). */
+  /** Separate stub for the claim extractor (defaults to the same gateway client). */
   extractorClient?: ThinkLLMClient;
-  /** Model id for the extractor's Haiku call. Defaults to a tier-utility model via resolveModel. */
+  /** Model id for the claim extractor. Defaults to the utility tier via resolveModel. */
   extractorModel?: string;
   /**
    * Inject a pre-built benchmark brain instead of creating one inside this
@@ -543,6 +557,8 @@ interface RunContext {
   expandFn: (query: string) => Promise<string[]>;
   replay: Map<string, string[]> | null;
   retrievalConfigHash: string;
+  /** The run's resolved expansion expectation (pins.expansion): the degradation gate's `expansion` input. */
+  expectExpansion: boolean;
   /**
    * Wraps the embed-producing section of one question (import + search) in
    * ONE embed-cache transaction (eng D7) — and nothing after it, so a reader
@@ -550,6 +566,7 @@ interface RunContext {
    */
   embedTxn: <T>(fn: () => Promise<T>) => Promise<T>;
   decide: decideLane.DecideEvalRun | null;
+  factKeys: { arm: retrievalArms.FactKeyArm; spend: retrievalArms.FactKeySpend } | null; synopsis: synopsisTier.SynopsisTier | null;
 }
 
 interface QuestionOutcome {
@@ -568,7 +585,7 @@ function resolvePins(opts: ParsedArgs, runOpts: RunOpts, trajectoryEnabled: bool
     mode: opts.mode ?? snapshot['search.mode'],
     overrides: loadOverridesFromConfig(snapshot),
     perCall: {
-      expansion: opts.expansion,
+      expansion: opts.viaOp.op ? opts.viaOp.expand : opts.expansion,
       ...(opts.expansionVariantBudget !== undefined ? { expansion_variant_budget: opts.expansionVariantBudget } : {}),
       ...(opts.reranker !== undefined ? { reranker_enabled: opts.reranker } : {}),
       ...(opts.autocut !== undefined ? { autocut: opts.autocut } : {}),
@@ -586,13 +603,14 @@ function resolvePins(opts: ParsedArgs, runOpts: RunOpts, trajectoryEnabled: bool
     keyword_only: opts.keywordOnly,
     reranker: { enabled: opts.keywordOnly ? false : knobs.reranker_enabled, model: knobs.reranker_model },
     autocut: opts.keywordOnly ? false : knobs.autocut,
-    expansion: opts.keywordOnly ? false : opts.expansion,
+    expansion: opts.viaOp.op ? opts.viaOp.op === 'query' && knobs.expansion : opts.keywordOnly ? false : opts.expansion,
     expansion_variant_budget: knobs.expansion_variant_budget,
     embedder,
     top_k: opts.topK,
     trajectory: trajectoryEnabled,
     ...(searchPins ? { search_pins: searchPins } : {}),
     ...(opts.evalPoolDepth ? { eval_pool_depth: opts.evalPoolDepth } : {}), ...(decide ? { decide: decide.runConfig } : {}),
+    ...retrievalArms.armPins(opts.arms), ...viaOperation.viaOperationPins(opts.viaOp),
   };
   return { pins, knobs };
 }
@@ -663,9 +681,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
   }
   let decideRun: decideLane.DecideEvalRun | null;
   try { ({ run: decideRun, questions } = decideLane.prepareLmeDecide(opts, questions)); } catch (err: any) { process.stderr.write(`Error: ${err.message ?? err}\n`); return fail(1); }
-  if (opts.limit && opts.limit < questions.length) {
-    questions = questions.slice(0, opts.limit);
-  }
+  if (opts.limit && opts.limit < questions.length) questions = questions.slice(0, opts.limit);
   if (questions.length === 0) {
     process.stderr.write(`Error: dataset contains no questions.\n`);
     fail(1);
@@ -674,11 +690,12 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
 
   const trajectoryEnabled = !opts.noTrajectory;
   const { pins, knobs } = resolvePins(opts, runOpts, trajectoryEnabled, decideRun);
+  const synopsis = await synopsisTier.resolveSynopsisTier(knobs, opts.keywordOnly, opts.synopsis, pins);
   const knobsHashValue = knobsHash(knobs);
   // D33 + review: the hash covers the pins AND the resolved knobs hash, so a
   // resume cannot merge runs whose injected snapshot differs in a non-pin knob.
   const retrievalHash = retrievalConfigHash(pins, { knobs_hash: knobsHashValue, knobs_hash_version: KNOBS_HASH_VERSION });
-  const degradeOpts = { keywordOnly: opts.keywordOnly, expansion: opts.expansion };
+  const degradeOpts = { keywordOnly: opts.keywordOnly, expansion: pins.expansion };
 
   // Resolved BEFORE the resume block: the reader model is half of every
   // row's judge_config_hash (D33), which the --judge backfill gate needs.
@@ -688,10 +705,18 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     envVar: 'GBRAIN_MODEL',
     fallback: 'sonnet',
   });
+  const extractorModel = trajectoryEnabled
+    ? await resolveModel(null, {
+        cliFlag: runOpts.extractorModel,
+        tier: 'utility',
+        fallback: 'haiku',
+      })
+    : '';
   const readerHash = readerConfigHash(readerConfig, normalizeModelId(model));
   const judgeHashFor = makeJudgeConfigHasher(opts.judgeModel, { model, prompt_sha: readerConfig.promptSha, max_tokens: readerConfig.maxTokens, k: opts.topK });
   /** This run's judge_config_hash (live rows; prior rows hash from their own recorded reader pins). */
   const runJudgeHash = judgeHashFor({});
+  if (opts.callPlanPath) return callPlan.runLmeCallPlan({ args, opts, questions, questionByQid, pins, knobs, synopsis, model, extractorModel, readerConfig, decide: decideRun, judgeHashFor }, fail);
 
   /** Everything the run-end block needs; filled by the main path or the no-op resume path. */
   interface RunEndState {
@@ -737,6 +762,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     errors: st.errorCount,
     reader: { mode: readerConfig.mode, prompt_version: readerConfig.promptVersion, prompt_sha: readerConfig.promptSha, max_tokens: readerConfig.maxTokens, model: normalizeModelId(model), config_hash: readerHash },
     ...(decideRun ? { decide_summary: decideLane.summarizeDecideReceipts(st.qaRows.map((r) => r.decide as never)) } : {}),
+    ...(opts.viaOp.op ? { via_operation_summary: viaOperation.summarizeViaOperation(st.qaRows as never, viaOperation.gbrainBuild()) } : {}),
   });
 
   /**
@@ -763,6 +789,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
       const c = st.cacheReceipt;
       process.stderr.write(`[longmemeval] embed cache: ${c.hits} hits, ${c.misses} misses, ${c.bypassed} bypassed, ${c.infra_faults} infra fault(s) (canonical ${c.canonical_sha256.slice(0, 12)})\n`);
     }
+    if (synopsisTier.reportSynopsisRunEnd(synopsis, st.questionsRun)) exitCode = 1;
     const incomplete = st.qaRows.filter(row => typeof row.error === 'string' && String(row.error).startsWith('reader_')).length;
     if (incomplete > 0) {
       process.stderr.write(`[longmemeval] ${incomplete} incomplete reader completion(s); partial, empty or unknown answers are errors and cannot count as completed.\n`);
@@ -839,8 +866,9 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
       process.stderr.write(`[longmemeval] FAIL vector arm: ${st.vectorDegradedRows} row(s) scored keyword-only after a silent embed failure (vector_enabled:false / embed_unavailable / embed_timeout) — vector_degraded_rows\n`);
       exitCode = 1;
     }
-    if (!opts.keywordOnly && opts.expansion && st.expansionFailedRows > 0) {
-      process.stderr.write(`[longmemeval] FAIL --expansion: ${st.expansionFailedRows} row(s) did not expand as configured (expansion_failed / expansion_partial) — expansion_failed_rows\n`);
+    if (!opts.keywordOnly && pins.expansion && st.expansionFailedRows > 0) {
+      process.stderr.write(opts.viaOp.op ? viaOperation.expansionFailLine(st.expansionFailedRows)
+        : `[longmemeval] FAIL --expansion: ${st.expansionFailedRows} row(s) did not expand as configured (expansion_failed / expansion_partial) — expansion_failed_rows\n`);
       exitCode = 1;
     }
     if (st.expansionReplayMiss > 0) {
@@ -1007,13 +1035,6 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
   const gatewayClient: ThinkLLMClient = makeGatewayThinkClient();
   const client: ThinkLLMClient = runOpts.client ?? gatewayClient;
   const extractorClient: ThinkLLMClient = runOpts.extractorClient ?? gatewayClient;
-  const extractorModel = trajectoryEnabled
-    ? await resolveModel(null, {
-        cliFlag: runOpts.extractorModel,
-        tier: 'utility',
-        fallback: 'haiku',
-      })
-    : '';
 
   if (runOpts.exitOnError === false) {
     if (!opts.retrievalOnly && !runOpts.client && !isAvailable('chat', model)) {
@@ -1117,9 +1138,10 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
 
   const ctx: RunContext = {
     opts, model, readerConfig, readerHash, client, trajectoryEnabled, extractorClient, extractorModel, decide: decideRun,
+    factKeys: await retrievalArms.resolveFactKeyArm(opts.arms, extractorClient), synopsis,
     expandFn: runOpts.expandFn ?? expandQuery,
     replay,
-    retrievalConfigHash: retrievalHash,
+    retrievalConfigHash: retrievalHash, expectExpansion: pins.expansion,
     embedTxn: (fn) => fn(),
   };
 
@@ -1284,6 +1306,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
         if (process.env.GBRAIN_LME_DEBUG === '1') {
           process.stderr.write(`[longmemeval] ${q.question_id} ${Date.now() - qStart}ms\n`);
         }
+        if (synopsis?.spend.exhausted()) { synopsis.stoppedAtCap = true; break; }
       }
     } finally {
       await brains.close();
@@ -1325,7 +1348,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     const total = xc.hits + xc.misses;
     const pct = total === 0 ? 0 : (xc.hits / total) * 100;
     process.stderr.write(`[longmemeval] extractor.cache_hits: ${xc.hits} / ${total} sessions (${pct.toFixed(1)}%, cached_bodies=${xc.size})\n`);
-    process.stderr.write(`[longmemeval] methodology_note: ${TRAJECTORY_METHODOLOGY_NOTE}\n`);
+    process.stderr.write(`[longmemeval] methodology_note: ${trajectoryMethodologyNote(extractorModel)}\n`);
   }
 
   finishRun({
@@ -1391,9 +1414,11 @@ async function runOneQuestion(
   const aliasMap: AliasMap = makeAliasMap();
 
   let meta: HybridSearchMeta | undefined;
+  const extra0: Record<string, unknown> = {};
   const decideBefore = await decideLane.lmeSpendBefore(engine, ctx.decide);
   let pool: SearchResult[] | undefined;
   let preRerank: SearchResult[] | undefined;
+  let viaRow: viaOperation.ViaOperationRow | undefined;
   // The embed-producing section (import + search) runs in ONE embed-cache
   // transaction and COMMITS before the trajectory lookup / reader call.
   const results: SearchResult[] = await ctx.embedTxn(async () => {
@@ -1401,7 +1426,7 @@ async function runOneQuestion(
       const p = adapterPages[i];
       pageMeta.push({ slug: p.slug, content: p.content, date: dates[i] });
       await importFromContent(engine, p.slug, p.content, { noEmbed: opts.keywordOnly });
-      // Inline Haiku extractor populates the facts table so trajectory routing
+      // Inline claim extractor populates the facts table so trajectory routing
       // has data to retrieve. Fail-open per session.
       if (ctx.trajectoryEnabled) {
         await extractAndInsertClaims({
@@ -1416,9 +1441,16 @@ async function runOneQuestion(
         });
       }
     }
+    if (ctx.synopsis) Object.assign(extra0, { contextual_synopsis: await synopsisTier.applySynopsisTier(engine, adapterPages, ctx.synopsis) });
+    if (ctx.factKeys) Object.assign(extra0, { fact_keys: await retrievalArms.applyFactKeyArm(engine, adapterPages, ctx.factKeys.arm, ctx.factKeys.spend) });
+    if (opts.viaOp.op) {
+      const via = await viaOperation.runViaOperation(engine, q.question, { ...opts.viaOp, op: opts.viaOp.op }, ctx.expectExpansion);
+      meta = via.meta; viaRow = via.row;
+      return via.results;
+    }
     if (opts.keywordOnly) return engine.searchKeyword(q.question, { limit: opts.topK });
     const searchOpts: HybridSearchOpts = {
-      limit: opts.topK,
+      limit: opts.arms.timeScope ? Math.max(opts.topK, opts.arms.timeScopePool) : opts.topK,
       // Per-call wins over the bundle: expansion fires ONLY with --expansion.
       expansion: opts.expansion,
       ...(expandFn ? { expandFn } : {}),
@@ -1428,7 +1460,7 @@ async function runOneQuestion(
         ? { onRerankPool: (p: readonly SearchResult[], pre?: readonly SearchResult[]) => { pool = [...p]; preRerank = pre ? [...pre] : undefined; } }
         : {}),
     };
-    return hybridSearch(engine, q.question, searchOpts);
+    return retrievalArms.scopeResults(await hybridSearch(engine, q.question, searchOpts), opts.arms, { q, pageMeta, slugToRaw, gold, k: opts.topK, extra: extra0 });
   });
 
   // Trajectory routing for temporal / knowledge_update intents. Skips for
@@ -1465,7 +1497,7 @@ async function runOneQuestion(
       reader_prompt_sha: ctx.readerConfig.promptSha,
       reader_max_tokens: ctx.readerConfig.maxTokens,
       reader_config_hash: ctx.readerHash,
-      reader_finish_reason: answer.finish_reason,
+      reader_finish_reason: answer.finish_reason, reader_usage: answer.usage,
       ...(readerError ? { error: readerError } : {}),
       ...(readerError && answer.text ? { reader_partial_output: answer.text } : {}),
       reader_context_chars: answer.context_chars,
@@ -1483,21 +1515,22 @@ async function runOneQuestion(
     reranked: false,
     ...(meta?.autocut ? { autocut: meta.autocut } : {}),
   };
-  const { rerankerSkipped, vectorDegraded, expansionFailed } = classifyDegradation(searchMeta, { keywordOnly: opts.keywordOnly, expansion: opts.expansion });
-  searchMeta.reranked = results.some(r => Number.isFinite(r.rerank_score)) && !rerankerSkipped;
+  const { rerankerSkipped, vectorDegraded, expansionFailed } = classifyDegradation(searchMeta, { keywordOnly: opts.keywordOnly, expansion: ctx.expectExpansion });
+  searchMeta.reranked = (viaRow ? viaOperation.rerankCalled(viaRow) : results.some(r => Number.isFinite(r.rerank_score))) && !rerankerSkipped;
 
   const extra: Record<string, unknown> = {
+    ...extra0,
     retrieval_config_hash: ctx.retrievalConfigHash,
     ...readerFields,
     search_meta: searchMeta,
     ...(expansionVariants ? { expansion_variants: expansionVariants } : {}),
-    ...(expansionReplayed ? { expansion_replayed: true } : {}),
+    ...(expansionReplayed ? { expansion_replayed: true } : {}), ...(viaRow ? { via_operation: viaRow } : {}),
     ...(ctx.trajectoryEnabled ? {
       intent,
       trajectory_points: route.points,
       entity_resolved: route.entityResolved,
       resolution_source: route.resolutionSource,
-      methodology_note: TRAJECTORY_METHODOLOGY_NOTE,
+      methodology_note: trajectoryMethodologyNote(ctx.extractorModel),
     } : {}),
   };
   Object.assign(extra, buildCaptureExtras({ pool, preRerank, meta, results, slugToRaw, gold }), await decideLane.lmeDecideRow(engine, ctx.decide, meta, decideBefore));

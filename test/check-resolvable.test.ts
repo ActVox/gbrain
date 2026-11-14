@@ -12,6 +12,11 @@ import {
 const SKILLS_DIR = join(import.meta.dir, "..", "skills");
 
 describe("parseResolverEntries", () => {
+  test('an orphan skills-index begin marker does not hide the resolver entries after it', () => {
+    const content = '## Brain\n<!-- gbrain:skills:begin -->\n- a stale line\n| "query the brain" | `skills/query/SKILL.md` |\n';
+    expect(parseResolverEntries(content).map((e) => e.skillPath)).toContain('skills/query/SKILL.md');
+  });
+
   test("extracts skill paths from markdown table rows", () => {
     const content = `## Brain operations
 | Trigger | Skill |
@@ -352,6 +357,21 @@ describe("extractDelegationTargets", () => {
     expect(refs).toEqual([{ convention: "conventions/quality.md", line: 2 }]);
   });
 
+  test("accepts a #anchor after .md and drops it from the path (#6704)", () => {
+    const refs = extractDelegationTargets(
+      "See `skills/conventions/quality.md#citations` and `skills/_brain-filing-rules.md#the-rule`.\n"
+    );
+    expect(refs).toEqual([
+      { convention: "conventions/quality.md", line: 1 },
+      { convention: "_brain-filing-rules.md", line: 1 },
+    ]);
+  });
+
+  test("accepts an anchor with dots and non-ASCII letters (#6704)", () => {
+    const refs = extractDelegationTargets("See `skills/conventions/quality.md#v1.2-引用`.\n");
+    expect(refs).toEqual([{ convention: "conventions/quality.md", line: 1 }]);
+  });
+
   test("ignores backticks pointing outside known delegation targets", () => {
     const refs = extractDelegationTargets(
       "See `skills/random/README.md` for unrelated notes.\n"
@@ -676,6 +696,23 @@ describe("checkResolvable — low-confidence foreign skills dir", () => {
       expect(issue.severity).toBe("error");
     }
     expect(report.errors.some(i => i.type === "unreachable")).toBe(true);
+  });
+
+  test("OpenClaw workspace discovery + prose AGENTS.md at the root + third-party skills: unreachable is a warning; a manifest.json keeps it an error", () => {
+    // An OpenClaw workspace's skills/ can hold only another tool's skills
+    // (OpenClaw loads them natively) under its default prose AGENTS.md.
+    dir = mkdtempSync(join(tmpdir(), "gbrain-openclaw-workspace-"));
+    writeFileSync(join(dir, "AGENTS.md"), "# AGENTS.md\n\nWorkspace instructions, no routing table.\n");
+    const skills = join(dir, "skills");
+    for (const name of ["third-party-one", "third-party-two", "third-party-three", "third-party-four"]) makeSkillWithoutTriggers(skills, name);
+    for (const source of ["openclaw_workspace_home_root", "openclaw_workspace_env_root", "openclaw_workspace_home", "openclaw_workspace_env"] as const) {
+      const report = checkResolvable(skills, { skillsDirSource: source });
+      expect(report.issues.filter(i => i.type === "unreachable").length).toBe(4);
+      expect(report.errors.some(i => i.type === "unreachable")).toBe(false);
+    }
+    writeFileSync(join(skills, "manifest.json"), JSON.stringify({ skills: ["third-party-one", "third-party-two", "third-party-three", "third-party-four"].map(name => ({ name, path: `${name}/SKILL.md` })) }));
+    const strict = checkResolvable(skills, { skillsDirSource: "openclaw_workspace_home_root" });
+    expect(strict.errors.some(i => i.type === "unreachable")).toBe(true);
   });
 });
 

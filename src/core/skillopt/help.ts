@@ -7,6 +7,12 @@ export const SKILLOPT_HELP_TEXT = `gbrain skillopt <skill-name> [flags]
 Self-evolving skill optimization. Treats SKILL.md as the trainable parameters
 of a frozen agent. Validation-gated, budget-capped, atomic-versioned.
 
+By default it runs ONE gated rewrite: a forward pass on one train batch, one
+whole-body rewrite, then the selection gate. --loop runs the iterative edit
+loop instead. The loop is deprecated and will be removed on or after
+2026-12-03: on gbrain's benchmarks it tied the one-shot rewrite (same held-out
+score at ~1.8x the cost). Nothing replaces it; edit the skill directly.
+
 Based on SkillOpt (arXiv 2605.23904, MSR May 2026).
 
 Required (one of):
@@ -22,7 +28,8 @@ Required (one of):
                                 after human review)
   --bootstrap-reviewed          Confirm bootstrap benchmark was hand-reviewed
 
-Training knobs:
+Training knobs (--epochs, --lr, --lr-schedule apply to --loop only;
+--batch-size is also the one-shot forward-pass size):
   --epochs N                    Default 4
   --batch-size N                Default 8
   --lr N                        Max edits per step. Default 4
@@ -49,8 +56,9 @@ Models:
                                 Same as skillopt.models_strict=true.
 
 Modes:
-  --patch                       Edit ops only (default; safer)
-  --rewrite                     Allow full rewrites of sections
+  --loop                        Iterative reflect loop (edit ops, epochs).
+                                Deprecated: removed on or after 2026-12-03.
+                                Default is one gated one-shot rewrite.
   --dry-run                     Models plan, strict verdict + cost estimate,
                                 no LLM calls (exit 1 only on a strict failure)
   --no-mutate                   Write proposed.md without replacing SKILL.md
@@ -61,18 +69,22 @@ Modes:
   --json                        Machine-readable stdout
 
 Safety:
-  --max-cost-usd N              Hard cap. Default 5.00. Preflight refuses
-                                if estimate exceeds. 0 disables the cap
-                                (unpriced model ids then warn-once instead
-                                of aborting with no_pricing).
-  --no-max-cost                 Shorthand for --max-cost-usd 0.
+  --max-usd N|off               Hard cap. Default 5.00. Preflight refuses
+                                if estimate exceeds. A model with no price
+                                runs under the default with a warning; an
+                                explicit cap refuses it before any spend
+                                until you register its rate (gbrain pricing
+                                set). off runs uncapped (spend still ledgered).
+  --max-cost-usd N              Legacy spelling of --max-usd; 0 still means
+                                uncapped (deprecated: write --max-usd off).
+  --no-max-cost                 Shorthand for --max-usd off.
   --max-runtime-min N           Wall-clock cap. Default 30
   --force                       Bypass dirty-working-tree refusal (rare)
   --resume <run-id>             Resume a prior interrupted run
 
 Batch + fleet + background:
   --all                         Optimize every skill with a benchmark
-                                (per-skill cap = --max-cost-usd; brain-wide
+                                (per-skill cap = --max-usd; brain-wide
                                 cap = --brain-wide-max-cost-usd, default $10)
   --brain-wide-max-cost-usd N   Cumulative ceiling for --all (default 10.00)
   --target-models a,b,c         Fleet mode: optimize ONCE per model. Always

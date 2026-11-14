@@ -6,15 +6,16 @@
  */
 
 import type { Operation } from './contract.ts';
-import { readPolicyOpts } from './context.ts';
+import { readPolicyOpts, requireWritablePage } from './context.ts';
 import { enforceClientSlugFence } from './context.ts';
 
 // --- Raw Data ---
 
 const put_raw_data: Operation = {
   name: 'put_raw_data',
+  idempotent: false,
   outputRedaction: 'no_stored_text',
-  description: 'Store raw API response data for a page',
+  description: 'Store a raw provider payload (API response JSON) alongside a page, keyed by source. Use when keeping the original data an enrichment came from. Needs write scope. On page_not_found: create or resolve the page first.',
   params: {
     slug: { type: 'string', required: true, description: 'Slug of the page to attach the raw data to.' },
     source: { type: 'string', required: true, description: 'Data source (e.g., crustdata, happenstance)' },
@@ -27,6 +28,8 @@ const put_raw_data: Operation = {
     if (ctx.dryRun) return { dry_run: true, action: 'put_raw_data', slug: p.slug, source: p.source };
     // v0.31.8 (D7 + D21): thread ctx.sourceId.
     const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    // GBRA-218: a remote caller's missing and member-hidden targets get the same page_not_found (no existence oracle).
+    if (ctx.remote !== false) await requireWritablePage(ctx, p.slug as string, 'put_raw_data', 'page');
     await ctx.engine.putRawData(p.slug as string, p.source as string, p.data as object, sourceOpts);
     return { status: 'ok' };
   },
@@ -34,6 +37,8 @@ const put_raw_data: Operation = {
 
 const get_raw_data: Operation = {
   name: 'get_raw_data',
+  mutating: false,
+  idempotent: true,
   outputRedaction: { exempt: 'explicit raw sidecar read by slug; governed by page visibility (CEO-17 raw-read exception)' },
   description: 'Retrieve raw data for a page. Raw data follows the page\'s soft-delete: a tombstoned (soft-deleted) page returns [] exactly like a missing page; restore_page brings the rows back, and get_page include_deleted: true verifies the tombstone.',
   params: {

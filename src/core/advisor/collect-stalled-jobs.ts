@@ -1,13 +1,16 @@
 /**
  * advisor/collect-stalled-jobs.ts — stuck background work + stale sync.
  *
- * #14: `minion_jobs` may be ABSENT on older/partial brains — the query is
- * wrapped so a missing table yields no finding (never an error). Engine-agnostic
+ * #14: `minion_jobs` may be ABSENT on older/partial brains, and very old
+ * brains lack `sources`, `sources.last_sync_at` or `sources.archived`: exactly those missing
+ * objects yield no finding. Any other read failure is rethrown so runAdvisor
+ * reports `collector_failed:stalled-jobs` instead of a clean check. Engine-agnostic
  * SQL via executeRaw (works on Postgres + PGLite); timestamps compared with
  * `now()` which both engines provide. No PG-only constructs.
  */
 
 import type { AdvisorCollector, AdvisorFinding } from './types.ts';
+import { isMissingSchemaObject } from '../utils.ts';
 
 export const collectStalledJobs: AdvisorCollector = {
   id: 'stalled-jobs',
@@ -38,8 +41,8 @@ export const collectStalledJobs: AdvisorCollector = {
           ask_user: true,
         });
       }
-    } catch {
-      /* minion_jobs absent / engine quirk → no stalled-jobs finding */
+    } catch (err) {
+      if (!isMissingSchemaObject(err, 'table', 'minion_jobs')) throw err;
     }
 
     // Stale federated sources: synced sources that haven't advanced in a week.
@@ -49,6 +52,7 @@ export const collectStalledJobs: AdvisorCollector = {
            FROM sources
           WHERE last_sync_at IS NOT NULL
             AND last_sync_at < now() - interval '7 days'
+            AND NOT archived
           ORDER BY id`,
       );
       for (const r of rows) {
@@ -62,8 +66,8 @@ export const collectStalledJobs: AdvisorCollector = {
           ask_user: true,
         });
       }
-    } catch {
-      /* sources table missing last_sync_at on a very old brain → skip */
+    } catch (err) {
+      if (!isMissingSchemaObject(err, 'table', 'sources') && !isMissingSchemaObject(err, 'column', 'last_sync_at') && !isMissingSchemaObject(err, 'column', 'archived')) throw err;
     }
 
     return findings;

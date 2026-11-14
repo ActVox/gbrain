@@ -2,6 +2,47 @@
 
 Fork-only entries that previously lived at the top of CHANGELOG.md. Upstream owns CHANGELOG.md; this file is ActVox-owned so upstream integrations never conflict with it.
 
+## [0.60.715.0] - 2026-11-14
+
+**ActVox integration of upstream garrytan/gbrain v0.60.715.0** (`a7cf37aa7116fed33a38d089b961d06739274258`). It contains the v0.60.428.0 integration (PR #35), which was never merged.
+
+### Operator notes
+- Schema goes from v189 (production) to v310: 121 new migrations (v190-v310). They apply on the first `initSchema()` of the new code, so stop every old writer and job producer first. They are roll-forward only: verify a database backup and a private restore before the cutover. Data-changing ones after v269: v282 (member read access: new tables, config rows), v292 (stamps `released_at` on finished worktree refreshes), v296 (copies applied ingest captures into a new table), v309 (writes `access.serves_derived`). No migration drops a column or table that holds page, chunk or embedding data, and none forces a chunk re-embed.
+- v275 turns on row level security for every gbrain table that lacked it, and v278 / v281 make the writer fences and derived-state triggers fail closed for a role that neither owns the tables nor bypasses RLS. Before the cutover, confirm that the role in `DATABASE_URL` / `GBRAIN_DIRECT_DATABASE_URL` owns the gbrain tables or has `BYPASSRLS`.
+- **Bun 1.4.4 is now required** (upstream v0.60.468.0): below it every command except `--version` exits at startup. The fork pin moves from 1.4.2 to 1.4.4 in `.mise.toml`, `render.yaml` (all four services) and the two fork workflows. A service built with the old pin would not start.
+- A Postgres connection to a non-local host now uses TLS unless the URL opts out (v0.60.653.0). Supabase accepts TLS; check that no production URL carries `sslmode=disable`.
+- OAuth access tokens last at most 90 days (v210 clamps stored lifetimes). `--token-ttl 2592000` in `render.yaml` is inside the cap.
+- MCP results are capped at 1 MiB over HTTP (`mcp.max_result_bytes_http`): a larger read returns `result_too_large`, and `fetch` of a page over 256 KB returns a window.
+- Existing OAuth clients keep their stored surface. New memory-reader, memory-writer and coding-agent grants are listed on the full MCP surface.
+- Required checks on `master`: `slow-eval-longmemeval` no longer exists upstream; remove it. `test-status` and `serial-tests (N)` report only from a full run (`full-ci` label, or dispatch `test.yml`).
+
+### Integration tooling
+- Hosted runner labels on the new upstream workflows `harness-check.yml`, `skill-resolver-bench.yml`, `upgrade-matrix.yml`, and on new jobs in `convergence-nightly.yml`, `native-locks.yml` and `scale-tier.yml`. `nightly-watch.yml` watches the Upstream Watcher, Stable daily and Upgrade matrix.
+- Upstream's new core world-reads ratchet (GBRA-248) gets two baseline rows for the fork-only `src/core/search/operational-memory.ts`.
+- The function-size ratchet now needs an issue id for a raised row: the `runExtract` row carries `garrytan/gbrain#5904`.
+- Fork delta vs upstream: 140 → 141 paths.
+
+## [0.60.428.0] - 2026-10-25
+
+**ActVox integration of upstream garrytan/gbrain v0.60.428.0** (`ccce3b49aa347b4123355086f836f05eca4dcd2f`).
+
+### Operator notes
+- Schema goes from v189 to v269: 80 new migrations (v190-v269), and v163's trigger function now pins `search_path`. They apply on the first `initSchema()` of the new code, so stop every old writer and job producer first. Some rewrite data: v191 deletes alias rows whose source is gone, v202 converts legacy token grants, v210 clamps stored OAuth token lifetimes, v218 strips legacy per-file maps from persistence manifests, v221 backfills `content_chunks.embedding_pending_since` for unembedded chunks, and v224 copies retrieval telemetry from `pages` to the new `page_retrievals` table. They are roll-forward only: verify a database backup before the cutover.
+- Upstream raised the secure Bun floor to 1.4.4 (`SECURE_BUN_VERSION`, Brotli CVE-2026-111497). The fork still pins Bun 1.4.2 in `.mise.toml`, `render.yaml` and `actvox-delta.yml`; gbrain starts, and doctor warns. Doctor goldens also need Bun 1.4.4.
+- Paid CI lanes use upstream's switch: set the repository variable `GBRAIN_PAID_LANES=0` to keep Tier 2, the hermes paid leg and the OpenCode credentialed lane off.
+- Upstream's Test workflow runs a cheap tier on pull requests. `test-status` and `serial-tests (N)` report only from a full run: add the `full-ci` label, or dispatch `test.yml` and `e2e.yml` on the branch. The `slow-eval-longmemeval` job no longer exists, so remove it from the `master` required checks.
+
+### Upstream absorbed these fork patches (fork copies dropped)
+- The paid-E2E opt-in in `e2e.yml` and `heavy-tests.yml` (upstream #5903, `GBRAIN_PAID_LANES`).
+- The patterns child-outcome helper (`outcome !== 'completed'` upstream), the `git-remote.ts` flag aliases (upstream `git-transport.ts`), the gateway-chat test reset and the `cjk.test.ts` tail.
+- The `.gitignore` `.gstack/` line: upstream's `.gstack/*` covers local state and now tracks `pregate.json` and `ship-policy.json`.
+
+### Integration tooling
+- Every new upstream workflow gets the hosted runner labels; `nightly-watch.yml` also watches the Upstream Watcher.
+- `actvox-delta.yml` installs through `scripts/ci-bun-install.ts`.
+- The llms-full budget is 801000 bytes (upstream's bundle is 799964 of 800000; the fork CLAUDE.md paragraph adds 419).
+- Fork delta vs upstream: 137 → 140 paths (11 new workflow label swaps; 10 dropped patches).
+
 ## [0.60.32.0] - 2026-10-03
 
 **ActVox integration of upstream garrytan/gbrain v0.60.32.0** (`48ed5e8233f617479df989998560840747af0425`).

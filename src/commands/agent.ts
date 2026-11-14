@@ -2,7 +2,7 @@
  * `gbrain agent` CLI: the user-facing entry point for the v0.15 subagent
  * runtime.
  *
- *   gbrain agent run <prompt> [flags]
+ *   gbrain agent run [flags] <prompt>
  *   gbrain agent logs <job_id> [--follow] [--since <spec>]
  *
  * `run` submits a subagent job (or fan-out of N subagents + aggregator)
@@ -22,6 +22,7 @@ import type { MinionJobInput, SubagentHandlerData, AggregatorHandlerData } from 
 import { resolveSourceId, isResolverUserError, ALL_SOURCES } from '../core/source-resolver.ts';
 import { fetchSource } from '../core/sources-load.ts';
 import { runAgentLogs } from './agent-logs.ts';
+import { TIMEOUT_EXIT_CODE } from '../core/exit-codes.ts';
 
 // ── arg parsing helpers ────────────────────────────────────
 
@@ -83,7 +84,7 @@ function printHelp(): void {
   console.log(`gbrain agent — durable LLM agent runs (v0.15)
 
 USAGE
-  gbrain agent run <prompt> [flags]
+  gbrain agent run [flags] <prompt>
   gbrain agent logs <job_id> [--follow] [--since <spec>]
   gbrain agent register <name> --harness <h> [flags]   (see: gbrain agent register --help)
 
@@ -106,8 +107,9 @@ SUBMITTING
 
   Flags before the prompt are parsed normally. The no-value switches
   --detach, --follow and --no-follow are ALSO recognized when they trail
-  the prompt, so \`gbrain agent run "do X" --detach\` detaches. Any other
-  --word is treated as prompt text (no error). Use \`--\` to end flag
+  the prompt, so \`gbrain agent run "do X" --detach\` detaches. A value
+  flag above written after the prompt refuses (write it before the prompt);
+  any other --word is treated as prompt text (no error). Use \`--\` to end flag
   parsing and pass the rest verbatim:
     gbrain agent run -- "literally --detach this, with --flags"
 
@@ -153,7 +155,10 @@ interface RunFlags {
 }
 
 /** No-value switches that may also trail the prompt and get hoisted out (#1738). */
-const BOOLEAN_TAIL_FLAGS = new Set(['--follow', '--no-follow', '--detach']);
+export const BOOLEAN_TAIL_FLAGS = new Set(['--follow', '--no-follow', '--detach']);
+
+/** Flags parseRunFlags reads with their value in the next argument (the CLI entry's = scan reads the flag zone through this). */
+export const RUN_VALUE_FLAGS = new Set(['--subagent-def', '--model', '--max-turns', '--tools', '--timeout-ms', '--source', '--fanout-manifest']);
 
 function applyBooleanFlag(flags: RunFlags, a: string): void {
   if (a === '--follow') flags.follow = true;
@@ -192,7 +197,9 @@ function parseIntFlagValue(v: string, flag: string): number {
  * Prompt zone: a trailing run of the no-value switches (--detach/--follow/
  * --no-follow) is hoisted out so `agent run "do X" --detach` detaches. Only
  * trailing switches are hoisted; a `--word` elsewhere in the prompt stays
- * verbatim. After an explicit `--`, nothing is hoisted.
+ * verbatim. After an explicit `--`, nothing is hoisted. One of the value
+ * flags in the prompt, up to its first bare `--`, throws (#7672): `agent run
+ * "do X" --tools read` would otherwise run with every tool.
  */
 function parseRunFlags(args: string[]): { flags: RunFlags; rest: string[] } {
   const flags: RunFlags = {
@@ -222,6 +229,13 @@ function parseRunFlags(args: string[]): { flags: RunFlags; rest: string[] } {
     if (!known) break; // unknown --flag → first token of the (freeform) prompt
   }
   const rest = args.slice(i);
+  if (!escaped) {
+    const end = rest.indexOf('--');
+    const stray = (end < 0 ? rest : rest.slice(0, end)).find(a => RUN_VALUE_FLAGS.has(a));
+    if (stray) {
+      throw new Error(`gbrain agent run: ${stray} is in the prompt, so it and its value would be prompt text. Write ${stray} <value> before the prompt and ahead of any word agent run does not read (such as --json or --yes), or put -- before the prompt to keep it as text.`);
+    }
+  }
   // An explicit `--` terminates flag parsing wherever it appears — leading
   // zone (escaped) OR after a positional (the leading loop breaks before it,
   // so `escaped` stays false). Honor both: when the prompt carries a literal
@@ -480,7 +494,7 @@ async function followJob(engine: BrainEngine, queue: MinionQueue, jobId: number,
     } catch (e) {
       if (e instanceof TimeoutError) {
         process.stderr.write(`[gbrain agent] timeout after ${e.elapsedMs}ms — job is still running. Check with: gbrain jobs get ${jobId}\n`);
-        process.exit(3);
+        process.exit(TIMEOUT_EXIT_CODE);
       }
       throw e;
     }

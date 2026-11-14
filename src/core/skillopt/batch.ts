@@ -19,13 +19,15 @@ import * as path from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { sanitizeEcho, type ModelsPlanEntry, type SkillOptModels } from './models-plan.ts';
 import { runSkillOpt } from './orchestrator.ts';
-import type { RunReceipt, SkillOptOpts } from './types.ts';
+import type { OptimizerMode, RunReceipt, SkillOptOpts } from './types.ts';
 
 export interface BatchAllOpts {
   engine: BrainEngine;
   skillsDir: string;
   /** Per-skill budget (each skill gets its own tracker). */
   perSkillMaxCostUsd: number;
+  /** `user` when either cap came from a flag (refuses unpriced models), `default` otherwise (#5563). Default `user`. */
+  maxCostSource?: 'user' | 'default';
   /** Brain-wide cumulative ceiling. */
   brainWideMaxCostUsd: number;
   /** Common knobs threaded to each skill. */
@@ -45,6 +47,8 @@ export interface BatchAllOpts {
   lr: number;
   lrSchedule: 'cosine' | 'linear' | 'constant';
   split: [number, number, number];
+  /** E1: 'one-shot-rewrite' (default) or 'reflect' (--loop), applied to every run. */
+  optimizerMode: OptimizerMode;
   dryRun: boolean;
   noMutate: boolean;
   allowMutateBundled: boolean;
@@ -113,12 +117,14 @@ export async function runBatchAll(opts: BatchAllOpts): Promise<BatchAllResult> {
       ...(opts.modelsBannerBaseline ? { modelsBannerBaseline: opts.modelsBannerBaseline } : {}),
       ...(opts.reflectMaxTokens !== undefined ? { reflectMaxTokens: opts.reflectMaxTokens } : {}),
       mode: 'patch',
+      optimizerMode: opts.optimizerMode,
       dryRun: opts.dryRun,
       noMutate: opts.noMutate,
       allowMutateBundled: opts.allowMutateBundled,
       bootstrapReviewed: false,
       json: true,
       maxCostUsd: cap,
+      maxCostSource: opts.maxCostSource ?? 'user',
       maxRuntimeMin: 30,
       force: opts.force,
     };
@@ -167,6 +173,8 @@ export interface FleetOpts {
   lr: number;
   lrSchedule: 'cosine' | 'linear' | 'constant';
   split: [number, number, number];
+  /** E1: 'one-shot-rewrite' (default) or 'reflect' (--loop), applied to every run. */
+  optimizerMode: OptimizerMode;
   dryRun: boolean;
   noMutate: boolean;
   allowMutateBundled: boolean;
@@ -174,6 +182,8 @@ export interface FleetOpts {
   /** F11: optional held-out test set (one skill, so a single path is valid here). */
   heldOutPath?: string;
   maxCostUsd: number;
+  /** See SkillOptOpts.maxCostSource. Default `user`. */
+  maxCostSource?: 'user' | 'default';
   maxRuntimeMin: number;
   force: boolean;
 }
@@ -252,6 +262,7 @@ export async function runFleet(opts: FleetOpts): Promise<FleetResult> {
       ...(opts.modelsStrict ? { modelsStrict: true } : {}),
       ...(opts.reflectMaxTokens !== undefined ? { reflectMaxTokens: opts.reflectMaxTokens } : {}),
       mode: 'patch',
+      optimizerMode: opts.optimizerMode,
       dryRun: opts.dryRun,
       noMutate,
       allowMutateBundled: opts.allowMutateBundled,
@@ -259,6 +270,7 @@ export async function runFleet(opts: FleetOpts): Promise<FleetResult> {
       ...(opts.heldOutPath ? { heldOutPath: opts.heldOutPath } : {}),
       json: true,
       maxCostUsd: opts.maxCostUsd,
+      maxCostSource: opts.maxCostSource ?? 'user',
       maxRuntimeMin: opts.maxRuntimeMin,
       force: opts.force,
     };

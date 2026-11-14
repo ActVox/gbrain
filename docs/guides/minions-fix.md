@@ -446,6 +446,20 @@ fail:
 [FAIL] minions_migration: MINIONS HALF-INSTALLED (partial migration: 0.11.0). Run: gbrain apply-migrations --yes
 ```
 
+Three or more partial records in a row read as `WEDGED MIGRATION(s)` and name
+`gbrain apply-migrations --force-retry <version>`. After that retry the version
+is pending again, and doctor warns that it has not run yet with the plain
+`gbrain apply-migrations --yes` command. Doctor also warns when the ledger shows
+a host migration that a newer one already ran past, so it never ran:
+
+```
+[WARN] minions_migration: 1 host migration(s) not run yet: 0.46.3. Run: gbrain apply-migrations --yes
+```
+
+`gbrain doctor --fast` has no database connection, so it cannot read the
+brain config that declines an opt-out migration (v0.53.0) and leaves such a
+version out of that list; the full `gbrain doctor` reports it.
+
 (Missing `~/.gbrain/preferences.json` on a fresh install is a valid
 pre-`apply-migrations` state — doctor deliberately does NOT fail on that
 alone; the partial-migration record is the canonical half-migration signal.)

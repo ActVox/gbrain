@@ -27,7 +27,12 @@
 # Markdown it does not own), but pinning this repo's own .md checkout to LF
 # removes the whole class for anyone working here.
 *.md text eol=lf
-/.gbrain-evals/eval-results.jsonl merge=union
+
+# Ratchet baselines (scripts/*.tsv) get the pin too: their parsers split rows
+# on LF, so under a CRLF checkout every row's last field ends in "\r", no
+# baseline row matches, and verify reports every grandfathered entry as a new
+# violation on a clean checkout.
+*.tsv text eol=lf
 
 # Native source hashes and prebuilds must survive Windows checkout unchanged.
 native/locks/** text eol=lf

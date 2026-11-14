@@ -7,8 +7,10 @@ import { InvalidClientError, InvalidGrantError, InvalidRequestError, InvalidTarg
 import type { SqlQuery } from './sql-query.ts';
 import { generateToken, hashToken } from './utils.ts';
 import { hasScope, parseScopeString } from './scope.ts';
-import { intersectGrantedScopes } from './grants/model.ts';
+import { TOKEN_TTL_MAX_SECONDS, intersectGrantedScopes } from './grants/model.ts';
 import { safeHexEqual } from './timing-safe.ts';
+import { isStalePlanError } from './retry-matcher.ts';
+import { clientHoldsAuthorization, GrantError, recordFirstConsentInTransaction } from './grants/service.ts';
 
 export type OAuthTransaction = <T>(fn: (sql: SqlQuery) => Promise<T>) => Promise<T>;
 type ClientRow = Record<string, unknown>;
@@ -59,7 +61,7 @@ function policyDigest(row: ClientRow): string {
     'source_id', 'federated_read', 'bound_tools', 'bound_source_id', 'bound_brain_id',
     'bound_slug_prefixes', 'bound_max_concurrent', 'budget_usd_per_day', 'surface', 'token_ttl',
     'allowed_operations', 'delegated_slug_prefixes', 'delegated_namespace', 'grant_profile',
-    'grant_revision', 'grant_repair_reasons'];
+    'grant_revision', 'grant_repair_reasons', 'registered_via'];
   return hashToken(JSON.stringify(fields.map(field => row[field] ?? null)));
 }
 
@@ -78,6 +80,12 @@ export interface OAuthConsentDetails {
   delegatedSlugPrefixes: string[] | null;
   delegatedNamespace: string | null;
   expiresAt: number;
+  /**
+   * #6202: `editable` only for a self-registered client's first consent
+   * (`registered_via='dcr'`, revision 0, no `client_credentials`, a source
+   * grant); `options` are the active sources then, `[]` otherwise.
+   */
+  sourceChoice: { editable: boolean; options: Array<{ id: string; name: string }> };
 }
 interface PendingAuthorization {
   details: OAuthConsentDetails;
@@ -119,12 +127,23 @@ export class OAuthGrants {
 
   private now(): number { return (this.options.now ?? Date.now)(); }
   private async locked<T>(clientId: string, fn: (sql: SqlQuery, row: ClientRow) => Promise<T>): Promise<T> {
-    if (!this.options.transaction) throw new ServerError('OAuth grant transactions are unavailable');
-    return this.options.transaction(async sql => {
+    const options = this.options;
+    if (!options.transaction) throw new ServerError('OAuth grant transactions are unavailable');
+    // GST-2260: a stale plan on the client read runs the transaction again. That read comes before the callback writes
+    // anything, so the second run is safe even when the caller's transaction is not a real one (mcp-provision).
+    let entered = false;
+    const run = () => options.transaction!(async sql => {
       const [row] = await sql`SELECT * FROM oauth_clients WHERE client_id = ${clientId} FOR UPDATE`;
+      entered = true;
       assertActive(row);
       return fn(sql, row);
     });
+    try {
+      return await run();
+    } catch (error) {
+      if (entered || !isStalePlanError(error)) throw error;
+      return run();
+    }
   }
 
   private prune(): void {
@@ -158,6 +177,12 @@ export class OAuthGrants {
     if (!Array.isArray(row.redirect_uris) || !row.redirect_uris.some(uri => typeof uri === 'string' && redirectUriMatches(params.redirectUri, uri))) {
       throw new InvalidRequestError('Redirect URI does not match registered client');
     }
+    const editable = row.registered_via === 'dcr' && Number(row.grant_revision) === 0
+      && !row.grant_types.includes('client_credentials') && row.source_grant !== 'none'
+      && !await clientHoldsAuthorization(this.options.sql, clientId);
+    const options = editable
+      ? (await this.options.sql`SELECT id, name FROM sources WHERE archived = false ORDER BY id`).map(r => ({ id: String(r.id), name: String(r.name) }))
+      : [];
     // No await between the capacity check and insert: concurrent DB reads cannot overfill the store or a client's budget.
     this.assertCapacity(clientId);
     const id = generateToken('');
@@ -172,6 +197,7 @@ export class OAuthGrants {
       delegatedSlugPrefixes: Array.isArray(row.delegated_slug_prefixes) ? [...row.delegated_slug_prefixes] as string[] : null,
       delegatedNamespace: typeof row.delegated_namespace === 'string' ? row.delegated_namespace : null,
       resource: resource?.toString() ?? null, expiresAt: this.now() + 10 * 60_000,
+      sourceChoice: { editable, options },
     };
     this.pending.set(id, {
       details, params: { ...params, scopes: [...details.scopes], resource },
@@ -194,8 +220,12 @@ export class OAuthGrants {
     try { this.details(id); return true; } catch { return false; }
   }
 
-  async decide(id: string, approve: boolean): Promise<string> {
-    this.details(id);
+  async decide(id: string, approve: boolean, choice?: { sourceId: string }): Promise<string> {
+    const { sourceChoice } = this.details(id);
+    if (choice !== undefined && (!approve || !sourceChoice.editable || !sourceChoice.options.some(o => o.id === choice.sourceId))) {
+      // Refused before the claim: the request stays pending and the owner can reload it.
+      throw new OAuthConsentError(403, 'invalid_consent', 'Reload this request and review it again before approving.');
+    }
     const pending = this.pending.get(id)!;
     pending.status = 'processing'; // claim synchronously before the first await
     const redirect = new URL(pending.params.redirectUri);
@@ -209,6 +239,15 @@ export class OAuthGrants {
       const code = await this.locked(pending.details.clientId, async (sql, row) => {
         if (pending.details.expiresAt <= this.now()) throw new OAuthConsentError(410, 'authorization_expired', 'This request expired. Restart the connection from your client.');
         if (policyDigest(row) !== pending.policy) throw new OAuthConsentError(409, 'client_policy_changed', 'Client permissions changed. Restart the connection and review the new request.');
+        if (sourceChoice.editable) {
+          // The first consent always consumes eligibility (revision 0 → 1), with or without a new source.
+          try {
+            await recordFirstConsentInTransaction(sql, pending.details.clientId, choice?.sourceId, 'owner');
+          } catch (error) {
+            if (error instanceof GrantError) throw new OAuthConsentError(409, 'client_policy_changed', 'Client permissions changed. Restart the connection and review the new request.');
+            throw error;
+          }
+        }
         const code = generateToken('gbrain_code_');
         await sql`
           INSERT INTO oauth_codes (code_hash, client_id, scopes, code_challenge,
@@ -243,7 +282,7 @@ export class OAuthGrants {
       const target = this.resource(row.resource, requested);
       const scopes = this.currentScopes(client, row.scopes as string[]);
       await sql`DELETE FROM oauth_codes WHERE code_hash = ${hashToken(code)} AND client_id = ${clientId}`;
-      return this.issue(sql, client, scopes, target, true);
+      return this.issue(sql, client, scopes, target, true, 'authorization_code');
     });
   }
 
@@ -260,7 +299,7 @@ export class OAuthGrants {
       const scopes = this.currentScopes(client, requested ?? original);
       const target = this.resource(row.resource, requestedResource);
       await sql`DELETE FROM oauth_tokens WHERE token_hash = ${hashToken(token)} AND token_type = 'refresh' AND client_id = ${clientId}`;
-      return this.issue(sql, client, scopes, target, true);
+      return this.issue(sql, client, scopes, target, true, 'refresh_token');
     });
   }
 
@@ -295,7 +334,7 @@ export class OAuthGrants {
       if (!Array.isArray(client.grant_types) || !client.grant_types.includes('client_credentials')) throw new InvalidGrantError('Client credentials grant not authorized for this client');
       if (typeof client.client_secret_hash !== 'string' || !/^[a-f0-9]{64}$/i.test(client.client_secret_hash) || !safeHexEqual(client.client_secret_hash, hashToken(secret))) throw new InvalidClientError('Invalid client secret');
       this.assertCredentialPolicy(client, client.client_secret_hash);
-      return this.issue(sql, client, grantScopes(client, requested ? parseScopeString(requested) : undefined), undefined, false);
+      return this.issue(sql, client, grantScopes(client, requested ? parseScopeString(requested) : undefined), undefined, false, 'client_credentials');
     });
   }
 
@@ -319,19 +358,29 @@ export class OAuthGrants {
     });
   }
 
-  private async issue(sql: SqlQuery, client: ClientRow, scopes: string[], resource: URL | undefined, refresh: boolean): Promise<OAuthTokens> {
+  /**
+   * GST-359 C1: each token records the grant that issued it (oauth_tokens.grant_type); only client_credentials tokens
+   * may attest an actor. grant_type is migration-only (v286, beside oauth_clients.attest_actor), so a schema without it
+   * issues unmarked tokens, which never attest. The locked client row tells which: a failed INSERT would abort the
+   * surrounding transaction, so the schema is inspected before the statement.
+   */
+  private async issue(sql: SqlQuery, client: ClientRow, scopes: string[], resource: URL | undefined, refresh: boolean, grant: 'authorization_code' | 'refresh_token' | 'client_credentials'): Promise<OAuthTokens> {
     const clientId = client.client_id as string;
     const override = Number(client.token_ttl);
-    const ttl = Number.isFinite(override) && override > 0 ? override : this.options.tokenTtl;
+    const ttl = Math.min(Number.isFinite(override) && override > 0 ? override : this.options.tokenTtl, TOKEN_TTL_MAX_SECONDS);
     const now = Math.floor(this.now() / 1000);
+    const marked = 'attest_actor' in client;
+    const insert = (token: string, type: 'access' | 'refresh', expiresAt: number) => marked
+      ? sql`INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource, created_at, grant_type)
+          VALUES (${hashToken(token)}, ${type}, ${clientId}, ${oauthPgArray(scopes)}, ${expiresAt}, ${resource?.toString() ?? null}, to_timestamp(${now}), ${grant})`
+      : sql`INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource, created_at)
+          VALUES (${hashToken(token)}, ${type}, ${clientId}, ${oauthPgArray(scopes)}, ${expiresAt}, ${resource?.toString() ?? null}, to_timestamp(${now}))`;
     const access = generateToken('gbrain_at_');
-    await sql`INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource)
-      VALUES (${hashToken(access)}, ${'access'}, ${clientId}, ${oauthPgArray(scopes)}, ${now + ttl}, ${resource?.toString() ?? null})`;
+    await insert(access, 'access', now + ttl);
     const result: OAuthTokens = { access_token: access, token_type: 'bearer', expires_in: ttl, scope: scopes.join(' ') };
     if (refresh) {
       const token = generateToken('gbrain_rt_');
-      await sql`INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource)
-        VALUES (${hashToken(token)}, ${'refresh'}, ${clientId}, ${oauthPgArray(scopes)}, ${now + this.options.refreshTtl}, ${resource?.toString() ?? null})`;
+      await insert(token, 'refresh', now + this.options.refreshTtl);
       result.refresh_token = token;
     }
     return result;

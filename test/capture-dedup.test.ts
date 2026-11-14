@@ -29,6 +29,7 @@ import { acquireWorktree, claimWorktree, getWorktreeBinding, MANAGED_WRITER_PROB
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { asOwner } from './helpers/owner-tier.ts';
 import { configureGateway, resetGateway, __setChatTransportForTests, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 import { runFactsPipeline, type FactsBackstopCtx } from '../src/core/facts/backstop.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
@@ -136,6 +137,8 @@ beforeAll(async () => {
   else { const pglite = new PGLiteEngine(); await pglite.connect({}); await pglite.initSchema(); engine = pglite; }
   await engine.setConfig('embedding_model', MODEL);
   await engine.setConfig('embedding_dimensions', String(DIM));
+  // #6091: capture-lane facts are admitted only while memory.auto_writeback allows the lane.
+  await engine.setConfig('memory.auto_writeback', 'all');
 }, 120_000);
 afterAll(async () => { await disposePersistenceConsumer(engine); if (close) await close(); else await engine.disconnect(); });
 beforeEach(() => {
@@ -302,7 +305,7 @@ for (const mode of ['unmanaged', 'managed'] as const) {
 }
 
 describe('hot memory collapse (V2)', () => {
-  const insert = (fact: string, entity_slug: string) => engine.insertFact({ fact, entity_slug, source: 'fixture', visibility: 'world' }, { source_id: sourceId });
+  const insert = (fact: string, entity_slug: string) => asOwner(engine, tx => tx.insertFact({ fact, entity_slug, source: 'fixture', visibility: 'world' }, { source_id: sourceId }));
 
   test('an identical claim on two entities that names one of them injects once with both labels; distinct facts still fill topK', () => withEnv({ GBRAIN_HOME: home }, async () => {
     await freshSource('unmanaged');

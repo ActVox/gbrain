@@ -30,6 +30,9 @@
  * so its existing importers are unaffected.
  */
 
+/** The `facts.source` prefix of every row the conversation-facts extractor writes (its facts and its audit rows). */
+export const CONVERSATION_FACTS_SOURCE_PREFIX = 'cli:extract-conversation-facts';
+
 export const TERMINAL_AUDIT_SOURCE = 'cli:extract-conversation-facts:terminal:v2';
 
 export const NON_EXTRACTABLE_AUDIT_SOURCE =
@@ -43,3 +46,48 @@ export const AUDIT_ROW_SOURCES = [
   NON_EXTRACTABLE_AUDIT_SOURCE,
   LEGACY_TERMINAL_AUDIT_SOURCE,
 ] as const;
+
+/** The fixed claim text of each outcome row (`terminalAuditFact`, `nonExtractableAuditFact`). */
+export const OUTCOME_MARKER_FACTS = ['EXTRACTION_COMPLETE', 'EXTRACTION_NOT_APPLICABLE'] as const;
+
+/**
+ * #7778: true for an extraction outcome row, the bookkeeping marker every
+ * conversation page carries with the same text. It is not a user claim, so no
+ * purge tombstone applies to it and no purge or forget writes one: a
+ * subject-'*' tombstone on its fingerprint would keep every page of the
+ * source from ever completing. Both the source and the exact marker text must
+ * match, so a user claim keeps every purge guarantee whatever its source.
+ */
+export function isOutcomeMarker(row: { source?: string | null; fact: string }): boolean {
+  return (AUDIT_ROW_SOURCES as readonly string[]).includes(row.source ?? '') && (OUTCOME_MARKER_FACTS as readonly string[]).includes(row.fact);
+}
+
+/** SQL twin of `isOutcomeMarker` over a facts row alias (constants only, no parameters). */
+export function outcomeMarkerSql(alias: string): string {
+  const list = (values: readonly string[]) => values.map(v => `'${v}'`).join(',');
+  return `(${alias}.source IN (${list(AUDIT_ROW_SOURCES)}) AND ${alias}.fact IN (${list(OUTCOME_MARKER_FACTS)}))`;
+}
+
+/**
+ * Decision 8 (wave 9 follow-ups): the conversation parser + extractor
+ * semantic version. Bump it when a parser or extractor change alters what an
+ * already-scanned page yields. New outcome rows carry it in their `context`
+ * (`extractor_version=<n>`) and a managed publication carries it in its
+ * generation identity. An outcome recorded under an older version stays
+ * fresh: nothing reopens automatically; doctor counts it as stale.
+ */
+export const CONVERSATION_EXTRACTOR_VERSION = 1;
+
+const EXTRACTOR_VERSION_RE = /(?:^|; )extractor_version=(\d+)$/;
+
+/** The outcome row context with the current extractor version stamped on it. */
+export function stampExtractorVersion(context: string | null | undefined): string {
+  const stamp = `extractor_version=${CONVERSATION_EXTRACTOR_VERSION}`;
+  return context ? `${context}; ${stamp}` : stamp;
+}
+
+/** The extractor version an outcome row was recorded under, or null for a row older than the stamp. */
+export function outcomeExtractorVersion(context: string | null | undefined): number | null {
+  const match = context ? EXTRACTOR_VERSION_RE.exec(context) : null;
+  return match ? Number(match[1]) : null;
+}

@@ -58,6 +58,7 @@ function makeJob(data: Record<string, unknown>): MinionJobContext {
     name: 'ingest_capture',
     data,
     attempts_made: 1,
+    idempotency_key: null,
     signal: new AbortController().signal,
     deadlineAtMs: null,
     shutdownSignal: new AbortController().signal,
@@ -294,12 +295,12 @@ describe('ingest_capture handler — write-source attribution', () => {
     expect(result.source_fallback).toBeUndefined();
   });
 
-  test('job.data.sourceId naming a missing source falls back to default', async () => {
+  test('job.data.sourceId naming a missing source falls back to default for a non-webhook capture', async () => {
     const handler = makeIngestCaptureHandler(engine);
     const ev = makeEvent({
       content: '# missing scoped source',
       source_id: 'webhook-client-x',
-      untrusted_payload: true,
+      source_kind: 'url-fetch', untrusted_payload: true,
     });
 
     const result = await handler(makeJob({
@@ -316,7 +317,7 @@ describe('ingest_capture handler — write-source attribution', () => {
     });
   });
 
-  test('job.data.sourceId naming an archived source falls back to default', async () => {
+  test('job.data.sourceId naming an archived source falls back to default for a non-webhook capture', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name, archived) VALUES ('archived-source', 'archived-source', true)`,
     );
@@ -324,7 +325,7 @@ describe('ingest_capture handler — write-source attribution', () => {
     const ev = makeEvent({
       content: '# archived scoped source',
       source_id: 'webhook-client-x',
-      untrusted_payload: true,
+      source_kind: 'url-fetch', untrusted_payload: true,
     });
 
     const result = await handler(makeJob({
@@ -341,7 +342,7 @@ describe('ingest_capture handler — write-source attribution', () => {
     });
   });
 
-  test('foreign-key violation retries once under default', async () => {
+  test('foreign-key violation retries a non-webhook capture once under default', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name) VALUES ('racing-source', 'racing-source')`,
     );
@@ -365,7 +366,7 @@ describe('ingest_capture handler — write-source attribution', () => {
     const ev = makeEvent({
       content: '# source deleted during write',
       source_id: 'webhook-client-x',
-      untrusted_payload: true,
+      source_kind: 'url-fetch', untrusted_payload: true,
     });
 
     const result = await handler(makeJob({
@@ -450,7 +451,7 @@ describe('ingest_capture handler — write-source attribution', () => {
       content: '# provenance across retry',
       source_id: 'webhook-client-x',
       source_uri: 'https://example.com/retry-provenance',
-      untrusted_payload: true,
+      source_kind: 'url-fetch', untrusted_payload: true,
     });
 
     const result = await handler(makeJob({
@@ -601,7 +602,7 @@ describe('ingest_capture handler — write-source attribution', () => {
     const ev = makeEvent({
       content: '# structured fk fields',
       source_id: 'webhook-client-x',
-      untrusted_payload: true,
+      source_kind: 'url-fetch', untrusted_payload: true,
     });
 
     const result = await handler(makeJob({
@@ -657,7 +658,7 @@ describe('ingest_capture handler — write-source attribution', () => {
     const sharedContent = '# same content two sources';
 
     await handler(makeJob({
-      event: makeEvent({ content: sharedContent, untrusted_payload: true }),
+      event: makeEvent({ content: sharedContent, source_kind: 'url-fetch', untrusted_payload: true }),
       slug,
       sourceId: 'shadow-source',
     }));
@@ -665,7 +666,7 @@ describe('ingest_capture handler — write-source attribution', () => {
 
     // Same slug + same content, but this client falls back to default.
     const result = await handler(makeJob({
-      event: makeEvent({ content: sharedContent, untrusted_payload: true }),
+      event: makeEvent({ content: sharedContent, source_kind: 'url-fetch', untrusted_payload: true }),
       slug,
       sourceId: 'never-registered-source',
     }));
@@ -679,17 +680,18 @@ describe('ingest_capture handler — write-source attribution', () => {
 
     // And the differing-content variant must not throw out of createVersion.
     const updated = await handler(makeJob({
-      event: makeEvent({ content: '# different content entirely', untrusted_payload: true }),
+      event: makeEvent({ content: '# different content entirely', source_kind: 'url-fetch', untrusted_payload: true }),
       slug,
       sourceId: 'never-registered-source',
     }));
     expect(updated.status).not.toBe('error');
   });
 
-  test('a trusted daemon event KEEPS gate-owned markers (stripping is untrusted-only)', async () => {
-    // The mirror of the case above: local/trusted emitters own these markers
-    // (the quarantine CLI and the sanity gate write them), so stripping must be
-    // conditioned on the event's trust flag, not applied unconditionally.
+  test('a trusted daemon event cannot plant gate-owned markers either (#6259)', async () => {
+    // Gate-owned markers are stripped from every writer except an owner-tier
+    // path (sync/import of the owner's files, reindex, repair, reconcile, the
+    // cycle derivers, quarantine clear); an ingest lane is not one, whatever
+    // the event's trust flag says.
     await engine.executeRaw(
       `INSERT INTO sources (id, name) VALUES ('trusted-marker-source', 'trusted-marker-source')`,
     );
@@ -706,7 +708,7 @@ describe('ingest_capture handler — write-source attribution', () => {
       `SELECT frontmatter FROM pages WHERE slug = $1`,
       ['inbox/trusted-markers'],
     );
-    expect((rows[0]?.frontmatter ?? {}).quarantine).toBe(true);
+    expect((rows[0]?.frontmatter ?? {}).quarantine).toBeUndefined();
   });
 });
 

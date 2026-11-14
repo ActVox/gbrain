@@ -123,10 +123,6 @@
       },
       {
         "category": "ops",
-        "name": "chat_fallback_chain_inert"
-      },
-      {
-        "category": "ops",
         "name": "search_mode"
       },
       {
@@ -136,6 +132,10 @@
       {
         "category": "ops",
         "name": "reranker_health"
+      },
+      {
+        "category": "ops",
+        "name": "chat_fallback_chain"
       },
       {
         "category": "brain",
@@ -164,6 +164,10 @@
       {
         "category": "brain",
         "name": "contextual_retrieval_coverage"
+      },
+      {
+        "category": "brain",
+        "name": "synopsis_tier_coverage"
       },
       {
         "category": "brain",
@@ -199,6 +203,10 @@
       },
       {
         "category": "brain",
+        "name": "privacy_label_ignored"
+      },
+      {
+        "category": "brain",
         "name": "safe_index_pending"
       },
       {
@@ -223,11 +231,23 @@
       },
       {
         "category": "brain",
+        "name": "fence_integrity"
+      },
+      {
+        "category": "brain",
         "name": "unbound_source"
       },
       {
         "category": "ops",
         "name": "persistence_capacity"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_compaction"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_counter_drift"
       },
       {
         "category": "brain",
@@ -239,7 +259,19 @@
       },
       {
         "category": "ops",
+        "name": "dream_write_deferred"
+      },
+      {
+        "category": "ops",
+        "name": "embedding_restamp_stalled"
+      },
+      {
+        "category": "ops",
         "name": "writer_version"
+      },
+      {
+        "category": "ops",
+        "name": "segmented_storage"
       },
       {
         "category": "brain",
@@ -251,7 +283,15 @@
       },
       {
         "category": "ops",
+        "name": "keyword_plan"
+      },
+      {
+        "category": "ops",
         "name": "stale_embedding_effects"
+      },
+      {
+        "category": "brain",
+        "name": "fact_bulk_dates"
       }
     ],
     "early_returns_after": [

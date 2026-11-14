@@ -36,6 +36,15 @@ export function autopilotLockPath(): string {
 }
 
 /**
+ * #7003: the daemon's heartbeat sidecar beside the lock. It records the daemon's own next tick (its adaptive interval),
+ * so autopilot status grades staleness from what the daemon scheduled rather than the caller's interval flag
+ * (src/core/autopilot-heartbeat.ts). The lock mtime stays the liveness signal.
+ */
+export function autopilotHeartbeatPath(): string {
+  return gbrainPath('autopilot.heartbeat.json');
+}
+
+/**
  * Written by the generated wrapper when it self-disables (its captured repo path
  * is gone). Read by the status command so a stopped daemon explains itself
  * instead of looking merely idle.
@@ -226,6 +235,8 @@ export interface AutopilotJob {
   wrapperPath: string;
   logPath: string;
   errPath: string;
+  /** #8017: launchd starts the wrapper through /bin/bash because the brain home is on another volume (macOS only). */
+  launchdViaBash?: boolean;
   installIdPath: string | null;
   /** configDir() at resolution time. */
   homeDir: string;
@@ -240,6 +251,7 @@ export function resolveAutopilotJob(opts: { mint?: boolean } = {}): AutopilotJob
     suffix = id ? id.slice(0, 8) : null;
     kind = suffix ? 'suffixed' : 'unassigned';
   }
+  const logs = autopilotLaunchdHostPaths(homeDir, autopilotLaunchdLabel(suffix), homedir(), process.platform === 'darwin' ? undefined : () => 0);
   return {
     kind,
     suffix,
@@ -248,11 +260,33 @@ export function resolveAutopilotJob(opts: { mint?: boolean } = {}): AutopilotJob
     startScriptPath: join(homeDir, suffix ? `start-autopilot-${suffix}.sh` : 'start-autopilot.sh'),
     cronMarker: suffix ? `# gbrain-autopilot:${suffix}` : null,
     wrapperPath: join(homeDir, 'autopilot-run.sh'),
-    logPath: join(homeDir, 'autopilot.log'),
-    errPath: join(homeDir, 'autopilot.err'),
+    logPath: logs.logPath,
+    errPath: logs.errPath,
+    ...(logs.viaBash ? { launchdViaBash: true } : {}),
     installIdPath: kind === 'default' ? null : autopilotInstallIdPath(),
     homeDir,
   };
+}
+
+/**
+ * #8017: launchd's spawn helper opens a job's Program and its log files before the job runs, and ends the job with
+ * EX_CONFIG (78) when they sit on a volume other than the user's home (a brain on an external GBRAIN_HOME). Such a
+ * brain gets launchd paths on the home volume: /bin/bash starts the wrapper, and the logs go to
+ * ~/Library/Logs/gbrain/<label>.log and .err. A brain on the home volume, or one whose volume cannot be read, keeps
+ * its logs in the brain home.
+ */
+export function autopilotLaunchdHostPaths(
+  homeDir: string,
+  label: string,
+  hostHome: string = homedir(),
+  dev: (path: string) => number = path => statSync(path).dev,
+): { viaBash: boolean; logPath: string; errPath: string } {
+  let external = false;
+  try { external = dev(homeDir) !== dev(hostHome); } catch { /* unreadable: keep the brain-home layout */ }
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- hostHome is this user's home directory and the rest are fixed segments.
+  const [logDir, base] = external ? [join(hostHome, 'Library', 'Logs', 'gbrain'), label] : [homeDir, 'autopilot'];
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- logDir is the brain's own config dir or ~/Library/Logs/gbrain; label passed autopilotLaunchdLabel's [A-Za-z0-9._-] grammar, which rejects separators and '..'.
+  return { viaBash: external, logPath: join(logDir, `${base}.log`), errPath: join(logDir, `${base}.err`) };
 }
 
 /**
@@ -287,6 +321,15 @@ export function autopilotWrapperOwner(
  */
 export function autopilotPausedMarkerPath(): string {
   return join(gbrainPath(), 'autopilot-paused');
+}
+
+/**
+ * The daemon's latest brain-wide maintenance verdict (GBRA-130 C-6), written
+ * each full-cycle tick so the engine-free `autopilot --status` can exit 1 while
+ * maintenance is stalled without opening the database.
+ */
+export function autopilotGlobalMaintenanceVerdictPath(): string {
+  return join(gbrainPath(), 'autopilot-global-maintenance.json');
 }
 
 /**

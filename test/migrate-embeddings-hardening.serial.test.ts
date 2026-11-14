@@ -46,6 +46,7 @@ const OUTGOING_RERANKER = 'fixture-provider:reranker-v1';
 import {
   configureGateway,
   resetGateway,
+  requireConfig,
   __setEmbedTransportForTests,
 } from '../src/core/ai/gateway.ts';
 import { runEmbedCore } from '../src/commands/embed.ts';
@@ -387,7 +388,7 @@ describe('reranker companion (D8)', () => {
       const plan = await resolveRerankerPlan(engine, 'fixture-provider:embedding-v1', 'voyage:voyage-4', undefined);
       expect(plan.exposed).not.toBeNull();
       expect(plan.exposed!.model).toBe(OUTGOING_RERANKER);
-      expect(plan.action).toEqual({ kind: 'switch', to: 'voyage:rerank-2.5' });
+      expect(plan.action).toEqual({ kind: 'switch', to: 'voyage:rerank-3-lite' });
     } finally {
       await engine.unsetConfig('search.reranker.model');
     }
@@ -404,7 +405,7 @@ describe('reranker companion (D8)', () => {
       const plan = await resolveRerankerPlan(engine, 'fixture-provider:embedding-v1', 'openai:text-embedding-3-small', undefined);
       expect(plan.exposed).not.toBeNull();
       expect(plan.action.kind).toBe('none');
-      expect((plan.action as { suggestion: string | null }).suggestion).toBe('voyage:rerank-2.5');
+      expect((plan.action as { suggestion: string | null }).suggestion).toBe('voyage:rerank-3-lite');
     } finally {
       await engine.unsetConfig('search.reranker.model');
     }
@@ -722,6 +723,26 @@ describe('config-plane hygiene (env leak + env-canonical gates)', () => {
     }
   }, 30000);
 
+  test('#7666: the post-apply gateway keeps a DB-plane provider_base_urls override, and the file plane never gains it', async () => {
+    const cfgPath = join(tmpHome, '.gbrain', 'config.json');
+    const url = 'http://127.0.0.1:11435/v1';
+    await engine.setConfig('provider_base_urls.ollama', url);
+    try {
+      await persistEmbeddingFileConfig('openai:text-embedding-3-small', TO_DIMS, engine);
+      expect(requireConfig().base_urls?.ollama).toBe(url);
+      expect(readFileSync(cfgPath, 'utf-8')).not.toContain(url);
+    } finally {
+      await engine.executeRaw(`DELETE FROM config WHERE key = 'provider_base_urls.ollama'`);
+      writeFileConfig('openai:text-embedding-3-small', TO_DIMS);
+      configureGateway({
+        embedding_model: 'openai:text-embedding-3-small',
+        embedding_dimensions: TO_DIMS,
+        env: { OPENAI_API_KEY: 'sk-test-fake', VOYAGE_API_KEY: 'pa-test-fake' },
+      });
+      installTransport();
+    }
+  }, 30000);
+
   test('dims-only env never fully pins the target; a no-file-plane run refuses at apply', async () => {
     // Unit: the MODEL var is required — dims alone must not pin (#1421 class).
     expect(envFullyPinsTarget('openai:text-embedding-3-small', TO_DIMS, {
@@ -875,6 +896,47 @@ describe('marker integrity across surfaces', () => {
 });
 
 describe('smoke-check miss + heartbeat resilience', () => {
+  test('verifySearchRoundTrip samples one representative chunk per distinct eligible page (#5334)', async () => {
+    const targetModel = 'openai:text-embedding-3-small';
+    const sig = `${targetModel}:${TO_DIMS}`;
+    const titles = ['Distinct canary 0', `Distinct canary 1${' long title'.repeat(100)}`, 'Distinct canary 2'];
+    const vector = '[' + new Array(TO_DIMS).fill(0).map((_, i) => Math.sin(i) * 0.01 + 0.001).join(',') + ']';
+    const seed = async (slug: string, title: string, chunks: string[], signature: string) => {
+      await engine.putPage(slug, { type: 'note', title, compiled_truth: `# ${title}\n\nbody` });
+      await installFixtureChunks(engine, slug, chunks.map((chunk_text, chunk_index) => ({ chunk_index, chunk_text, chunk_source: 'compiled_truth', token_count: 30 })));
+      await engine.setPageEmbeddingSignature(slug, { signature });
+      await engine.executeRaw(`UPDATE content_chunks SET embedding = $1::vector, model = $2, embedded_at = now(), embedded_text_hash = md5(chunk_text)
+        WHERE page_id = (SELECT id FROM pages WHERE slug = $3)`, [vector, targetModel, slug]);
+    };
+    const body = (page: number, chunk: number) =>
+      `${'Recommendation: review this imported evidence. '.repeat(4)}distinct page ${page} chunk ${chunk} ${'More useful context. '.repeat((chunk + 1) * 20)}`;
+    try {
+      await seed('srm-diverse-a', titles[0], [0, 1, 2].map(c => body(0, c)), sig);
+      await seed('srm-diverse-b', titles[1], [0, 1, 2].map(c => body(1, c)), sig);
+      // The newest chunks all belong to one page: the old ORDER BY chunk id
+      // sampled it three times.
+      await seed('srm-diverse-c', titles[2], [2, 1, 0, 0, 0, 0].map(c => body(2, c)), sig);
+      // A newer page in another embedding space is never a sample.
+      await seed('srm-diverse-stale', 'Stale space', [body(9, 2)], 'old:model:1536');
+
+      embeddedTexts = [];
+      const outcome = await verifySearchRoundTrip(engine, { samples: 3 });
+      const ids = Object.fromEntries((await engine.executeRaw<{ slug: string; id: number }>(
+        "SELECT slug, id FROM pages WHERE slug LIKE 'srm-diverse-%'")).map(r => [r.slug, Number(r.id)]));
+      expect(outcome.samples.map(sample => sample.page_id)).toEqual([ids['srm-diverse-c'], ids['srm-diverse-b'], ids['srm-diverse-a']]);
+      expect(embeddedTexts).toHaveLength(3);
+      for (const page of [0, 1, 2]) {
+        expect(embeddedTexts.some(text => text.startsWith(`${titles[page].slice(0, 160)}\n`) && text.includes(`distinct page ${page} chunk 2`))).toBe(true);
+      }
+      expect(embeddedTexts.every(text => text.length <= 160 + 1 + 512)).toBe(true);
+      expect(JSON.stringify(outcome)).not.toContain('distinct page');
+    } finally {
+      await engine.executeRaw(`DELETE FROM content_chunks WHERE page_id IN (SELECT id FROM pages WHERE slug LIKE 'srm-diverse-%')`);
+      await engine.executeRaw(`DELETE FROM pages WHERE slug LIKE 'srm-diverse-%'`);
+      embeddedTexts = [];
+    }
+  }, 60000);
+
   test('verifySearchRoundTrip reports warn/self_retrieval_miss with content-free samples', async () => {
     const canary = 'sealed-privacy-canary-text';
     const targetModel = 'openai:text-embedding-3-small';
@@ -1053,6 +1115,25 @@ describe('empty-brain migration (plan pin 15)', () => {
     } finally {
       await e2.disconnect();
       writeFileConfig('openai:text-embedding-3-small', TO_DIMS);
+    }
+  }, 120000);
+});
+
+describe('concurrent-writer census', () => {
+  test('an unreadable worker registry does not also drop the embed-job count', async () => {
+    const registry = join(tmpHome, '.gbrain', 'workers');
+    rmSync(registry, { recursive: true, force: true });
+    writeFileSync(registry, 'not a directory');
+    await engine.executeRaw(
+      `INSERT INTO minion_jobs (submission_authority, name, queue, status, created_at, updated_at)
+       VALUES ('{"version":1,"kind":"application"}'::jsonb, 'embed-backfill', 'default', 'waiting', now(), now())`,
+    );
+    try {
+      const ctx = await planMigrationFlow(engine, { to: 'openai:text-embedding-3-small', dim: TO_DIMS });
+      expect(ctx.concurrentWriters).toEqual({ workers: null, embedJobs: 1 });
+    } finally {
+      await engine.executeRaw(`DELETE FROM minion_jobs WHERE name = 'embed-backfill'`);
+      rmSync(registry, { force: true });
     }
   }, 120000);
 });

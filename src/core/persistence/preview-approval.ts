@@ -40,7 +40,7 @@ export const PREVIEW_APPROVAL_OP = 'repair-approval';
 /** The default `purgeStaleCheckpoints` TTL; an older approved set may already be gone. */
 export const APPROVAL_MAX_AGE_DAYS = 7;
 
-export type PreviewApprovalCommand = 'authorize-legacy' | 'jobs-cancel' | 'stale-atoms' | 'extractor-facts' | 'captured-facts' | 'loop-facts';
+export type PreviewApprovalCommand = 'authorize-legacy' | 'jobs-cancel' | 'stale-atoms' | 'atoms-restore' | 'atom-fence-rows' | 'extractor-facts' | 'unwithdrawn-facts' | 'conversation-labels' | 'captured-facts' | 'agent-session-facts' | 'redacted-facts' | 'loop-facts' | 'ontology-facts' | 'facts-rehome' | 'consolidate-ties' | 'duplicate-facts' | 'failed-writes' | 'split-facts' | 'frontmatter' | 'fences' | 'slug-conflicts' | 'managed-sync-orphans' | 'frontmatter-keys' | 'file-drift' | 'stuck-recovery' | 'ghost-pages' | 'origin-twins' | 'moved-pages' | 'receipt-compaction' | 'accepted-takes' | 'rename-identity' | 'overwritten-edits' | 'legacy-twins' | 'missing-tables' | 'segmented-mirror' | 'segmented-tiling' | 'uncommitted-deletions' | 'visibility' | 'generations' | 'fact-claim-dates' | 'timeline-order' | 'contact-rows' | 'provenance' | 'secret-spans' | 'rows-behind' | 'facts-home' | 'private-labels' | 'lost-fence-rows';
 
 export interface ApprovedSetKey {
   command: PreviewApprovalCommand;
@@ -48,6 +48,13 @@ export interface ApprovedSetKey {
   hash: string;
   /** The read-only command that prints a fresh preview, filled with the caller's real flags. */
   previewCommand: string;
+  /**
+   * #6351: the hash a preview of the same selection prints when it finds
+   * nothing, computed from current state (source incarnations included). A
+   * preview that found nothing saves no set; its hash still approves applying
+   * nothing while that state holds.
+   */
+  emptyHash?: () => Promise<string>;
 }
 
 export interface ApprovedSet<T> {
@@ -92,6 +99,9 @@ export async function loadApprovedSet<T>(engine: BrainEngine, key: ApprovedSetKe
        FROM op_checkpoints WHERE op=$1 AND fingerprint=$2`,
     [PREVIEW_APPROVAL_OP, fingerprint(key.command, key.hash), String(APPROVAL_MAX_AGE_DAYS)]);
   const saved = row?.completed_keys?.[0];
+  if (!row && key.emptyHash && await key.emptyHash() === key.hash) {
+    return { command: key.command, hash: key.hash, items: [], approved_at: new Date().toISOString() };
+  }
   if (!row || row.fresh !== true || saved?.command !== key.command || saved.hash !== key.hash || !Array.isArray(saved.items)) {
     throw previewChangedError(key.hash, key.previewCommand);
   }
@@ -101,4 +111,11 @@ export async function loadApprovedSet<T>(engine: BrainEngine, key: ApprovedSetKe
 /** Drops an approved set once its apply finished. */
 export async function clearApprovedSet(engine: BrainEngine, key: Omit<ApprovedSetKey, 'previewCommand'>): Promise<void> {
   await engine.executeRaw('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [PREVIEW_APPROVAL_OP, fingerprint(key.command, key.hash)]);
+}
+
+/** Applies one approved item and drops the set once the last item returns; an item that throws keeps the set, so the printed apply resumes with the same hash. */
+export async function retireAfterLastItem<T>(engine: BrainEngine, command: PreviewApprovalCommand, hash: string | null | undefined, last: boolean, apply: () => Promise<T>): Promise<T> {
+  const outcome = await apply();
+  if (last && hash) await clearApprovedSet(engine, { command, hash });
+  return outcome;
 }

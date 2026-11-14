@@ -48,6 +48,12 @@ const CONN_PATTERNS = [
   // retry, the checkpoint write (and every other pool-contending write) is
   // dropped during the exact spike #1794's resumable sync must survive.
   /EMAXCONNSESSION/i,
+  // #6340: the socket errnos postgres.js surfaces as "write <ERRNO> host:port" when a
+  // session-mode pooler drops the connection mid-statement (ECONNABORTED was the one
+  // that ended four managed catch-up runs in one afternoon). Same class as ECONNRESET.
+  /ECONNABORTED/i,
+  /ETIMEDOUT/i,
+  /EPIPE/i,
   /too many clients already/i,
   /max.*clients?.*in session mode/i,
   /remaining connection slots are reserved/i,
@@ -70,6 +76,23 @@ export function getCode(err: unknown): string | undefined {
   return undefined;
 }
 
+/** Socket errnos and postgres.js library codes that mean an open connection went away: decided by the code, never the message. */
+const CONNECTION_CODES: ReadonlySet<string> = new Set(['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE', 'CONNECTION_CLOSED', 'CONNECTION_ENDED', 'CONNECTION_DESTROYED']);
+
+/** True for a socket errno or a postgres.js connection code. */
+export function isConnectionCode(code: string | undefined): boolean {
+  return code !== undefined && CONNECTION_CODES.has(code);
+}
+
+/**
+ * GBRA-133 S-70: does this message name a path? Connection text is only read from a message that names none, so an
+ * unexpected error quoting a file such as `notes/connection closed.md` is never taken for a dropped connection.
+ * URLs (a connection string, an endpoint) are not paths.
+ */
+export function quotesPath(message: string): boolean {
+  return /[\\/]/.test(message.replace(/[a-z][a-z0-9+.-]*:\/\/\S*/gi, ''));
+}
+
 export function getMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === 'object') {
@@ -80,6 +103,18 @@ export function getMessage(err: unknown): string {
 }
 
 /**
+ * GST-2314: a prepared statement whose cached plan went stale because a migration changed a table it reads (SQLSTATE
+ * 0A000 "cached plan must not change result type"). Outside a transaction the driver re-prepares it; inside one the
+ * transaction is already aborted, so the caller sees the error and a re-run on a fresh transaction succeeds. Every other
+ * 0A000 (feature_not_supported) stays a refusal. The C routine (RevalidateCachedQuery) is matched first because the
+ * server translates the message under a non-English lc_messages.
+ */
+export function isStalePlanError(err: unknown): boolean {
+  if (getCode(err) !== '0A000') return false;
+  return (err as { routine?: unknown }).routine === 'RevalidateCachedQuery' || /cached plan must not change result type/i.test(getMessage(err));
+}
+
+/**
  * SQLSTATE 57014: query_canceled / statement_timeout.
  * Postgres signals this when a statement exceeds `statement_timeout`.
  */
@@ -87,6 +122,20 @@ export function isStatementTimeoutError(err: unknown): boolean {
   if (getCode(err) === '57014') return true;
   const msg = getMessage(err);
   return /statement_timeout|canceling statement due to statement timeout/i.test(msg);
+}
+
+/**
+ * GST-2260: runs `transaction` once more when a stale plan aborted it. The abort rolled back every statement it ran, so
+ * the second run is safe only for a callback that does nothing but database work and in-memory computation: never wrap
+ * one that writes a file, calls the network or changes state that outlives the transaction.
+ */
+export async function retryOnStalePlan<T>(transaction: () => Promise<T>): Promise<T> {
+  try {
+    return await transaction();
+  } catch (error) {
+    if (!isStalePlanError(error)) throw error;
+    return transaction();
+  }
 }
 
 /**
@@ -127,6 +176,7 @@ export function isRetryableConnError(err: unknown): boolean {
   // The message form is already caught by /connection.*closed/i below; match
   // the code too for wrappers that rethrow with the code but a new message.
   if (code === 'CONNECTION_CLOSED') return true;
+  if (isConnectionCode(code)) return true;
   // v0.42.x (#1794): SQLSTATE 53300 too_many_connections — pool/pooler
   // exhaustion. Starts with 53 not 08, so the /^08/ test above misses it.
   // Transient: the spike clears as in-flight queries release connections.
@@ -141,7 +191,21 @@ export function isRetryableConnError(err: unknown): boolean {
     return true;
   }
   const msg = getMessage(err);
-  return CONN_PATTERNS.some(p => p.test(msg));
+  return !quotesPath(msg) && CONN_PATTERNS.some(p => p.test(msg));
+}
+
+/**
+ * #6355: did the database session go away under a statement that was already sent? Narrower than
+ * `isRetryableConnError` (no auth or startup races): the connection-class SQLSTATEs, postgres.js's own
+ * connection codes, the server's admin/crash shutdown codes (`pg_terminate_backend`, a failover) and the
+ * socket errnos. Such an error says nothing about whether the statement's transaction committed, so a
+ * caller that sent a write must re-read its retained request id instead of inferring rollback.
+ */
+export function isConnectionLoss(err: unknown): boolean {
+  const code = getCode(err);
+  if (code && (/^08/.test(code) || isConnectionCode(code) || ['57P01', '57P02', '57P03'].includes(code))) return true;
+  const msg = getMessage(err);
+  return !quotesPath(msg) && /\b(ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE)\b|Connection terminated unexpectedly|server closed the connection|connection.*closed|terminating connection due to administrator command/i.test(msg);
 }
 
 /**
@@ -157,6 +221,23 @@ export function isConnectionEndedError(err: unknown): boolean {
   if (code === 'CONNECTION_ENDED') return true;
   const msg = getMessage(err);
   return /CONNECTION_ENDED/i.test(msg);
+}
+
+/**
+ * Did postgres.js abandon a connection handshake because its own
+ * `connect_timeout` timer fired? It reports that as code `CONNECT_TIMEOUT`
+ * with the message "write CONNECT_TIMEOUT <host>:<port>" (the host and port
+ * read "undefined:undefined" once the socket has been upgraded to TLS).
+ *
+ * Kept OUT of `isRetryableConnError` on purpose: on a process's first connect
+ * a handshake timeout usually means the host does not route, which
+ * pg-access-classify reports as `network_unreachable`, and retrying cannot
+ * fix that. A caller that has already reached the same URL in this process
+ * opts in through connectWithRetry's `retryConnectTimeout`.
+ */
+export function isConnectTimeoutError(err: unknown): boolean {
+  if (getCode(err) === 'CONNECT_TIMEOUT') return true;
+  return /\bCONNECT_TIMEOUT\b/.test(getMessage(err));
 }
 
 /**

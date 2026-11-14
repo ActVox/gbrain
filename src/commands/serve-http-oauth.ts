@@ -17,6 +17,8 @@ import { scopesSupportedForDiscovery } from '../core/scope.ts';
 import { GRANT_PROFILES } from '../core/grants/model.ts';
 import { publicHarnessMetadata } from '../core/harness/registry.ts';
 import { mcpAdministrationGuidance } from '../mcp/capabilities.ts';
+import { AGENT_LABEL_HEADER } from '../core/persistence/attribution.ts';
+import { GBRAIN_CLIENT_HEADER } from '../mcp/result-rows.ts';
 import { VERSION } from '../version.ts';
 import type { ServeHttpContext } from './serve-http.ts';
 
@@ -134,7 +136,7 @@ export function mountOAuth(app: Express, ctx: ServeHttpContext): void {
     origin: resolveCorsOrigin(corsAllowlistOAuth),
     credentials: false,
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', AGENT_LABEL_HEADER, GBRAIN_CLIENT_HEADER],
   };
   // Match the SDK's Express routes, including trailing slashes and case aliases.
   app.use(['/mcp', '/token', '/authorize', '/register', '/revoke'], (req: Request, res: Response, next: NextFunction) => {
@@ -506,15 +508,17 @@ export function mountOAuthConsent(app: Express, provider: GBrainOAuthProvider, r
     const id = String(req.params.id);
     const body = req.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)
-      || Object.keys(body).some(key => key !== 'decision' && key !== 'csrf')
+      || Object.keys(body).some(key => key !== 'decision' && key !== 'csrf' && key !== 'source_id')
       || (body.decision !== 'approve' && body.decision !== 'deny')
+      || (body.source_id !== undefined && (body.decision !== 'approve' || typeof body.source_id !== 'string'))
       || typeof body.csrf !== 'string' || !/^[a-f0-9]{64}$/.test(body.csrf)
       || !safeHexEqual(body.csrf, csrfFor(req, id))) {
       res.status(403).json({ error: 'invalid_consent', message: 'Reload this request and review it again before approving.' });
       return;
     }
     try {
-      res.json({ redirectUrl: await provider.grants.decide(id, body.decision === 'approve') });
+      res.json({ redirectUrl: await provider.grants.decide(id, body.decision === 'approve',
+        body.source_id === undefined ? undefined : { sourceId: body.source_id }) });
     } catch (error) { handleError(res, error); }
   });
 }

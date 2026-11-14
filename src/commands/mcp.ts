@@ -1,4 +1,5 @@
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { OperationError, opError } from '../core/ops/contract.ts';
 import { statSync } from 'node:fs';
 import type { BrainEngine } from '../core/engine.ts';
 import { GRANT_PROFILES, type GrantPatch, type GrantProfileId } from '../core/grants/model.ts';
@@ -9,6 +10,8 @@ import { provisionHarnessGrant, type ProvisionGrantInput } from './mcp-provision
 import { validateHarnessArguments, MCP_GRANT_ARGUMENTS } from '../core/harness/arguments.ts';
 import { createMcpAdminHttp, hasAdminCredential, McpAdminError, redactAdminValue } from './mcp-admin-http.ts';
 import { runMcpAdmin } from './mcp-admin.ts';
+import { grantFromClient } from '../core/grants/model.ts';
+import { credentialCensus, exposureServes, renderedExposure, sharedTokenNotice, writeExposureNotice } from '../core/grants/shared-exposure.ts';
 
 const HELP = `gbrain mcp — provision access on the host; install it inside the harness
 
@@ -55,7 +58,12 @@ export function mcpNeedsEngine(args: string[], envToken = process.env.GBRAIN_ADM
 }
 
 export function parseMcpGrant(args: string[]): ProvisionGrantInput {
-  if (args[0] !== 'grant' || !args[1] || args[1].startsWith('-')) throw new Error('Usage: gbrain mcp grant NAME [options]');
+  if (args[0] !== 'grant' || !args[1] || args[1].startsWith('-')) {
+    throw opError('invalid_params', 'gbrain mcp grant needs a client NAME.',
+      'Usage: gbrain mcp grant NAME --harness ID --profile PROFILE --source SOURCE --url URL --credentials-out FILE. '
+      + 'Example: gbrain mcp grant laptop-agent --harness claude-code --profile memory-writer --source default --url https://brain.example.ts.net/mcp --credentials-out ~/laptop-agent.json --dry-run '
+      + '(`gbrain mcp adapters` and `gbrain mcp profiles` list the ids; `gbrain mcp --help` lists every option).');
+  }
   validateHarnessArguments(args.slice(2), MCP_GRANT_ARGUMENTS);
   const value = (flag: string) => { const i = args.indexOf(flag); if (i < 0) return undefined; const v = args[i + 1]; if (!v || v.startsWith('--')) throw new Error(`${flag} requires a value`); return v; };
   const list = (flag: string) => value(flag)?.split(',').map(v => v.trim()).filter(Boolean);
@@ -137,7 +145,14 @@ export async function runMcp(args: string[], engine?: BrainEngine): Promise<void
       try { writeCredentials(value('--credentials-out')!, result.credentials); }
       catch { throw new Error(`credential_delivery_incomplete: client ${result.grant.clientId} exists; repeat with --resume --client ${result.grant.clientId} --credentials-out <private-file>. Do not create a duplicate or rotate its secret automatically.`); }
     }
+    const exposure = sharedTokenNotice({ kind: 'oauth_client', id: result.grant.clientId || input.name, name: input.name }, {
+      harness: harnessAdapter(input.harness).id,
+      census: engine && !hasAdminCredential(args) ? await credentialCensus(engine, grantFromClient(result.grant)) : null,
+      serves: engine && !hasAdminCredential(args) ? await exposureServes(engine) : null,
+    });
+    writeExposureNotice(exposure);
     console.log(JSON.stringify({ status: result.dry_run ? 'preview' : 'granted', grant: result.grant, before: result.before,
+      ...(exposure ? { warnings: renderedExposure(exposure) } : {}),
       spending: result.grant.budgetUsdPerDay === null ? { mode: 'unlimited' } : { mode: 'daily_cap', usd: result.grant.budgetUsdPerDay },
       credentials: result.credentials ? credentialReceipt(result.credentials) : result.credential_action,
       credential_file: result.credentials ? value('--credentials-out') : null,
@@ -145,6 +160,13 @@ export async function runMcp(args: string[], engine?: BrainEngine): Promise<void
         ? 'Install the private handoff inside the intended harness with gbrain connect, then run gbrain mcp verify.'
         : 'Grant updated; inspect effective access with gbrain mcp admin client. Restrictions apply immediately. Newly added scopes require fresh authorization in the native client or a new machine token; existing credentials are preserved.' }, null, args.includes('--json') ? undefined : 2));
   } catch (error) {
+    if (error instanceof OperationError && error.code === 'invalid_params') {
+      // A3/D4: a malformed invocation exits 2 with the usage and an example; the legacy keys lead the document.
+      const { writeCliError } = await import('../cli/cli-error.ts');
+      writeCliError(error, 'mcp', { json: true, legacy: { status: 'error', reason: 'invalid_params', message: error.message } });
+      setCliExitVerdict(2);
+      return;
+    }
     console.log(JSON.stringify({ status: 'error', reason: error instanceof McpAdminError ? error.code : 'mcp_setup_failed',
       message: redactAdminValue(error instanceof Error ? error.message : 'MCP setup failed', [process.env.GBRAIN_ADMIN_BOOTSTRAP_TOKEN ?? '']),
       ...(error instanceof McpAdminError && error.outcome ? { outcome: error.outcome } : {}),

@@ -41,6 +41,7 @@
 import { PostgresEngine } from './postgres-engine.ts';
 import type { BrainEngine } from './engine.ts';
 import { DEGRADED_LAST_ERROR, DEGRADED_ON_RECOVER, DEGRADED_STATE } from './degraded-marker.ts';
+import { ENGINE_ROOT } from './engine-root.ts';
 
 export interface DegradedEngineOptions {
   /** The startup connect error — rethrown verbatim while dead so dispatch's
@@ -58,6 +59,8 @@ export interface DegradedEngineOptions {
    *  tools/list handshake, for the full driver connect_timeout). */
   callerWaitMs?: number;
   now?: () => number;
+  /** `kind` reported while dead (default postgres); status-only serve passes the configured engine. */
+  kind?: 'postgres' | 'pglite';
 }
 
 /**
@@ -93,9 +96,9 @@ function enginePrototypeMethodNames(): string[] {
 
 /** Prototype GETTERS (e.g. `get sql()`), delegated too — serve holds this
  *  wrapper forever, so a post-recovery property read must reach the live
- *  engine, not silently return undefined. Instance properties set in the
- *  constructor are NOT enumerable from the prototype and stay out of the
- *  BrainEngine contract (methods + kind + prototype getters only). */
+ *  engine, not silently return undefined. Instance fields are not on the
+ *  prototype: while dead they are absent, and recovery (`alignWith`)
+ *  delegates them along with the live engine's own methods and getters. */
 function enginePrototypeGetterNames(): string[] {
   const names = new Set<string>();
   let proto: object | null = PostgresEngine.prototype;
@@ -135,6 +138,7 @@ export function createDegradedEngine(opts: DegradedEngineOptions): BrainEngine {
         .reconnect()
         .then((engine) => {
           live = engine;
+          alignWith(engine);
           for (const cb of recoveryCallbacks.splice(0)) {
             try { cb(); } catch { /* recovery callbacks are best-effort */ }
           }
@@ -165,9 +169,44 @@ export function createDegradedEngine(opts: DegradedEngineOptions): BrainEngine {
   }
 
   const target: Record<string | symbol, unknown> = {};
+  /** Names the stand-in mirrored from PostgresEngine; recovery drops the ones the live engine lacks. */
+  const mirrored = new Set<string>();
+  /**
+   * #9224: the surface was enumerated from PostgresEngine; a live engine of
+   * another kind (status-only serve over PGLite) gets exactly its own surface:
+   * every property reachable on it (prototype methods and getters, instance
+   * fields, symbol keys), delegated to it, and none it lacks. Before, only
+   * methods were aligned, so PGLite's `db` getter stayed missing and
+   * tryAcquireDbLock refused every delegated sync that had pages to write.
+   */
+  const alignWith = (engine: BrainEngine) => {
+    const own = engine as unknown as Record<string | symbol, unknown>;
+    for (const name of mirrored) {
+      if (name !== 'disconnect' && !(name in engine)) delete target[name];
+    }
+    for (let holder: object | null = engine; holder && holder !== Object.prototype; holder = Object.getPrototypeOf(holder)) {
+      for (const key of Reflect.ownKeys(holder)) {
+        if (key === 'constructor' || key in target) continue;
+        const desc = Object.getOwnPropertyDescriptor(holder, key)!;
+        if (holder !== engine && typeof desc.value === 'function') {
+          target[key] = (...args: unknown[]) => (own[key] as (...a: unknown[]) => unknown).apply(engine, args);
+          continue;
+        }
+        Object.defineProperty(target, key, {
+          get: () => own[key],
+          set: (value: unknown) => { own[key] = value; },
+          enumerable: desc.enumerable ?? false,
+          configurable: true,
+        });
+      }
+    }
+  };
   for (const name of enginePrototypeMethodNames()) {
     if (name === 'disconnect') continue; // special-cased below
-    target[name] = async (...args: unknown[]) => {
+    mirrored.add(name);
+    // Not async: once live, a synchronous method (registerBeforeDisconnect returns its unregister function) must
+    // return its own value, not a promise of it (#9224). While dead every call is a rejected promise, as before.
+    target[name] = (...args: unknown[]) => {
       if (live) {
         return (live as unknown as Record<string, (...a: unknown[]) => unknown>)[name](...args);
       }
@@ -179,6 +218,7 @@ export function createDegradedEngine(opts: DegradedEngineOptions): BrainEngine {
     if (live) await live.disconnect();
   };
   for (const name of enginePrototypeGetterNames()) {
+    mirrored.add(name);
     Object.defineProperty(target, name, {
       // Sync surface: a property read never triggers a reconnect — while
       // dead it throws the stored (honest) error rather than silently
@@ -188,11 +228,16 @@ export function createDegradedEngine(opts: DegradedEngineOptions): BrainEngine {
         throw lastError;
       },
       enumerable: true,
+      configurable: true,
     });
   }
   Object.defineProperty(target, 'kind', {
-    get: () => (live ? live.kind : 'postgres'),
+    get: () => (live ? live.kind : opts.kind ?? 'postgres'),
     enumerable: true,
+  });
+  // Once recovered, per-engine caches read through this wrapper share the live engine's entry (`engineKey`).
+  Object.defineProperty(target, ENGINE_ROOT, {
+    get: () => (live ? (live as unknown as Record<symbol, unknown>)[ENGINE_ROOT] : undefined),
   });
   target[DEGRADED_STATE] = () => live === null;
   target[DEGRADED_ON_RECOVER] = (cb: () => void) => {

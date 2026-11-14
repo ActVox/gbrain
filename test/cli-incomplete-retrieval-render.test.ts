@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
-import { captureRetrievalMeta, formatResult, resetRetrievalMetaForTests } from '../src/cli.ts';
+import { captureRetrievalMeta, formatResult, resetRetrievalMetaForTests } from '../src/cli/main.ts';
 
 afterEach(() => resetRetrievalMetaForTests());
 
@@ -8,7 +8,7 @@ describe('CLI incomplete retrieval is visible without changing JSON result shape
     '%s is visible for empty and partial results', stage => {
       captureRetrievalMeta('retrieval', { degraded: [{ stage }] });
       expect(formatResult('search', [], {})).toContain(`degraded: ${stage}`);
-      expect(formatResult('search', [], {})).not.toContain('clean miss');
+      expect(formatResult('search', [], {})).not.toContain('retrieval healthy');
       const partial = formatResult('query', [{ slug: 'notes/synthetic', score: 1, chunk_text: 'Synthetic note' }], {});
       expect(partial).toContain(`Retrieval incomplete: ${stage}.`);
       expect(partial).toContain('notes/synthetic');

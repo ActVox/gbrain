@@ -28,7 +28,7 @@
  *
  * Lane: unit. Run: `bun test test/serve-http-surface-ceiling.test.ts`. Moved from test/e2e/
  * by the 2026-09 lane-move pilot (PGLite-only, no DATABASE_URL); see
- * docs/TESTING.md "Lane-move pilot".
+ * docs/test-audit/2026-09-29/implementation/lane-pilot.md.
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
@@ -40,6 +40,7 @@ import { cliDiagnostic, fixtureDiagnostic, toolDiagnostic } from './helpers/fixt
 import { join } from 'path';
 import { VERB_NAMES } from '../src/core/verbs.ts';
 import { operations } from '../src/core/operations.ts';
+import { fenceTranscriptText } from '../src/core/search/transcript-quote.ts';
 
 const PORT_A = 19833; // plain --surface verbs (unique across the e2e suite)
 const PORT_B = 19834; // --surface verbs + GBRAIN_MCP_FORCE_SURFACE=full
@@ -237,8 +238,11 @@ describe('serve --http --surface verbs ceiling E2E (hermetic PGLite)', () => {
     // result, never a transport-level error).
     expect(result.isError).toBe(true);
     expect(result.content?.[0]?.type).toBe('text');
-    expect(JSON.parse(result.content[0].text)).toEqual({
+    // Agent contract v1: the frozen `error` value stays; `code` is the canonical
+    // unknown_tool; the rest of the envelope is additive.
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
       error: 'unknown_operation',
+      code: 'unknown_tool',
       message: 'Unknown: list_pages',
     });
   }, 30_000);
@@ -276,6 +280,6 @@ describe('serve --http --surface verbs ceiling E2E (hermetic PGLite)', () => {
     expect(recalled.protocol_version).toBe(1);
     expect(Array.isArray(recalled.facts)).toBe(true);
     expect(recalled.total).toBeGreaterThanOrEqual(1);
-    expect(recalled.facts.some((f: { fact: string }) => f.fact === factText)).toBe(true);
+    expect(recalled.facts.some((f: { fact: string }) => f.fact === fenceTranscriptText(factText, `fact ${remembered.id}`))).toBe(true);
   }, 30_000);
 });

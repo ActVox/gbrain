@@ -7,7 +7,7 @@
  */
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 import { dirname, join, resolve as resolvePath } from 'path';
-import { execSync } from 'child_process';
+import { execSync } from '../../core/spawn.ts';
 import {
   autopilotLaunchdLabel,
   autopilotWrapperOwner,
@@ -35,9 +35,9 @@ export function legacyStartScriptPath(): string {
 export const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 export const unshellQuote = (s: string) => s.replace(/'\\''/g, "'");
 
-/** The wrapper a launchd plist runs (its first ProgramArguments entry). */
+/** The wrapper a launchd plist runs: its first ProgramArguments entry, or the second after `/bin/bash` (#8017). */
 export function plistWrapperPath(plist: string): string | null {
-  const m = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(plist);
+  const m = /<key>ProgramArguments<\/key>\s*<array>\s*(?:<string>\/bin\/bash<\/string>\s*)?<string>([^<]*)<\/string>/.exec(plist);
   if (!m) return null;
   return m[1].replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
 }

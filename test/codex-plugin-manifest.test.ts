@@ -3,7 +3,7 @@
  *
  * Mirrors test/openclaw-plugin-manifest.test.ts for the two new lanes:
  * version lockstep across every plugin manifest, exact MCP declarations
- * (starter surface + --source-guard), launcher static AND behavioral
+ * (registration surface + --source-guard), launcher static AND behavioral
  * invariants (every resolver branch), marketplace content-equivalence
  * (codex reads BOTH marketplace formats — divergence would fork the
  * install), curated-tree membership algebra, and the derived env_vars
@@ -15,6 +15,7 @@ import { readFileSync, readdirSync, existsSync, statSync, mkdtempSync, mkdirSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { PLUGIN_SURFACE } from '../src/core/mcp-registration.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
@@ -30,7 +31,7 @@ const openclawPlugin = json('openclaw.plugin.json');
 const lanes = json('skills/plugin-lanes.json');
 
 const LAUNCHER = './.agents/gbrain-launcher';
-const EXPECTED_ARGS = ['serve', '--surface', 'starter', '--source-guard'];
+const EXPECTED_ARGS = ['serve', '--surface', 'full', '--source-guard'];
 
 describe('version lockstep (the merge-drift catcher)', () => {
   test('every plugin manifest ships at the repo version', () => {
@@ -56,7 +57,7 @@ describe('codex plugin.json', () => {
     expect(i.longDescription.length).toBeGreaterThan(100);
     // The longDescription is the recovery path's storefront: it must carry
     // the pinned install ref and the init requirement.
-    expect(i.longDescription).toContain('github:garrytan/gbrain#latest-stable');
+    expect(i.longDescription).toContain('github:garrytan/gbrain#stable');
     expect(i.longDescription).toContain('gbrain init');
   });
 });
@@ -230,7 +231,7 @@ describe('launcher (static)', () => {
   });
 
   test('carries the sanctioned install ref, never the squatted npm name', () => {
-    expect(text).toContain('github:garrytan/gbrain#latest-stable');
+    expect(text).toContain('github:garrytan/gbrain#stable');
     expect(text).not.toMatch(/npm install -g gbrain(?!['\w-])(?![^\n]*unrelated)/);
   });
 
@@ -278,7 +279,7 @@ describe('launcher (behavioral — every resolver branch, hermetic HOME)', () =>
     try {
       const r = run({}, ['serve'], home);
       expect(r.status).toBe(127);
-      expect(r.stderr).toContain('bun install -g github:garrytan/gbrain#latest-stable');
+      expect(r.stderr).toContain('bun install -g github:garrytan/gbrain#stable');
       expect(r.stderr).toContain('setup');
       expect(r.stderr).toContain('GBRAIN_BIN');
     } finally {
@@ -314,8 +315,8 @@ describe('launcher (behavioral — every resolver branch, hermetic HOME)', () =>
   test('(d) GBRAIN_SURFACE substitutes an existing --surface value', () => {
     const { dir, stub } = stubDir();
     try {
-      const r = run({ GBRAIN_BIN: stub, GBRAIN_SURFACE: 'full' }, EXPECTED_ARGS, dir);
-      expect(r.stdout.trim().split('\n')).toEqual(['serve', '--surface', 'full', '--source-guard']);
+      const r = run({ GBRAIN_BIN: stub, GBRAIN_SURFACE: 'starter' }, EXPECTED_ARGS, dir);
+      expect(r.stdout.trim().split('\n')).toEqual(['serve', '--surface', 'starter', '--source-guard']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -388,6 +389,22 @@ describe('curated tree membership + scanner guard', () => {
       const name = fm![1].match(/^name:\s*(\S+)\s*$/m);
       expect(name?.[1], `${slug}: frontmatter name mismatch`).toBe(slug);
       expect(/^description:/m.test(fm![1]), `${slug}: missing description`).toBe(true);
+    }
+  });
+
+  // #5858: the generator's only frontmatter change is one `when_to_use:` line built from triggers.
+  const withoutWhenToUse = (text: string) => text.replace(/^when_to_use: .*\n/m, '');
+  // The plugin serves PLUGIN_SURFACE (full), so no bundled skill names
+  // an MCP op beyond it: the gap snapshot is empty and every lane skill ships
+  // byte-identical to its source (no "Tools outside your MCP surface" note).
+  test('F6 under the full plugin surface: no starter gaps; every lane skill is byte-identical', () => {
+    expect(PLUGIN_SURFACE).toBe('full');
+    expect(lanes.starter_gaps).toEqual({});
+    expect(laneSet.size).toBeGreaterThan(0);
+    for (const slug of laneSet) {
+      const generated = withoutWhenToUse(read(`plugin/skills/${slug}/SKILL.md`));
+      expect({ slug, identical: generated === read(`skills/${slug}/SKILL.md`) }).toEqual({ slug, identical: true });
+      expect(generated).not.toContain('## Tools outside your MCP surface');
     }
   });
 
@@ -480,9 +497,10 @@ describe('generator negative fixtures (a guard that cannot fail is not coverage)
   });
 
   test('a stale starter_gaps snapshot fails with the refresh instruction', () => {
-    // beta declares a beyond-starter MCP op but the recorded snapshot is empty.
+    // The recorded snapshot names gaps the computed set cannot equal on any
+    // registration surface: on starter beta's gap is [add_link], on full none.
     const root = fixtureRoot(
-      { additions: { beta: 'a reason long enough to pass the length check' } },
+      { additions: { beta: 'a reason long enough to pass the length check' }, starter_gaps: { beta: ['add_link', 'sync_brain'] } },
       ['add_link'],
     );
     try {

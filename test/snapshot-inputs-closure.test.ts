@@ -114,7 +114,7 @@ describe('snapshot schema hash inputs (EO7)', () => {
         `FAIL: src/core/${f} is in the static import closure of the PGLite schema roots but computeSnapshotSchemaHash does not hash it.`,
         'Why:  a change to it would leave the test-fixture PGLite snapshot stale.',
         'Fix:  make src/core/snapshot-schema-inputs.ts reach it (import form it does not follow?), and cover it in every',
-        '      pglite-snapshot cache key in .github/workflows/e2e.yml and .github/workflows/test.yml.',
+        '      pglite-snapshot cache key in .github/workflows/e2e.yml, test.yml and stress.yml.',
         SEE,
       ].join('\n')).join('\n'));
     }
@@ -142,10 +142,11 @@ describe('snapshot schema hash inputs (EO7)', () => {
 describe('pglite-snapshot CI cache keys (DX O7)', () => {
   const keys = discoverCacheKeys();
 
-  test('discovers every key: 13 across e2e.yml and test.yml, two profiles', () => {
-    expect(keys.length).toBe(13);
-    expect(keys.filter((k) => k.file.endsWith('e2e.yml')).length).toBe(5);
+  test('discovers every key: 16 across e2e.yml, test.yml and stress.yml, two profiles', () => {
+    expect(keys.length).toBe(16);
+    expect(keys.filter((k) => k.file.endsWith('e2e.yml')).length).toBe(7);
     expect(keys.filter((k) => k.file.endsWith('test.yml')).length).toBe(8);
+    expect(keys.filter((k) => k.file.endsWith('stress.yml')).length).toBe(1);
     expect([...new Set(keys.map((k) => k.namespace))].sort()).toEqual(['pglite-snapshot', 'pglite-snapshot-default']);
   });
 
@@ -176,13 +177,20 @@ describe('pglite-snapshot CI cache keys (DX O7)', () => {
         `FAIL: ${f} is a computeSnapshotSchemaHash input but no pglite-snapshot cache key covers it.`,
         'Why:  CI would restore a snapshot baked before the file changed, so the suite runs on a stale schema.',
         `Fix:  add '${f}' (or a glob covering it) to the hashFiles(...) list of all ${keys.length} pglite-snapshot keys in`,
-        '      .github/workflows/e2e.yml and .github/workflows/test.yml (keep the lists identical).',
+        '      .github/workflows/e2e.yml, test.yml and stress.yml (keep the lists identical).',
         SEE,
       ].join('\n')).join('\n'));
     }
     expect(uncovered).toEqual([]);
     for (const extra of ['test/helpers/legacy-embedding-config.ts', 'scripts/build-pglite-snapshot.ts']) {
       expect(keys[0]!.patterns).toContain(extra);
+    }
+  });
+
+  test('the keys cover any src/core subdirectory, so a new folder in the closure needs no workflow edit (#8700)', () => {
+    const globs = keys[0]!.patterns.map((p) => new Bun.Glob(p));
+    for (const probe of ['src/core/feature-example/x.ts', 'src/core/feature-example/nested/y.ts', 'src/core/z.ts']) {
+      expect({ probe, covered: globs.some((g) => g.match(probe)) }).toEqual({ probe, covered: true });
     }
   });
 });

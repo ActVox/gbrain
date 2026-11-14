@@ -20,12 +20,17 @@ import {
 } from '../core/skillopt/models-plan.ts';
 import { SKILLOPT_HELP_TEXT } from '../core/skillopt/help.ts';
 import { runSkillOpt, parseSplit } from '../core/skillopt/orchestrator.ts';
-import { checkpointPath } from '../core/skillopt/checkpoint.ts';
+import { checkpointOptimizerMode, checkpointPath, loadCheckpoint } from '../core/skillopt/checkpoint.ts';
+import { noteSkillOptLoopDeprecated } from '../core/skillopt/loop-deprecation.ts';
 import { formatModelsUsedTable } from '../core/budget/models-used.ts';
 import { parsePositiveInt } from '../core/skillopt/output-cap.ts';
 import { serializeError, StructuredAgentError } from '../core/errors.ts';
 import type { BrainEngine } from '../core/engine.ts';
-import type { RunReceipt, SkillOptOpts } from '../core/skillopt/types.ts';
+import type { OptimizerMode, RunReceipt, SkillOptOpts } from '../core/skillopt/types.ts';
+import { capNotice, mergeCapFlag, parseCapFlag, type CapFlag } from '../core/budget/cap-flag.ts';
+
+/** Per-run cost cap when no cap flag is passed (a `default` cap: unpriced models warn and run). */
+const DEFAULT_SKILLOPT_MAX_COST_USD = 5.0;
 
 interface ParsedFlags {
   skillName: string;
@@ -48,13 +53,20 @@ interface ParsedFlags {
   /** Abort before spend unless every active model was chosen by explicit configuration. */
   modelsStrict: boolean;
   mode: 'patch' | 'rewrite';
+  /** E1: `--loop` opts into the iterative reflect loop; one-shot rewrite is the default. */
+  loop: boolean;
   dryRun: boolean;
   noMutate: boolean;
   allowMutateBundled: boolean;
   /** F11: optional held-out test set path. REQUIRED (non-empty) to mutate a bundled skill. */
   heldOutPath?: string;
   json: boolean;
+  /** 0 = uncapped (`--max-usd off`, `--no-max-cost`, legacy `--max-cost-usd 0`). */
   maxCostUsd: number;
+  /** `user` when a cap flag was passed, `default` for the $5 default (#5563). */
+  maxCostSource: 'user' | 'default';
+  /** The cap flag spelling the user typed, when any. */
+  maxCostFlag?: string;
   maxRuntimeMin: number;
   force: boolean;
   resumeRunId?: string;
@@ -87,6 +99,11 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
     process.stdout.write(SKILLOPT_HELP_TEXT);
     process.exit(0);
   }
+
+  if (parsed.maxCostFlag === '--max-cost-usd' && parsed.maxCostUsd === 0) {
+    process.stderr.write('gbrain skillopt: --max-cost-usd 0 is deprecated; it still means uncapped, but write --max-usd off.\n');
+  }
+  process.stderr.write(`[skillopt] ${capNotice({ usd: parsed.maxCostUsd > 0 ? parsed.maxCostUsd : null, source: parsed.maxCostSource, flag: parsed.maxCostFlag })}\n`);
 
   if (!engine) {
     process.stderr.write('gbrain skillopt: requires a configured brain (engine connection failed)\n');
@@ -125,6 +142,7 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
         dryRun: parsed.dryRun,
         modelsStrict: parsed.modelsStrict,
         maxCostUsd: parsed.maxCostUsd,
+        maxCostSource: parsed.maxCostSource,
       });
       if (run.dry_run) exitDryRun(run.models_plan, run.strict, parsed.json, {});
       if (parsed.json) {
@@ -136,6 +154,12 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
     }
   }
 
+  // E1: one-shot rewrite unless --loop. A resume continues in the mode its
+  // checkpoint ran (a checkpoint from before this default ran the loop).
+  const resumed = parsed.resumeRunId && parsed.skillName ? loadCheckpoint(skillsDir, parsed.skillName, parsed.resumeRunId) : null;
+  const optimizerMode: OptimizerMode = parsed.loop ? 'reflect' : resumed ? checkpointOptimizerMode(resumed) : 'one-shot-rewrite';
+  noteSkillOptLoopDeprecated(optimizerMode);
+
   // ── F4: --all batch mode ────────────────────────────────────────────────
   if (parsed.all) {
     try {
@@ -146,6 +170,7 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
         engine,
         skillsDir,
         perSkillMaxCostUsd: parsed.maxCostUsd,
+        maxCostSource: parsed.maxCostSource === 'user' || parsed.brainWideMaxCostUsd !== undefined ? 'user' : 'default',
         brainWideMaxCostUsd: parsed.brainWideMaxCostUsd ?? 10.0,
         optimizerModel,
         targetModel,
@@ -159,6 +184,7 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
         lr: parsed.lr,
         lrSchedule: parsed.lrSchedule,
         split: parsed.split,
+        optimizerMode,
         dryRun: parsed.dryRun,
         noMutate: parsed.noMutate,
         allowMutateBundled: parsed.allowMutateBundled,
@@ -203,12 +229,14 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
         lr: parsed.lr,
         lrSchedule: parsed.lrSchedule,
         split: parsed.split,
+        optimizerMode,
         dryRun: parsed.dryRun,
         noMutate: parsed.noMutate,
         allowMutateBundled: parsed.allowMutateBundled,
         bootstrapReviewed: parsed.bootstrapReviewed,
         ...(parsed.heldOutPath ? { heldOutPath: parsed.heldOutPath } : {}),
         maxCostUsd: parsed.maxCostUsd,
+        maxCostSource: parsed.maxCostSource,
         maxRuntimeMin: parsed.maxRuntimeMin,
         force: parsed.force,
       });
@@ -259,12 +287,14 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
           modelsStrict: parsed.modelsStrict,
           ...(parsed.reflectMaxTokens !== undefined ? { reflectMaxTokens: parsed.reflectMaxTokens } : {}),
           mode: parsed.mode,
+          optimizerMode,
           dryRun: parsed.dryRun,
           noMutate: parsed.noMutate,
           allowMutateBundled: parsed.allowMutateBundled,
           ...(parsed.heldOutPath ? { heldOutPath: parsed.heldOutPath } : {}),
           bootstrapReviewed: parsed.bootstrapReviewed,
           maxCostUsd: parsed.maxCostUsd,
+          maxCostSource: parsed.maxCostSource,
           maxRuntimeMin: parsed.maxRuntimeMin,
           force: parsed.force,
         });
@@ -275,7 +305,7 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
         }, { allowProtectedSubmit: true });
         process.stdout.write(`job_id=${job.id}\n`);
         if (args.includes('--follow')) {
-          const { spawn } = await import('child_process');
+          const { spawn } = await import('../core/spawn.ts');
           const cmd = process.argv[0] ?? 'bun';
           const script = process.argv[1] ?? '';
           const child = spawn(cmd, [script, 'jobs', 'follow', String(job.id)], { stdio: 'inherit' });
@@ -303,6 +333,7 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
     modelsStrict: parsed.modelsStrict,
     ...(parsed.reflectMaxTokens !== undefined ? { reflectMaxTokens: parsed.reflectMaxTokens } : {}),
     mode: parsed.mode,
+    optimizerMode,
     dryRun: parsed.dryRun,
     noMutate: parsed.noMutate,
     allowMutateBundled: parsed.allowMutateBundled,
@@ -310,6 +341,7 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
     bootstrapReviewed: parsed.bootstrapReviewed,
     json: parsed.json,
     maxCostUsd: parsed.maxCostUsd,
+    maxCostSource: parsed.maxCostSource,
     maxRuntimeMin: parsed.maxRuntimeMin,
     force: parsed.force,
     ...(parsed.resumeRunId ? { resumeRunId: parsed.resumeRunId } : {}),
@@ -376,8 +408,10 @@ export function formatRunSummary(outcome: RunSkillOptOutcome, receipt: RunReceip
     const detail = receipt.abort_detail ?? '(no detail captured)';
     lines.push(`[skillopt] Failure reason: ${receipt.abort_reason ?? 'unknown'}`);
     lines.push(`[skillopt] Detail: ${detail}`);
-    if (detail.includes('no_pricing')) {
-      lines.push(`[skillopt] Hint: model has no pricing entry; pass --no-max-cost (or --max-cost-usd 0) to run uncapped with a warn-once.`);
+    if (receipt.no_pricing) {
+      lines.push(`[skillopt] Hint: ${receipt.no_pricing.lookup} Register it with: ${receipt.no_pricing.register_command} — then retry; or pass --no-max-cost (or --max-cost-usd 0) to run uncapped with a warn-once.`);
+    } else if (detail.includes('no_pricing')) {
+      lines.push(`[skillopt] Hint: gbrain has no price for the model, so the cap can't be enforced. Look up its per-token price and register it with \`gbrain pricing set\` (see the detail above), then retry; or pass --no-max-cost (or --max-cost-usd 0) to run uncapped with a warn-once.`);
     }
   }
   if (receipt.stop_reason === 'early_stop_unusable_output') {
@@ -426,12 +460,13 @@ export function parseFlags(args: string[]): ParsedFlags {
   let judgeModel: string | undefined;
   let reflectMaxTokens: number | undefined;
   let mode: 'patch' | 'rewrite' = 'patch';
+  let loop = false;
   let dryRun = false;
   let noMutate = false;
   let allowMutateBundled = false;
   let heldOutPath: string | undefined;
   let json = false;
-  let maxCostUsd = 5.0;
+  let cap: CapFlag | undefined;
   let maxRuntimeMin = 30;
   let force = false;
   let resumeRunId: string | undefined;
@@ -479,16 +514,18 @@ export function parseFlags(args: string[]): ParsedFlags {
     }
     if (a === '--patch') { mode = 'patch'; i += 1; continue; }
     if (a === '--rewrite') { mode = 'rewrite'; i += 1; continue; }
+    if (a === '--loop') { loop = true; i += 1; continue; }
     if (a === '--dry-run') { dryRun = true; i += 1; continue; }
     if (a === '--no-mutate') { noMutate = true; i += 1; continue; }
     if (a === '--allow-mutate-bundled') { allowMutateBundled = true; i += 1; continue; }
     if (a === '--held-out') { heldOutPath = args[++i]; i += 1; continue; }
     if (a === '--json') { json = true; i += 1; continue; }
-    // #3516: 0 is accepted and means UNCAPPED — pricing misses for unpriced
-    // model ids (openrouter:*, litellm:*) then warn-once instead of aborting
-    // the run with BudgetExhausted(no_pricing).
-    if (a === '--max-cost-usd') { maxCostUsd = mustNonNegFloat(args[++i], '--max-cost-usd'); i += 1; continue; }
-    if (a === '--no-max-cost') { maxCostUsd = 0; i += 1; continue; }
+    // D19: one shared parser. `--max-usd N|off` is canonical; the legacy
+    // `--max-cost-usd` keeps #3516's meaning for 0 (uncapped) and
+    // `--no-max-cost` is `--max-usd off`. Disagreeing cap flags are refused.
+    if (a === '--max-usd') { cap = mergeCapFlag(cap, parseCapFlag(a, args[++i])); i += 1; continue; }
+    if (a === '--max-cost-usd') { cap = mergeCapFlag(cap, parseCapFlag(a, args[++i], { zero: 'off' })); i += 1; continue; }
+    if (a === '--no-max-cost') { cap = mergeCapFlag(cap, { flag: a, usd: null }); i += 1; continue; }
     if (a === '--max-runtime-min') { maxRuntimeMin = mustInt(args[++i], '--max-runtime-min'); i += 1; continue; }
     if (a === '--force') { force = true; i += 1; continue; }
     if (a === '--resume') { resumeRunId = args[++i]; i += 1; continue; }
@@ -562,12 +599,15 @@ export function parseFlags(args: string[]): ParsedFlags {
     ...(reflectMaxTokens !== undefined ? { reflectMaxTokens } : {}),
     modelsStrict,
     mode,
+    loop,
     dryRun,
     noMutate,
     allowMutateBundled,
     ...(heldOutPath !== undefined ? { heldOutPath } : {}),
     json,
-    maxCostUsd,
+    maxCostUsd: cap === undefined ? DEFAULT_SKILLOPT_MAX_COST_USD : cap.usd ?? 0,
+    maxCostSource: cap === undefined ? 'default' : 'user',
+    ...(cap ? { maxCostFlag: cap.flag } : {}),
     maxRuntimeMin,
     force,
     ...(resumeRunId !== undefined ? { resumeRunId } : {}),
@@ -595,14 +635,6 @@ function mustFloat(v: string | undefined, flag: string): number {
   return n;
 }
 
-/** #3516: like mustFloat but 0 is allowed (0 = uncapped for --max-cost-usd). */
-function mustNonNegFloat(v: string | undefined, flag: string): number {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) {
-    throw new Error(`${flag} requires a non-negative number (got '${v}'; 0 disables the cap)`);
-  }
-  return n;
-}
 
 function handleErrorAndExit(err: unknown, json: boolean, exitCode: number): never {
   if (json) {

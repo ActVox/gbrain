@@ -14,6 +14,9 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runConfig } from '../src/commands/config.ts';
+import { operations } from '../src/core/operations.ts';
+import { readPublishGate, type PublishGateKey } from '../src/mcp/publish-gates.ts';
+import { loadConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
@@ -142,5 +145,87 @@ describe('#3943 — config get redacts sensitive values by default (--raw opts o
     const { logs, exit } = await runGet({}, 'chat_model');
     expect(exit).toBeNull();
     expect(logs).toContain('anthropic:claude-sonnet-4-6');
+  });
+});
+
+describe('#5358 — config get resolves publish-gate keys the way the runtime gate does (DB > file)', () => {
+  const gateKeys = [...new Set(operations.flatMap((op) => (op.publishGateKey ? [op.publishGateKey] : [])))];
+
+  test('the operation contract still registers publish gates (the set config get derives from)', () => {
+    expect(gateKeys).toContain('mcp.publish_skills');
+    expect(gateKeys.length).toBeGreaterThan(0);
+  });
+
+  test('mcp.publish_skills prints the DB value and warns about the diverged file mirror', async () => {
+    writeFileConfig({ engine: 'pglite', mcp: { publish_skills: true } });
+    const { logs, errs, exit } = await runGet({ 'mcp.publish_skills': 'false' }, 'mcp.publish_skills');
+    expect(exit).toBeNull();
+    expect(logs).toEqual(['false']);
+    expect(errs.join('\n')).toContain('db plane (authoritative for this key)');
+    expect(errs.join('\n')).toContain('file mirror disagrees');
+  });
+
+  test('mcp.publish_skills falls back to the file plane when no DB row exists', async () => {
+    writeFileConfig({ engine: 'pglite', mcp: { publish_skills: true } });
+    const { logs, errs } = await runGet({}, 'mcp.publish_skills');
+    expect(logs).toEqual(['true']);
+    expect(errs.join('\n')).toContain('file mirror (no DB row)');
+  });
+
+  test.each(gateKeys)('%s: config get reports the value the runtime gate resolves when the planes differ', async (key) => {
+    const leaf = key.slice('mcp.'.length);
+    writeFileConfig({ engine: 'pglite', mcp: { [leaf]: true } });
+    const db = { [key]: 'false' };
+    const { logs } = await runGet(db, key);
+    const runtime = await withEnv({ GBRAIN_HOME: home }, () =>
+      readPublishGate(stubEngine(db), loadConfig(), key as PublishGateKey, 'http'));
+    expect(logs).toEqual([String(runtime)]);
+  });
+});
+
+describe('#7346 — config get and show redact secrets nested in an object value', () => {
+  // Value: protects=object-storage credentials never reach scrollback or agent transcripts through config get/show;
+  // fails_when=a nested camelCase secret (storage.secretAccessKey) prints in the clear; why_new=the #3943 pins cover
+  // only flat snake_case keys; seam=runConfig with a file-plane storage object; no_claim=redaction of --raw output.
+  const SECRET = 'minio-test7346-secret-value';
+  const KEY_ID = 'minio-test7346-key-id';
+  const storage = { backend: 's3', bucket: 'brain-files', endpoint: 'http://127.0.0.1:9000', accessKeyId: KEY_ID, secretAccessKey: SECRET };
+
+  async function runShow(): Promise<string> {
+    const logs: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await withEnv({ GBRAIN_HOME: home }, () => runConfig(stubEngine({}), ['show']));
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+    return logs.join('\n');
+  }
+
+  test('get storage masks the nested credentials and keeps the other fields', async () => {
+    writeFileConfig({ engine: 'pglite', storage });
+    const { logs, errs, exit } = await runGet({}, 'storage');
+    expect(exit).toBeNull();
+    const out = logs.join('\n');
+    expect(out).not.toContain(SECRET);
+    expect(out).not.toContain(KEY_ID);
+    expect(errs.join('\n')).not.toContain(SECRET);
+    expect(JSON.parse(out)).toEqual({ ...storage, accessKeyId: '***', secretAccessKey: '***' });
+  });
+
+  test('get storage.secretAccessKey prints ***; --raw still prints the value', async () => {
+    writeFileConfig({ engine: 'pglite', storage });
+    expect((await runGet({}, 'storage.secretAccessKey')).logs).toEqual(['***']);
+    expect((await runGet({}, 'storage.secretAccessKey', { after: ['--raw'] })).logs).toEqual([SECRET]);
+  });
+
+  test('show masks the nested credentials', async () => {
+    writeFileConfig({ engine: 'pglite', storage });
+    const out = await runShow();
+    expect(out).toContain('brain-files');
+    expect(out).not.toContain(SECRET);
+    expect(out).not.toContain(KEY_ID);
   });
 });

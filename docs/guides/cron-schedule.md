@@ -36,8 +36,16 @@ scheduling surfaces — reach for these first:
   hand-rolling the dream cycle below.
 - **`gbrain jobs` / minions** — queue shell jobs or LLM subagents with retry,
   backoff, and an audit trail. See the `minion-orchestrator` skill.
-- **`gbrain autopilot`** — the long-lived background daemon that runs cycles
-  on its own cadence.
+- **`gbrain serve`** — while the agent connected to it is idle, it runs the
+  free upkeep (`gbrain maintain --unattended`) once a day, with nothing to
+  install. A source too big to finish in its short idle slices is parked after
+  30 tries and finished by the next full run. `gbrain maintain --status` shows
+  the last run and anything parked.
+- **`gbrain maintain --schedule`** — for a brain no agent opens most days:
+  installs a job that runs the same upkeep every 6 hours (launchd, a systemd
+  user timer or cron). Opt-in; preview with `--dry-run`.
+- **`gbrain autopilot`** — the long-lived background daemon that runs full
+  cycles on its own cadence, for a Postgres brain with a repo.
 - **`cron-scheduler` skill** (`skills/cron-scheduler/`) — teaches an agent to
   manage its harness's scheduler.
 - **Bootstrap session-triggered schedules** — `gbrain bootstrap` installs
@@ -46,6 +54,14 @@ scheduling surfaces — reach for these first:
 
 For scheduling `sync` + `embed --stale` specifically, the home doc is
 [live-sync.md](live-sync.md).
+
+### Dream beside autopilot
+
+A nightly `gbrain dream` beside autopilot is supported. Source phases run
+under the source's own lease; brain-wide phases (synthesize, patterns, embed,
+purge…) also need the shared `gbrain-cycle` lease, so the later run skips only
+those (`maintenance_lock_busy`) and the holder runs them.
+`gbrain status --section locks --json` shows the holder.
 
 ## Implementation: Setting Up Cron Jobs
 
@@ -62,18 +78,109 @@ For scheduling `sync` + `embed --stale` specifically, the home doc is
 # Calendar sync — Sundays at 10 AM
 0 10 * * 0 cd /path/to/calendar-sync && node calendar-sync.mjs --start $(date -v-7d +%Y-%m-%d) --end $(date +%Y-%m-%d)
 
-# Brain health — weekly Mondays at 6 AM
-0 6 * * 1 gbrain doctor --json >> /tmp/gbrain-health.log 2>&1 && gbrain embed --stale
+# Brain health — weekly Mondays at 6 AM. Every gbrain call goes through the
+# wrapper below (gbrain-run), never a bare `gbrain` or `bun run src/cli.ts`.
+0 6 * * 1 gbrain-run doctor --json >> /tmp/gbrain-health.log 2>&1 && gbrain-run embed --stale
+
+# Health alert — hourly. Page on the alert verdict, never on health_score:
+# exit 0 none, 17 act (alert.items carry each fix), 18 unknown (a page-class
+# check did not run fresh); page on 18 only from the second run in a row.
+17 * * * * gbrain-run doctor --alert --json > /tmp/gbrain-alert.json 2>> /tmp/gbrain-alert.err; rc=$?; case $rc in 0) ;; 17) your-notify "gbrain needs action" ;; 18) [ "$(jq -r '.alert.consecutive_unknown // 0' /tmp/gbrain-alert.json)" -ge 2 ] && your-notify "gbrain health unknown twice in a row" ;; *) your-notify "gbrain doctor --alert failed (exit $rc)" ;; esac
 
 # Autopilot health gate — daily at 7 AM. The exit code is the signal:
 # 0 fresh (or nothing installed), 1 needs attention (stale heartbeat,
-# never ran, or paused), 2 the daemon took itself out of rotation.
-# Status is filesystem-only, so it works even during a DB outage.
-0 7 * * * gbrain autopilot --status >> /tmp/gbrain-autopilot-health.log 2>&1 || your-notify "gbrain autopilot needs attention"
+# never ran, paused, or brain-wide maintenance stalled: no completed pass
+# for 3 global intervals while its jobs fail or a phase keeps blocking it,
+# or passes stamping past a phase that failed 3+ passes in a row),
+# 2 the daemon took itself out of rotation. Status is filesystem-only (the
+# daemon writes the maintenance verdict each tick), so it works even during
+# a DB outage. On a stall: gbrain doctor --only global_maintenance_stalled
+# names the phase and the command to run.
+0 7 * * * gbrain-run autopilot --status >> /tmp/gbrain-autopilot-health.log 2>&1 || your-notify "gbrain autopilot needs attention"
 
 # Dream cycle — nightly at 2 AM
 0 2 * * * /path/to/dream-cycle.sh
 ```
+
+<a id="calling-gbrain-unattended"></a>
+### Call gbrain through one wrapper
+
+A scheduled job does not run in the shell you tested it in. Cron, a harness's
+workspace scripts and git hooks start with another `HOME`, a bare `PATH` and
+whatever environment their parent had, so a call that works by hand can do
+something else on a schedule:
+
+- **No database.** The job finds no brain config or URL, gbrain refuses
+  (`no_brain`, or `GBRAIN_DB_ACCESS no_url`) on stderr, and a caller that
+  drops stderr reads every lookup as "nothing found".
+- **A second host.** gbrain keeps its host identity under the brain home, so a
+  job that resolves another home is another host: `gbrain sources refresh`
+  refuses `refresh_not_owner` (since v0.60.427.0 it names the identity file it
+  read and the `HOME` and `GBRAIN_HOME` it resolved), and owner-only
+  maintenance reports `owner_unavailable` with reason `host_mismatch`.
+- **A stale database.** A variable the caller already exported wins over the
+  brain's `config.json` and `.gbrain/.env`, so a job started from an old
+  environment keeps using the old `DATABASE_URL`.
+
+Give every cron line, workspace script and hook one entry point, a wrapper that
+sets `GBRAIN_HOME`, loads the brain's env file if the harness keeps one, and
+runs the installed binary:
+
+```bash
+#!/usr/bin/env bash
+# gbrain-run: the only way scheduled work calls gbrain
+set -euo pipefail
+export GBRAIN_HOME=/srv/gbrain          # parent of .gbrain; the value serve, workers and autopilot use
+if [ -f /srv/gbrain/brain.env ]; then   # only if the harness keeps the brain's settings in its own file
+  set -a; . /srv/gbrain/brain.env; set +a
+fi
+exec /srv/gbrain/.bun/bin/gbrain "$@"  # the installed binary, by absolute path
+```
+
+Rules for the wrapper and everything that calls it:
+
+1. **Set `GBRAIN_HOME`, never `HOME`.** `GBRAIN_HOME` moves only gbrain's
+   state. Changing `HOME` also changes the git identity, SSH keys and push
+   credentials the job runs with. Use the same value as the serve, the workers
+   and autopilot; doctor `host_identity_mismatch` names a process that differs.
+2. **Run the installed binary.** Never `bun run src/cli.ts` from a checkout with
+   the caller's inherited environment: it skips the wrapper's settings and can
+   run another build than the serve.
+3. **Keep stderr and the exit code.** Never send gbrain's stderr to
+   `/dev/null`. Append it to a log and branch on the exit code
+   ([exit codes](exit-codes.md)): `10` means the write was accepted and is
+   still pending, not "not found" or "failed"; `3` means stop and ask the
+   user. A refusal fails the job; it is never an empty result.
+4. **Keep stdout clean.** A `--json` caller parses stdout as one document, so
+   the wrapper and any hook it runs log to a file or stderr, never stdout.
+5. **Allow time.** A cold CLI start takes 3–6 s on a pooled Postgres brain.
+   Set caller timeouts of at least 10 s in the shell and in the language
+   runtime that runs it (a runtime's exec timeout can override the shell's
+   without saying so), and turn on the [warm CLI socket](cli-socket.md) so
+   reads skip the cold start. Give fetch or push calls (`gbrain sources
+   git-reconcile`, `refresh`) 15 minutes.
+6. **Quote the env file.** A file a shell sources is shell syntax. An unquoted
+   `&` in a URL ends the assignment and backgrounds the rest, so the variable
+   silently keeps its old value. Quote every value, keep Postgres URLs to
+   `?sslmode=require` (set driver options such as `GBRAIN_PREPARE=false` as
+   variables instead of extra `&` parameters), and restart every running
+   gbrain process after an edit: a process keeps the environment it started
+   with.
+7. **Never print the environment.** `env`, `printenv` or a process's
+   `environ` holds the database URL and API keys, and a transcript keeps them.
+   To debug, print variable names only, or run `gbrain engine status --json`,
+   which redacts the URL.
+
+On a managed brain the same wrapper runs `gbrain-run sources refresh <id>` on
+a schedule ([the managed cron line](../../skills/cron-scheduler/SKILL.md#managed-brain)).
+Scripts commit the files they write with
+`gbrain git commit-push --path <absolute brain checkout> -- <paths>`, never
+plain `git commit`, in the managed checkout (a wrapper that changes directory
+would otherwise point it at another repository); see
+[shared-checkout git](shared-checkout-git.md#scripts-and-the-managed-checkout).
+`gbrain doctor --only cron_gbrain_home --json` reads the crontab and the scripts
+it names and warns about a line that runs `src/cli.ts` straight from a checkout,
+or calls gbrain without the brain's `GBRAIN_HOME`.
 
 ### Quiet Hours Gate (MANDATORY)
 
@@ -130,8 +237,13 @@ per-transcript synthesis subagents. The dials:
 - `dream.triage.threshold` (default 0.5) — the score bar, and the first of the
   two ways a transcript passes the gate (the verified-segment rescue below is
   the second). Scores are cached, so retuning it re-gates instantly with
-  **zero** new LLM calls. Raise it if too much routine content synthesizes;
-  lower it if real signal is being skipped.
+  **zero** new LLM calls. Lower it if real signal is being skipped. Raising it
+  alone may not cut volume (#6753): the rescue band below is
+  `[rescue_floor, threshold)`, so it widens with the threshold, and
+  transcripts that stop passing directly can still pass through the rescue.
+  To cut volume, raise `dream.triage.rescue_floor` or
+  `dream.triage.rescue_min_segments` along with it (`0` turns the rescue
+  off), and compare `details.triage.rescue_fired` before and after.
 - `models.dream.triage` — the triage model (default: utility tier / Haiku).
 - `dream.triage.max_chars` (default 24000, floor 1000) — per-transcript
   sample window (head/middle/tail) sent to the judge. Not part of cache
@@ -158,6 +270,47 @@ per-transcript synthesis subagents. The dials:
   Pages that already existed are checked only on the sentences this run
   added. The off switch is the incident escape hatch; telemetry lands in
   `details.synthesis.quote_verify`.
+- `cycle.propose_takes.types` (default unset = every page type) — a JSON array
+  of page types the `propose_takes` phase may scan, for example
+  `gbrain config set cycle.propose_takes.types '["meeting","analysis"]'`.
+  Pages of other types (machine-written lanes, `note` scratch pages) are
+  never sent to the model, so the phase spends only on the lanes you name.
+  The built-in exclusions (receipts, atoms, the dream cycle's own output)
+  still apply; a value that is not a JSON array is ignored with one stderr
+  line and the phase scans every type. Note that a page with no `type` has
+  no type to match, so it is excluded whenever the list is set.
+  A page whose reply is a complete empty array (`[]`, even with an
+  explanation after it) gets a "no gradeable claims" tombstone and is not
+  sent again while its content is unchanged; a reply that is truncated,
+  prose only, or empty and then followed by takes is retried next cycle.
+  There is no per-page force flag: the tombstone is keyed by a hash of the
+  page body, so any edit to the body re-extracts the page on the next cycle,
+  and that is the only way to send one tombstoned page again.
+  A page the model refuses the same way in 3 cycles (a prompt too long for
+  the model, a content block) gets a separate failure tombstone and is
+  skipped while its body and the prompt version are unchanged; pages that
+  failed before are retried after the fresh ones, so they never block the
+  rest. `gbrain takes propose --failed` lists held pages and
+  `gbrain takes propose --retry-failed [--slug <slug>]` releases them.
+  Timeouts, rate limits and other transient errors are never held.
+- `dream.synthesize.attribution_rules` and `dream.propose_takes.attribution_rules`
+  (default off) — extra prompt rules from #5425: keep who proposed what and
+  later corrections explicit; an assistant-authored judgment is not the
+  user's. Off because matched runs measured no benefit (propose-takes F1
+  0.896 → 0.876); a brain that wants them opts in per phase.
+- `dream.attribution_checks` (default off; `true` or `false`) — the two
+  mechanical attribution checks of #5425 that need the same held-out
+  measurement before they can change defaults. On, `propose_takes` stores a
+  proposal held by `people/<slug>` as held by `brain` when its numbers, dates
+  and quoted phrases appear only in assistant turns of the page and no user
+  turn states or explicitly accepts any of them (a page without speaker turns
+  is left alone), and the synthesis claim check adds `superseded_in_source`:
+  a sentence whose grounded quote a later user turn takes back in a sentence
+  that negates and names the same number or date moves to
+  `unverified_claims`; a later sentence that only repeats the number, or
+  negates a different one, changes nothing. Off, every page and proposal is
+  byte-identical to a release without the checks. One switch, both checks:
+  `gbrain config set dream.attribution_checks true`.
 - `dream.synthesize.max_turns` (default 16) — synthesis turn budget for
   agentic children and oneshot fallbacks (the default oneshot path — see
   the next section — is a single completion and never spends turns). The
@@ -173,6 +326,9 @@ per-transcript synthesis subagents. The dials:
   judging NEW files; a big cold corpus triages across a few cycles (cached
   files are free). Deferred files are labeled "not yet triaged", never
   silently rejected.
+- A truncated, refused or unparseable verdict backs off (24h, doubling to
+  7 days; `triage_unreliable_backoff`) instead of being re-paid nightly;
+  `gbrain dream retriage --force` re-judges now.
 - `dream.synthesize.max_submissions_per_source_per_day` (default 0 = off) —
   opt-in backstop cap on synthesis jobs per source; 200/day is a sane value
   for busy deployments.
@@ -258,11 +414,13 @@ Three more fields answer "what did that cost and did it land":
 - `quote_verify` — what the post-write claim check touched: quotes checked
   and repaired, sentences quarantined (with counts per reason:
   `quote_not_in_source`, `quote_crosses_speakers`, `speaker_mismatch`,
-  `number_not_in_source`, `decision_misattributed`), pre-existing pages
+  `number_not_in_source`, `decision_misattributed`, and, with
+  `dream.attribution_checks` on, `superseded_in_source`), pre-existing pages
   checked by diff, and unbalanced paragraphs. `decision_misattributed` is a
   sentence saying a speaker decided, agreed or will do something whose
   numbers or dates only another speaker stated and the named speaker never
-  explicitly accepted.
+  explicitly accepted. `superseded_in_source` is a sentence whose quote a
+  later user turn took back on the same number or date.
 
 Per-call spend also lands in the `chat_usage_log` ledger with a phase tag:
 the orchestrator's own calls under `phase:synthesize`, each drained child
@@ -333,8 +491,8 @@ echo "Dream cycle starting at $(date)"
 # Phase 2: Shipped maintenance cycle (lint, backlinks, extract, sync, embed, synthesize)
 gbrain dream
 
-# Phase 3: Surface anything the cycle flagged
-gbrain doctor --json | jq '.checks[] | select(.status=="warn")'
+# Phase 3: Surface anything that needs someone (exit 17 act, 18 unknown)
+gbrain doctor --alert --json | jq '.alert'
 
 echo "Dream cycle complete at $(date)"
 ```

@@ -104,11 +104,10 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   reverse-writes on the composite key; `validateSourceId` before any `source_id` path join.
 - **One canonical chat-pricing table.** All paid-cloud chat/completion prices live ONCE in
   `src/core/model-pricing.ts` (`CANONICAL_PRICING` + `canonicalLookup`). Every other table
-  (`anthropic-pricing.ts`'s `ANTHROPIC_PRICING`, `takes-quality-eval/pricing.ts`'s
-  `MODEL_PRICING`, the contradictions/cross-modal/skillopt cost views) is a DERIVED view, never
-  a hand-copied duplicate — so cross-table price drift is structurally impossible. Update a
-  price in `model-pricing.ts` only; each consumer keeps its own key allowlist + miss policy
-  (fail-closed vs warn-only vs null), not its own numbers. Pinned by `test/model-pricing.test.ts`
+  (`anthropic-pricing.ts`'s `ANTHROPIC_PRICING`, the contradictions/cross-modal/skillopt cost
+  views) is a DERIVED view, never a hand-copied duplicate — so cross-table price drift is
+  structurally impossible (takes-quality reads `pricing.overrides`, then canonical). Update a
+  price in `model-pricing.ts` only; each consumer keeps its own miss policy, not its own numbers. Pinned by `test/model-pricing.test.ts`
   (drift guard asserts each view equals canonical). Embeddings price separately in
   `embedding-pricing.ts` (different unit).
 - **Module-size ratchet.** `scripts/module-size-limits.tsv` pins per-file line ceilings
@@ -187,7 +186,7 @@ from recurring:
   narration. When a file's behavior changes, UPDATE its entry to the new truth.
 - **CI is the enforcement, not this prose.** `scripts/check-key-files-current-state.sh`
   (in `bun run verify`) fails on the bolded-release-clause marker in the reference
-  docs AND on size caps for CLAUDE, README, the index, and each subsystem. A written rule caused this disease; a guard
+  docs AND on size caps for CLAUDE, the index, and each subsystem. A written rule caused this disease; a guard
   cures it.
 - **After any CLAUDE.md or reference-doc edit, run `bun run build:llms`** — the
   llms bundle inlines/links these (config in `scripts/llms-config.ts`); the
@@ -198,8 +197,8 @@ from recurring:
 Confirm the user's mode choice during installation; relay the matrix in
 `INSTALL_FOR_AGENTS.md` Step 3.5. The current command-level expansion and cost
 contract lives in [search modes](docs/guides/search-modes.md), not a second knob
-table here. `query` expands in every mode unless explicitly disabled; `search`
-and memory verbs do not. Semantic result reuse is disabled.
+table here. `query` never expands by default (`search.expansion true` turns it
+on; `--expand` / `--no-expand` win); `search` and memory verbs never do. Semantic result reuse is disabled.
 
 Read `docs/eval/SEARCH_MODE_METHODOLOGY.md` for eval methodology and
 `docs/eval/METRIC_GLOSSARY.md` for metric definitions. Eval audit records stay in
@@ -217,8 +216,8 @@ routing eval evidence, and shared conventions.
 Durable facts and preferences belong in shared memory with provenance. Transient
 task state, credentials, local configuration, and harness activation state do not.
 Automatic capture is opt-in. Withdrawal is not physical erasure. Remote
-`put_page` does not extract graph links inline: stdio has best-effort startup/idle
-sweeps; HTTP needs explicit maintenance or authorized `add_link`. Configured
+`put_page` links plain mentions of existing visible pages post-commit (`links`
+effect); typed edges need the stdio sweep, maintenance or `add_link`. Configured
 providers can receive text, and Markdown export is not a full database backup.
 Read [memory boundaries](docs/guides/memory-boundaries.md).
 
@@ -302,17 +301,17 @@ checkpoint resume, or DB-contention-aware pace mode.
 
 ## Version locations (single source of truth: `VERSION` file)
 
-Every release updates the required version stamps in the table below.
-Update TODOS only when filing new work, not to rewrite old entries. Keep these in sync. `/ship` enforces this via Step 12's idempotency check (VERSION vs
-package.json drift), but the canonical list lives here so future runs and
-the auto-update agent know where to look.
+Every release updates the required version stamps in the table below. PRs do
+not: a PR carries a `changelog.d` fragment, and the release PR rewrites every
+row ([releases per batch](docs/RELEASING.md#releases-per-batch)).
+Update TODOS only when filing new work. `/ship`'s Step 12 idempotency check
+catches VERSION vs package.json drift; the canonical list lives here.
 
 **Version format is mandatory: `MAJOR.MINOR.PATCH.MICRO` (four numeric
 segments, dot-separated, no leading `v`).** Every new release MUST use the
-4-segment form. The `.MICRO` slot is the dot-suffix follow-up channel: when
-a release ships its commit subject ahead of its VERSION bump (e.g. PR #795
-landing as `v0.31.4` without bumping the file), the corrective ship lands
-as `0.31.4.1` rather than churning the patch number to `0.31.5`. Suffixes
+4-segment form. The `.MICRO` slot is the dot-suffix follow-up channel: a
+release whose commit subject shipped ahead of its VERSION bump is corrected
+as `0.31.4.1`, not by churning the patch number to `0.31.5`. Suffixes
 like `-fixwave` are still allowed as needed (`0.31.1.1-fixwave`), but the
 four numeric segments are required first. Historical 3-segment versions
 (`0.31.3`, `0.22.1`) remain valid in `git log` and migration filenames
@@ -366,9 +365,9 @@ four numeric segments are required first. Historical 3-segment versions
   (e.g. "v0.21.0 Code Cathedral"); update only when the README's marketing
   copy is intentionally being refreshed, NOT on every micro/patch bump.
 
-**Always use PATCH without asking**, including the initial release choice;
-override `/ship`'s MINOR/MAJOR prompts. Auto-allocate past collisions, sync all
-version stamps and the PR title, then report the number. This changes numbering
+**PRs carry no version** ([releases per batch](docs/RELEASING.md#releases-per-batch)):
+/ship writes a `changelog.d` fragment, and the release PR picks the next PATCH
+(never MINOR or MAJOR) and syncs every stamp. This changes numbering
 only: scope, merge, deployment, paid-work and validation approvals still apply.
 CI rejects mismatched `VERSION`/`package.json` or versions not newer than master.
 
@@ -471,8 +470,8 @@ This applies to README, CHANGELOG, docs, PRs, commits, issues, and release pages
 
 ## PR title format — version FIRST (IRON RULE)
 
-PR titles and version-bump commit subjects start with the version, followed by
-the conventional-commit subject:
+A PR without a version is titled in plain words. Release PR titles and version-bump commit subjects start with the
+version, followed by the conventional-commit subject:
 
 ```
 vMAJOR.MINOR.PATCH.MICRO <type>(<scope>): <summary> (#issue or wave ref)

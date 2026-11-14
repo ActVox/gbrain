@@ -20,11 +20,26 @@ import { checkVolunteerChannels } from './core-health.ts';
 import { buildRetrievalReflexCheck, buildMemoryVerbsCheck } from './verbs-reflex.ts';
 import type { Check } from '../../doctor.ts';
 import type { DoctorContext, DoctorEntry } from '../context.ts';
+import { checkError, infoCheck } from '../check-fix.ts';
+import { isGbrainManagedSkillsDir } from '../../../core/skill-manifest.ts';
+
+/**
+ * W4: a skills folder found only by walking up from the cwd that gbrain did not install (an agent's own skills, no
+ * gbrain manifest or skillpack block) is not graded against gbrain's conventions: resolver_health and skill_currency
+ * report it as info. --skills-dir, $GBRAIN_SKILLS_DIR and $OPENCLAW_WORKSPACE still grade whatever they name.
+ */
+function foreignSkillsCheck(ctx: DoctorContext, name: string): Check | null {
+  const { dir, source } = ctx.skillsDirResolution;
+  if (!dir || (source !== 'cwd_walk_up' && source !== 'cwd_skills') || isGbrainManagedSkillsDir(dir)) return null;
+  return infoCheck(name, `not a gbrain skills folder (${dir}); pass --skills-dir to grade it`, 'not_applicable');
+}
 
 async function runResolverHealth(ctx: DoctorContext): Promise<Check[]> {
   const { skillsDirResolution: detected, doFix, dryRun, jsonOutput, scope } = ctx;
   const skillsDir = detected.dir;
   const checks: Check[] = [];
+  const foreign = scope === 'all' ? foreignSkillsCheck(ctx, 'resolver_health') : null;
+  if (foreign) return [foreign];
 
   if (scope === 'all' && skillsDir) {
 
@@ -76,7 +91,7 @@ async function runResolverHealth(ctx: DoctorContext): Promise<Check[]> {
       checks.push(check);
     }
   } else if (scope === 'all') {
-    checks.push({ name: 'resolver_health', status: 'warn', message: 'Could not find skills directory' });
+    checks.push(checkError('resolver_health', 'find skills directory'));
   }
   return checks;
 }
@@ -120,6 +135,7 @@ async function runRetrievalReflex(ctx: DoctorContext): Promise<Check[]> {
 export const retrievalReflexEntry: DoctorEntry = {
   name: 'retrieval_reflex_health',
   emits: ['retrieval_reflex_health', 'volunteer_channels', 'memory_verbs_usage'],
+  engineChecks: ['volunteer_channels'],
   run: runRetrievalReflex,
 };
 
@@ -164,7 +180,7 @@ async function runSkillConformance(ctx: DoctorContext): Promise<Check[]> {
   // `requires:`. Currency is filesystem-only; preconditions need the engine
   // and skip cleanly without one.
   if (scope === 'all' && skillsDir) {
-    checks.push(skillCurrencyCheck(skillsDir));
+    checks.push(foreignSkillsCheck(ctx, 'skill_currency') ?? skillCurrencyCheck(skillsDir));
     checks.push(await skillPreconditionsCheck(skillsDir, engine));
   }
   return checks;
@@ -206,7 +222,7 @@ function printAutoFixReport(report: AutoFixReport, dryRun: boolean, jsonOutput: 
   const label = dryRun ? 'fixes proposed' : 'fixes applied';
   console.log(`${n} ${label}${s > 0 ? `, ${s} skipped:` : '.'}`);
   for (const sk of report.skipped) {
-    const hint = sk.reason === 'working_tree_dirty' ? ' (run `git stash` first)' : '';
+    const hint = sk.reason === 'working_tree_dirty' ? ' (commit or discard your edits to those files first)' : '';
     console.log(`  - ${sk.skillPath}: ${sk.reason}${hint}`);
   }
   if (dryRun && n > 0) console.log('\nRun without --dry-run to apply.');

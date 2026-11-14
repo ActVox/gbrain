@@ -49,6 +49,7 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
+import type { AuthInfo } from '../ops/contract.ts';
 import { validateTtlConfig } from './ttl-parse.ts';
 
 export const AUTO_WRITEBACK_KEY = 'memory.auto_writeback';
@@ -107,6 +108,10 @@ export interface WritebackConfig extends WritebackFileConfig {
    * says enabled — the planes diverged (see module header). Gate callers
    * skip WITHOUT the terminal sidecar; doctor names the re-sync command. */
   plane_drift?: true;
+  /** Present when the DB plane has NO row while the provided file mirror
+   * explicitly says 'off' — a dual-write of off that never reached the DB.
+   * The compact and SessionEnd lanes hold on it instead of extracting. */
+  off_unsynced?: true;
 }
 
 function normalizeMode(raw: unknown): Pick<WritebackFileConfig, 'mode' | 'mode_valid' | 'raw_mode'> {
@@ -151,7 +156,7 @@ const lkg = new WeakMap<BrainEngine, WritebackConfig>();
  */
 export function ambientOptsFrom(
   wb: WritebackConfig,
-  avail: { remember: boolean; extractFacts: boolean },
+  avail: { remember: boolean; extractFacts: boolean; member?: boolean; actor?: boolean },
 ): AmbientOptsShape | null {
   if (!wb.enabled || wb.mode === 'off') return null;
   if (!avail.remember) return null;
@@ -160,6 +165,7 @@ export function ambientOptsFrom(
     transientTtl: wb.transient_ttl,
     visibility: wb.visibility,
     extractFactsAvailable: avail.extractFacts,
+    ...(avail.member ? { member: true } : avail.actor ? { actor: true } : {}),
   };
 }
 interface AmbientOptsShape {
@@ -167,6 +173,19 @@ interface AmbientOptsShape {
   transientTtl: string;
   visibility: 'world' | 'private';
   extractFactsAvailable: boolean;
+  member?: boolean;
+  actor?: boolean;
+}
+
+/**
+ * GST-2243: who an HTTP credential writes as, for its instructions: a member-bound credential is one member; a credential
+ * that may name a member per call (x-qm-actor on remember) writes as that member on those calls and as itself otherwise.
+ * GST-2346 D1: a credential bound to the brain owner (`ownerMember`, config access.owner_member) and fenced to no slug
+ * prefixes saves shared by default, so it is told what a credential bound to no member is told.
+ */
+export function writebackCaller(auth: Pick<AuthInfo, 'member' | 'attest' | 'boundSlugPrefixes'> | undefined, ownerMember?: string | null): { member?: true; actor?: true } {
+  if (auth?.member && !(ownerMember && auth.member.id === ownerMember.trim() && !auth.boundSlugPrefixes)) return { member: true };
+  return auth?.attest?.ops.includes('remember') ? { actor: true } : {};
 }
 
 /**
@@ -205,7 +224,9 @@ export async function resolveWritebackConfig(
     // Drift: the DB has NO row while the file mirror claims enabled. An
     // explicit DB 'off' is operator intent — never drift.
     const fileClaims = fileCfg?.memory?.auto_writeback;
-    const drift = dbMode == null && fileClaims != null && normalizeMode(fileClaims).mode !== 'off';
+    const fileMode = fileClaims == null ? null : normalizeMode(fileClaims);
+    const drift = dbMode == null && fileMode != null && fileMode.mode !== 'off';
+    const offUnsynced = dbMode == null && fileMode?.raw_mode === 'off';
     const bundle: WritebackConfig = {
       ...m,
       enabled: m.mode !== 'off',
@@ -215,6 +236,7 @@ export async function resolveWritebackConfig(
       visibility_explicit_private: posture.explicit_private,
       visibility_posture: posture.visibility,
       ...(drift ? { plane_drift: true as const } : {}),
+      ...(offUnsynced ? { off_unsynced: true as const } : {}),
     };
     lkg.set(engine, bundle);
     return bundle;
@@ -227,4 +249,96 @@ export async function resolveWritebackConfig(
     }
     return { ...OFF_BUNDLE, read_error: true };
   }
+}
+
+/**
+ * The ambient capture lanes (#6091). `writeback` is the Stop hook's `.wb-`
+ * turn files; `compact` is PreCompact segments and OpenClaw compactions;
+ * `session_end` is the SessionEnd `<sid>.txt` transcript. Installing the
+ * harness hooks is the opt-in for compact and SessionEnd capture, so those
+ * two extract while the setting is unset; the writeback lane never does.
+ */
+export const CAPTURE_GATE_LANES = Object.freeze(['writeback', 'compact', 'session_end'] as const);
+export type CaptureGateLane = (typeof CAPTURE_GATE_LANES)[number];
+
+export type CaptureGateReason =
+  | 'writeback_on' | 'writeback_unset' | 'writeback_off'
+  | 'writeback_gate_unreadable' | 'writeback_mode_invalid' | 'writeback_plane_drift' | 'writeback_off_unsynced';
+
+export interface CaptureGateDecision {
+  /** extract: run the lane; retire: record the file as finished, never extract it;
+   * hold: leave the file untouched until the config is coherent again. */
+  action: 'extract' | 'retire' | 'hold';
+  reason: CaptureGateReason;
+}
+
+/**
+ * The one capture gate every ambient lane applies under its claim, before any
+ * provider call or receipt republication. Resolve `cfg` with `{ gate: true }`
+ * (never a last-known-good enabled bundle) and the file mirror, so drift is
+ * visible. Explicit `off` retires on every lane; a read error, plane drift or
+ * an invalid mode holds; unset retires the writeback lane and extracts the
+ * compact and SessionEnd lanes, unless the file mirror says `off` while the DB
+ * has no row (a failed dual-write of off), which holds.
+ */
+export function captureGateDecision(cfg: WritebackConfig, lane: CaptureGateLane): CaptureGateDecision {
+  if (cfg.read_error) return { action: 'hold', reason: 'writeback_gate_unreadable' };
+  if (!cfg.mode_valid) return { action: 'hold', reason: 'writeback_mode_invalid' };
+  if (cfg.plane_drift) return { action: 'hold', reason: 'writeback_plane_drift' };
+  if (cfg.enabled) return { action: 'extract', reason: 'writeback_on' };
+  if (cfg.raw_mode === 'off' || lane === 'writeback') return { action: 'retire', reason: 'writeback_off' };
+  if (cfg.off_unsynced) return { action: 'hold', reason: 'writeback_off_unsynced' };
+  return { action: 'extract', reason: 'writeback_unset' };
+}
+
+/** Capture-time view for the engine-free hook children: the brain's own file
+ * plane says an explicit, valid `off`. Only this case is recorded at capture. */
+export function fileCaptureIsOff(cfg: GBrainConfig | null | undefined): boolean {
+  const f = resolveWritebackConfigFromFile(cfg);
+  return f.mode_valid && f.raw_mode === 'off';
+}
+
+/** Operator-facing lane names (config messages, doctor, docs truth table). */
+export const CAPTURE_LANE_LABELS: Readonly<Record<CaptureGateLane, string>> = Object.freeze({
+  writeback: 'Stop-hook turn capture',
+  compact: 'compaction harvest',
+  session_end: 'SessionEnd transcripts',
+});
+
+/** Each lane's effective action under `cfg` (resolve it with `{ gate: true }`). */
+export function captureLaneStates(cfg: WritebackConfig): Record<CaptureGateLane, CaptureGateDecision['action']> {
+  return Object.fromEntries(CAPTURE_GATE_LANES.map((lane) => [lane, captureGateDecision(cfg, lane).action])) as Record<CaptureGateLane, CaptureGateDecision['action']>;
+}
+
+/** One line: `Stop-hook turn capture: retire; compaction harvest: extract; …`. */
+export function captureLaneSummary(cfg: WritebackConfig): string {
+  const states = captureLaneStates(cfg);
+  return CAPTURE_GATE_LANES.map((lane) => `${CAPTURE_LANE_LABELS[lane]}: ${states[lane]}`).join('; ');
+}
+
+/** Workers that read the gate only from this version on; an older one keeps capturing until it restarts. */
+export const WRITEBACK_RESTART_AFTER_OFF: readonly string[] = Object.freeze([
+  'long-running `gbrain serve` processes (compaction harvest; `gbrain sources writer status --json` consumer_version is a hint, not proof, because an idle old worker leaves no receipt)',
+  'cron or autopilot sweeps (SessionEnd transcripts and the compaction backstop)',
+  'any OpenClaw gateway hosting the gbrain context engine (compaction rungs 2 and 3)',
+]);
+
+/** What `gbrain config set memory.auto_writeback off` tells the operator. */
+export function writebackOffMessage(): string[] {
+  return [
+    'Ambient writeback off. Stopped: Stop-hook turn capture, the compaction harvest (PreCompact segments and OpenClaw compactions) and SessionEnd transcript extraction. Session text banked from now on is retired, never extracted later, even if writeback is turned back on.',
+    'Not stopped: facts already saved, explicit remember / extract_facts calls, and fact extraction from pages written on purpose.',
+    `Enforcement is incomplete until workers started on an older gbrain restart: ${WRITEBACK_RESTART_AFTER_OFF.join('; ')}.`,
+    'Review facts these lanes already saved: `gbrain recall --since 30d --limit 500 --json` (rows whose source is hook:compact, hook:writeback or sweep:corpus); forget one only with the user\'s agreement: `gbrain forget <fact-id>`.',
+    'To stop the hooks from banking session text at all, SessionEnd included: `gbrain bootstrap harness --remove`.',
+    'If harness instruction blocks were installed, remove them: gbrain bootstrap harness --yes (converges on off).',
+  ];
+}
+
+/** What `gbrain config unset memory.auto_writeback` tells the operator. */
+export function writebackUnsetMessage(): string[] {
+  return [
+    'Ambient writeback is unset: Stop-hook turn capture stays off, but the compaction harvest and SessionEnd transcripts extract again (installing the harness hooks opted into them). To stop every capture lane: `gbrain config set memory.auto_writeback off`.',
+    'If harness instruction blocks were installed, remove them: gbrain bootstrap harness --yes (converges on off).',
+  ];
 }

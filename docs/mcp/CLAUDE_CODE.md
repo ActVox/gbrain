@@ -13,6 +13,21 @@ For an existing agent, start with the [memory-only walkthrough](../tutorials/con
 > Open a new empty folder (bootstrap creates the private repo for you), or make an
 > empty private repo under your own account and open the clone — bootstrap adopts it.
 
+## Fastest: `gbrain setup claude-code`
+
+```bash
+gbrain setup claude-code --dry-run   # the brain, source, launcher and owner it resolved; writes nothing
+gbrain setup claude-code             # keyless brain if none, stdio MCP entry, read-context hooks, verified
+```
+
+Setup writes the same stdio entry as Option 1 into `~/.claude.json` plus the
+`SessionStart` and `UserPromptSubmit` hooks into `~/.claude/settings.json`,
+owned by hash through a connection receipt, and smoke-tests the registration.
+Capture hooks (`--capture`) and providers (`--providers`) stay off unless you
+accept them; `--remove` deletes only unchanged entries it wrote. It refuses
+instead of starting a second owner on a live PGLite brain or creating a local
+brain next to a hosted one. Details: [gbrain setup](../guides/setup.md).
+
 ## Option 0: Install as a Claude Code plugin
 
 gbrain ships as a native Claude Code plugin — MCP server + the curated
@@ -42,8 +57,8 @@ into your user-scope skills dir with a local-edit-respecting update lens
 (CLI form: `claude plugin marketplace add garrytan/gbrain` +
 `claude plugin install gbrain@gbrain`.) Prerequisites and behavior match the
 [Codex plugin](CODEX.md#install-as-a-codex-plugin-recommended): the gbrain CLI
-installed (`bun install -g github:garrytan/gbrain#latest-stable`), a brain
-(`gbrain init`), `starter` MCP surface with `--source-guard`, and the same
+installed (`bun install -g github:garrytan/gbrain#stable`), a brain
+(`gbrain init`), `full` MCP surface with `--source-guard`, and the same
 routing rules (`GBRAIN_SOURCE`/`GBRAIN_BRAIN_ID` env — dotfiles don't apply
 to a plugin-launched serve). Positioning: the plugin is the lightweight
 brain+skills path; `gbrain bootstrap` remains the deep lane (identity, hooks,
@@ -51,13 +66,31 @@ push protocol). One approval-UX difference: the bootstrap lane pre-approves
 `mcp__gbrain` via `permissions.allow` for headless runs; plugin-provided MCP
 tools use the plugin lane's own approval flow.
 
+**Per-turn hook.** Every gbrain plugin declares the `UserPromptSubmit` hook
+`gbrain setup claude-code` writes (`gbrain hook user-prompt`, 3 s), run through
+the launcher with `GBRAIN_HOOK_LANE=plugin`. While a brain-first block is
+installed it puts the brain-first rule beside each turn (`gbrain setup
+claude-code --instructions-only` writes the block; doctor `harness_wiring` and
+`gbrain post-upgrade` name that command when it's missing), and it adds the
+setup hook's read-context block when a serve is running. When setup,
+`gbrain bootstrap` or a workspace install already wires the event in your
+user settings or the project's `.claude` settings, the plugin's hook exits
+without output, so each turn gets it once. `GBRAIN_HOOKS=0`, or a recorded `gbrain setup claude-code --no-hooks`, turns it off.
+
 ## Option 1: Local (recommended, zero server needed)
 
 ```bash
-claude mcp add gbrain -- gbrain serve --surface verbs
+gbrain setup claude-code
 ```
 
-That's it. Claude Code spawns `gbrain serve` as a stdio subprocess. No server, no
+Setup registers `gbrain serve --surface starter --advertise verbs`, adds the
+[brain-first instructions](#brain-first-instructions) and hooks, and runs a
+smoke test; `--no-hooks` skips the hooks. The MCP entry starts serve through
+gbrain's launcher (`<gbrain config dir>/hook-launcher/gbrain-hook`): Claude
+Code starts a stdio server in the session's directory, where a script-mode Bun
+install would load that directory's `bunfig.toml` and `.env`. Don't register
+`gbrain serve` with a bare `claude mcp add` for that reason.
+Claude Code spawns `gbrain serve` as a stdio subprocess. No server, no
 tunnel, no token needed. Works with both PGLite and Supabase engines.
 
 > **PGLite brains are single-process.** PGLite is a single-writer embedded
@@ -72,13 +105,13 @@ tunnel, no token needed. Works with both PGLite and Supabase engines.
 > connections. Details:
 > [serve ↔ sync concurrency](../architecture/serve-sync-concurrency.md).
 
-`--surface verbs` exposes the seven-verb memory protocol (`recall`, `remember`,
-`entity`, `synthesize`, `forget`, `context_pack`, `delta` —
-[MEMORY_VERBS v1](../protocol/MEMORY_VERBS_v1.md)),
-the surface built for agents and quickstarts. `--surface starter` adds the
-daily-driver set on top (core page/search/graph ops + capture). Drop the flag for the full
-operation catalog (`get_page`, `put_page`, `search`, graph ops, …) — `full` is
-the default and what existing installs already run.
+`--surface starter` lists the daily-driver tools: the seven memory verbs
+([MEMORY_VERBS v1](../protocol/MEMORY_VERBS_v1.md)), `search`, `query`,
+`get_page`, `put_page`, `capture`, graph reads and skills. It is the surface every
+new registration gbrain writes pins (a bare `serve` still defaults to full). A parameter it leaves out is still accepted,
+and `request_tools` returns full schemas or widens the session to a left-out tool. `--surface full` lists every
+operation (`put_pages`, admin and tuning ops) and is the opt-in; `--surface verbs`
+lists only the seven verbs.
 
 ## Option 2: Remote, one command (fastest from a bearer token)
 
@@ -147,6 +180,34 @@ Replace the host with your MagicDNS name (or your ngrok domain) and
 > private (it lands in `~/.claude.json`), and prefer a scoped/short-lived token
 > where your host supports one.
 
+## Brain-first instructions
+
+Registering the MCP server only makes the tools available. Agents seldom call a
+brain nobody told them about, so finish the install with:
+
+```bash
+gbrain setup claude-code --instructions-only
+```
+
+It writes one short marked block into `~/.claude/CLAUDE.md` (with `--scope project`, `./CLAUDE.local.md`): before answering any turn,
+search the brain first, read the best hit, fill gaps with other tools, apply your own
+access rules, then finish the task. Text outside the markers is never touched, a
+re-run upgrades the block in place, `--dry-run` previews it,
+`--no-instructions` opts out (and is remembered) and `--remove` takes it out.
+`gbrain setup claude-code` and `gbrain connect --install` write it for you.
+While the block is installed, setup's UserPromptSubmit hook also leads every turn
+with the same rule, beside the user's message, whether or not `gbrain serve` has
+context to add (`--no-hooks` installs no hook). After a plain `claude mcp add`,
+`--instructions-only` adds that hook on its own (a `turn-rule-v1` entry in
+`~/.claude/settings.json` that prints only the rule and reads no brain data),
+unless setup, bootstrap or a gbrain plugin already carries it. It runs the hook
+once to prove it loads and exits non-zero with `turn_hook_not_loaded` when it
+does not ([repair](../guides/repair.md#turn-hook-not-loaded)); `/hooks` inside a
+session lists it. With no absolute gbrain binary to put in the hook, it prints
+the step instead.
+`gbrain doctor` warns when the block is missing or out of date, or its per-turn
+hook is missing or untrusted.
+
 ## Verify
 
 In Claude Code, try:
@@ -182,8 +243,7 @@ sub-second, world-visibility by default, and available on `--surface verbs`.
   window's standing entities so that rehydration pack is warm) into
   `.claude/settings.local.json`. Nothing to call; `GBRAIN_HOOKS=0` disables
   every hook event, including capture. Session start never shows another
-  session's activity: the `Last session activity` line older releases printed
-  was removed in v0.60.28.0 (#5558), with deliberately no opt-in to restore it.
+  session's activity, and no setting turns that on.
 - **Manual (any brain, incl. remote/Postgres):** call the verbs yourself at
   boundaries — `context_pack(entities, budget_tokens)` at session start /
   after compaction, `delta(session_id, budget_tokens)` on wakes. See

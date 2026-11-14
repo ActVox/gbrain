@@ -3,8 +3,13 @@ import { BRAIN_TOOL_ALLOWLIST } from '../minions/tools/brain-allowlist.ts';
 import { operationScopesAllowed } from '../scope.ts';
 import { opAllowedForBoundClient } from '../ops/context.ts';
 import { GrantError, type ClientGrant, type GrantPatch, type GrantProfileId, type GrantValidationContext } from './model.ts';
+import { VERSION } from '../../version.ts';
+import { INSTALL_SURFACE_SET_BY } from '../../mcp/surface.ts';
 
 export const RENEWABLE_GRANT_TTL_SECONDS = 3600;
+
+/** Harness and bot profiles: a new grant calls the full surface and lists the memory verbs (INSTALL_SURFACE_SET_BY). */
+const VERBS_LISTED_PROFILES: ReadonlySet<GrantProfileId> = new Set(['memory-reader', 'memory-writer', 'coding-agent']);
 export const STATIC_GRANT_TTL_SECONDS = 30 * 24 * 3600;
 
 export function grantCatalog(): Pick<GrantValidationContext, 'operationNames' | 'delegateToolNames'> {
@@ -14,6 +19,18 @@ export function grantCatalog(): Pick<GrantValidationContext, 'operationNames' | 
     // by a remote source grant. Local-only operations never enter remote grants.
     delegateToolNames: new Set(operations.filter(op => !op.localOnly && BRAIN_TOOL_ALLOWLIST.has(op.name)).map(op => op.name)),
   };
+}
+
+/**
+ * The operation catalog an operation snapshot was written against. Stored on
+ * the grant's audit record when a snapshot is written, so a later diagnosis can
+ * tell operations added after the snapshot from ones left out of it. Grants
+ * written before this existed have none, and none is ever synthesized for them.
+ */
+export interface CatalogProvenance { version: 1; gbrain_version: string; operations: string[] }
+
+export function catalogProvenance(): CatalogProvenance {
+  return { version: 1, gbrain_version: VERSION, operations: [...grantCatalog().operationNames].sort() };
 }
 
 /** Explicit profile application is a regrant; ordinary repair does not call this. */
@@ -45,7 +62,9 @@ export function resolveGrantProfile(opts: {
     profile: opts.profile, scopes, sourceId: opts.sourceId,
     federatedRead: opts.federatedRead ?? opts.existing?.federatedRead ?? [opts.sourceId],
     boundSlugPrefixes: directPrefixes, allowedOperations,
-    surface: opts.profile === 'full' || opts.profile === 'operator' ? 'full' : 'starter', surfaceSetBy: 'operator',
+    surface: opts.profile === 'delegating-agent' ? 'starter' : 'full',
+    surfaceSetBy: VERBS_LISTED_PROFILES.has(opts.profile) && (!opts.existing || opts.existing.surfaceSetBy === INSTALL_SURFACE_SET_BY)
+      ? INSTALL_SURFACE_SET_BY : 'operator',
     boundTools: delegated ? opts.boundTools ?? opts.existing?.boundTools ?? null : null,
     boundSourceId: delegated ? opts.sourceId : null,
     boundBrainId: null,

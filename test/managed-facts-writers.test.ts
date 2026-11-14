@@ -31,7 +31,7 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { configureGateway, resetGateway, __setChatTransportForTests, __setEmbedTransportForTests, type ChatResult } from '../src/core/ai/gateway.ts';
 import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
-import { runExtractConversationFactsCore, runExtractConversationFacts } from '../src/commands/extract-conversation-facts.ts';
+import { runExtractConversationFactsCore, runExtractConversationFacts, type ExtractConversationFactsResult } from '../src/commands/extract-conversation-facts.ts';
 import { runPhaseConversationFactsBackfill } from '../src/core/cycle/conversation-facts-backfill.ts';
 import { writeFactsToFence } from '../src/core/facts/fence-write.ts';
 import { writeSingleFact } from '../src/core/facts/write-single.ts';
@@ -39,6 +39,7 @@ import { runLoopsExtract } from '../src/core/google/loops-extract.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
 const backends = testBackends();
@@ -245,6 +246,8 @@ test('managed writeSingleFact supersedes a near-duplicate of the same kind like 
   await managed(async ({ engine, put }) => {
     await engine.setConfig('embedding_model', 'openai:text-embedding-3-large');
     await engine.setConfig('embedding_dimensions', '1536');
+    // Calibrate the test embedder: an uncalibrated model never supersedes by cosine (supersession-threshold.ts).
+    await engine.setConfig('facts.supersession_thresholds', JSON.stringify({ 'openai:text-embedding-3-large@1536': 0.95 }));
     await put('people/alice-example', PERSON('Alice Example'));
   }, async ({ engine, sourceId, root }) => {
     const remember = (fact: string) => writeSingleFact(engine, sourceId, { fact, provenance: 'fixture', entity: 'people/alice-example', visibility: 'world' });
@@ -294,6 +297,29 @@ test('managed bulk conversation extraction writes its facts and terminal audit r
     const replay = await runExtractConversationFactsCore(engine, { sourceId, overrideDisabled: true, extractor, types: ['conversation'], force: true });
     expect(replay.orphan_facts_cleaned).toBe(2);
     expect(await facts(engine, sourceId, 'conversations/synthetic-chat')).toHaveLength(2);
+  });
+}, 120_000);
+
+test('managed conversation extraction honors facts.default_visibility=world on extracted rows; both audit rows stay private', async () => {
+  const single = `---\ntitle: Single message\ntype: conversation\n---\n**Alice Example** (2024-03-15 9:00 AM): Only one message here.\n`;
+  await managed(async ({ put }) => {
+    await put('conversations/synthetic-chat', CONVERSATION);
+    await put('conversations/single-message', single);
+  }, async ({ engine, sourceId }) => {
+    await engine.setConfig('facts.default_visibility', 'world');
+    try {
+      const result = await runExtractConversationFactsCore(engine, { sourceId, overrideDisabled: true, extractor, types: ['conversation'] });
+      expect(result).toMatchObject({ facts_inserted: 1, pages_marked_non_extractable: 1, pages_failed: 0 });
+      const rows = await engine.executeRaw<{ slug: string; source: string; visibility: string }>(
+        'SELECT source_markdown_slug AS slug, source, visibility FROM facts WHERE source_id=$1 ORDER BY source_markdown_slug, row_num', [sourceId]);
+      expect(rows).toEqual([
+        { slug: 'conversations/single-message', source: 'cli:extract-conversation-facts:non-extractable:v2', visibility: 'private' },
+        { slug: 'conversations/synthetic-chat', source: 'cli:extract-conversation-facts', visibility: 'world' },
+        { slug: 'conversations/synthetic-chat', source: 'cli:extract-conversation-facts:terminal:v2', visibility: 'private' },
+      ]);
+    } finally {
+      await engine.unsetConfig('facts.default_visibility');
+    }
   });
 }, 120_000);
 
@@ -477,7 +503,7 @@ test('managed deleted-page expiry waits for a concurrent restore of that page (P
     await put('people/bob-demo', PERSON('Bob Demo', FENCE('| 1 | Plays chess | fact | 1.0 | world | low | 2019-01-01 |  | chat |  |')));
   }, async ({ engine, sourceId }) => {
     if (engine.kind !== 'postgres') return;
-    await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => tx.softDeletePage('people/bob-demo', { sourceId })));
+    await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], () => tx.softDeletePage('people/bob-demo', { sourceId }), TEST_WRITE_ATTRIBUTION));
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let locked!: () => void;
@@ -487,7 +513,7 @@ test('managed deleted-page expiry waits for a concurrent restore of that page (P
       await tx.executeRaw('UPDATE pages SET deleted_at=NULL WHERE source_id=$1 AND slug=$2', [sourceId, 'people/bob-demo']);
       locked();
       await gate;
-    }));
+    }, TEST_WRITE_ATTRIBUTION));
     await holding;
     const run = runExtractFacts(engine, { sourceId, slugs: [] });
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -503,6 +529,40 @@ test('managed writeSingleFact reports the entity it persisted for an unresolved 
     const written = await writeSingleFact(engine, sourceId, { fact: 'Carol Unknown owns a sailboat.', provenance: 'fixture', entity: 'Carol Unknown' });
     const [row] = await engine.executeRaw<{ entity_slug: string | null }>('SELECT entity_slug FROM facts WHERE id=$1', [written.id]);
     expect(written.entity_slug).toBe(row.entity_slug);
+  });
+}, 120_000);
+
+test('#7068: an interrupted managed extraction hands back the counts of the pages it published', async () => {
+  const later = `---\ntitle: Synthetic follow-up\ntype: conversation\n---\n${[
+    '**Bob Demo** (2024-03-16 9:00 AM): Did the move to the platform team go through?',
+    '**Alice Example** (2024-03-16 9:01 AM): Yes, I start on Monday.',
+  ].join('\n')}\n`;
+  await managed(async ({ put }) => {
+    await put('conversations/first-chat', CONVERSATION);
+    await put('conversations/second-chat', later);
+  }, async ({ engine, sourceId }) => {
+    const caller = new AbortController();
+    const replies = ['Alice Example signed an offer with Acme Corp.', 'Alice Example starts on the platform team on Monday.'];
+    let call = 0;
+    const factFor = (text: string) => [{ fact: text, kind: 'event' as const, entity_slug: null, confidence: 1,
+      notability: 'high' as const, source: 'test', visibility: 'private' as const }];
+    const interruptSecond = async () => {
+      if (++call === 2) { caller.abort(new Error('per-source walltime cap hit')); throw caller.signal.reason; }
+      return factFor(replies[0]!);
+    };
+    const handed: ExtractConversationFactsResult[] = [];
+    const thrown = await runExtractConversationFactsCore(engine, { sourceId, types: ['conversation'], sleepMs: 0,
+      extractor: interruptSecond, onInterrupted: partial => { handed.push(partial); } }, caller.signal).then(() => null, (err: Error) => err);
+    expect(thrown?.message).toBe('per-source walltime cap hit');
+    expect(handed).toHaveLength(1);
+    expect(handed[0]).toMatchObject({ pages_processed: 1, facts_inserted: 1, pages_failed: 0 });
+    expect((await facts(engine, sourceId, 'conversations/first-chat')).map(f => f.fact)).toEqual([replies[0], 'EXTRACTION_COMPLETE']);
+    expect(await facts(engine, sourceId, 'conversations/second-chat')).toEqual([]);
+
+    const resumed = await runExtractConversationFactsCore(engine, { sourceId, types: ['conversation'], sleepMs: 0,
+      extractor: async () => factFor(replies[1]!) });
+    expect(resumed).toMatchObject({ pages_skipped_completed: 1, pages_processed: 1, facts_inserted: 1 });
+    expect((await facts(engine, sourceId, 'conversations/second-chat')).map(f => f.fact)).toEqual([replies[1], 'EXTRACTION_COMPLETE']);
   });
 }, 120_000);
 

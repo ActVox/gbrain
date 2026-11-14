@@ -34,6 +34,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { runRecall } from '../src/commands/recall.ts';
 import { withEnv, emptyHome } from './helpers/with-env.ts';
+import { asOwner } from './helpers/owner-tier.ts';
 import { TERMINAL_AUDIT_SOURCE, NON_EXTRACTABLE_AUDIT_SOURCE, LEGACY_TERMINAL_AUDIT_SOURCE, AUDIT_ROW_SOURCES } from '../src/core/facts/audit-sources.ts';
 
 let engine: PGLiteEngine;
@@ -53,7 +54,7 @@ beforeAll(async () => {
   // audit rows before the real fact, as an earlier draft of this test did,
   // makes the real fact newest and the test passes even without the SQL-
   // level fix — non-discriminative.)
-  await engine.insertFact(
+  await asOwner(engine, tx => tx.insertFact(
     {
       fact: 'the user prefers oat milk in their coffee',
       kind: 'preference',
@@ -62,13 +63,13 @@ beforeAll(async () => {
       visibility: 'world',
     },
     { source_id: 'default' },
-  );
+  ));
   // A genuine user fact whose TEXT happens to be exactly the audit marker
   // string, but written by a normal (non-audit) source. This is the case
   // the OLD `fact NOT IN ('EXTRACTION_COMPLETE', ...)` predicate got wrong
   // — it matched on fact TEXT and hid this real content. The fix keys the
   // predicate on `source` instead, so this row must survive exclusion.
-  await engine.insertFact(
+  await asOwner(engine, tx => tx.insertFact(
     {
       fact: 'EXTRACTION_COMPLETE',
       kind: 'fact',
@@ -77,7 +78,7 @@ beforeAll(async () => {
       visibility: 'world',
     },
     { source_id: 'default' },
-  );
+  ));
   for (let i = 0; i < 5; i++) {
     await engine.insertFact(
       {
@@ -305,6 +306,13 @@ describe('countUnconsolidatedFacts excludes audit checkpoint rows', () => {
   });
 
   test('pending count is the one real fact, not real + audit checkpoints', async () => {
+    expect(await engine3.countUnconsolidatedFacts('default')).toBe(1);
+  });
+
+  // #5831: consolidate reads (source, entity) buckets only, so a fact with no
+  // entity is never drained and must not count as pending backlog.
+  test('a fact with no entity is not pending consolidation backlog', async () => {
+    await engine3.insertFact({ fact: 'small teams ship faster with written decisions', kind: 'fact', entity_slug: null, source: 'test' }, { source_id: 'default' });
     expect(await engine3.countUnconsolidatedFacts('default')).toBe(1);
   });
 });

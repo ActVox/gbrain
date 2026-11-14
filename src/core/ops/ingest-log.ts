@@ -9,13 +9,28 @@
 import type { Operation } from './contract.ts';
 import { clampSearchLimit } from '../engine.ts';
 import { linkReadScopeOpts } from './context.ts';
+import { remotePageAccess } from '../persistence/page-visibility.ts';
+
+/** Row kinds whose source_ref and summary name one page while pages_updated stays empty. */
+const PAGE_REF_TYPES = new Set(['facts:absorb', 'write-verify-guard']);
+
+/** A file URL or an absolute, home-relative, relative or Windows path token in a free-form source_ref. */
+const HOST_PATH_RE = /(^|\s)(?:file:\/\/|\.{1,2}[\\/]|~?\/|[A-Za-z]:[\\/])\S*/g;
+
+/** A source_ref as a remote reader sees it: a sync row keeps only its commit, an import row names no directory. */
+function remoteSourceRef(sourceType: string, ref: string): string {
+  if (sourceType === 'git_sync') return ref.replace(/^.*?( @ [0-9a-f]+)?$/s, (_m, commit: string | undefined) => `<local path>${commit ?? ''}`);
+  if (sourceType === 'directory') return '<local path>';
+  return ref.replace(HOST_PATH_RE, '$1<local path>');
+}
 
 // --- Ingest Log ---
 
 const log_ingest: Operation = {
   name: 'log_ingest',
+  idempotent: false,
   outputRedaction: 'no_stored_text',
-  description: 'Log an ingestion event',
+  description: 'Record one ingestion event (source type, reference, pages updated, summary) in the brain\'s ingest log. Use after importing or enriching content. Needs write scope.',
   params: {
     source_type: { type: 'string', required: true, description: "Kind of ingest source, e.g. 'email', 'meeting', 'rss', 'api'." },
     source_ref: { type: 'string', required: true, description: 'Identifier of the ingested item — a URL, message id, or file path.' },
@@ -43,10 +58,12 @@ const log_ingest: Operation = {
 
 const get_ingest_log: Operation = {
   name: 'get_ingest_log',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
-  description: 'Get recent ingestion log entries',
+  description: 'Recent ingestion log entries: what was already imported, and when.',
   params: {
-    limit: { type: 'number', description: 'Max entries (default 20)' },
+    limit: { type: 'number', description: 'Default 20.' },
   },
   handler: async (ctx, p) => {
     // Source-scope the log for remote callers (scalar grant → single-element
@@ -56,10 +73,23 @@ const get_ingest_log: Operation = {
     // can carry another source's private context, so an unscoped remote read
     // is a cross-source leak.
     const scope = ctx.remote !== false ? linkReadScopeOpts(ctx) : {};
-    return ctx.engine.getIngestLog({
+    const rows = await ctx.engine.getIngestLog({
       limit: clampSearchLimit(p.limit as number | undefined, 20, 50),
       ...(scope.sourceIds ? { sourceIds: scope.sourceIds } : scope.sourceId ? { sourceIds: [scope.sourceId] } : {}),
     });
+    if (ctx.remote === false) return rows;
+    // GBRA-431: a remote reader sees a row only when every page it names is a live page the reader can read (its
+    // summary may describe any of them), with no host filesystem path (a sync row's source_ref names the checkout).
+    // A row that names its page in source_ref alone is checked on that page; one whose ref names a page the reader
+    // cannot read is dropped too.
+    const { known, readable } = await remotePageAccess(ctx.engine, rows.flatMap(r => [...(r.pages_updated ?? []), r.source_ref].map(slug => ({ source_id: r.source_id, slug }))));
+    const key = (r: { source_id: string }, slug: string) => `${r.source_id}\u0000${slug}`;
+    return rows.filter(r => {
+      const pages = r.pages_updated ?? [];
+      if (!pages.every(slug => readable.has(key(r, slug)))) return false;
+      if (pages.length === 0 && PAGE_REF_TYPES.has(r.source_type)) return readable.has(key(r, r.source_ref));
+      return !known.has(key(r, r.source_ref)) || readable.has(key(r, r.source_ref));
+    }).map(r => ({ ...r, source_ref: remoteSourceRef(r.source_type, r.source_ref) }));
   },
   scope: 'read',
 };
