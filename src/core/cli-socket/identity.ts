@@ -40,6 +40,8 @@ export const READ_BEHAVIOR_ENV: readonly string[] = [
   'GBRAIN_EMBEDDING_IMAGE_OCR', 'GBRAIN_EMBEDDING_IMAGE_OCR_MODEL', 'GBRAIN_MAX_CHUNK_TOKENS',
   'GBRAIN_QUERY_EMBED_TIMEOUT_MS', 'GBRAIN_AI_EMBED_TIMEOUT_MS', 'GBRAIN_AI_CHAT_TIMEOUT_MS', 'GBRAIN_AI_MULTIMODAL_TIMEOUT_MS',
   'GBRAIN_RECIPES_DIR', 'GBRAIN_PLUGIN_PATH', 'GBRAIN_GUARDRAILS_MODULE', 'GBRAIN_AI_CALL_LOG', 'GBRAIN_CONTRIBUTOR_MODE',
+  // ActVox fork: the operational-memory ranking policy (src/core/search/operational-memory.ts) boosts and demotes results.
+  'GBRAIN_OPERATIONAL_MEMORY_POLICY', 'GBRAIN_OPERATIONAL_MEMORY_POLICY_JSON',
 ];
 /** Provider credentials: only whether each is set enters the identity. Every other provider variable (endpoints, deployments, versions, org/project/group ids) enters with its value. */
 const SECRET_PROVIDER_ENV = /(_API_KEY|_TOKEN|_SECRET)$/;
