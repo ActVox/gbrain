@@ -18,8 +18,10 @@ const isCheckout = (step: Step) => step.uses?.startsWith('actions/checkout@') ??
 const onUbicloud = (job: Job) => JSON.stringify([job['runs-on'], job.strategy]).includes('ubicloud-');
 
 describe('a stalled checkout is bounded and tried again', () => {
-  test('the scan finds the workflows that run the full suites', () => {
-    expect(workflows.map(w => w.file)).toEqual(expect.arrayContaining(['e2e.yml', 'persistence-validation.yml', 'test.yml']));
+  // ActVox fork: every job runs on hosted runners (test/scripts/ci-runner-routing.test.ts), so no workflow job is on
+  // Ubicloud and no checkout needs the stall pair. Upstream asserts e2e.yml, persistence-validation.yml and test.yml here.
+  test('the scan finds no workflow job on Ubicloud runners (ActVox hosted-runner policy)', () => {
+    expect(workflows.filter(w => Object.values(w.parsed.jobs).some(onUbicloud)).map(w => w.file)).toEqual([]);
   });
 
   test.each(workflows.map(w => [w.file, w] as const))('%s pairs every checkout with a bounded retry', (_file, w) => {
