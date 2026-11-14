@@ -11,7 +11,7 @@ scripts/module-size-limits.tsv	src/commands/extract.ts	add	59	ActVox runExtractD
 scripts/module-size-limits.tsv	src/commands/serve-http.ts	add	1	ActVox serve-http patch
 scripts/module-size-limits.tsv	src/core/search/hybrid.ts	add	3	ActVox operational-memory ranking hook (+1 at v0.60.428.0: exactLookupOpts to sizeReturnPool)
 scripts/module-size-limits.tsv	src/core/minions/supervisor.ts	row	src/core/minions/supervisor.ts	1514	ratchet	ActVox fork: supervisor boot clears expired gbrain_cycle_locks rows (clearStaleLocks in db-lock.ts; inventory row src/core/minions/supervisor.ts)
-scripts/function-size-baseline.tsv	src/commands/extract.ts|runExtract	set	316	runExtractDbCore delegation keeps runExtract under upstream's 398 (measured 316 at v0.60.428.0)
+scripts/function-size-baseline.tsv	src/commands/extract.ts|runExtract	set	316	runExtractDbCore delegation keeps runExtract under upstream's 398 (measured 316 at v0.60.428.0); the row justification needs an issue id (garrytan/gbrain#5904) re-added by hand after a conflict
 scripts/structural-suites.tsv	test/release-workflow.test.ts|forbid-atx-hub-pr-base.yml expression boundary	row	test/release-workflow.test.ts	forbid-atx-hub-pr-base.yml expression boundary	1	readFileSync
 scripts/structural-suites.tsv	test/release-workflow.test.ts|semgrep.yml differential baseline contract	row	test/release-workflow.test.ts	semgrep.yml differential baseline contract	2	readFileSync
 scripts/structural-suites.tsv	test/scripts/actvox-check-delta.test.ts|fork-delta ratchet	row	test/scripts/actvox-check-delta.test.ts	fork-delta ratchet	6	readFileSync

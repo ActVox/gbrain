@@ -944,6 +944,8 @@ src/core/search/hybrid/request.ts	process_env	1	W6: settings plane out of the co
 src/core/search/image-loader.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/search/image-vector-presence.ts	module_collection	1	W6: per-engine state, or mark as a constant table
 src/core/search/mode-switch-ux.ts	process_env	1	W6: settings plane out of the core
+src/core/search/operational-memory.ts	fs_import	1	ActVox fork: operational-memory ranking policy file (GBRAIN_OPERATIONAL_MEMORY_POLICY); stays until the policy arrives on engine settings (W7)
+src/core/search/operational-memory.ts	process_env	4	ActVox fork: operational-memory ranking policy env (GBRAIN_OPERATIONAL_MEMORY_POLICY[_JSON], GBRAIN_HOME); stays until the policy arrives on engine settings (W6)
 src/core/search/private-visibility.ts	als_store	1	W2: engine scope (decision E) replaces ad hoc async context
 src/core/search/private-visibility.ts	module_collection	6	W6: per-engine state, or mark as a constant table
 src/core/search/private-visibility.ts	process_env	4	W6: settings plane out of the core
