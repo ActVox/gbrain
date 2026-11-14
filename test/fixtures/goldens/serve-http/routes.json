@@ -1,6 +1,12 @@
 {
   "golden": [
     {
+      "handlers": [],
+      "method": "disable",
+      "path": "x-powered-by",
+      "when": []
+    },
+    {
       "handlers": [
         "resolveTrustProxy(process . env . GBRAIN_HTTP_TRUST_PROXY)"
       ],
@@ -38,6 +44,20 @@
       ],
       "method": "use",
       "path": "/mcp",
+      "when": []
+    },
+    {
+      "handlers": [
+        "<inline>"
+      ],
+      "method": "use",
+      "path": [
+        "/mcp",
+        "/token",
+        "/authorize",
+        "/register",
+        "/revoke"
+      ],
       "when": []
     },
     {

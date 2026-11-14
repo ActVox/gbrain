@@ -34,6 +34,19 @@
         },
         {
           "handlers": [
+            "<anonymous>"
+          ],
+          "method": "use",
+          "path": [
+            "/mcp",
+            "/token",
+            "/authorize",
+            "/register",
+            "/revoke"
+          ]
+        },
+        {
+          "handlers": [
             "corsMiddleware"
           ],
           "method": "use",
@@ -788,6 +801,19 @@
           ],
           "method": "use",
           "path": "/mcp"
+        },
+        {
+          "handlers": [
+            "<anonymous>"
+          ],
+          "method": "use",
+          "path": [
+            "/mcp",
+            "/token",
+            "/authorize",
+            "/register",
+            "/revoke"
+          ]
         },
         {
           "handlers": [
