@@ -4735,7 +4735,7 @@
           "includeFrontmatter?: boolean | undefined",
           "inferDates?: boolean | undefined",
           "jsonMode?: boolean | undefined",
-          "mode: \"timeline\" | \"all\" | \"links\"",
+          "mode: \"timeline\" | \"links\" | \"all\"",
           "ner?: boolean | undefined",
           "rebuild?: boolean | undefined",
           "since?: string | undefined",
