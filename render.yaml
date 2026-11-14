@@ -65,9 +65,9 @@ services:
     healthCheckPath: /health
     buildCommand: |
       set -e
-      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.2
+      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.4
       export PATH="$HOME/.bun/bin:$PATH"
-      test "$(bun --version)" = "1.4.2"
+      test "$(bun --version)" = "1.4.4"
       bun install --frozen-lockfile --ignore-scripts
       (cd admin && bun install --frozen-lockfile)
       bun run build:admin
@@ -98,9 +98,9 @@ services:
     autoDeploy: false                        # coordinated web/worker/schema promotion
     buildCommand: |
       set -e
-      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.2
+      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.4
       export PATH="$HOME/.bun/bin:$PATH"
-      test "$(bun --version)" = "1.4.2"
+      test "$(bun --version)" = "1.4.4"
       bun install --frozen-lockfile --ignore-scripts
       bun run build
     # Idempotent startup: clones the team repos to the persistent disk on first boot,
@@ -159,9 +159,9 @@ services:
     schedule: "*/30 * * * *"                 # every 30 min — fallback for missed webhooks
     buildCommand: |
       set -e
-      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.2
+      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.4
       export PATH="$HOME/.bun/bin:$PATH"
-      test "$(bun --version)" = "1.4.2"
+      test "$(bun --version)" = "1.4.4"
       bun install --frozen-lockfile --ignore-scripts
       bun run build
     startCommand: |
@@ -191,9 +191,9 @@ services:
     schedule: "0 2 * * *"                    # 02:00 UTC daily
     buildCommand: |
       set -e
-      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.2
+      curl -fsSL https://bun.sh/install | bash -s -- bun-v1.4.4
       export PATH="$HOME/.bun/bin:$PATH"
-      test "$(bun --version)" = "1.4.2"
+      test "$(bun --version)" = "1.4.4"
       bun install --frozen-lockfile --ignore-scripts
       bun run build
     startCommand: |

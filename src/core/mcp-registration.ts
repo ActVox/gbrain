@@ -11,30 +11,76 @@
 
 import { shellQuote } from './shell-quote.ts';
 import type { McpSurface } from '../mcp/surface.ts';
+import { STDIO_MEMBER_FLAG } from './stdio-member-flag.ts';
 
 export { shellQuote };
 
 /**
- * The surface a new stdio registration pins: `full`, callable and advertised
- * (S0, wave 0; the maintainer chose no narrowing). Every install path reads
- * this one value: README, docs/mcp, INSTALL_FOR_AGENTS.md, the plugin
- * manifests and every registration gbrain writes. A narrower list, where a
- * harness caps its tool count, is the user's explicit `--surface starter|verbs`.
+ * The surface a new stdio registration pins: `starter`, the daily-driver tool
+ * list (Garry, 2026-10-24: new installs register starter instead of full;
+ * gbrain-evals#191 measured unchanged reach and accuracy with 17-23% fewer
+ * input tokens). Every install path reads this one value: README, docs/mcp,
+ * the plugin manifests and every registration gbrain writes. An existing
+ * registration keeps its surface; `--surface full` is the opt-in for every
+ * operation, and any hidden parameter or tool stays reachable through
+ * `request_tools`.
  */
-export const REGISTRATION_SURFACE: McpSurface = 'full';
+export const REGISTRATION_SURFACE: McpSurface = 'starter';
+
+/**
+ * The surface the Codex and Claude Code plugin manifests pin: `full`. A plugin
+ * update rewrites the registration of every existing plugin install, so
+ * narrowing it would change existing installs without asking; plugins keep
+ * full (as does a bare `serve`, whose default is unchanged).
+ */
+export const PLUGIN_SURFACE: McpSurface = 'full';
+
+/**
+ * What a new registration's tools/list shows: the seven memory verbs plus
+ * request_tools (`serve --advertise verbs`). Everything REGISTRATION_SURFACE
+ * allows stays callable, and request_tools returns any tool's full schema.
+ * Approved 2026-10-25 on harness-evals#70: no pass-rate cost, no
+ * cross-scope reads, recall about 3x faster than search. Applies only when
+ * the user chose no surface: an explicit `--surface` or GBRAIN_SURFACE lists
+ * that surface in full, and an existing registration keeps its own form.
+ */
+export const REGISTRATION_ADVERTISE: McpSurface = 'verbs';
 
 /** A registration command's surface value (`verbs`, `starter` or `full`). */
 export function isRegistrationSurface(v: unknown): v is McpSurface {
   return v === 'verbs' || v === 'starter' || v === 'full';
 }
 
+const SURFACE_ORDER: readonly McpSurface[] = ['verbs', 'starter', 'full'];
+
 /**
- * `<bin> serve --surface <surface>`. `null` renders a bare `<bin> serve`
- * (config/default resolution): never-narrow keeps an existing bare
- * registration bare when it replaces it.
+ * `<bin> serve --surface <surface> [--advertise <advertise>]`. `null` renders
+ * a bare `<bin> serve` (config/default resolution): never-narrow keeps an
+ * existing bare registration bare when it replaces it. `--advertise` is
+ * written only when it is narrower than the surface.
  */
-export function stdioServeArgv(bin: string, surface: McpSurface | null = REGISTRATION_SURFACE): string[] {
-  return surface ? [bin, 'serve', '--surface', surface] : [bin, 'serve'];
+export function stdioServeArgv(bin: string, surface: McpSurface | null = REGISTRATION_SURFACE, advertise: McpSurface | null = null, stdioMember?: string): string[] {
+  const member = stdioMember !== undefined ? [STDIO_MEMBER_FLAG, stdioMember] : [];
+  if (!surface) return [bin, 'serve', ...member];
+  return [bin, 'serve', '--surface', surface, ...(advertise && SURFACE_ORDER.indexOf(advertise) < SURFACE_ORDER.indexOf(surface) ? ['--advertise', advertise] : []), ...member];
+}
+
+/**
+ * The listing a registration writes. A surface the user chose (flag or
+ * GBRAIN_SURFACE) is listed in full; an existing registration keeps its own
+ * `--advertise` (none on registrations written before this default); a new
+ * registration lists REGISTRATION_ADVERTISE.
+ */
+export function registrationAdvertise(opts: { userChoseSurface: boolean; prior?: { advertise?: McpSurface | null } | null }): McpSurface | null {
+  if (opts.userChoseSurface) return null;
+  if (opts.prior) return opts.prior.advertise ?? null;
+  return REGISTRATION_ADVERTISE;
+}
+
+/** An existing registration's `--advertise` value, `null` when it lists everything it serves. */
+export function registeredAdvertise(text: string): McpSurface | null {
+  const m = /--advertise[\s=]+["']?(verbs|starter|full)\b/.exec(text);
+  return m ? m[1] as McpSurface : null;
 }
 
 /**
@@ -209,10 +255,10 @@ export const OAUTH_SECRET_NOTE =
   'short-lived, scoped access tokens; revoke with `gbrain auth revoke-client`.';
 
 /**
- * Paste-ready OpenClaw wiring block — HONEST v1. OpenClaw has no native
- * remote-MCP client yet, so the scoped path is a thin gbrain install on the
- * OpenClaw machine (`gbrain init` in mcp-only mode), which routes brain access
- * through the OAuth client minted for it. Deliberately NOT an mcpServers/
+ * Paste-ready OpenClaw wiring block — HONEST v1. The scoped path this client
+ * serves is a thin gbrain install on the OpenClaw machine (`gbrain init` in
+ * mcp-only mode), which routes brain access through the OAuth client minted
+ * for it; OpenClaw's own remote MCP client signs in with its own OAuth login. Deliberately NOT an mcpServers/
  * stdio JSON config: the stdio config in docs/mcp/OPENCLAW.md grants FULL
  * local DB access and does not use this client.
  */
@@ -235,7 +281,8 @@ export function openclawThinClientBlock(opts: {
     init,
     '',
     'Your OpenClaw reaches the brain through the scoped gbrain CLI (search/query/recall/put);',
-    "native remote MCP isn't supported yet — the stdio config in docs/mcp/OPENCLAW.md grants",
+    "OpenClaw's native remote MCP client (streamable HTTP + `openclaw mcp login`) is the other scoped",
+    'route, with its own OAuth login (docs/mcp/OPENCLAW.md); the stdio config in docs/mcp/OPENCLAW.md grants',
     'FULL local DB access and does not use this client.',
   ].join('\n');
 }

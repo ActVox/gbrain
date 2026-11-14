@@ -36,11 +36,12 @@ import { jsonGuardActive, jsonRequested, setCliExitVerdict, writeJsonDocument } 
 import { BUDGET_STOP_EXIT_CODE } from '../core/exit-codes.ts';
 import { opError, type OperationError } from '../core/ops/contract.ts';
 import { usageError, writeCliError, writeCliRefusal } from '../cli/cli-error.ts';
+import { printHelpText } from '../cli/help/render.ts';
 import { cliRenderContext, renderAction, shellQuote, type Action } from '../core/agent-output.ts';
 import { codeEntry } from '../core/error-catalogue.ts';
 import { fetchSource } from '../core/sources-load.ts';
 import { existsSync } from 'fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 
 interface DreamArgs {
   json: boolean;
@@ -350,7 +351,7 @@ async function resolveBrainDir(
   // source has a checkout on disk, use it so its filesystem phases can run.
   if (engine && resolvedSourceId) {
     const src = await fetchSource(engine, resolvedSourceId);
-    if (src?.local_path && existsSync(src.local_path)) {
+    if (src?.local_path && isAbsolute(src.local_path) && existsSync(src.local_path)) {
       return resolve(src.local_path);
     }
     // Explicit --source whose checkout isn't on disk → DB-only (skip FS phases).
@@ -364,7 +365,8 @@ async function resolveBrainDir(
 
   if (engine) {
     const configured = await engine.getConfig('sync.repo_path');
-    if (configured && existsSync(configured)) {
+    // #7630: a relative stored path names whatever directory gbrain runs from, so it is no checkout.
+    if (configured && isAbsolute(configured) && existsSync(configured)) {
       return resolve(configured);
     }
   }
@@ -374,8 +376,8 @@ async function resolveBrainDir(
   return null;
 }
 
-function printHelp() {
-  console.log(`Usage: gbrain dream [options]
+function printHelp(args: string[]): Promise<void> {
+  return printHelpText('dream', `Usage: gbrain dream [options]
        gbrain dream retriage [flags]   (see: gbrain dream retriage --help)
        gbrain dream reset-key <key> | --list   (see: gbrain dream reset-key --help)
 
@@ -490,7 +492,7 @@ Configure synthesize:
 Related:
   gbrain autopilot --install            # continuous maintenance as a daemon
   gbrain autopilot                      # same maintenance cycle, scheduled
-`);
+`, args);
 }
 
 // ─── Human-friendly report printing ────────────────────────────────
@@ -755,7 +757,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   // ALWAYS prints help and exits 0, never reaching the engine-null gate
   // below. If you reorder this, test/dream.test.ts ("--help --source whatever") fails.
   if (opts.help) {
-    printHelp();
+    await printHelp(args);
     return;
   }
 
@@ -913,16 +915,21 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   // 'partial' cycles still exit 0.
   const failedPhases = report.phases.filter(p => p.status === 'fail' || p.details?.contained === true).map(p => p.phase);
   const failed = report.status === 'failed' || failedPhases.length > 0;
+  // #7646: a phase that needs the user (sync_anchor_relative) fails again on every rerun; its ask_user fix leads instead.
+  const askPhase = report.phases.find(p => failedPhases.includes(p.phase) && p.fix?.next === 'ask_user');
   if (!opts.json) printHuman(report);
   else if (!failed || !jsonGuardActive()) await writeJsonDocument(JSON.stringify(report, null, 2));
   else {
     // D2: under the --json guard a failed cycle is one envelope leading with the CycleReport keys.
     writeCliError(opError('cycle_failed', `The dream cycle ${report.status === 'failed' ? 'failed' : 'had failing phases'}${failedPhases.length ? ` (${failedPhases.join(', ')})` : ''}.`,
-      `Read phases[].error for the cause, fix it, then rerun the phase: gbrain dream --phase ${failedPhases[0] ?? '<phase>'}`),
-    'dream', { json: true, stderr: false, legacy: { ...report } });
+      askPhase ? `The ${askPhase.phase} phase needs the user: ${askPhase.summary} Follow phases[].fix before rerunning.`
+        : `Read phases[].error for the cause, fix it, then rerun the phase: gbrain dream --phase ${failedPhases[0] ?? '<phase>'}`),
+    'dream', { json: true, stderr: false, legacy: { ...report }, ...(askPhase ? { extra: { fix: askPhase.fix } } : {}) });
   }
   if (failed && !opts.json && failedPhases.length > 0) {
-    console.error(`Dream failed: ${failedPhases.length} phase(s) failed (${failedPhases.join(', ')}); see the phase errors above. After fixing the cause, re-run one with: gbrain dream --phase ${failedPhases[0]}`);
+    console.error(askPhase
+      ? `Dream failed: the ${askPhase.phase} phase needs the user before it can run: ${askPhase.fix?.user_message ?? askPhase.summary}`
+      : `Dream failed: ${failedPhases.length} phase(s) failed (${failedPhases.join(', ')}); see the phase errors above. After fixing the cause, re-run one with: gbrain dream --phase ${failedPhases[0]}`);
   }
   if (failed) process.exit(1);
 

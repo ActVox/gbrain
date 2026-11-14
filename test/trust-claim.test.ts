@@ -33,6 +33,7 @@ import { explainTrust } from '../src/core/trust/review.ts';
 import { TRUST_TIER_RANK } from '../src/core/trust/tier.ts';
 import { runTrustScan } from '../src/core/eligibility/scan.ts';
 import { runTrustClaimSources } from '../src/commands/trust-claim.ts';
+import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { runSetTrust } from '../src/commands/sources-trust.ts';
 import { trustSourcesUnclaimedEntry } from '../src/commands/doctor/checks/trust-sources-unclaimed.ts';
 import { trustScanEntry } from '../src/commands/doctor/checks/trust-scan.ts';
@@ -55,7 +56,7 @@ beforeAll(async () => {
   fresh = empty;
 }, 120_000);
 afterAll(async () => { await engine.disconnect(); await fresh.disconnect(); });
-afterEach(() => { __setConfirmationIoForTests(null); process.exitCode = 0; });
+afterEach(() => { __setConfirmationIoForTests(null); process.exitCode = 0; _resetCliExitVerdictForTests(); });
 
 const cli = { transport: 'cli' as const, isCallable: () => false, preapproved: () => true };
 const render = (fix: unknown) => renderAction(fix as Action, cli);
@@ -141,6 +142,9 @@ describe('trust claim-sources', () => {
       { dream_generated: true }, { dream_generated: 'true' }, { dream_generated: false }, { provenance: 'manual', source_kind: 'inbox-folder', trust_tier: 'tool_observed' },
       { extracted_by: 'extract_atoms-v0.41.2.1' }, { extracted_by: ' extract_atoms-v0.42 ' }, { extracted_by: 'extractXatoms-v1' },
       { extracted_by: 'gpt-extractor' }, { extracted_by: 5 }, { extracted_by: 'extract_atoms-v0.41.2.1', trust_tier: 'external_untrusted' },
+      { source_kind: '\u00a0webhook\u00a0' }, { captured_via: '\u2003connector:gmail\u000b' }, { ingested_via: 'capture-cli\u3000' },
+      { transcript_import: { harness: '\ufeffclaude-code\u2028' } }, { source_url: '\u00a0', clipper: 'x' }, { source_url: 'https://x', clipped_at: '\u000c' },
+      { provenance: 'auto-extracted\u00a0' }, { extracted_by: '\u2009extract_atoms-v0.42' },
     ];
     const sql = `SELECT LEAST(${frontmatterTrustCapsSql('v.fm').join(', ')}) AS r FROM (SELECT $1::text::jsonb AS fm) v`;
     for (const fm of samples) {

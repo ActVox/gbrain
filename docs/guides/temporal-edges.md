@@ -79,7 +79,15 @@ the page states:
   a dated start stays open until a dated end, whatever the prose says. On one page, a
   present-tense mention wins ("previously at Acme, now runs Acme's EU team" stays live).
 - **Manual edges:** `add_link` accepts `valid_from` and `valid_until` (YYYY-MM-DD).
-  Re-run `add_link` with `valid_until` to record that a relationship ended.
+  Re-run `add_link` with `valid_until` to record that a relationship ended. On a
+  managed brain the edge and its dates are a row of the from page's `## Links` table
+  (`<!--- gbrain:links:begin -->`); editing or deleting that row edits or removes the edge.
+  Each row (target, type, source) keeps its own dates: if a rewrite drops the section,
+  the next `add_link` puts every kept row back with its own dates, and `remove_link`
+  with a `link_source` removes that row's dates only. Dates stored before rows kept
+  their source have none; when such dates sit on a target and type with several rows and the section
+  is gone, `add_link` and `remove_link` refuse `link_dates_unattributed` and ask you to
+  add the section back with `edit_page`, one row per source with its own dates.
 
 Dated evidence beats undated evidence from any page: a closure on a person's timeline
 ends the relationship even if the company page still lists them under `key_people`.

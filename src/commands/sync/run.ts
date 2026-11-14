@@ -3,7 +3,7 @@ import { existsSync } from 'fs';
 import { getCompanyBrainProfile } from '../../core/company-brain/profile.ts';
 import { slog, withSourcePrefix } from '../../core/console-prefix.ts';
 import type { BrainEngine } from '../../core/engine.ts';
-import { msysToNativePath } from '../../core/path-confine.ts';
+import { isHostAbsolutePath, msysToNativePath } from '../../core/path-confine.ts';
 import { syncFailureJsonFields, readManagedSyncFailures } from '../../core/persistence/sync-failures.ts';
 import { syncHoldJsonFields } from '../../core/persistence/sync-holds.ts';
 import { printHoldNotes } from '../sync-diagnostics.ts';
@@ -19,6 +19,7 @@ import {
 import type { SyncEmbedBackfillOutcome } from '../../core/sync-embed-backfill.ts';
 import { runBreakLock } from '../../core/sync-lock.ts';
 import { automaticSyncSkip, isSyncDisabledConfig } from '../../core/sync-policy.ts';
+import { assertSyncAnchorAbsolute, syncAnchorRelativeError } from '../../core/sync-applicability.ts';
 import { composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { acknowledgeFailures, unacknowledgedSyncFailures } from '../../core/sync.ts';
 import type { SyncResult, SyncOpts } from '../sync.ts';
@@ -40,10 +41,13 @@ import { runSyncTrigger } from './trigger.ts';
 import { drainJsonFields, formatDrainSummary, syncOutcome } from '../../core/persistence/sync-drain.ts';
 import { readManagedMode } from '../../core/persistence/ownership.ts';
 import { writeJsonDocument } from '../../core/cli-force-exit.ts';
-import { cliRenderContext, renderNotice } from '../../core/agent-output.ts';
+import { cliRenderContext, renderNotice, type Notice } from '../../core/agent-output.ts';
 
 /** D2: under the `--json` guard only writeStdoutFinal reaches fd 1 (writeJsonDocument). */
 const emitJson = (text: string): void => { void writeJsonDocument(text); };
+
+/** #7630: a stored root that is not absolute names the cwd, so post-sync .gitignore upkeep skips it. */
+const absoluteStoredPath = (path: string | null): string | null => path && isHostAbsolutePath(path) ? path : null;
 
 type SyncAllSourceRow = { id: string; name: string; local_path: string | null; config: Record<string, unknown>; last_commit: string | null; chunker_version: string | null };
 
@@ -54,7 +58,19 @@ type PerSourceResult = {
   status: 'ok' | 'error' | 'skipped_missing_path';
   result?: SyncResult;
   error?: string;
+  /** #7646: a refusal's agent contract (code, why, fix), so an --all consumer gets what a single-source sync exits 3 with. */
+  contract?: Record<string, unknown>;
   localPath?: string;
+};
+
+/** A sync result's own notices: a degraded tail, the change-reason scan, and ignored privacy labels (GST-2462). */
+function runNotices(result: SyncResult): Notice[] {
+  return [...(result.tail?.notice ? [result.tail.notice] : []), ...(result.reason_notices ?? []), ...(result.privacy_label_notice ? [result.privacy_label_notice] : [])];
+}
+const failureContract = (error: unknown): Record<string, unknown> | undefined => {
+  if (!(error instanceof Error) || error.name !== 'OperationError') return undefined;
+  const { code, suggestion, why, fix } = (error as Error & { toJSON(): Record<string, unknown> }).toJSON();
+  return { code, ...(suggestion ? { suggestion } : {}), ...(why ? { why } : {}), ...(fix ? { fix } : {}) };
 };
 
 /**
@@ -65,20 +81,22 @@ async function syncCapacityNotices(engine: BrainEngine, json: boolean, result?: 
   const { capacityNotices, CAPACITY_READ_WAIT_MS } = await import('../../core/persistence/capacity-snapshot.ts');
   // #6712 PR 2 (L5): a degraded post-checkpoint tail rides the same notices. #6803 C4: the snapshot wait is bounded.
   const capacity = await capacityNotices(engine, { throttle: true, deadlineAt: Date.now() + CAPACITY_READ_WAIT_MS }).catch(() => []);
-  const notices = [...(result?.tail?.notice ? [result.tail.notice] : []), ...capacity].map(notice => renderNotice(notice, cliRenderContext()));
+  const notices = [...(result ? runNotices(result) : []), ...capacity].map(notice => renderNotice(notice, cliRenderContext()));
   if (!json) for (const notice of notices) process.stderr.write(`[gbrain notice ${notice.code}] ${notice.why}\n`);
   return notices.length ? { notices } : {};
 }
 
 /** #6712 PR 2 (L5): one source's post-checkpoint tail in a `sync --all` receipt: its report and its rendered degraded notice. */
 function syncTailJsonFields(result: SyncResult): { tail?: Omit<NonNullable<SyncResult['tail']>, 'notice'>; notices?: unknown[] } {
-  if (!result.tail) return {};
-  const { notice, ...tail } = result.tail;
-  return { tail, ...(notice ? { notices: [renderNotice(notice, cliRenderContext())] } : {}) };
+  const notices = runNotices(result).map(n => renderNotice(n, cliRenderContext()));
+  const rendered = notices.length ? { notices } : {};
+  if (!result.tail) return rendered;
+  const { notice: _notice, ...tail } = result.tail;
+  return { tail, ...rendered };
 }
 
 function printTailNotice(result: SyncResult): void {
-  if (result.tail?.notice) process.stderr.write(`[gbrain notice ${result.tail.notice.code}] ${result.tail.notice.why}\n`);
+  for (const notice of runNotices(result)) process.stderr.write(`[gbrain notice ${notice.code}] ${notice.why}\n`);
 }
 
 export async function runSyncInner(engine: BrainEngine, args: string[]) {
@@ -469,6 +487,8 @@ async function runSyncAll(
   const companyPolicies = new Map<string, Awaited<ReturnType<typeof getCompanyBrainProfile>>>();
   const policyFailures = new Map<string, unknown>();
   for (const source of runnableSources) {
+    // #7630: a relative local_path fails its source before the cost gate walks the directory.
+    if (source.local_path && !isHostAbsolutePath(source.local_path)) { policyFailures.set(source.id, syncAnchorRelativeError(source.id, source.local_path)); continue; }
     try { companyPolicies.set(source.id, await getCompanyBrainProfile(engine, source.id)); }
     catch (error) { policyFailures.set(source.id, error); }
   }
@@ -708,6 +728,7 @@ export async function dispatchSyncAll(input: {
           sourceName: src.name,
           status: 'error',
           error: msg,
+          contract: failureContract(r.reason),
         });
       }
     }
@@ -732,6 +753,7 @@ export async function dispatchSyncAll(input: {
           sourceName: src.name,
           status: 'error',
           error: msg,
+          contract: failureContract(e),
         });
       }
     }
@@ -784,6 +806,7 @@ function emitSyncAllEnvelope(input: {
         ...(r.result.type_warnings ? { type_warnings: r.result.type_warnings } : {}),
       } : {}),
       ...(r.error ? { error: r.error } : {}),
+      ...r.contract,
       ...(embedBackfillBySource.has(r.sourceId)
         ? { embed_backfill: embedBackfillBySource.get(r.sourceId) }
         : {}),
@@ -813,6 +836,8 @@ async function runSingleSourceSync(
     excludePatterns, includeHiddenPatterns, concurrency, timeoutSeconds,
   } = flags;
   const { sourceId, companyPolicy, noEmbed, resumeCommand, args } = input;
+  // #7630: before the cost gate walks the directory.
+  await assertSyncAnchorAbsolute(engine, { sourceId, repoPath });
   // v0.41.13.0 (T6) — single-source --timeout: same per-source AbortController
   // shape as the --all runOne closure. Timer scoped to this CLI invocation;
   // try/finally clears it after performSync resolves (or throws).
@@ -858,7 +883,7 @@ async function runSingleSourceSync(
     if (gateRows.length > 0) {
       const gate = await resolveSingleSyncEmbedPlan(engine, {
         sourceId,
-        local_path: gateRows[0].local_path ?? repoPath ?? null,
+        local_path: absoluteStoredPath(gateRows[0].local_path) ?? repoPath ?? null,
         config: gateRows[0].config ?? {},
         last_commit: gateRows[0].last_commit,
         chunker_version: gateRows[0].chunker_version,
@@ -961,7 +986,7 @@ async function runSingleSourceSync(
       result.status !== 'blocked_by_failures' &&
       result.status !== 'partial'
     ) {
-      const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+      const effectiveRepoPath = opts.repoPath ?? absoluteStoredPath(await getDefaultSourcePath(engine));
       if (effectiveRepoPath && !companyPolicy) {
         manageGitignoreAtGitRoot(effectiveRepoPath, engine.kind);
       }
@@ -1028,7 +1053,7 @@ async function runSingleSourceSync(
         result.status !== 'blocked_by_failures' &&
         result.status !== 'partial'
       ) {
-        const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
+        const effectiveRepoPath = opts.repoPath ?? absoluteStoredPath(await getDefaultSourcePath(engine));
         if (effectiveRepoPath) {
           manageGitignoreAtGitRoot(effectiveRepoPath, engine.kind);
         }

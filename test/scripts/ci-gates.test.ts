@@ -46,8 +46,9 @@ describe('CI execution evidence', () => {
       expect(unit.jobs[name].if).toBe("${{ github.event_name != 'workflow_dispatch' || (inputs.native_only != true && inputs.race_hunt != true && !inputs.stress_files && !inputs.stress_base) }}");
     }
     expect(e2e.jobs.tier2.needs).toBe('jsonb-parity');
-    // No event gating: the only condition is the repository-wide paid-lane switch (#5903).
-    expect(e2e.jobs.tier2.if).toBe("format('{0}', vars.GBRAIN_PAID_LANES) != '0'");
+    // Keyed Tier 2 runs on the nightly (and a full_corpus dispatch) only, under the
+    // repository-wide paid-lane switch (#5903; GBRA-135 L6).
+    expect(e2e.jobs.tier2.if).toBe("format('{0}', vars.GBRAIN_PAID_LANES) != '0' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full_corpus))");
   });
 
   test('the verify job runs `bun run verify`, which dispatches through run-verify-parallel.sh', () => {
@@ -56,13 +57,14 @@ describe('CI execution evidence', () => {
     expect(pkg.scripts.verify).toContain('scripts/run-verify-parallel.sh');
   });
 
-  test('typecheck runs as its own job beside verify, under a measured step timeout, saves its state on every outcome and gates test-status', () => {
+  test('typecheck runs as its own job beside verify, under a measured step timeout, saves its state whenever tsc finished and gates test-status', () => {
     const job = unit.jobs.typecheck;
-    const tsc = job.steps.find(step => step.run === 'bun run typecheck')!;
-    expect(tsc['timeout-minutes']).toBe(6);
+    const tsc = job.steps.find(step => step.run === 'bash scripts/ci-typecheck.sh bun run typecheck')! as Job['steps'][number] & { id?: string };
+    expect(tsc.id).toBe('tsc');
+    expect(tsc['timeout-minutes']).toBe(12);
     const restore = job.steps.find(step => step.uses?.startsWith('actions/cache/restore@') && step.with?.path === 'node_modules/.cache/gbrain-typecheck.tsbuildinfo')!;
     const save = job.steps.find(step => step.uses?.startsWith('actions/cache/save@'))!;
-    expect(save.if).toBe('always()');
+    expect(save.if).toBe("always() && steps.tsc.outputs.state_written == 'true'");
     expect(save.with).toEqual({ path: restore.with!.path, key: restore.with!.key });
     expect(job.steps.indexOf(save)).toBeGreaterThan(job.steps.indexOf(tsc));
     const verify = unit.jobs.verify.steps.find(step => step.run === 'bun run verify')!;
@@ -76,17 +78,19 @@ describe('CI execution evidence', () => {
     expect(aggregate(unit, 'test-status', 'push', { typecheck: 'failure' })).toBe(1);
   });
 
-  test('macOS 26 validation typechecks in its own job, under a measured step timeout, saves its state on every outcome, and its verify skips tsc (#6056)', () => {
+  test('macOS 26 validation typechecks in its own job, under a measured step timeout, saves its state whenever tsc finished, and its verify skips tsc (#6056)', () => {
     const mac = loadWorkflow('macos-validation.yml') as Workflow & { jobs: Record<string, Job & { 'runs-on'?: string }> };
     const job = mac.jobs.typecheck;
-    expect(job['runs-on']).toBe('macos-26');
+    expect(job['runs-on']).toBe('macos-26-intel');
     expect(job.if).toBe(mac.jobs['macos-26'].if);
-    const tsc = job.steps.find(step => step.run === 'bun run typecheck')!;
-    expect(tsc['timeout-minutes']).toBe(15);
+    const tsc = job.steps.find(step => step.run === 'bash scripts/ci-typecheck.sh bun run typecheck')! as Job['steps'][number] & { id?: string };
+    expect(tsc.id).toBe('tsc');
+    expect(tsc['timeout-minutes']).toBe(30);
+    expect(tsc.env?.GBRAIN_TYPECHECK_ATTEMPT_SECONDS).toBe('900');
     const restore = job.steps.find(step => step.uses?.startsWith('actions/cache/restore@') && step.with?.path === 'node_modules/.cache/gbrain-typecheck.tsbuildinfo')!;
     expect(restore.with!.key).toBe(unit.jobs.typecheck.steps.find(step => step.uses?.startsWith('actions/cache/restore@') && step.with?.path === restore.with!.path)!.with!.key);
     const save = job.steps.find(step => step.uses?.startsWith('actions/cache/save@'))!;
-    expect(save.if).toBe('always()');
+    expect(save.if).toBe("always() && steps.tsc.outputs.state_written == 'true'");
     expect(save.with).toEqual({ path: restore.with!.path, key: restore.with!.key });
     expect(job.steps.indexOf(restore)).toBeLessThan(job.steps.indexOf(tsc));
     expect(job.steps.indexOf(save)).toBeGreaterThan(job.steps.indexOf(tsc));
@@ -114,7 +118,7 @@ describe('CI execution evidence', () => {
     expect(e2e.jobs['e2e-status'].if).toBe("${{ needs.prepare-e2e.outputs.reuse != 'true' && always() }}");
     const needs = e2e.jobs['e2e-status'].needs as string[];
     const nightly = ['coverage-full-unit', 'coverage-full-serial', 'coverage-full-slow', 'coverage-full-e2e'];
-    expect(needs).toEqual(['jsonb-parity', 'tier1', 'tier1-backend-matrix', 'postgres15-compat', 'tier2', 'prepare-e2e', 'selected-e2e', ...nightly]);
+    expect(needs).toEqual(['jsonb-parity', 'tier1', 'tier1-graduation', 'tier1-backend-matrix', 'postgres15-compat', 'tier2', 'prepare-e2e', 'selected-e2e', ...nightly]);
     for (const event of ['pull_request', 'push', 'workflow_dispatch']) {
       expect(aggregate(e2e, 'e2e-status', event, Object.fromEntries(nightly.map(job => [job, 'skipped'])))).toBe(0);
     }

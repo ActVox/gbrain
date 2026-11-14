@@ -21,7 +21,7 @@ import { readPageBodyPolicy } from '../page-body/limits.ts';
 import { importStreamedMarkdownFile, type StreamedPreparedImport } from '../page-body/streamed-import.ts';
 import { assertPageRevision } from '../page-state/types.ts';
 import { contentRefusalError, PAGE_OVER_LIMIT_SUGGESTION } from '../import-screen.ts';
-import { pageGateTrust, pageWriteTrust, stampPageTrustMarker, storedPageTier } from '../trust/page-write.ts';
+import { pageGateTrust, stampPageTrustMarker, storedPageTier } from '../trust/page-write.ts';
 import type { WriteTrust } from '../trust/tier.ts';
 import { sizeStateField } from '../page-embedding-budget.ts';
 import { coreMarking } from '../core-memory.ts';
@@ -34,12 +34,14 @@ import type { PageSnapshot } from '../page-state/types.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { bodyStagingGoneError } from '../engine-sql/page-body.ts';
 import { ownerSourceGateInput, writeTrustOfGate } from './attribution.ts';
-import { pageDatabaseOnlyPublication } from './page-prepare.ts';
+import { keepStoredProvenance, pageDatabaseOnlyPublication, provenanceWriteTrust } from './page-prepare.ts';
 import { pageIdentityError } from './page-identity.ts';
 import { remoteLinkHint } from './page-advisories.ts';
 import { stagedUploadParts, stagedUploadWork, type StagingBodyRef } from './page-upload.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
+import { assertPrivateRequestKept, privateRequestGuarded, readPrivateRequest } from './visibility-request.ts';
+import { assertLabelledOnlyCreate, defaultSourceMemberWriter, defaultSourceWriterIsOwner, defaultSourceWriterReaders } from './page-visibility.ts';
 
 const text = (value: unknown) => (typeof value === 'string' ? value : null);
 
@@ -91,6 +93,8 @@ export async function prepareStreamedUpload(engine: BrainEngine, row: WriteReque
   const remote = row.authority.remote === true;
   if (remote && snapshot && !snapshot.page.deleted_at) await assertNothingHiddenDropped(engine, row, snapshot, p);
   const storedTier = remote && snapshot ? await storedPageTier(engine, row.source_id, row.slug) : null;
+  const defaultSourceWriter = await defaultSourceMemberWriter(engine, row.authority);
+  const defaultSourceOwner = await defaultSourceWriterIsOwner(engine, defaultSourceWriter);
   let trust: WriteTrust | undefined;
   const dir = await mkdtemp(join(tmpdir(), 'gbrain-upload-'));
   let ready: StreamedPreparedImport | undefined;
@@ -111,11 +115,15 @@ export async function prepareStreamedUpload(engine: BrainEngine, row: WriteReque
       content: { provenance: { source_kind: text(p.source_kind), source_uri: text(p.source_uri), ingested_via: text(p.ingested_via) },
         ...(remote ? { writer: {
           gate: async (frontmatter: Record<string, unknown>) => {
-            trust = pageWriteTrust(row, frontmatter);
+            trust = provenanceWriteTrust(row, frontmatter, snapshot?.page.frontmatter);
             const gate = pageGateTrust(row, trust, storedTier);
             return gate ? { tier: gate.tier, origin: { channel: gate.origin?.channel ?? row.operation }, requestId: null } : ownerSourceGateInput(engine, row.source_id, frontmatter);
           },
-          stamp: (frontmatter: Record<string, unknown>) => stampPageTrustMarker(row, frontmatter, trust, storedTier),
+          stamp: (frontmatter: Record<string, unknown>) => {
+            keepStoredProvenance(frontmatter, snapshot?.page.frontmatter);
+            stampPageTrustMarker(row, frontmatter, trust, storedTier, snapshot?.page.frontmatter);
+            defaultSourceWriterReaders(defaultSourceWriter, frontmatter, snapshot?.page, defaultSourceOwner);
+          },
         } } : {}) },
       coordinated: { snapshot, sha256: ref.sha256, slug: row.slug, prepare: async value => { ready = value; return value.result; },
         owner: { kind: 'put', principalKind: row.principal_kind, principalId: row.principal_id, baseRevision: snapshot?.revision ?? null } } }, stat, policy)
@@ -129,6 +137,9 @@ export async function prepareStreamedUpload(engine: BrainEngine, row: WriteReque
     throw opError('invalid_params', result.error ?? 'The uploaded page could not be prepared.', `Page ${row.slug} was not written. Fix what the message names, then upload it again with a new request_id.`);
   }
   const prepared: StreamedPreparedImport = ready;
+  await assertLabelledOnlyCreate(engine, row.authority, row.slug, snapshot?.page, prepared.frontmatter);
+  const privateRequest = privateRequestGuarded(row.operation, p.kind) ? readPrivateRequest('', () => prepared.frontmatter) : null;
+  if (privateRequest) assertPrivateRequestKept(row, privateRequest.frontmatter);
   if (coreMarking(snapshot?.page.frontmatter).core || coreMarking(prepared.frontmatter).core) {
     throw opError('page_body_segmented', `Page ${row.slug} is (or would become) always-loaded core memory, whose budget renders the page whole, and this upload is over ${PAGE_MAX_BYTES} bytes. Nothing was written.`,
       'Write a core page within the single-string ceiling, or drop always_load from its frontmatter.');

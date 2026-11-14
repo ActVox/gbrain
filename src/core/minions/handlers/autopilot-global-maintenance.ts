@@ -1,6 +1,7 @@
 /**
  * `autopilot-global-maintenance` Minion job handler (built-in; registered by registerBuiltinHandlers in src/commands/jobs.ts).
  */
+import { isAbsolute } from 'node:path';
 import type { BrainEngine } from '../../engine.ts';
 import type { MinionHandler } from '../types.ts';
 import type { CycleReport, PhaseResult } from '../../cycle.ts';
@@ -175,9 +176,11 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine, deps:
     const cycle = await import('../../cycle.ts');
     const { MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } = cycle;
     const runCycle = deps.runCycle ?? cycle.runCycle;
-    const repoPath: string | null = typeof job.data.repoPath === 'string'
+    // #7630: a relative path names whatever directory the worker runs from, so it is no checkout.
+    const configured: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
       : (await engine.getConfig('sync.repo_path')) ?? null;
+    const repoPath = configured && isAbsolute(configured) ? configured : null;
 
     // #4250: queued maintenance payloads are machine-authored too — intersect
     // with MAINTENANCE_PHASES so a stale (or remote-submitted) payload can't
@@ -419,6 +422,15 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine, deps:
         stamped = true;
       } catch (e) {
         console.warn(`[autopilot-global-maintenance] failed to stamp last_global_at: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    // #7854: the verdict `autopilot --status` reads is otherwise rewritten only on the daemon's next full-cycle tick.
+    if (stamped) {
+      try {
+        const { recordGlobalMaintenanceStallStatus } = await import('../global-maintenance-stall.ts');
+        await recordGlobalMaintenanceStallStatus(engine);
+      } catch (e) {
+        console.warn(`[autopilot-global-maintenance] failed to refresh the status verdict: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     const streaks = Object.entries(progress.failures).map(([phase, s]) => ({ phase, ...s, fix: phaseStreakFix(phase, s) }));

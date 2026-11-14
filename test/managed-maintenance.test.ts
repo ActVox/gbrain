@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ensureCorpusSpoolDir, sessionCorpusFileName } from '../src/core/context/corpus-segments.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runPhaseConsolidate } from '../src/core/cycle/phases/consolidate.ts';
@@ -16,7 +17,7 @@ import { disposePersistenceConsumer, startPersistenceConsumer } from '../src/cor
 import { claimNextWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
 import { localHostId, revokeLocalWriter } from '../src/core/persistence/identity.ts';
-import { submitForgetMutation } from '../src/core/persistence/memory-mutations.ts';
+import { legacyForget } from './helpers/legacy-forget.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { readJournalLimits } from '../src/core/persistence/limits.ts';
@@ -273,7 +274,7 @@ for (const change of ['derived', 'semantic'] as const) {
       const lock = (await acquireWorktree((await getWorktreeBinding(engine, sourceId))!, 5000))!;
       expect(lock).not.toBeNull();
       try {
-        await expect(pendingWait(() => runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 }))).rejects.toMatchObject({ code: 'write_pending' });
+        expect((await pendingWait(() => runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 }))).details).toMatchObject({ buckets_deferred: 1, facts_consolidated: 0 });
         await disposePersistenceConsumer(engine);
       } finally { await lock.release(); }
       const row = (await claimNextWrite(engine, localHostId()))!;
@@ -331,7 +332,7 @@ test('paused owner retains an admitted consolidation and a fresh process publish
     const lock = (await acquireWorktree(binding, 5000))!;
     expect(lock).not.toBeNull();
     try {
-      await expect(pendingWait(() => runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 }))).rejects.toMatchObject({ code: 'write_pending' });
+      expect((await pendingWait(() => runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 }))).details).toMatchObject({ buckets_deferred: 1, facts_consolidated: 0 });
       await engine.executeRaw("UPDATE persistence_worktrees SET state='draining' WHERE id=$1::uuid", [binding.worktree_id]);
       await disposePersistenceConsumer(engine);
       expect(await engine.executeRaw('SELECT id FROM facts WHERE source_id=$1 AND consolidated_at IS NOT NULL', [sourceId])).toHaveLength(0);
@@ -412,7 +413,7 @@ for (const failure of ['commit', 'withdrawal'] as const) {
       const lock = (await acquireWorktree(binding, 5000))!;
       expect(lock).not.toBeNull();
       try {
-        await expect(pendingWait(() => runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 }))).rejects.toMatchObject({ code: 'write_pending' });
+        expect((await pendingWait(() => runPhaseConsolidate(engine, { sourceId, minOldestAgeMs: 0 }))).details).toMatchObject({ buckets_deferred: 1, facts_consolidated: 0 });
         await disposePersistenceConsumer(engine);
       } finally { await lock.release(); }
       const row = (await claimNextWrite(engine, localHostId()))!;
@@ -420,8 +421,10 @@ for (const failure of ['commit', 'withdrawal'] as const) {
       const prepared = await prepareMaintenanceMutation(engine, row, { engine: engine.kind, embedding_disabled: true });
       if (failure === 'withdrawal') {
         const [fact] = await engine.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 ORDER BY id LIMIT 1', [sourceId]);
-        await submitForgetMutation({ engine, sourceId, remote: false, config: { engine: engine.kind }, dryRun: false,
-          logger: { info() {}, warn() {}, error() {} } }, 'forget', { id: Number(fact.id), request_id: randomUUID() });
+        // A current forget queues behind the claimed request on its root; a gbrain before G4 sharing the brain still commits
+        // its withdrawal database-first, at any moment (test/helpers/legacy-forget.ts).
+        await legacyForget({ engine, sourceId, remote: false, config: { engine: engine.kind }, dryRun: false,
+          logger: { info() {}, warn() {}, error() {} } }, Number(fact.id));
       }
       const outcome = await publishMutation(engine, row, prepared, localHostId(), { boundary: async name => {
         if (failure === 'commit' && name === 'before_commit') throw new Error('Injected fixture commit failure');
@@ -438,7 +441,7 @@ for (const failure of ['commit', 'withdrawal'] as const) {
 test('managed synthesis drives real children and publishes repaired provenance plus summary without repeated model calls', async () => {
   await fixture(async (engine, sourceId, root) => {
     await seed(engine, sourceId);
-    const transcript = join(root, '2026-09-20-session.txt');
+    const transcript = join(ensureCorpusSpoolDir(root), sessionCorpusFileName('2026-09-20-session', sourceId));
     const quote = 'we charge for durability because reliable memories should survive every tool';
     writeFileSync(transcript, `User: ${quote}.\n${'Assistant: Discuss the long term roadmap.\n'.repeat(15)}`);
     await engine.setConfig('dream.synthesize.enabled', 'true');

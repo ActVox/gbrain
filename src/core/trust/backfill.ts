@@ -46,6 +46,7 @@ import { appendBulkRetier } from '../belief/retier.ts';
 import { markBeliefCommits } from '../belief/append.ts';
 import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { readManagedMode } from '../persistence/managed-mode.ts';
+import { edgeTrimSql } from '../edge-whitespace.ts';
 import { EXTRACT_ATOMS_EXTRACTOR_PREFIX, frontmatterTrustCapsSql } from './channel.ts';
 import { claimedSourceSql, legacyRowSql, notConnectorSourceSql, readLegacyCeilings, type LegacyCeilings } from './claim-state.ts';
 import { TRUST_BACKFILL_COMPLETED_KEY, type TrustTable } from './schema.ts';
@@ -151,7 +152,7 @@ function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilin
       WHEN ${kind} LIKE 'managed\\_sync\\_%' OR ${kind} IN ('managed_file_import','canonical_reconcile','managed_file_repair') THEN ${rank('operator_curated')}
       WHEN ${kind} LIKE 'managed\\_facts\\_%' OR ${kind} LIKE 'managed\\_atom\\_%' OR ${kind} LIKE 'managed\\_maintenance\\_%' THEN ${rank('agent_written')}
       WHEN ${r}.intent IS NOT NULL AND ${kind} IS NULL AND ${r}.operation IN ('put_page','capture','remember','edit_page','append_page','delete_page','restore_page',
-        'revert_version','add_tag','remove_tag','add_timeline_entry','takes_add','takes_update','takes_supersede','takes_resolve','takes_remove') THEN ${rank('agent_written')}
+        'revert_version','add_tag','remove_tag','add_timeline_entry','add_link','remove_link','takes_add','takes_update','takes_supersede','takes_resolve','takes_remove') THEN ${rank('agent_written')}
       END`;
   };
   const requestJoin = (table: string, column: string, alias: string, row: string) =>
@@ -168,7 +169,7 @@ function classifier(cols: Columns, assumeClaimed: readonly string[] = [], ceilin
       signals.add('frontmatter_provenance');
       terms.push(`CASE WHEN ${p}.frontmatter ? 'transcript_import' OR ${p}.frontmatter->>'provenance' = 'auto-extracted'
         OR ${p}.frontmatter->>'dream_generated' = 'true'
-        OR (CASE WHEN jsonb_typeof(${p}.frontmatter->'extracted_by') = 'string' THEN btrim(${p}.frontmatter->>'extracted_by', E' \\t\\n\\r') END)
+        OR (CASE WHEN jsonb_typeof(${p}.frontmatter->'extracted_by') = 'string' THEN ${edgeTrimSql(`${p}.frontmatter->>'extracted_by'`)} END)
           LIKE '${EXTRACT_ATOMS_EXTRACTOR_PREFIX.replace(/_/g, '\\_')}%' THEN ${rank('agent_written')} END`);
     }
     if (cols.has('pages', 'revision_write_request_id')) { const q = request(r); if (q) terms.push(q); }

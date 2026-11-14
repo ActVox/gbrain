@@ -166,8 +166,10 @@ or a third of the remaining time. Pause both with
 
 The two new phases consolidate yesterday's conversations into long-term memory:
 
-**Synthesize phase (two-stage cascade):** reads transcripts from
-`dream.synthesize.session_corpus_dir`, then triages before it spends: a cheap
+**Synthesize phase (two-stage cascade):** reads the cycle source's transcripts from
+`dream.synthesize.session_corpus_dir` (another source's sessions wait for their own
+`gbrain dream --source <id> --phase synthesize`; unresolved or legacy files are held,
+already-extracted ones included, until `gbrain sweep --assign-corpus <source>`), then triages before it spends: a cheap
 utility-tier judge (`models.dream.triage`) scores every new file 0–1 for
 salience and pre-extracts candidate quotes + entities, cached in
 `dream_verdicts` with the judging model + prompt version (bounded per cycle
@@ -300,8 +302,12 @@ a colon (`Source: Summary`) is prose, so the row keeps `source: markdown` and th
 whole text as its summary.
 Note: extracted entries improve structured queries (`gbrain timeline`), not vector search.
 
-### Autopilot check
-Verify autopilot is running:
+### Upkeep and autopilot check
+`gbrain maintain --status` shows the last free-upkeep run, which an open
+`gbrain serve` does while idle; an item serve could not finish in 30 slices is
+listed as parked, and `gbrain maintain --unattended` finishes it. For a brain
+no agent opens most days, offer `gbrain maintain --schedule` (asks consent). On a Postgres brain with a repo,
+verify autopilot:
 ```bash
 gbrain autopilot --status
 ```
@@ -475,9 +481,9 @@ your operational heartbeat.
 
 ### On every heartbeat (hourly or per-session)
 
-Run `gbrain doctor --json` and check for degradation. Report any failing checks
-to the user. Key signals: connection health, schema version, RLS status, embedding
-staleness.
+Run `gbrain doctor --alert --json`. Exit 0: report nothing. Exit 17: report each
+`alert.items` entry with its fix. Exit 18: report only when
+`alert.consecutive_unknown` is 2 or more. Never alert on `health_score`.
 
 ### Weekly maintenance
 

@@ -21,6 +21,7 @@ import { resolveChildCliInvocation } from '../core/minions/job-isolation.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import {
   attemptAutopilotSelfUpgrade,
+  computeAutopilotIdle,
   autopilotEngineIdentity,
   chatBootWarning,
   classifyReconnectError,
@@ -32,6 +33,7 @@ import {
   resolveGbrainCliPath,
   shouldSpawnAutopilotWorker,
 } from './autopilot.ts';
+import { restartServeAfterSelfUpgrade } from './upgrade-restart.ts';
 
 /**
  * Mutable daemon state shared by the tick loop, the shutdown path and the tick
@@ -321,10 +323,18 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
     if (configurationBlocked()) continue;
     await attemptAutopilotSelfUpgrade(engine, engineType, lockPath, () => !configurationBlocked());
     if (configurationBlocked()) continue;
+    await restartServeAfterSelfUpgrade(() => computeAutopilotIdle(engine, engineType));
+    if (configurationBlocked()) continue;
 
     // --no-worker peer-liveness probe (v0.19.1). Runs every cycle, cheap
     // (single SELECT). See the NO_WORKER_WARN_TICKS comment for caveats.
     if (noWorker && useMinionsDispatch) await probeNoWorkerPeer(engine, state, baseInterval);
+
+    if (!(await (await import('../core/persistence/automatic-sync-policy.ts')).automaticGitPullDisabled(engine))) {
+      const reconciled = await (await import('./autopilot-git-reconcile.ts')).autopilotReconcile(engine);
+      for (const line of reconciled.lines) (reconciled.ok ? console.log : console.error)(`[autopilot] git-reconcile: ${line}`);
+      if (configurationBlocked()) continue;
+    }
 
     const tick = useMinionsDispatch
       ? await dispatchAutopilotTick(engine, state, { repoPath, baseInterval, jsonMode })

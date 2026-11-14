@@ -25,7 +25,7 @@
  */
 import { execFileSync } from '../spawn.ts';
 import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { parseMarkdown } from '../markdown.ts';
 import { screenFenceCtx } from '../import-screen.ts';
@@ -95,7 +95,7 @@ async function censusSources(engine: Exec, sourceIds?: readonly string[]): Promi
     WHERE archived IS NOT TRUE AND incarnation IS NOT NULL AND ($1::text[] IS NULL OR id=ANY($1::text[])) ORDER BY id`, [sourceIds ? [...sourceIds] : null]);
 }
 
-const hasCheckout = (source: CensusSource) => !!source.local_path && existsSync(source.local_path) && statSync(source.local_path).isDirectory();
+const hasCheckout = (source: CensusSource) => !!source.local_path && isAbsolute(source.local_path) && existsSync(source.local_path) && statSync(source.local_path).isDirectory();
 
 /** Where the next incremental pass starts: this moment, or the start of the oldest writer transaction still open, minus the grace. */
 async function passHorizon(engine: Exec, graceMs: number): Promise<string> {
@@ -126,7 +126,7 @@ const PAGE_COLUMNS = `id, slug, type, frontmatter, source_path, content_hash, up
 async function judgePages(engine: Exec, source: CensusSource, rows: readonly PageRow[], at: string): Promise<void> {
   const clean: string[] = [];
   for (const row of rows) {
-    const page = row.live && row.compiled_truth !== null ? { compiled_truth: row.compiled_truth, timeline: row.timeline ?? '' } : null;
+    const page = row.live && row.compiled_truth !== null ? { compiled_truth: row.compiled_truth, timeline: row.timeline ?? '', slug: row.slug } : null;
     const verdict = page && pageHasFenceText(page) ? judgeFences(page, screenFenceCtx({ type: row.type as never, frontmatter: row.frontmatter ?? {} })) : null;
     if (!verdict) { clean.push(row.slug); continue; }
     const finding: PageFinding = { ...verdict, sha256: sha256(`${page!.compiled_truth}\u0000${page!.timeline}`), checked_at: at,

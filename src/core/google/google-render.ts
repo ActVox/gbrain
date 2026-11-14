@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { renderAttachmentInspection, threadAttachmentReceipts } from './attachment-receipts.ts';
 
 import { emailCitation } from '../output/scaffold.ts';
+import { neutralizeOutsideText } from '../outside-content.ts';
 import { DEFAULT_CONTACTS_DIR, type CalendarEventData, type ContactData, type GmailMessageMeta, type GmailThreadData } from './types.ts';
 
 // ── Noise + signature rules (recipes/email-to-brain.md, now code) ───────────
@@ -31,6 +32,13 @@ const NOISE_SENDER_SUBSTRINGS = [
 ];
 
 /**
+ * #7856: separator and localized no-reply spellings, matched against the
+ * local part only (from its start or after a separator), so a person whose
+ * name or domain merely contains a fragment stays a person.
+ */
+const NOISE_LOCAL_PART = /(?:^|[-._+])(?:no[._]reply|do[-._]not[-._]reply|no[-._]?responder|ne[-._]?pas[-._]?repondre|keine[-._]?antwort)|notifica(?:ciones|coes)$/;
+
+/**
  * Fixed Google system addresses that carry no human obligation (#5103: the
  * Meet notes digest). Matched by EQUALITY, never as a substring, so a
  * lookalike address on another domain is still treated as a person.
@@ -39,7 +47,8 @@ const GOOGLE_SYSTEM_SENDERS: ReadonlySet<string> = new Set(['gemini-notes@google
 
 export function isNoiseSender(fromAddress: string): boolean {
   const f = fromAddress.toLowerCase();
-  return GOOGLE_SYSTEM_SENDERS.has(f) || NOISE_SENDER_SUBSTRINGS.some((p) => f.includes(p));
+  return GOOGLE_SYSTEM_SENDERS.has(f) || NOISE_SENDER_SUBSTRINGS.some((p) => f.includes(p))
+    || NOISE_LOCAL_PART.test(f.replace(/@[^@]*$/, ''));
 }
 
 const BULK_PRECEDENCE = new Set(['bulk', 'list', 'junk']);
@@ -170,15 +179,18 @@ export function htmlToText(html: string): string {
 /**
  * Trim quoted-reply tails: trailing '>'-quoted runs and the "On ... wrote:"
  * marker line and everything after it. Conservative — only the TAIL is cut,
- * inline quotes mid-message survive.
+ * inline quotes mid-message survive. A forward separator (Gmail, Apple Mail)
+ * before any reply marker keeps the whole body (#8719): forwarded content is
+ * new to the brain, while a reply's quoted tail repeats a message of the thread.
  */
 export function trimQuotedReply(text: string): string {
   const lines = text.split('\n');
-  // Find the "On <date>, <name> wrote:" marker (also matches forwarded-message separators).
+  // Find the "On <date>, <name> wrote:" or Original Message marker.
   let cut = lines.length;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i].trim();
-    if (/^On .{4,80} wrote:$/.test(l) || /^-{2,}\s*Original Message\s*-{2,}$/i.test(l) || /^-{2,}\s*Forwarded message\s*-{2,}$/i.test(l)) {
+    if (/^-{2,}\s*Forwarded message\s*-{2,}$/i.test(l) || /^Begin forwarded message:$/i.test(l)) return text.trim();
+    if (/^On .{4,80} wrote:$/.test(l) || /^-{2,}\s*Original Message\s*-{2,}$/i.test(l)) {
       cut = i;
       break;
     }
@@ -284,7 +296,7 @@ export function renderThreadPage(thread: GmailThreadData): RenderedPage | null {
     '---',
   ];
 
-  const body: string[] = ['', `# ${subject}`, ''];
+  const body: string[] = ['', neutralizeOutsideText(`# ${subject}`), ''];
   for (const m of thread.messages) {
     const cite = /^[A-Za-z0-9]{10,60}$/.test(m.id) ? emailCitation({
       account: thread.account,
@@ -294,13 +306,13 @@ export function renderThreadPage(thread: GmailThreadData): RenderedPage | null {
     }) : 'Gmail message link unavailable.';
     const sent = m.labelIds.includes('SENT');
     body.push(
-      `## ${sent ? '→ ' : ''}${m.from || m.fromAddress} · ${m.dateIso.slice(0, 16).replace('T', ' ')}`,
+      neutralizeOutsideText(`## ${sent ? '→ ' : ''}${m.from || m.fromAddress} · ${m.dateIso.slice(0, 16).replace('T', ' ')}`),
       '',
       cite,
       '',
     );
-    if (m.to.length > 0) body.push(`To: ${m.to.join(', ')}${m.cc.length > 0 ? ` · Cc: ${m.cc.join(', ')}` : ''}`, '');
-    body.push(m.bodyText || '_empty message_', '', renderAttachmentInspection(m.attachmentInspection), '');
+    if (m.to.length > 0) body.push(neutralizeOutsideText(`To: ${m.to.join(', ')}${m.cc.length > 0 ? ` · Cc: ${m.cc.join(', ')}` : ''}`), '');
+    body.push(neutralizeOutsideText(m.bodyText || '_empty message_'), '', renderAttachmentInspection(m.attachmentInspection), '');
   }
 
   return { relPath: threadRelPath(thread), markdown: fm.join('\n') + body.join('\n') + '\n' };
@@ -364,7 +376,7 @@ export function renderCalendarEventPage(ev: CalendarEventData): RenderedPage | n
   }
   if (ev.description) body.push('## Description', '', htmlToText(ev.description), '');
   if (ev.hangoutLink) body.push(`Meet: ${ev.hangoutLink}`, '');
-  return { relPath: calendarRelPath(ev), markdown: fm.join('\n') + body.join('\n') + '\n' };
+  return { relPath: calendarRelPath(ev), markdown: fm.join('\n') + neutralizeOutsideText(body.join('\n')) + '\n' };
 }
 
 // ── Person page (contacts) ───────────────────────────────────────────────────
@@ -422,11 +434,11 @@ export function renderPersonPage(c: ContactData, disambiguate = false, dir: stri
   ];
   const body = [
     '',
-    `# ${name}`,
+    neutralizeOutsideText(`# ${name}`),
     '',
     [
-      c.title && c.organization ? `${c.title} at ${c.organization}.` : c.organization ? `Works at ${c.organization}.` : null,
-      `Contact: ${[...c.emails, ...c.phones].join(', ')}.`,
+      c.title && c.organization ? neutralizeOutsideText(`${c.title} at ${c.organization}.`) : c.organization ? neutralizeOutsideText(`Works at ${c.organization}.`) : null,
+      neutralizeOutsideText(`Contact: ${[...c.emails, ...c.phones].join(', ')}.`),
       `[Source: Google Contacts]`,
     ]
       .filter(Boolean)

@@ -21,6 +21,7 @@ import { join } from 'path';
 import type { BrainEngine } from '../../core/engine.ts';
 import { loadConfig } from '../../core/config.ts';
 import { VERSION } from '../../version.ts';
+import { recordScaffoldBases } from '../../core/skillpack/safe-update.ts';
 import { autoDetectSkillsDir } from '../../core/repo-root.ts';
 import {
   claudeProjectSkillsDir,
@@ -59,6 +60,11 @@ import { findGbrainOrDie, resolveAbs, resolveWorkspace } from './shared.ts';
 import { installSharedBrainBridge } from '../../core/skillpack/shared-brain-bridge.ts';
 import { nativeSharedSkillsDirectory } from '../../core/harness/native-router.ts';
 import { confinedSkillChildWrite } from '../../core/skillpack/writer-guard.ts';
+
+/** OpenClaw's default: the brain-first core. OpenClaw lists every workspace
+ * skill's description in every prompt, so the full bundle (`all`) cost about
+ * 61k input tokens per trial in the HARN-5 install ladder and was never called. */
+const OPENCLAW_CORE_SKILLS = ['brain-ops', 'capture', 'data-loss-gate', 'query', 'resolve-before-asking'];
 
 const DEFAULT_PERSONA: Record<Exclude<BridgeHarness, 'openclaw'>, string> = {
   'claude-code': 'coding-agent',
@@ -217,13 +223,8 @@ function resolveSlugs(gbrainRoot: string, a: HarnessArgs): { slugs: string[]; pe
     validateSlugsAgainstLane(gbrainRoot, a.skills);
     return { slugs: [...new Set(a.skills)].sort(), persona: null };
   }
-  const persona =
-    a.persona ??
-    (a.all
-      ? 'all'
-      : a.harness === 'openclaw'
-        ? 'all'
-        : DEFAULT_PERSONA[a.harness as Exclude<BridgeHarness, 'openclaw'>]);
+  if (a.harness === 'openclaw' && a.persona === null && !a.all) return { slugs: OPENCLAW_CORE_SKILLS, persona: 'core' };
+  const persona = a.persona ?? (a.all ? 'all' : DEFAULT_PERSONA[a.harness as Exclude<BridgeHarness, 'openclaw'>]);
   return { slugs: resolvePersonaSlugs(gbrainRoot, persona), persona };
 }
 
@@ -344,7 +345,8 @@ export async function cmdScaffoldHarness(args: string[]): Promise<void> {
         'skills dir. Additive; never overwrites your files (local edits win).\n\n' +
         '  --persona      Named curation from skills/plugin-lanes.json#personas,\n' +
         '                 or `all` for the full plugin lane. Defaults: claude-code/\n' +
-        '                 codex/opencode → coding-agent; openclaw → all.\n' +
+        '                 codex/opencode → coding-agent; openclaw → the five-skill\n' +
+        '                 brain-first core (--all for the full bundle).\n' +
         '  --all          Shorthand for the full plugin lane (same as persona all).\n' +
         '  --skill        Explicit slug picks (repeatable; overrides --persona).\n' +
         '  --dest         Install dir override. Required for codex/opencode (no\n' +
@@ -392,7 +394,7 @@ export async function cmdScaffoldHarness(args: string[]): Promise<void> {
       }
       const targetWorkspace = resolveWorkspace({ workspace: a.workspace });
       const { slugs, persona } = resolveSlugs(gbrainRoot, a);
-      const useFullBundle = a.skills.length === 0 && (a.persona === null || a.persona === 'all');
+      const useFullBundle = persona === 'all';
       // The workspace scaffold enumerates the OPENCLAW universe (paired
       // sources included) — plugin-lane ADDITIONS don't exist there, so a
       // persona slug outside openclaw.plugin.json#skills must be reported,
@@ -410,11 +412,13 @@ export async function cmdScaffoldHarness(args: string[]): Promise<void> {
         gbrainRoot,
         targetWorkspace,
         skillSlug: null,
-        // Full bundle (openclaw's default, today's behavior) enumerates the
-        // openclaw universe directly; persona/skill picks filter it.
+        // The full bundle (--all) enumerates the openclaw universe directly;
+        // the core default, persona and skill picks filter it.
         ...(useFullBundle ? {} : { skillSlugs: deliverable }),
         dryRun: a.dryRun,
       });
+      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- the operator's own workspace root, where runScaffold just wrote.
+      if (!a.dryRun) await recordScaffoldBases(join(targetWorkspace, 'skills'), result.files);
       if (a.json) {
         console.log(
           JSON.stringify(
@@ -440,6 +444,7 @@ export async function cmdScaffoldHarness(args: string[]): Promise<void> {
             `skipped (plugin-lane additions, not in the openclaw bundle): ${laneOnly.join(', ')}`,
           );
         }
+        console.log('These skills are a fallback: OpenClaw agents seldom open a listed skill on their own. The primary route is the per-turn rule from `gbrain setup openclaw`.');
       }
       process.exit(0);
     }
@@ -460,6 +465,7 @@ export async function cmdScaffoldHarness(args: string[]): Promise<void> {
       dryRun: a.dryRun,
       nowIso: new Date().toISOString(),
     });
+    if (!result.dryRun) await recordScaffoldBases(dest, result.files.filter(file => file.slug !== null));
 
     // Coexistence: these same skills may also load from the gbrain plugin
     // snapshot (marketplace install) — duplicate names in one session.

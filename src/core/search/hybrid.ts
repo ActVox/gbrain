@@ -33,7 +33,7 @@ import type { RrfAttribution } from '../types.ts';
 import {
   isAmbiguousModalityQuery,
 } from './query-intent.ts';
-import { isTitlePhraseMatch } from './title-match.ts';
+import { isTitlePhraseMatch, titleNameVariants } from './title-match.ts';
 import { applyGraphSignals, graphSignalPageIds } from './graph-signals.ts';
 import { applyAliasResolvedBoost, readAliasCanonicals } from './hybrid/alias-resolved.ts';
 import {
@@ -53,6 +53,7 @@ import { searchVectorFallback, searchWithoutEmbeddings } from './hybrid/keyword-
 import { factEmbeddingDisabled } from '../embedding-disabled.ts';
 import { capSessionPool, collapsePool, expandStructuralNeighbors, finalizeHybridResults, fuseArms, rerankAndPin, sizeReturnPool } from './hybrid/rank.ts';
 import { type StageTimer, UNTIMED } from './stage-timings.ts';
+import { needsEngineScope, withEngineScope } from '../engine-scope.ts';
 
 export const RRF_K = 60;
 const COMPILED_TRUTH_BOOST = 2.0;
@@ -398,8 +399,10 @@ export function applyRecencyBoost(
  * T2 (retrieval-maxpool incident) — apply the title-phrase boost.
  *
  * Fires when the normalized query is a contiguous token-run inside a result's
- * page title (or an exact full-title match), per `isTitlePhraseMatch`. Mutate-
- * in-place; caller re-sorts. Mirrors applyBacklinkBoost's floor-gate + stamp.
+ * page title (or an exact full-title match), per `isTitlePhraseMatch`, or a
+ * given-name variant of it does (#7471: "Matt Example" for "Matthew Example",
+ * `titleNameVariants`). Mutate-in-place; caller re-sorts. Mirrors
+ * applyBacklinkBoost's floor-gate + stamp.
  *
  * Bounded by construction: a single fixed multiplier (`factor`, default 1.25),
  * floor-ratio-gated so a title hit on a weak-overlap page can't leapfrog a
@@ -417,11 +420,12 @@ export function applyTitleBoost(
   floorThreshold?: number,
 ): void {
   if (!query || !Number.isFinite(factor) || factor <= 1.0) return;
+  const queries = [query, ...titleNameVariants(query)];
   for (const r of results) {
     if (!Number.isFinite(r.score)) continue;
     if (floorThreshold !== undefined && r.score < floorThreshold) continue;
     if (!r.title) continue;
-    if (isTitlePhraseMatch(query, r.title)) {
+    if (queries.some(q => isTitlePhraseMatch(q, r.title!))) {
       r.score *= factor;
       r.title_match_boost = factor; // attribution stamp (v0.40.4 convention)
     }
@@ -1080,6 +1084,7 @@ export async function hybridSearch(
   opts?: HybridSearchOpts,
 ): Promise<SearchResult[]> {
   if (opts?.types?.length === 0) return [];
+  if (needsEngineScope(engine)) return withEngineScope(engine, () => hybridSearch(engine, query, opts));
   const timer = opts?._timings ?? UNTIMED;
   if (opts?.type || opts?.types?.length) {
     const { expandEngineTypeFilters } = await import('../schema-pack/query-types.ts');
@@ -1206,6 +1211,7 @@ export async function hybridSearchCached(
   opts?: HybridSearchOpts,
 ): Promise<SearchResult[]> {
   if (opts?.types?.length === 0) return [];
+  if (needsEngineScope(engine)) return withEngineScope(engine, () => hybridSearchCached(engine, query, opts));
   const timer = opts?._timings ?? UNTIMED;
   const { modeInputForCache, resolvedForCache, knobsHash } = await timer.stage('setup', () => resolveCacheSearchMode(engine, opts));
   const queryPrefix = opts?._queryPrefix ?? await timer.stage('setup', () => loadEmbeddingQueryPrefix(engine));

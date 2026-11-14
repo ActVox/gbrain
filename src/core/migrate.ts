@@ -1,10 +1,13 @@
 import type { BrainEngine } from './engine.ts';
 import type { Migration } from './schema-migrations/types.ts';
 import { isLockTimeoutError } from './retry-matcher.ts';
-import { resolveSchemaLockTimeoutMs, schemaLockBlockedError, withSchemaLockTimeout } from './postgres-engine/schema-lock-timeout.ts';
+import { resolveSchemaLockTimeoutMs, schemaLockBlockedError } from './postgres-engine/schema-lock-timeout.ts';
+import { SCHEMA_MIGRATION_LOCK_APPLICATION_NAME } from './postgres-engine/init-schema-lock.ts';
+import { assertSchemaMigrationLockHeld, withSchemaMigrationLock } from './schema-migration-lock.ts';
 import { MIGRATIONS } from './schema-migrations/registry.generated.ts';
 import { hasPendingMigrations } from './migrate-pending.ts';
-import { setQuietMigrationNotices } from './schema-migrations/helpers.ts';
+import { assertOwnedTableShapes } from './owned-table-shapes.ts';
+import { runMigrationStatement, setQuietMigrationNotices } from './schema-migrations/helpers.ts';
 import { MIGRATION_PRELUDES, runMigrationPrelude } from './migration-preludes.ts';
 import { clearMigrationTimeout, migrationStatementTimeoutMs, recordMigrationTimeout } from './migration-timeout.ts';
 // runMigrations executes while an initialized engine is live. Keep its helper
@@ -14,6 +17,7 @@ import {
   isRetryableConnError,
 } from './retry-matcher.ts';
 import { repairTimelineDedupIndex } from './timeline-dedup-repair.ts';
+import { hardenFunctionSearchPaths } from './function-search-path.ts';
 import { resumePageRevisionBackfill } from './page-state/revision-backfill-schema.ts';
 import { repairPagesUpsertArbiter } from './pages-upsert-arbiter.ts';
 import { repairLinkSourceCheck, LINK_SOURCE_GATE_MIGRATION_VERSION } from './link-source-check-repair.ts';
@@ -80,6 +84,8 @@ export { MIGRATIONS };
 export const LATEST_VERSION = MIGRATIONS.length > 0
   ? Math.max(...MIGRATIONS.map(m => m.version))
   : 1;
+/** The newest migration runMigrations would apply now, read from the live registry (LATEST_VERSION is fixed at load). */
+export const registeredLatestVersion = (): number => Math.max(1, ...MIGRATIONS.map(m => m.version));
 
 /**
  * Row returned by `getIdleBlockers`. The shape is the public contract
@@ -112,7 +118,8 @@ export async function getIdleBlockers(engine: BrainEngine): Promise<IdleBlocker[
        FROM pg_stat_activity
        WHERE state = 'idle in transaction'
          AND query_start < NOW() - INTERVAL '5 minutes'
-         AND pid != pg_backend_pid()`
+         AND pid != pg_backend_pid()
+         AND application_name IS DISTINCT FROM '${SCHEMA_MIGRATION_LOCK_APPLICATION_NAME}'`
     );
   } catch {
     return [];
@@ -232,35 +239,7 @@ export async function runMigrationSQL(
       throw error;
     }
   } else {
-    // Postgres + transaction:false → can't use SET LOCAL (needs a txn),
-    // can't use plain SET on the pooled connection (leaks to other
-    // queries). Instead: reserve a dedicated backend, set session-level
-    // statement_timeout on just that connection, run the DDL there.
-    //
-    // On Supabase (both PgBouncer 6543 and direct 5432) a server-level
-    // statement_timeout of ~2 min is enforced. Without this override a
-    // CREATE INDEX CONCURRENTLY on a large table (e.g. 500K pages) hits
-    // the timeout and aborts. SET on the reserved connection cleanly
-    // overrides because the GUC scope is connection-local (session-scope
-    // is fine when nobody else uses the connection).
-    //
-    // The reserved-connection primitive is new in PR #356. See
-    // BrainEngine.withReservedConnection.
-    await engine.withReservedConnection(async (conn) => {
-      try {
-        await conn.executeRaw(`SET statement_timeout = '${migrationStatementTimeoutMs()}'`);
-      } catch {
-        // Non-fatal: some managed Postgres may restrict this GUC.
-        // Falling through means the DDL runs with the server default.
-      }
-      // #5227 (W14 P1.6): no transaction here, so the lock bound is session-level on this reserved backend and restored after.
-      // #6543 (A4): the raised statement_timeout is restored too, so the connection does not carry this migration's budget back to the pool.
-      try {
-        await withSchemaLockTimeout({ unsafe: (query: string) => conn.executeRaw(query) }, () => conn.executeRaw(sql), { step: `migration v${m.version}` });
-      } finally {
-        await conn.executeRaw('RESET statement_timeout').catch(() => {});
-      }
-    }, { selfContained: true });
+    await runMigrationStatement(engine, m.version, sql);
   }
 }
 
@@ -391,7 +370,14 @@ export function isDeadlockError(err: unknown): boolean {
   return /40P01|deadlock detected/i.test(msg);
 }
 
+export { withSchemaMigrationLock };
+
+/** GBRA-467: under the schema migration lock (schema-migration-lock.ts); the version is read once it is held. */
 export async function runMigrations(engine: BrainEngine): Promise<{ applied: number; current: number }> {
+  return withSchemaMigrationLock(engine, () => runMigrationsLocked(engine));
+}
+
+async function runMigrationsLocked(engine: BrainEngine): Promise<{ applied: number; current: number }> {
   const currentStr = await engine.getConfig('version');
   const current = parseInt(currentStr || '1', 10);
 
@@ -402,6 +388,7 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
   const sorted = [...MIGRATIONS].sort((a, b) => a.version - b.version);
 
   const pending = sorted.filter(m => m.version > current);
+  if (pending.length > 0) await assertOwnedTableShapes(async sql => (await engine.executeRaw(sql))[0]); // #9190: before any repair or migration
 
   // #2038: schema-drift self-heal. A migration renumbered during a master
   // merge (v102 timeline dedup, originally v99) can be recorded-as-applied
@@ -461,7 +448,26 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
   }
 
   const backfill = () => resumePageRevisionBackfill(engine).catch(e => console.error(`[migrate] page revision backfill paused (#5216): ${e instanceof Error ? e.message : String(e)}`));
+  // #7632: a migration that re-creates a gbrain function from a historical body resets its search_path, a failing
+  // migration can stop the run before v277, and a failed earlier attempt leaves one behind; put pg_temp back on every
+  // run. At head (nothing pending) it still runs, for a function a failed earlier run left (e2e case 9), but does not
+  // name functions another role owns: doctor's function_search_path does, so a non-owner role is not told on every
+  // boot (#7688). Best-effort: doctor names whatever is left.
+  const harden = async (nameLeftovers: boolean): Promise<void> => {
+    try {
+      const left = await hardenFunctionSearchPaths(engine);
+      if (left === null) {
+        process.stderr.write('  search_path: pg_temp put back on gbrain functions, but listing any left without it failed; gbrain doctor (function_search_path) names them\n');
+      } else if (nameLeftovers && left.length > 0) {
+        process.stderr.write(`  search_path: ${left.length} function(s) left without pg_temp on their search_path (${left.join(', ')}): `
+          + 'ALTER FUNCTION needs the owner. Run gbrain doctor for the SQL to run as that role.\n');
+      }
+    } catch (e) {
+      process.stderr.write(`  search_path: pg_temp not restored on gbrain functions (${e instanceof Error ? e.message : String(e)}); gbrain doctor (function_search_path) names them\n`);
+    }
+  };
   if (pending.length === 0) {
+    await harden(false);
     await backfill();
     return { applied: 0, current };
   }
@@ -491,11 +497,13 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
   }
 
   let applied = 0;
+  let lockRefused = false;
   try {
     // Pre-flight: warn about connections that might block DDL
     await checkForBlockingConnections(engine);
 
     for (const m of pending) {
+      await assertSchemaMigrationLockHeld();
       if (!quietReplay) process.stderr.write(`  [${m.version}] ${m.name}...\n`);
       try {
         await applyOneMigration(engine, m);
@@ -515,10 +523,16 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
       if (!quietReplay) process.stderr.write(`  [${m.version}] ✓ ${m.name}\n`);
       applied++;
     }
+  } catch (err) {
+    lockRefused = (err as { code?: unknown }).code === 'schema_lock_blocked' || isLockTimeoutError(err);
+    throw err;
   } finally {
     // Never leak the fresh-install quiet flag into a later in-process run —
     // covers every exit path from here on (incl. the pre-flight probe).
     setQuietMigrationNotices(false);
+    // A run stopped by a lock it could not take would wait a second lock_timeout here before its own error surfaced.
+    if (lockRefused) process.stderr.write('  search_path: not put back on gbrain functions after the lock refusal; the next migration run does it, and gbrain doctor (function_search_path) names what is left\n');
+    else await harden(true);
   }
   await clearMigrationTimeout(engine);
   await backfill();

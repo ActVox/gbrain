@@ -26,6 +26,7 @@ import { ContentHashStream } from './content-hash-stream.ts';
 import type { StoredRegion } from './segmenter.ts';
 import type { BodyRegion, JsonObject, ManifestRow } from './types.ts';
 import { assertGenerationTiles } from './body-tiling.ts';
+import { deleteRewrittenDerivations } from './segment-derive.ts';
 
 /** Rewrites one fence (the text of a stored facts or takes region, markers included), given the body region holding it; called in body order. */
 export type FenceTransform = (fence: string, at: { region: BodyRegion }) => Promise<string>;
@@ -154,6 +155,8 @@ const rewriteTier = (page: { contextual_retrieval_mode: string | null; corpus_ge
 export interface LiveFenceRewrite {
   /** Segment shas the old generation referenced in place of the rewritten units. */
   replaced: Uint8Array[];
+  /** page_segment_derivations rows deleted because they may hold the replaced text (deleteRewrittenDerivations). */
+  derivations: number;
   /** False when the page was left unsealed (its projection runs after commit: `buildSegmentedProjection`). */
   sealed: boolean;
 }
@@ -162,23 +165,24 @@ export interface LiveFenceRewrite {
  * Rewrite the fences of a segmented page's live body through `transform`, in
  * the caller's transaction: a new generation whose unchanged segments keep
  * their rows and chunks, and whose rewritten segments get new occurrences
- * (their chunks staged here, the old ones retired by the flip). A fence edit
+ * (their chunks staged here, the old ones retired by the flip), and the
+ * derivation rows that may hold the replaced text are deleted. A fence edit
  * is not authorship, so the page keeps its trust tier; a soft-deleted page
  * stays deleted. Null when no fence changed (nothing is written).
  */
 export async function rewriteLiveSegmentedFences(tx: BrainEngine, pageId: number, transform: FenceTransform): Promise<LiveFenceRewrite | null> {
   const [page] = await tx.executeRaw<{ id: number; slug: string; source_id: string; title: string; type: string; page_kind: string; frontmatter: JsonObject | null;
-    body_generation: number | string; body_flags: JsonObject | null; body_storage: string; deleted_at: string | null; tags: string[];
+    body_generation: number | string; body_bytes: number | string; body_flags: JsonObject | null; body_storage: string; deleted_at: string | null; tags: string[];
     contextual_retrieval_mode: string | null; corpus_generation: string | null }>(`SELECT p.id,p.slug,p.source_id,p.title,
-      p.type,p.page_kind,p.frontmatter,p.body_generation,p.body_flags,p.body_storage,p.deleted_at,p.contextual_retrieval_mode,p.corpus_generation,
+      p.type,p.page_kind,p.frontmatter,p.body_generation,p.body_bytes,p.body_flags,p.body_storage,p.deleted_at,p.contextual_retrieval_mode,p.corpus_generation,
       COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id),'[]'::jsonb) AS tags FROM pages p WHERE p.id=$1`, [pageId]);
   if (page?.body_storage !== 'segmented') return null;
   const sourceId = page.source_id, slug = page.slug, frontmatter = page.frontmatter ?? {};
-  const rows = await tx.readManifest(pageId);
-  await assertGenerationTiles(tx, pageId, undefined, rows);
+  const generation = Number(page.body_generation);
+  const rows = await tx.readManifest(pageId, { generation });
+  await assertGenerationTiles(tx, pageId, generation, rows, Number(page.body_bytes));
   const units = await changedUnits(tx, sourceId, rows, transform);
   if (!units.length) return null;
-  const generation = Number(page.body_generation);
   const prepared = await prepareSegmentedBody(tx, { sourceId, slug, title: page.title, type: page.type, frontmatter, tags: page.tags,
     live: { id: pageId, generation, storage: 'segmented', title: page.title, type: page.type, flags: page.body_flags },
     truth: rewrittenRegion(tx, sourceId, rows, units, 'truth'), timeline: rewrittenRegion(tx, sourceId, rows, units, 'timeline'),
@@ -189,7 +193,8 @@ export async function rewriteLiveSegmentedFences(tx: BrainEngine, pageId: number
     retireMaxRows: flipRetireMaxRows, meta: { title: page.title, type: page.type as never, frontmatter, page_kind: page.page_kind as never } }));
   if (page.deleted_at) await tx.executeRaw('UPDATE pages SET deleted_at=$2 WHERE id=$1', [pageId, page.deleted_at]);
   if (applied.complete) await sealSegmentedPage(tx, pageId);
-  return { replaced: replacedShas(rows, units), sealed: applied.complete };
+  const derivations = await deleteRewrittenDerivations(tx, pageId, rows, units);
+  return { replaced: replacedShas(rows, units), sealed: applied.complete, derivations };
 }
 
 const MANIFEST_COLUMNS = `page_id,occurrence_id,seq,region,source_id,sha256,byte_start,byte_len,line_start,line_count,cut_kind,entry_state,

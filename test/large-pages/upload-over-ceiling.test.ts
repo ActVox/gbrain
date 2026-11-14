@@ -136,6 +136,19 @@ for (const kind of testBackends()) {
       for (const [key, value] of Object.entries(after)) expect([key, value]).toEqual([key, prior[key] ?? [0, 0]]);
     }, 600_000);
 
+    for (const [label, head, close] of [['Visibility: Private', 'Visibility: Private\n', '---'], ['a duplicate visibility key', 'visibility: private\nvisibility: world\n', '---'],
+      ['an unparseable block', 'visibility: private\nfoo: [unclosed\n', '---'], ['a block closed with dots', 'visibility: private\n', '...']] as const) {
+      test(`a 25 MiB upload that asks for visibility: private as ${label} is refused and nothing is stored (#7841)`, async () => {
+        await setConfig('write_gate.agent_mode', 'off');
+        const slug = `notes/huge-private-request-${label.replace(/\W+/g, '-').toLowerCase()}`;
+        const text = `---\ntitle: Huge private request\ntype: note\n${head}${close}\n${conversation(25 * MiB, 'private')}`;
+        const id = await staged(text, slug);
+        const refused = await commitRefusal({ upload_id: id });
+        expect(refused.code).toBe(label === 'Visibility: Private' ? 'visibility_not_applied' : 'invalid_params');
+        expect(await engine.readPageSnapshot(slug, { sourceId: 'default' })).toBeNull();
+      }, 600_000);
+    }
+
     test('a replace above 24 MiB commits at its expected_revision and refuses with revision_changed after the page moved', async () => {
       const slug = 'notes/huge-conversation';
       const v2 = conversation(25.5 * MiB, 'replace');
@@ -191,6 +204,21 @@ for (const kind of testBackends()) {
         if (reason === 'facts') expect(await privateFactRows(slug)).toEqual(['Private launch budget is forty thousand.']);
         const after = await counters();
         for (const [key, value] of Object.entries(after)) expect([reason, key, value]).toEqual([reason, key, prior[key] ?? [0, 0]]);
+      }
+    }, 900_000);
+
+    test('GST-2051: a member-bound client creating a page over the ceiling in default keeps it to its member', async () => {
+      await setConfig('write_gate.agent_mode', 'off');
+      await engine.executeRaw("INSERT INTO access_members (id) VALUES ('alice-example') ON CONFLICT (id) DO NOTHING");
+      await engine.executeRaw("UPDATE oauth_clients SET member_id = 'alice-example' WHERE client_id = 'upload-big'");
+      try {
+        const slug = 'notes/huge-member-upload';
+        const receipt = await commit({ upload_id: await staged(conversation(25 * MiB, 'member'), slug) });
+        expect(receipt.state).toBe('committed');
+        const { frontmatter } = await stored(slug);
+        expect((typeof frontmatter === 'string' ? JSON.parse(frontmatter) : frontmatter).readable_by).toEqual(['member:alice-example']);
+      } finally {
+        await engine.executeRaw("UPDATE oauth_clients SET member_id = NULL WHERE client_id = 'upload-big'");
       }
     }, 900_000);
   });

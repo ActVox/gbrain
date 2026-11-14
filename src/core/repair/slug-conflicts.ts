@@ -66,7 +66,7 @@ import { dailyLedger, FENCE_REPAIR_LEDGER, nextUtcMidnight } from '../budget/dai
 import { pricingSetCommand } from '../budget/no-pricing.ts';
 import type { CapSource } from '../consent.ts';
 import { sha256 } from '../persistence/digest.ts';
-import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
+import { loadApprovedSet, previewChangedError, previewHash, retireAfterLastItem, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { clearGitHold, readGitHold, readGitSourceHolds, recordContentHoldRepair, recordHoldAttempt, type ContentHoldRepairState, type GitHoldRecord } from '../persistence/sync-holds.ts';
 import { rotate, rotationAfter, rotationBrain, rotationKeyOf, saveRotation } from './rotation.ts';
 import { confinedRepairTarget, prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../persistence/file-repair.ts';
@@ -85,6 +85,7 @@ import { CONTENT_REPAIR_LANE_VERSION, contentRepairLaneCurrent } from '../persis
 import { lineDiff } from './frontmatter.ts';
 import { repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairPlanOptions, type RepairResult, type RepairScope } from './core.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { commitPushCommand } from '../git/commit-push.ts';
 import { recordSlugLineAlias } from '../page-state/rename-alias.ts';
 import { canonicalOriginPage, originConflictMessage } from '../persistence/origin-guard.ts';
 
@@ -532,9 +533,8 @@ export const slugConflictsRepair: RepairHandler = {
     if (ctx.remote !== false) throw trustedCliRequired('gbrain repair slug-conflicts writes files and may call a paid model, so it runs only from the trusted local CLI or the maintenance job on the brain host.');
     const { entry, hash, last } = raw as ConflictItem;
     try {
-      return await applyConflict(ctx, entry, { embed: opts?.embed === true, expect: hash, allowanceUsd: opts?.llmAllowanceUsd, deadline: opts?.deadline, noLlm: opts?.noLlm === true });
+      return await retireAfterLastItem(ctx.engine, 'slug-conflicts', hash, last, () => applyConflict(ctx, entry, { embed: opts?.embed === true, expect: hash, allowanceUsd: opts?.llmAllowanceUsd, deadline: opts?.deadline, noLlm: opts?.noLlm === true }));
     } finally {
-      if (hash && last) await clearApprovedSet(ctx.engine, { command: 'slug-conflicts', hash });
       if (!hash) await saveRotation(ctx.engine, ROTATION_OP, await rotationBrain(ctx.engine), rotationKey(entry)).catch(() => undefined);
     }
   },
@@ -686,7 +686,7 @@ async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, a
   const holdCleared = cand.hold ? await kept(await clearGitHold(engine, { sourceId: src.id, incarnation: src.incarnation, path: cand.path, observedAt: observedAt ?? new Date().toISOString() })) : false;
   if (parts.declared_alias) await recordSlugLineAlias(engine, src.id, parts.declared_alias, cand.slug);
   if (!edits) return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'legacy', imported: imported.status, hold_cleared: holdCleared, content_repair: receipt }, ...spend };
-  const commitStep = `git -C ${shellQuote([root])} add -- ${shellQuote([cand.path])} && git -C ${shellQuote([root])} commit -m ${shellQuote([contentRepairCommitSubject(cand.path)])} -m ${shellQuote([contentRepairTrailer(receipt)])} -- ${shellQuote([cand.path])}`;
+  const commitStep = commitPushCommand(root, [cand.path], [contentRepairCommitSubject(cand.path), contentRepairTrailer(receipt)]);
   return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'legacy', backup, imported: imported.status, hold_cleared: holdCleared, content_repair: receipt, committed: 'commit_step', commit_step: commitStep }, ...spend };
 }
 

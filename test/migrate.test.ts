@@ -1454,8 +1454,15 @@ describe('PR #356 — non-transactional DDL runs via reserved connection', () =>
     const runFnIdx = source.indexOf('async function runMigrationSQL(');
     expect(runFnIdx).toBeGreaterThan(-1);
     const fnBody = source.slice(runFnIdx, runFnIdx + 2500);
-    expect(fnBody).toContain('withReservedConnection');
-    expect(fnBody).toContain("SET statement_timeout = '${migrationStatementTimeoutMs()}'");
+    // The else-branch runs through schema-migrations/helpers.ts runMigrationStatement, which a handler's own
+    // statement (v265's VALIDATE CONSTRAINT) shares.
+    expect(fnBody).toContain('await runMigrationStatement(engine, m.version, sql);');
+    const helpers = surfaceFileSource('migrate', 'src/core/schema-migrations/helpers.ts');
+    const helperIdx = helpers.indexOf('export async function runMigrationStatement(');
+    expect(helperIdx).toBeGreaterThan(-1);
+    const helperBody = helpers.slice(helperIdx, helperIdx + 1500);
+    expect(helperBody).toContain('withReservedConnection');
+    expect(helperBody).toContain("SET statement_timeout = '${migrationStatementTimeoutMs()}'");
     expect(migrationStatementTimeoutMs()).toBe(600_000);
   });
 });
@@ -2413,6 +2420,8 @@ describe('v117 — context_volunteer_events_table', () => {
 
   test('insert + 90-day purge round-trip (purgeStaleVolunteerEvents)', async () => {
     const { insertVolunteerEvents, purgeStaleVolunteerEvents } = await import('../src/core/context/volunteer-events.ts');
+    await engine.putPage('people/alice-example', { type: 'person', title: 'Alice Example', compiled_truth: '', timeline: '' });
+    await engine.putPage('projects/acme-example', { type: 'project', title: 'Acme Example', compiled_truth: '', timeline: '' });
     await insertVolunteerEvents(engine, [
       { source_id: 'default', slug: 'people/alice-example', confidence: 0.9, match_arm: 'alias', rationale: 'alias match', channel: 'op' },
       { source_id: 'default', slug: 'projects/acme-example', confidence: 0.8, match_arm: 'title', rationale: 'exact title', channel: 'reflex', session_id: 's1', turn: 3 },

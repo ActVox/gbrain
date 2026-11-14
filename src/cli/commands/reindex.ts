@@ -48,6 +48,14 @@ export async function run(engine: BrainEngine, args: string[]): Promise<void> {
     }
     return;
   }
+  if (args.includes('--synopsis')) {
+    await (await import('../../commands/reindex-synopsis.ts')).runReindexSynopsis(engine, args);
+    return;
+  }
+  if (args.includes('--segmented')) {
+    await reindex.runReindexSegmented(engine, args);
+    return;
+  }
   if (args.includes('--oversized')) {
     const { runOversizedBackfill, formatOversizedBackfillReceipt } = await import('../../core/oversized-backfill.ts');
     const value = (flag: string) => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };

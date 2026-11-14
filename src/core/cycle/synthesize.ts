@@ -2,6 +2,7 @@ import { observationDateLine, observationDateRule } from '../ai/date-grounding.t
 import { isConsumerDateGroundingOn } from '../facts/extract.ts';
 import { maintenancePreflight, publishMaintenancePage, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
 import { reportFileHolds, reverseWriteDreamRefs, writeDreamPageFile } from './derived-write-through.ts';
+import { emptySessionSourceRouting, keepSessionSourceTranscripts, withSessionSourceRouting, type SessionSourceRouting } from './synthesize-source-routing.ts';
 import { deferPublishOrThrow, finishDeferredPostprocess, loadCommittedOutputsOrDefer, postprocessManagedSynthesis, withPostprocessConflicts, withPublishPending, type PostprocessConflict, type RetainedOutput } from './synthesize-postprocess.ts';
 /**
  * Synthesize phase (v0.23; #4152 two-stage cascade) — conversation-to-brain
@@ -79,7 +80,7 @@ import { stampDreamProvenance, summaryProvenanceLines } from './dream-provenance
 import { activateSynthesisGenerations } from './synthesize-generations.ts';
 import { summaryDerivation, withTranscriptTaint } from './dream-taint.ts';
 import { DREAM_SUMMARY_KIND, publishSinglePage } from '../generations/adapters/single-page.ts';
-import { findSynthV2Completion, partitionCompletedSynthesis } from './synthesize-completion.ts';
+import { findSynthV2Completion, noCandidates, noNewTranscripts, partitionCompletedSynthesis } from './synthesize-completion.ts';
 
 // Re-exports: the drain was peeled to inline-drain.ts (dream-wave C7), the
 // allow-list loader to filing-rules.ts (#2397); patterns.ts and the
@@ -95,7 +96,7 @@ import { safeSplitIndex, truncateUtf8 } from '../text-safe.ts';
 import { PAGE_SLUG_SEG } from '../cjk.ts';
 import { withChatPhase, estimateChatCostUsd } from '../ai/chat-usage.ts';
 import { verifyAndRepairDreamPages, normForGrounding, readVerifyEpoch, loadChildWriteEpochs, isDreamOwnedPage, type QuoteVerifyStats, type TranscriptForVerify } from './synthesize-verify.ts';
-import { dreamBreakerRefusal, loadDreamBreaker } from './dream-breaker.ts';
+import { loadDreamBreaker, synthBreakerRefusal } from './dream-breaker.ts';
 import { resolveTriageDecide, type TriageDecide, type TriageDecideStats } from './triage-decide.ts';
 import { OperationError } from '../ops/contract.ts';
 import { isRetryableConnError } from '../retry-matcher.ts';
@@ -405,12 +406,14 @@ export async function runPhaseSynthesize(
   // wins (minions/worker.ts wraps each job), and that is intentional: the
   // authoritative child spend rolls up from minion_jobs token columns below.
   const startedAt = Date.now(); // #6757: outputs an earlier pass deferred finish even when this pass returns before postprocessing
-  return withChatPhase('phase:synthesize', async () => finishDeferredPostprocess(engine, opts, startedAt, await runPhaseSynthesizeInner(engine, opts), loadSynthConfig));
+  const routing = emptySessionSourceRouting(); // #7805: corpus files left out because they belong to another source, or to none yet
+  return withChatPhase('phase:synthesize', async () => withSessionSourceRouting(await finishDeferredPostprocess(engine, opts, startedAt, await runPhaseSynthesizeInner(engine, opts, routing), loadSynthConfig), routing, opts.sourceId ?? 'default'));
 }
 
 async function runPhaseSynthesizeInner(
   engine: BrainEngine,
   opts: SynthesizePhaseOpts,
+  routing: SessionSourceRouting,
 ): Promise<PhaseResult> {
   const start = Date.now();
   let ownedPrivateQueue: { queue: MinionQueue; name: string } | null = null;
@@ -501,7 +504,7 @@ async function runPhaseSynthesizeInner(
     const priorContradictionsBlock = await loadPriorContradictionsBlock(engine);
 
     // Discover: the corpus walk (or --input) plus #4419 imported conversation pages.
-    const transcripts = await withConversationPages(engine, opts, config, opts.inputFile
+    const transcripts = await keepSessionSourceTranscripts(engine, await withConversationPages(engine, opts, config, opts.inputFile
       ? loadAdHocTranscript(opts.inputFile, config.minChars, config.excludePatterns, opts.bypassDreamGuard)
       : !config.corpusDir ? [] : discoverTranscripts({
           corpusDir: config.corpusDir,
@@ -524,10 +527,10 @@ async function runPhaseSynthesizeInner(
               ].map(prefix => join(opts.brainDir, prefix)),
           // #5413: corpus files captured from gbrain's own claude-cli calls.
           selfCaptureSessionIds: claudeCliSelfSessionIds(),
-        }));
+        })), { corpusDir: config.corpusDir, sourceId: opts.sourceId ?? 'default', readOnly: opts.dryRun }, routing);
 
     if (transcripts.length === 0) {
-      return ok('no transcripts to process', { transcripts_processed: 0, pages_written: 0 });
+      return noCandidates('no transcripts to process', { transcripts_discovered: 0 });
     }
 
     // Best-effort housekeeping (#4069): expiry is enforced on reads
@@ -542,6 +545,7 @@ async function runPhaseSynthesizeInner(
 
     const { completed, retainedSkips, successfulV2Keys, synthesisIdentity } = await partitionCompletedSynthesis(engine, transcripts, opts.sourceId ?? 'default', maintenance, opts.dryRun);
     const synthesisState = { candidates: transcripts.length - completed.size, already_synthesized: completed.size };
+    if (synthesisState.candidates === 0 && !maintenance && !opts.dryRun) return noNewTranscripts(engine, transcripts, { retainedSkips, successfulV2Keys, synthesisIdentity });
     const pass = await runTriagePass(engine, transcripts.filter(t => !completed.has(t.filePath)), {
       model: config.triage.model,
       maxChars: config.triage.maxChars,
@@ -791,8 +795,7 @@ async function runPhaseSynthesizeInner(
         continue;
       }
 
-      const refusal = breaker && dreamBreakerRefusal(breaker,
-        `dream:synth-v2:${encodeURIComponent(synthesisIdentity)}:filename:${encodeURIComponent(basename(t.filePath))}:${hash16}`);
+      const refusal = breaker && synthBreakerRefusal(breaker, { synthesisIdentity, sourceId: cycleSourceId, filePath: t.filePath, hash16 });
       if (refusal) { process.stderr.write(`[dream] ${t.basename}: ${refusal}\n`); skipReports.push({ filePath: t.filePath, reason: refusal }); continue; }
       const chunks = splitTranscriptByBudget(t.content, t.contentHash, maxCharsPerChunk);
 
@@ -923,7 +926,8 @@ async function runPhaseSynthesizeInner(
             ? `${t.contentHash.slice(0, 6)}-c${i}`
             : t.contentHash.slice(0, 6),
           oneshot_task_prefixes: [config.reflectionsPrefix, config.originalsPrefix], // #6160: oneshot task shapes
-          require_writes: true,
+          ...(maintenance ? { dream_output: { raw_source: t.filePath, transcript_hash: t.contentHash, cycle_date: summaryDate, quote_verify: config.quoteVerify, ...(t.seat ? { seat: t.seat } : {}) } } : {}), // GBRA-60
+          require_writes: true, ...(t.corpusSource ? { corpus_source: t.corpusSource } : {}), // #7850: re-resolved when the child runs
           // #1586: scope every child tool call to the cycle's resolved source
           // so put_page writes land there instead of the hardcoded 'default'.
           ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
@@ -2884,7 +2888,7 @@ function buildSynthesisPrompt(
 CONTEXT
 ${dateContextLine}
 - Transcript hash suffix (USE THIS in slugs): ${hashSuffix}
-- Source file basename: ${baseSlugSegment}${chunkBanner}${priorContradictionsBlock}${triageMapBlock}${linkManifestBlock}${allowedPathsBlock}
+- Source file basename: ${baseSlugSegment}${t.speaker ? `\n- Speaker: this session was launched by the automated agent "${t.speaker}". Its user turns are that agent's brief, not the user's words: never present them as what the user said, requested or prefers; attribute them to Agent ${t.speaker}.` : ''}${chunkBanner}${priorContradictionsBlock}${triageMapBlock}${linkManifestBlock}${allowedPathsBlock}
 
 OUTPUT POLICY (ALL of these are required)
 1. Quote the user verbatim. Quotation marks are ONLY for spans reproducible EXACTLY from the transcript below — if you cannot reproduce a span exactly, paraphrase it WITHOUT quotation marks. Do not paraphrase memorable phrasings you can quote exactly.

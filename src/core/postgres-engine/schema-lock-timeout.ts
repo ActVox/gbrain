@@ -18,6 +18,7 @@
  * is never read: the message carries identifiers only.
  */
 import postgres from '#postgres';
+import { withPgTls } from '../pg-tls.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
 import { isLockTimeoutError } from '../retry-matcher.ts';
 
@@ -79,14 +80,14 @@ function describe(sessions: BlockingSession[]): string {
 
 /** The typed refusal for SQLSTATE 55P03 under the schema bound. */
 // engine-sql-ok: the suggestion text quotes an operator's pg_stat_activity query; nothing here runs SQL
-export function schemaLockBlockedError(input: { step: string; timeoutMs: number; sessions: BlockingSession[] | null; sampledDuringWait: boolean }): OperationError {
+export function schemaLockBlockedError(input: { step: string; timeoutMs: number; sessions: BlockingSession[] | null; sampledDuringWait: boolean; lock?: string }): OperationError {
   const { step, timeoutMs, sessions } = input;
   const holders = sessions === null ? 'The blocking sessions could not be sampled.'
     : sessions.length === 0 ? `No blocking session was found${input.sampledDuringWait ? ' at the sample' : ' after the cancel (it may have finished)'}.`
     : `Blocked by ${describe(sessions)}${input.sampledDuringWait ? '' : ' (sampled after the cancel)'}.`;
   const pids = sessions?.map(s => s.pid) ?? [];
   return opError('schema_lock_blocked',
-    `Schema ${step} waited ${Math.round(timeoutMs / 1000)}s for a table lock another session holds, and stopped instead of hanging. ${holders} Query text is not shown.`,
+    `Schema ${step} waited ${Math.round(timeoutMs / 1000)}s for ${input.lock ?? 'a table lock'} another session holds, and stopped instead of hanging. ${holders} Query text is not shown.`,
     `Nothing was changed by the cancelled step; the schema is as it was. Find what holds the lock (an open transaction in another client, a stuck job): ${pids.length
       ? `the blocking pid(s) are ${pids.join(', ')}. Let that session finish or, with the user's agreement, end it with SELECT pg_terminate_backend(<pid>) on the database host.`
       : 'run SELECT pid, application_name, state FROM pg_stat_activity WHERE state LIKE \'idle in transaction%\' on the database host and let that session finish or, with the user\'s agreement, end it with SELECT pg_terminate_backend(<pid>).'} Then rerun the same gbrain command; a longer wait is GBRAIN_SCHEMA_LOCK_TIMEOUT_SECONDS.`,
@@ -100,7 +101,7 @@ export function schemaLockBlockedError(input: { step: string; timeoutMs: number;
 export function schemaDiagnosticConnection(url: string | undefined): SchemaLockTimeoutOpts['diagnostic'] {
   if (!url) return undefined;
   return async () => {
-    const sql = postgres(url, { max: 1, connect_timeout: 10, prepare: false, onnotice: () => {}, connection: { application_name: 'gbrain-schema-lock-diagnostic' } });
+    const sql = postgres(url, withPgTls(url, { max: 1, connect_timeout: 10, prepare: false, onnotice: () => {}, connection: { application_name: 'gbrain-schema-lock-diagnostic' } }));
     return { unsafe: (query: string, params?: unknown[]) => sql.unsafe(query, params as never), end: () => sql.end({ timeout: 5 }) };
   };
 }
@@ -139,5 +140,26 @@ export async function withSchemaLockTimeout<T>(conn: Queryable, run: () => Promi
   } finally {
     if (timer) clearTimeout(timer);
     await conn.unsafe(`SET lock_timeout = '${previous.replace(/'/g, '')}'`).catch(() => {});
+  }
+}
+
+
+/** #6143: attempts of the schema replay when Postgres aborts it as a deadlock victim. */
+const SCHEMA_REPLAY_DEADLOCK_ATTEMPTS = 3;
+
+/**
+ * #6143: the base-schema replay is one implicit transaction that takes ACCESS EXCLUSIVE locks as it goes (pages'
+ * triggers long before sources' managed_writer_guard), while live readers (the resident consumer's probe, serve queries)
+ * lock tables in their own order, so a reader holding sources that then reads pages deadlocks with it. Postgres aborts
+ * the replay, which waited first, and rolls all of it back, so running it again is safe.
+ */
+export async function retrySchemaReplayOnDeadlock<T>(run: () => Promise<T>, attempt = 1): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== '40P01' || attempt >= SCHEMA_REPLAY_DEADLOCK_ATTEMPTS) throw error;
+    process.stderr.write(`  Schema replay deadlocked with a concurrent query (40P01); nothing was applied, retrying (${attempt + 1}/${SCHEMA_REPLAY_DEADLOCK_ATTEMPTS})\n`);
+    await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+    return retrySchemaReplayOnDeadlock(run, attempt + 1);
   }
 }

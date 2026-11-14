@@ -13,6 +13,7 @@ import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { invalidateGitListingCache, knownOutsideGitRepo, noteGitFailure } from './git-visible-files.ts';
 import { hasUnresolvedDbOnlyDeclaration, loadStorageConfig } from './storage-config.ts';
 import { GIT_READ_ENV, gitChildEnv } from './git-env.ts';
+import { recordCommit, recordIntent } from './git/commit-ledger.ts';
 
 /**
  * v0.32.7 CJK wave (codex post-merge F4): resolve a slug by `pages.source_path`
@@ -529,14 +530,13 @@ export function createSyncBaselineCommit(repoPath: string): void {
   const dbOnlyDirs = storageConfig?.db_only ?? [];
   // Sniff-test fail-closed (round 6, P2): `loadStorageConfig` warns-and-
   // returns an EMPTY config for syntactically-valid-but-unsupported YAML
-  // (e.g. flow-style `db_only: [dir/]`; the narrow custom parser only
-  // handles block-style lists), which would silently resolve zero
+  // (e.g. a flow list split over lines; the narrow custom parser handles
+  // block lists and one-line flow lists), which would silently resolve zero
   // exclusions from a file that clearly intended some. If gbrain.yml has a
   // db_only (or deprecated `supabase_only`) key line but nothing resolved
   // from it, refuse rather than guess; `hasUnresolvedDbOnlyDeclaration`
-  // owns the key-line rules. Accepted trade-off: an intentionally empty
-  // `db_only: []` also refuses (same empty config); silently committing
-  // db_only content into permanent git history is high-cost and hard to undo.
+  // owns the key-line rules (an explicit empty `db_only: []` declares none, #8007);
+  // silently committing db_only content into permanent git history is high-cost and hard to undo.
   if (hasUnresolvedDbOnlyDeclaration(repoPath, storageConfig)) {
     const yamlPath = join(repoPath, 'gbrain.yml');
     throw new Error(
@@ -593,6 +593,7 @@ export function createSyncBaselineCommit(repoPath: string): void {
     const stderr = err && typeof err === 'object' && 'stderr' in err ? String((err as { stderr: unknown }).stderr) : '';
     if (!stderr.includes('ignored by one of your .gitignore files')) throw err;
   }
+  recordIntent(repoPath, { writer: 'sync_init', head_before: null, message: 'gbrain: initial commit (auto-init by sync)' });
   git(
     repoPath,
     // --no-verify only skips pre-commit/commit-msg — prepare-commit-msg
@@ -614,6 +615,7 @@ export function createSyncBaselineCommit(repoPath: string): void {
     ],
     ['user.name=gbrain', 'user.email=gbrain@localhost', 'core.hooksPath=/dev/null'],
   );
+  recordCommit(repoPath, { sha: git(repoPath, ['rev-parse', 'HEAD']), writer: 'sync_init' });
 }
 
 /**

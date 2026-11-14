@@ -24,8 +24,10 @@ async function install(brain: { syncRepoPath?: string; defaultSourcePath?: strin
     const log = console.log;
     const error = console.error;
     const exit = process.exit;
+    const stderrWrite = process.stderr.write;
     console.log = () => {};
     console.error = (...p: unknown[]) => { stderr.push(p.map(String).join(' ')); };
+    process.stderr.write = ((chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; }) as typeof process.stderr.write;
     process.exit = ((code?: number) => { exitCode = code ?? 0; throw new Error('process.exit'); }) as typeof process.exit;
     _resetCliExitVerdictForTests();
     try {
@@ -40,6 +42,7 @@ async function install(brain: { syncRepoPath?: string; defaultSourcePath?: strin
     } finally {
       console.log = log;
       console.error = error;
+      process.stderr.write = stderrWrite;
       process.exit = exit;
     }
   });
@@ -71,6 +74,24 @@ describe('autopilot --install repo resolution (#6755)', () => {
     const flag = mkdtempSync(join(tmpdir(), 'gbrain-ap-fallback-flag-'));
     const r = await install({ syncRepoPath: '/configured', defaultSourcePath: '/elsewhere' }, ['--repo', flag]);
     expect(r.wrapper).toContain(`autopilot --repo '${flag}'`);
+  });
+
+  // /ship coverage audit (GBRA-207, #7630).
+  // Value: protects=a relative sync.repo_path is skipped, not fatal: install falls through to an absolute default local_path, and refuses when both are relative;
+  //   fails_when=installRepoFallback returns null on a relative sync.repo_path without consulting local_path, or bakes "." into the wrapper;
+  //   why_new=sync-relative-anchor-readers-7630 asserts only the all-relative null, never the fall-through to an absolute local_path; seam=none;
+  //   no_claim=a real supervisor install (ephemeral-container target, stub engine)
+  test('#7630: a relative sync.repo_path falls through to an absolute default local_path; relative everywhere refuses', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-ap-fallback-relative-'));
+    const fellThrough = await install({ syncRepoPath: '.', defaultSourcePath: repo });
+    expect(fellThrough.exitCode).toBeUndefined();
+    expect(fellThrough.wrapper).toContain(`autopilot --repo '${repo}'`);
+    expect(fellThrough.wrapper).not.toContain("autopilot --repo '.'");
+    const refused = await install({ syncRepoPath: '.', defaultSourcePath: 'notes' });
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain('No repo path');
+    expect(refused.stderr).toContain('unset or relative');
+    expect(refused.wrapper).toBeNull();
   });
 
   test('no path anywhere: refuses with exit 1 and writes nothing', async () => {

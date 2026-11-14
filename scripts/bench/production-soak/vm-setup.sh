@@ -5,10 +5,11 @@
 # Docker, bun and frozen dependencies, and pre-pulls the four images the
 # topology uses (lib.ts): pgvector, PgBouncer (pinned by digest) and toxiproxy.
 #
-#   scripts/ubicloud/ubi-runner.sh run --setup scripts/bench/production-soak/vm-setup.sh -- 'bash scripts/bench/production-soak/run.sh ...'
+#   scripts/ubicloud/ubi-runner.sh run --ttl-hours <soak hours + 4> --setup scripts/bench/production-soak/vm-setup.sh -- 'bash scripts/bench/production-soak/run.sh ...'
+# (ubicloud.sh start does this per latency; without --ttl-hours the VM's 3-hour default TTL ends a soak mid-run)
 set -euo pipefail
 
-BUN_VERSION="${BUN_VERSION:-1.4.3}"
+BUN_VERSION="${BUN_VERSION:-1.4.4}"
 t0=$(date +%s)
 step() { echo "[soak-setup +$(( $(date +%s) - t0 ))s] $*"; }
 

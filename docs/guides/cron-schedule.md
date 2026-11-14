@@ -36,8 +36,16 @@ scheduling surfaces — reach for these first:
   hand-rolling the dream cycle below.
 - **`gbrain jobs` / minions** — queue shell jobs or LLM subagents with retry,
   backoff, and an audit trail. See the `minion-orchestrator` skill.
-- **`gbrain autopilot`** — the long-lived background daemon that runs cycles
-  on its own cadence.
+- **`gbrain serve`** — while the agent connected to it is idle, it runs the
+  free upkeep (`gbrain maintain --unattended`) once a day, with nothing to
+  install. A source too big to finish in its short idle slices is parked after
+  30 tries and finished by the next full run. `gbrain maintain --status` shows
+  the last run and anything parked.
+- **`gbrain maintain --schedule`** — for a brain no agent opens most days:
+  installs a job that runs the same upkeep every 6 hours (launchd, a systemd
+  user timer or cron). Opt-in; preview with `--dry-run`.
+- **`gbrain autopilot`** — the long-lived background daemon that runs full
+  cycles on its own cadence, for a Postgres brain with a repo.
 - **`cron-scheduler` skill** (`skills/cron-scheduler/`) — teaches an agent to
   manage its harness's scheduler.
 - **Bootstrap session-triggered schedules** — `gbrain bootstrap` installs
@@ -70,8 +78,14 @@ those (`maintenance_lock_busy`) and the holder runs them.
 # Calendar sync — Sundays at 10 AM
 0 10 * * 0 cd /path/to/calendar-sync && node calendar-sync.mjs --start $(date -v-7d +%Y-%m-%d) --end $(date +%Y-%m-%d)
 
-# Brain health — weekly Mondays at 6 AM
-0 6 * * 1 gbrain doctor --json >> /tmp/gbrain-health.log 2>&1 && gbrain embed --stale
+# Brain health — weekly Mondays at 6 AM. Every gbrain call goes through the
+# wrapper below (gbrain-run), never a bare `gbrain` or `bun run src/cli.ts`.
+0 6 * * 1 gbrain-run doctor --json >> /tmp/gbrain-health.log 2>&1 && gbrain-run embed --stale
+
+# Health alert — hourly. Page on the alert verdict, never on health_score:
+# exit 0 none, 17 act (alert.items carry each fix), 18 unknown (a page-class
+# check did not run fresh); page on 18 only from the second run in a row.
+17 * * * * gbrain-run doctor --alert --json > /tmp/gbrain-alert.json 2>> /tmp/gbrain-alert.err; rc=$?; case $rc in 0) ;; 17) your-notify "gbrain needs action" ;; 18) [ "$(jq -r '.alert.consecutive_unknown // 0' /tmp/gbrain-alert.json)" -ge 2 ] && your-notify "gbrain health unknown twice in a row" ;; *) your-notify "gbrain doctor --alert failed (exit $rc)" ;; esac
 
 # Autopilot health gate — daily at 7 AM. The exit code is the signal:
 # 0 fresh (or nothing installed), 1 needs attention (stale heartbeat,
@@ -82,11 +96,91 @@ those (`maintenance_lock_busy`) and the holder runs them.
 # daemon writes the maintenance verdict each tick), so it works even during
 # a DB outage. On a stall: gbrain doctor --only global_maintenance_stalled
 # names the phase and the command to run.
-0 7 * * * gbrain autopilot --status >> /tmp/gbrain-autopilot-health.log 2>&1 || your-notify "gbrain autopilot needs attention"
+0 7 * * * gbrain-run autopilot --status >> /tmp/gbrain-autopilot-health.log 2>&1 || your-notify "gbrain autopilot needs attention"
 
 # Dream cycle — nightly at 2 AM
 0 2 * * * /path/to/dream-cycle.sh
 ```
+
+<a id="calling-gbrain-unattended"></a>
+### Call gbrain through one wrapper
+
+A scheduled job does not run in the shell you tested it in. Cron, a harness's
+workspace scripts and git hooks start with another `HOME`, a bare `PATH` and
+whatever environment their parent had, so a call that works by hand can do
+something else on a schedule:
+
+- **No database.** The job finds no brain config or URL, gbrain refuses
+  (`no_brain`, or `GBRAIN_DB_ACCESS no_url`) on stderr, and a caller that
+  drops stderr reads every lookup as "nothing found".
+- **A second host.** gbrain keeps its host identity under the brain home, so a
+  job that resolves another home is another host: `gbrain sources refresh`
+  refuses `refresh_not_owner` (since v0.60.427.0 it names the identity file it
+  read and the `HOME` and `GBRAIN_HOME` it resolved), and owner-only
+  maintenance reports `owner_unavailable` with reason `host_mismatch`.
+- **A stale database.** A variable the caller already exported wins over the
+  brain's `config.json` and `.gbrain/.env`, so a job started from an old
+  environment keeps using the old `DATABASE_URL`.
+
+Give every cron line, workspace script and hook one entry point, a wrapper that
+sets `GBRAIN_HOME`, loads the brain's env file if the harness keeps one, and
+runs the installed binary:
+
+```bash
+#!/usr/bin/env bash
+# gbrain-run: the only way scheduled work calls gbrain
+set -euo pipefail
+export GBRAIN_HOME=/srv/gbrain          # parent of .gbrain; the value serve, workers and autopilot use
+if [ -f /srv/gbrain/brain.env ]; then   # only if the harness keeps the brain's settings in its own file
+  set -a; . /srv/gbrain/brain.env; set +a
+fi
+exec /srv/gbrain/.bun/bin/gbrain "$@"  # the installed binary, by absolute path
+```
+
+Rules for the wrapper and everything that calls it:
+
+1. **Set `GBRAIN_HOME`, never `HOME`.** `GBRAIN_HOME` moves only gbrain's
+   state. Changing `HOME` also changes the git identity, SSH keys and push
+   credentials the job runs with. Use the same value as the serve, the workers
+   and autopilot; doctor `host_identity_mismatch` names a process that differs.
+2. **Run the installed binary.** Never `bun run src/cli.ts` from a checkout with
+   the caller's inherited environment: it skips the wrapper's settings and can
+   run another build than the serve.
+3. **Keep stderr and the exit code.** Never send gbrain's stderr to
+   `/dev/null`. Append it to a log and branch on the exit code
+   ([exit codes](exit-codes.md)): `10` means the write was accepted and is
+   still pending, not "not found" or "failed"; `3` means stop and ask the
+   user. A refusal fails the job; it is never an empty result.
+4. **Keep stdout clean.** A `--json` caller parses stdout as one document, so
+   the wrapper and any hook it runs log to a file or stderr, never stdout.
+5. **Allow time.** A cold CLI start takes 3–6 s on a pooled Postgres brain.
+   Set caller timeouts of at least 10 s in the shell and in the language
+   runtime that runs it (a runtime's exec timeout can override the shell's
+   without saying so), and turn on the [warm CLI socket](cli-socket.md) so
+   reads skip the cold start. Give fetch or push calls (`gbrain sources
+   git-reconcile`, `refresh`) 15 minutes.
+6. **Quote the env file.** A file a shell sources is shell syntax. An unquoted
+   `&` in a URL ends the assignment and backgrounds the rest, so the variable
+   silently keeps its old value. Quote every value, keep Postgres URLs to
+   `?sslmode=require` (set driver options such as `GBRAIN_PREPARE=false` as
+   variables instead of extra `&` parameters), and restart every running
+   gbrain process after an edit: a process keeps the environment it started
+   with.
+7. **Never print the environment.** `env`, `printenv` or a process's
+   `environ` holds the database URL and API keys, and a transcript keeps them.
+   To debug, print variable names only, or run `gbrain engine status --json`,
+   which redacts the URL.
+
+On a managed brain the same wrapper runs `gbrain-run sources refresh <id>` on
+a schedule ([the managed cron line](../../skills/cron-scheduler/SKILL.md#managed-brain)).
+Scripts commit the files they write with
+`gbrain git commit-push --path <absolute brain checkout> -- <paths>`, never
+plain `git commit`, in the managed checkout (a wrapper that changes directory
+would otherwise point it at another repository); see
+[shared-checkout git](shared-checkout-git.md#scripts-and-the-managed-checkout).
+`gbrain doctor --only cron_gbrain_home --json` reads the crontab and the scripts
+it names and warns about a line that runs `src/cli.ts` straight from a checkout,
+or calls gbrain without the brain's `GBRAIN_HOME`.
 
 ### Quiet Hours Gate (MANDATORY)
 
@@ -397,8 +491,8 @@ echo "Dream cycle starting at $(date)"
 # Phase 2: Shipped maintenance cycle (lint, backlinks, extract, sync, embed, synthesize)
 gbrain dream
 
-# Phase 3: Surface anything the cycle flagged
-gbrain doctor --json | jq '.checks[] | select(.status=="warn")'
+# Phase 3: Surface anything that needs someone (exit 17 act, 18 unknown)
+gbrain doctor --alert --json | jq '.alert'
 
 echo "Dream cycle complete at $(date)"
 ```

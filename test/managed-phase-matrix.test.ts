@@ -22,6 +22,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ensureCorpusSpoolDir, sessionCorpusFileName } from '../src/core/context/corpus-segments.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { ALL_PHASES, runCycle, type CycleOpts, type CyclePhase, type PhaseResult } from '../src/core/cycle.ts';
@@ -179,7 +180,7 @@ const MATRIX: Record<CyclePhase, Entry> = {
   synthesize: {
     seed: async ({ engine, sourceId, root }) => {
       await put(engine, sourceId, 'people/example', page('note', 'Example', 'Example evidence.'));
-      writeFileSync(join(root, '2026-09-20-session.txt'), `User: we charge for durability because reliable memories should survive every tool.\n${'Assistant: Discuss the long term roadmap.\n'.repeat(15)}`);
+      writeFileSync(join(ensureCorpusSpoolDir(root), sessionCorpusFileName('2026-09-20-session', sourceId)), `User: we charge for durability because reliable memories should survive every tool.\n${'Assistant: Discuss the long term roadmap.\n'.repeat(15)}`);
     },
     config: { 'dream.synthesize.enabled': 'true', 'dream.synthesize.cooldown_hours': '0', 'dream.synthesize.min_chars': '100',
       'dream.synthesize.link_manifest': 'false', 'dream.synthesize.mode': 'oneshot', 'models.dream.synthesize': 'anthropic:claude-sonnet-4-6',
@@ -368,6 +369,19 @@ const MATRIX: Record<CyclePhase, Entry> = {
       expect(await engine.executeRaw("SELECT state FROM chronicle_page_state WHERE source_id=$1", [sourceId])).toEqual([{ state: 'extracted' }]);
     },
   },
+  claim_conflicts: {
+    config: { 'dream.claim_conflicts.mode': 'propose' },
+    seed: async ({ engine, sourceId }) => {
+      for (const [value, at] of [[40000, '2026-03-02'], [45000, '2026-03-20']] as const) {
+        await engine.executeRaw(`INSERT INTO facts(source_id,entity_slug,fact,kind,source,visibility,confidence,valid_from,claim_metric,claim_value,claim_unit,claim_period)
+          VALUES($1,'companies/acme-example',$2,'fact','test','world',1,$3::timestamptz,'mrr',$4,'USD','monthly')`, [sourceId, `Acme MRR is ${value}`, at, value]);
+      }
+    },
+    assert: async ({ engine, sourceId, result }) => {
+      expect(result.details).toMatchObject({ pairs_found: 1, proposals_written: 1, deferred: 0 });
+      expect(await engine.executeRaw("SELECT status FROM decide_proposals WHERE source_id=$1 AND sweep_id LIKE 'claim_conflicts:%'", [sourceId])).toEqual([{ status: 'pending' }]);
+    },
+  },
   facts_drain: {
     config: { embedding_disabled: 'true' },
     seed: async ({ engine, sourceId }) => {
@@ -453,12 +467,29 @@ const MATRIX: Record<CyclePhase, Entry> = {
       expect((await committed(engine, sourceId, 'notes/expired')).at(-1)?.outcome?.status).toBe('purged');
     },
   },
+  bookkeeping_gc: {
+    seed: async ({ engine, sourceId }) => {
+      await put(engine, sourceId, 'notes/kept-deleted', page('note', 'Kept', 'Deleted, but GC never purges pages.'));
+      await engine.executeRaw("UPDATE pages SET deleted_at=now() - interval '100 hours' WHERE source_id=$1 AND slug='notes/kept-deleted'", [sourceId]);
+      await engine.executeRaw("INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at) VALUES ('matrix-gc', $1, '[]'::jsonb, now() - interval '8 days')", [sourceId]);
+    },
+    assert: async ({ engine, sourceId, result }) => {
+      expect(result.details.purged_checkpoints_count).toBeGreaterThanOrEqual(1);
+      expect(await engine.executeRaw("SELECT 1 FROM op_checkpoints WHERE op='matrix-gc' AND fingerprint=$1", [sourceId])).toEqual([]);
+      expect(await engine.readPageSnapshot('notes/kept-deleted', { sourceId, includeDeleted: true })).not.toBeNull();
+    },
+  },
 };
 
 test('every cycle phase is classified for managed brains, with no extra keys', () => {
   expect(Object.keys(MANAGED_PHASE_TABLE).sort()).toEqual([...ALL_PHASES].sort());
   expect(Object.keys(MATRIX).sort()).toEqual([...ALL_PHASES].sort());
   for (const entry of Object.values(MANAGED_PHASE_TABLE)) expect(entry.reason.length).toBeGreaterThan(0);
+});
+
+test('every cycle phase carries a tier (GBRA-438)', () => {
+  const missing = ALL_PHASES.filter(phase => !['free', 'paid', 'deletes', 'filesystem'].includes((MANAGED_PHASE_TABLE[phase] as { tier?: string } | undefined)?.tier ?? ''));
+  expect(missing).toEqual([]);
 });
 
 const REFUSALS = ['writer_coordinator_required', 'owner_unavailable'];

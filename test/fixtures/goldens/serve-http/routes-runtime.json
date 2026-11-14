@@ -27,16 +27,10 @@
         },
         {
           "handlers": [
-            "<anonymous>"
+            "mcpForegroundMiddleware"
           ],
           "method": "use",
-          "path": [
-            "/mcp",
-            "/token",
-            "/authorize",
-            "/register",
-            "/revoke"
-          ]
+          "path": "/mcp"
         },
         {
           "handlers": [
@@ -633,6 +627,74 @@
         {
           "handlers": [
             "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/access/members"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/access/members"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/access/member-links"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/access/member-links"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/access/attest"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/memory-proposals"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/memory-proposals/:request_id"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/memory-proposals/:request_id"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
             "jsonParser",
             "<anonymous>"
           ],
@@ -670,6 +732,8 @@
         },
         {
           "handlers": [
+            "<anonymous>",
+            "<anonymous>",
             "<anonymous>",
             "<anonymous>"
           ],
@@ -720,16 +784,10 @@
         },
         {
           "handlers": [
-            "<anonymous>"
+            "mcpForegroundMiddleware"
           ],
           "method": "use",
-          "path": [
-            "/mcp",
-            "/token",
-            "/authorize",
-            "/register",
-            "/revoke"
-          ]
+          "path": "/mcp"
         },
         {
           "handlers": [
@@ -1370,6 +1428,74 @@
         {
           "handlers": [
             "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/access/members"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/access/members"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/access/member-links"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/access/member-links"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/access/attest"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/memory-proposals"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/memory-proposals/:request_id"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "jsonParser",
+            "<anonymous>"
+          ],
+          "method": "post",
+          "path": "/admin/api/memory-proposals/:request_id"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
             "jsonParser",
             "<anonymous>"
           ],
@@ -1407,6 +1533,8 @@
         },
         {
           "handlers": [
+            "<anonymous>",
+            "<anonymous>",
             "<anonymous>",
             "<anonymous>"
           ],

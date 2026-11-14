@@ -55,6 +55,8 @@ const EXTRA_FLAGS: Record<string, string[]> = {
   // Deferred persistence routing reaches runForget in recall.ts two levels deep;
   // `forget --purge` hands off from there to src/commands/forget-purge.ts.
   forget: ['--reason', '--request-id', '--purge', '--dry-run', '--yes', '--match', '--status', '--vacuum', '--all-subjects'],
+  // sources add reads the meetings and slack options as bare names in src/commands/sources-lifecycle-args.ts (its valued set).
+  sources: ['--provider', '--transcript', '--lookback-days', '--sync-interval-min', '--record', '--visibility', '--channels', '--timezone', '--max-requests', '--skip'],
 };
 
 /**
@@ -72,8 +74,9 @@ const DELEGATED_MODULES: Record<string, string[]> = {
   forget: ['src/commands/forget-purge.ts'],
   // `upgrade --restart-only --dry-run` is parsed by restartDryRun in
   // upgrade-restart.ts, which refuses --dry-run without --restart-only;
-  // post-upgrade shares upgrade.ts and never takes it.
-  upgrade: ['src/commands/upgrade-restart.ts'],
+  // post-upgrade shares upgrade.ts and never takes it. A plain `upgrade --dry-run`
+  // is the channel preview, parsed by runUpgradeDryRun in upgrade-channel.ts.
+  upgrade: ['src/commands/upgrade-restart.ts', 'src/commands/upgrade-channel.ts'],
 };
 
 /**
@@ -88,9 +91,16 @@ const DELEGATED_MODULES: Record<string, string[]> = {
  * declares both flags in its own source. strict-args.ts is the strict-argument
  * table for several commands' destructive subcommands (#6114): its literals
  * belong to pages, cache, schema, integrity and search, each of which reads
- * its own flags in its own source.
+ * its own flags in its own source. flag-equals.ts (#7619) names flags as
+ * arity data for the `=` split; each handler reads its own flags.
+ * direct-pool-profile.ts reads other commands'
+ * argv to pick the process's pool profile (`sync --watch`, `serve --access`):
+ * serve imports it for the read-only check, and its `--watch` made
+ * `gbrain serve --watch` pass validation. grants/shared-exposure.ts (GST-363)
+ * names other commands' flags (auth rescope, mcp grant, doctor) in warning
+ * text that setup, mcp, connect, skillpack and auth print.
  */
-const EXCLUDED_MODULES = ['thin-client-routing.ts', 'persistence-delegate.ts', 'job-isolation.ts', 'strict-args.ts'];
+const EXCLUDED_MODULES = ['thin-client-routing.ts', 'persistence-delegate.ts', 'job-isolation.ts', 'strict-args.ts', 'direct-pool-profile.ts', 'flag-equals.ts', 'shared-exposure.ts'];
 
 function isExcludedModule(p: string): boolean {
   // Basename comparison is path-separator agnostic: on Windows p ends in
@@ -420,6 +430,8 @@ function buildFlagArtifacts(root: string): { registry: Record<string, string[]>;
     reindex: ['--type'],
     upgrade: ['--type', '--aliases'],
     'post-upgrade': ['--type', '--aliases'],
+    // bundled-skill's skill_not_found hint names setup's refresh command; it parses its own flags strictly.
+    'bundled-skill': ['--skill-loading', '--skills-index-only', '--install'],
   };
   const consumes = (text: string, flag: string): boolean =>
     new RegExp(`['"\`]${flag}['"\`]`).test(text);

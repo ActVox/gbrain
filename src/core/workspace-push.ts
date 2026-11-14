@@ -56,7 +56,7 @@ import { OperationError } from './ops/contract.ts';
 import {
   existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { dirname, isAbsolute, join, resolve } from 'path';
 import { createHash, randomBytes } from 'crypto';
 import { execFileSync, spawn } from './spawn.ts';
 import { GIT_ENV, GIT_ENV_AUTH, GIT_SSRF_SUBCOMMAND_FLAGS, detectDefaultBranch, divergenceSafePull, type PullStrategy } from './git-remote.ts';
@@ -78,6 +78,8 @@ import {
 import { scanTextStream } from './secret-scan-stream.ts';
 import { shellQuote } from './mcp-registration.ts';
 import { gitChildEnv } from './git-env.ts';
+import { recordCommit, recordIntent } from './git/commit-ledger.ts';
+import { stagedScanPublishRefusal } from './git/range-secret-scan.ts';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -87,6 +89,7 @@ export type WorkspacePushStatus =
   | 'blocked_tracked_deny'  // a TRACKED file matches the deny globs [G6]
   | 'blocked_secrets'       // unallowlisted secret-scan findings [D6]
   | 'blocked_unscannable'   // a staged blob could not be scanned — fail CLOSED
+  | 'blocked_history'       // the range scan of the commits it would push refused (publish_secret_found / publish_scan_unreadable)
   | 'refused_visibility'    // remote not verifiably private [G8]
   | 'pull_conflict'         // divergenceSafePull aborted a conflicted rebase
   | 'push_failed'           // push rejected / origin unreachable
@@ -110,6 +113,10 @@ export interface WorkspacePushResult {
   findings?: PushSecretFinding[];
   /** Staged paths the secret scan could not read (fail-closed block reason). */
   unscannable?: string[];
+  /** blocked_history: the refusal's code, what to do (a longer `--scan-timeout` after a timeout) and its findings JSON (never a value). */
+  code?: string;
+  suggestion?: string;
+  detail?: string;
 }
 
 /** Troubleshooting section for push refusals (DX-8 in docs/guides/write-refusals.md). */
@@ -157,6 +164,8 @@ export interface WorkspacePushOpts {
   allowUnverifiedRemote?: boolean;
   commitMessage?: string;
   logger?: (line: string) => void;
+  /** The range secret scan's time budget (`--scan-timeout`; default 300 s). */
+  scanTimeoutMs?: number;
   /**
    * TEST SEAM: hold the lock for N ms after acquisition, before any git work.
    * Lets a concurrency test make "N callers, 1 winner" deterministic.
@@ -314,6 +323,13 @@ function git(
     maxBuffer: 64 * 1024 * 1024,
     env: gitChildEnv({ ...(opts.auth ? GIT_ENV_AUTH : GIT_ENV) }),
   }).toString();
+}
+
+/** PR B: the workspace push commit, with its commit-ledger intent and commit lines (src/core/git/commit-ledger.ts). */
+function commitRecorded(root: string, message: string): void {
+  recordIntent(root, { writer: 'workspace_push', head_before: tryGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD']), message });
+  git(root, ['commit', '-m', message], { timeoutMs: 60_000 });
+  recordCommit(root, { sha: tryGit(root, ['rev-parse', 'HEAD']) ?? '', writer: 'workspace_push' });
 }
 
 function tryGit(root: string, args: string[], opts: { timeoutMs?: number; auth?: boolean } = {}): string | null {
@@ -565,20 +581,38 @@ export interface PushStatusEntry {
 
 const PUSH_STATUS_FILE_RE = /^push-status-[0-9a-f]{12}\.json$/;
 
-/** Tolerant reader over every push-status file (banner, SessionStart note,
- * and doctor all consume THIS — one parse, one schema owner). Per-root files
- * win; the legacy global file is consulted only when none exist, so a stale
- * pre-upgrade record can't shadow live per-root state. */
-export function readPushStatuses(): PushStatusEntry[] {
+/** One push-status file as a record, or null when it is missing, torn or not
+ * a JSON object (#7377: a whole-file primitive, array or null is unreadable,
+ * never an empty record that reads as a success). Never throws. */
+function parsePushStatusFile(file: string): PushStatusEntry | null {
+  try {
+    const s: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    return s !== null && typeof s === 'object' && !Array.isArray(s) ? { ...(s as Omit<PushStatusEntry, 'file'>), file } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** #7377: a recorded repoRoot is gone only when stat answers ENOENT or
+ * ENOTDIR. A denied traversal (EACCES, EPERM), an I/O error or a value that
+ * is not an absolute path is unreadable, never proof the workspace is gone. */
+function pushStatusRootState(root: unknown): 'present' | 'gone' | 'unreadable' {
+  if (root === undefined) return 'present';
+  if (typeof root !== 'string' || !isAbsolute(root)) return 'unreadable';
+  try {
+    statSync(root);
+    return 'present';
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 'gone' : 'unreadable';
+  }
+}
+
+/** Every authoritative push-status file, classified: a live record, the
+ * record of a workspace that no longer exists, or unreadable. Per-root files
+ * win; the legacy global file is consulted only when none exist. */
+function classifyPushStatusFiles(): Array<PushStatusEntry | 'gone' | 'unreadable'> {
   const dir = join(ensureGbrainHome(), 'bootstrap');
-  const parse = (file: string): PushStatusEntry | null => {
-    try {
-      const s = JSON.parse(readFileSync(file, 'utf8')) as Omit<PushStatusEntry, 'file'>;
-      return { ...s, file };
-    } catch {
-      return null; // torn/corrupt/missing → skip, never throw
-    }
-  };
   let names: string[] = [];
   try {
     names = readdirSync(dir).filter((n) => PUSH_STATUS_FILE_RE.test(n));
@@ -586,22 +620,42 @@ export function readPushStatuses(): PushStatusEntry[] {
     return [];
   }
   // The legacy file is consulted only when NO per-root FILES exist on disk —
-  // if per-root files exist but are all corrupt, an empty result is the honest
-  // answer (doctor pairs it with pushStatusFilesExist for the loud warn); a
-  // stale pre-upgrade record must never shadow live-but-unreadable state.
+  // a stale pre-upgrade record must never shadow live-but-unreadable state.
   if (names.length === 0) {
-    const legacy = parse(pushStatusPath());
-    return legacy ? [legacy] : [];
+    const legacy = parsePushStatusFile(pushStatusPath());
+    return legacy ? [legacy] : existsSync(pushStatusPath()) ? ['unreadable'] : [];
   }
-  return names
-    .map((n) => parse(join(dir, n)))
-    .filter((e): e is PushStatusEntry => e !== null)
-    // A record whose workspace no longer exists on disk is a ghost: it can
-    // never be cleared by a re-push (the root is gone), so it must not feed
-    // the failure banner / staleness note forever (deleted Conductor
-    // workspaces are routine). Entries without repoRoot (legacy shape in a
-    // per-root file) are kept — absence of evidence is not a ghost.
-    .filter((e) => e.repoRoot === undefined || existsSync(e.repoRoot));
+  return names.map((n) => {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- n is a readdirSync(dir) entry that matched PUSH_STATUS_FILE_RE
+    const entry = parsePushStatusFile(join(dir, n));
+    if (!entry) return 'unreadable';
+    // A record whose workspace no longer exists is a ghost: it can never be
+    // cleared by a re-push (the root is gone), so it must not feed the
+    // failure banner / staleness note forever (deleted Conductor workspaces
+    // are routine). Entries without repoRoot (legacy shape in a per-root
+    // file) are kept — absence of evidence is not a ghost.
+    const state = pushStatusRootState(entry.repoRoot);
+    return state === 'present' ? entry : state;
+  });
+}
+
+/** Tolerant reader over every push-status file (banner, SessionStart note,
+ * and doctor all consume THIS — one parse, one schema owner). Per-root files
+ * win; the legacy global file is consulted only when none exist, so a stale
+ * pre-upgrade record can't shadow live per-root state. Unreadable files and
+ * records of gone workspaces are skipped; doctor tells them apart with
+ * pushStatusRecordCounts. */
+export function readPushStatuses(): PushStatusEntry[] {
+  return classifyPushStatusFiles().filter((e): e is PushStatusEntry => typeof e !== 'string');
+}
+
+/** #7377: how many authoritative push-status files hold the record of a
+ * workspace that no longer exists, and how many hold nothing readable. Doctor
+ * reads an empty readPushStatuses() through this, so retained history of
+ * deleted workspaces is not reported as an unreadable status. */
+export function pushStatusRecordCounts(): { gone: number; unreadable: number } {
+  const states = classifyPushStatusFiles();
+  return { gone: states.filter((s) => s === 'gone').length, unreadable: states.filter((s) => s === 'unreadable').length };
 }
 
 /** True when any push-status file exists on disk (parseable or not). The
@@ -620,14 +674,7 @@ export function pushStatusFilesExist(): boolean {
 /** The per-root status for one workspace, or null. Direct keyed read first —
  * the scan is only a fallback for legacy records carrying a repoRoot field. */
 export function readPushStatusForRoot(root: string): PushStatusEntry | null {
-  const keyedPath = pushStatusPathForRoot(root);
-  try {
-    const s = JSON.parse(readFileSync(keyedPath, 'utf8')) as Omit<PushStatusEntry, 'file'>;
-    return { ...s, file: keyedPath };
-  } catch {
-    /* fall through to the scan */
-  }
-  return readPushStatuses().find((e) => e.repoRoot === root) ?? null;
+  return parsePushStatusFile(pushStatusPathForRoot(root)) ?? readPushStatuses().find((e) => e.repoRoot === root) ?? null;
 }
 
 /**
@@ -843,6 +890,43 @@ export function managedPushRefusal(dir: string, root: string | null | undefined,
   return error;
 }
 
+type PushFailure = Pick<WorkspacePushResult, 'reason' | 'code' | 'suggestion' | 'detail'> & { status: 'error' | 'push_failed' | 'blocked_history' };
+
+/**
+ * Step 7 of {@link workspacePush}: the push carries every local commit origin lacks, including ones a script made with
+ * plain `git commit` that the staged scan never saw, so the exact commit pushed is range-scanned against origin's tip,
+ * read from origin itself (the pull may have fetched another upstream remote) and leased on (#8902). Tags never ride
+ * along. Returns the failure (blocked_history for a scan refusal), or null when pushed.
+ */
+function pushScannedHead(root: string, branch: string, log: (line: string) => void, scanTimeoutMs?: number): PushFailure | null {
+  const target = tryGit(root, ['rev-parse', '--verify', 'HEAD^{commit}']);
+  if (!target) return { status: 'error', reason: 'HEAD names no commit; nothing to push' };
+  const heads = tryGit(root, [...pushSsrfFlags(), 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`], { timeoutMs: 120_000, auth: true });
+  if (heads === null) return { status: 'push_failed', reason: `could not read origin's ${branch}; nothing pushed` };
+  const fetched = !heads || tryGit(root, [...pushSsrfFlags(), 'fetch', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--no-tags', 'origin',
+    `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { timeoutMs: 120_000, auth: true }) !== null;
+  if (!fetched) return { status: 'push_failed', reason: `could not fetch origin's ${branch}; nothing pushed` };
+  const base = heads ? tryGit(root, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}^{commit}`]) ?? '' : '';
+  if (heads && !base) return { status: 'push_failed', reason: `could not read origin's ${branch} after fetching it; nothing pushed` };
+  if (base && tryGit(root, ['merge-base', '--is-ancestor', base, target]) === null) {
+    return { status: 'push_failed', reason: `local ${branch} does not contain origin/${branch}; nothing pushed (rerun to pull first)` };
+  }
+  const refusal = stagedScanPublishRefusal(root, base, target, { timeoutMs: scanTimeoutMs, progress: log, retryArgv: ['gbrain', 'sources', 'push', '--path', root] });
+  if (refusal) {
+    log(`PUSH BLOCKED: ${refusal.code}: ${refusal.message}`);
+    return { status: 'blocked_history', code: refusal.code, reason: `${refusal.code}: ${refusal.message}`, suggestion: refusal.suggestion,
+      ...(refusal.detail !== undefined ? { detail: String(refusal.detail) } : {}) };
+  }
+  try {
+    git(root, [...pushSsrfFlags(), 'push', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--no-follow-tags', '--recurse-submodules=no', `--force-with-lease=refs/heads/${branch}:${base}`, 'origin', `${target}:refs/heads/${branch}`], {
+      timeoutMs: 120_000, auth: true,
+    });
+    return null;
+  } catch (e) {
+    return { status: 'push_failed', reason: `git push failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
 export async function workspacePush(opts: WorkspacePushOpts): Promise<WorkspacePushResult> {
   const log = (line: string) => opts.logger?.(line);
 
@@ -887,6 +971,7 @@ export async function workspacePush(opts: WorkspacePushOpts): Promise<WorkspaceP
     writePushStatus({
       ts: new Date().toISOString(),
       ok: r.ok,
+      ...(r.code !== undefined ? { code: r.code } : {}),
       ...(r.reason !== undefined ? { reason: r.reason } : {}),
       ...(r.ahead !== undefined ? { ahead: r.ahead } : {}),
       repoRoot: root,
@@ -1043,7 +1128,7 @@ export async function workspacePush(opts: WorkspacePushOpts): Promise<WorkspaceP
     try {
       const clean = tryGit(root, ['diff', '--cached', '--quiet']) !== null;
       if (!clean) {
-        git(root, ['commit', '-m', opts.commitMessage ?? 'gbrain: workspace push'], { timeoutMs: 60_000 });
+        commitRecorded(root, opts.commitMessage ?? 'gbrain: workspace push');
         committed = true;
       }
     } catch (e) {
@@ -1119,17 +1204,8 @@ export async function workspacePush(opts: WorkspacePushOpts): Promise<WorkspaceP
     }
 
     // 7. push — even with no new commit (a prior failure may have left local ahead).
-    try {
-      git(root, [...pushSsrfFlags(), 'push', ...GIT_SSRF_SUBCOMMAND_FLAGS, 'origin', `HEAD:${branch}`], {
-        timeoutMs: 120_000, auth: true,
-      });
-    } catch (e) {
-      return finish({
-        ok: false, status: 'push_failed', repoRoot: root, branch, committed,
-        ahead: aheadCount(root, branch),
-        reason: `git push failed: ${(e as Error).message.slice(0, 200)}`,
-      });
-    }
+    const failed = pushScannedHead(root, branch, log, opts.scanTimeoutMs);
+    if (failed) return finish({ ok: false, ...failed, repoRoot: root, branch, committed, ahead: aheadCount(root, branch) });
 
     const ahead = aheadCount(root, branch) ?? 0;
     log(`pushed ${root} → origin/${branch}${committed ? ' (new commit)' : ''}`);

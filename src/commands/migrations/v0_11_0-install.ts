@@ -2,13 +2,13 @@
  * v0.11.0 Phase F: the autopilot install, and an upgrade on a brain that names
  * no repo (#6755).
  *
- * Phase F installs the daemon only for the repo the brain names in
- * sync.repo_path, the same one `gbrain autopilot --install` resolves first.
- * Without it the phase installs nothing during an upgrade: it is skipped with
- * the exact install command (the default source's local_path when there is
- * one), a pending host-work item records that command, and doctor's
- * `minions_migration` line carries it until an autopilot is installed for
- * this brain. The migration completes instead of ending partial.
+ * An upgrade never installs autopilot on a brain that has none (GBRA-224 W5):
+ * Phase F only reinstalls an autopilot already installed for this brain, for
+ * the repo it names in sync.repo_path. Otherwise the phase installs nothing:
+ * it is skipped with the exact install command (sync.repo_path, else the
+ * default source's local_path), a pending host-work item records that command,
+ * and doctor's `minions_migration` line carries it until an autopilot is
+ * installed for this brain. The migration completes instead of ending partial.
  *
  * The old Phase F ran the install anyway and wedged such brains after three
  * partials. Its ledger rows cannot say why the install failed (the child's
@@ -16,11 +16,11 @@
  * `Command failed: <command>`), so `clearRepoPathWedge` keys on the shape
  * and the brain as it is now: every trailing partial failed only the install
  * phase, and the new phase would skip because sync.repo_path is unset. Phase F
- * now records a `reason` code on its outcomes (`no_repo_path`,
+ * now records a `reason` code on its outcomes (`no_repo_path`, `not_installed`,
  * `autopilot_already_installed`, `install_failed`) for later readers.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, isAbsolute } from 'path';
 import { shellQuote } from '../../core/agent-output.ts';
 import { resolveAutopilotJob } from '../../core/autopilot-paths.ts';
 import { cliChildStdio } from '../../core/cli-force-exit.ts';
@@ -71,7 +71,7 @@ export function pendingAutopilotInstall(): AutopilotInstallTodo | null {
 }
 
 /** Record the skipped install as a pending host-work item, once per install command. */
-export function recordSkippedAutopilotInstall(repo: string | null): void {
+export function recordSkippedAutopilotInstall(repo: string | null, why = 'sync.repo_path is unset'): void {
   const argv = autopilotInstallArgv(repo);
   if (pendingAutopilotInstall()?.install_argv.join('\0') === argv.join('\0')) return;
   const todo: AutopilotInstallTodo = {
@@ -81,7 +81,7 @@ export function recordSkippedAutopilotInstall(repo: string | null): void {
     repo,
     install_argv: argv,
     recommendation: repo
-      ? `The upgrade installed no autopilot because sync.repo_path is unset. Install it for this brain's repo: ${autopilotInstallCommand(repo)}`
+      ? `The upgrade installed no autopilot because ${why}. Install it for this brain's repo: ${autopilotInstallCommand(repo)}`
       : `The upgrade installed no autopilot because the brain names no repo (no sync.repo_path, no default source path). Install it with the brain repo's path: ${autopilotInstallCommand(null)}`,
   };
   mkdirSync(dirname(pendingHostWorkPath()), { recursive: true });
@@ -97,22 +97,36 @@ async function readRepoPaths(config: GBrainConfig | null): Promise<{ syncRepoPat
   if (!config) throw new Error('no brain configured');
   const { engine, close } = await connectMigrationEngine(config);
   try {
-    const syncRepoPath = (await engine.getConfig('sync.repo_path')) || null;
-    return { syncRepoPath, defaultSourcePath: syncRepoPath ? null : await defaultSourceLocalPath(engine) };
+    // #7630: a relative stored path names the upgrade's cwd, which the install no longer accepts; it counts as unset.
+    const absolute = (path: string | null) => path && isAbsolute(path) ? path : null;
+    const syncRepoPath = absolute(await engine.getConfig('sync.repo_path'));
+    return { syncRepoPath, defaultSourcePath: syncRepoPath ? null : absolute(await defaultSourceLocalPath(engine)) };
   } finally { await close(); }
 }
 
 function skipWithoutRepo(defaultSourcePath: string | null): OrchestratorPhaseResult {
   if (autopilotInstalledForBrain()) {
-    return { name: 'install', status: 'skipped', reason: 'autopilot_already_installed', detail: 'sync.repo_path is unset and an autopilot is already installed for this brain; left as is' };
+    return { name: 'install', status: 'skipped', reason: 'autopilot_already_installed', detail: 'sync.repo_path is unset or relative and an autopilot is already installed for this brain; left as is' };
   }
   recordSkippedAutopilotInstall(defaultSourcePath);
   const command = autopilotInstallCommand(defaultSourcePath);
-  console.log(`No autopilot was installed: sync.repo_path is unset. Install it when you want background maintenance: ${command} `
+  console.log(`No autopilot was installed: sync.repo_path is unset or relative. Install it when you want background maintenance: ${command} `
     + `(recorded in ${pendingHostWorkPath()}; gbrain doctor shows it until an autopilot is installed)`);
   return {
-    name: 'install', status: 'skipped', reason: 'no_repo_path', detail: `sync.repo_path is unset, so the upgrade installed no autopilot. Install it: ${command}`,
+    name: 'install', status: 'skipped', reason: 'no_repo_path', detail: `sync.repo_path is unset or relative, so the upgrade installed no autopilot. Install it: ${command}`,
     ...(defaultSourcePath ? { argv: autopilotInstallArgv(defaultSourcePath) } : {}),
+  };
+}
+
+function skipNotInstalled(repo: string | null): OrchestratorPhaseResult {
+  const why = 'no autopilot is installed for this brain, and an upgrade never installs one';
+  recordSkippedAutopilotInstall(repo, why);
+  const command = autopilotInstallCommand(repo);
+  console.log(`No autopilot was installed: ${why}. Install it when you want background maintenance: ${command} `
+    + `(recorded in ${pendingHostWorkPath()}; gbrain doctor shows it until an autopilot is installed)`);
+  return {
+    name: 'install', status: 'skipped', reason: 'not_installed', detail: `${why}. Install it: ${command}`,
+    ...(repo ? { argv: autopilotInstallArgv(repo) } : {}),
   };
 }
 
@@ -125,13 +139,16 @@ export async function phaseFInstall(opts: OrchestratorOpts): Promise<Orchestrato
     if (config?.engine === 'pglite') {
       return { name: 'install', status: 'skipped', detail: 'PGLite is single-writer; use gbrain serve for background maintenance' };
     }
+    let repoPath: string | null = null;
     try {
       const repo = await readRepoPaths(config);
       if (!repo.syncRepoPath) return skipWithoutRepo(repo.defaultSourcePath);
-      repoNote = `sync.repo_path ${repo.syncRepoPath}`;
+      repoPath = repo.syncRepoPath;
+      repoNote = `sync.repo_path ${repoPath}`;
     } catch (e) {
       repoNote = `repo path unreadable (${e instanceof Error ? e.message : String(e)}); the install resolves it itself`;
     }
+    if (!autopilotInstalledForBrain()) return skipNotInstalled(repoPath);
     execSync(gbrainChildCommand('gbrain autopilot --install --yes'), { stdio: cliChildStdio(), timeout: 60_000, env: process.env });
     return { name: 'install', status: 'complete' };
   } catch (e) {
@@ -162,7 +179,7 @@ export async function clearRepoPathWedge(completed: readonly CompletedMigrationE
   const repo = await readRepoPaths(config).catch(() => null);
   if (!repo || repo.syncRepoPath) return false;
   appendCompletedMigration({ version: '0.11.0', status: 'retry', reason: 'phase_f_no_repo_path' });
-  console.error('Cleared the v0.11.0 wedge: every partial run failed only the autopilot install, and sync.repo_path is unset. '
+  console.error('Cleared the v0.11.0 wedge: every partial run failed only the autopilot install, and sync.repo_path is unset or relative. '
     + 'This version skips that install, so the migration runs again now.');
   return true;
 }

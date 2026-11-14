@@ -1,11 +1,11 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { opError, OperationError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { acquireWorktree, getWorktreeBinding, readManagedMode, type WorktreeBinding } from './ownership.ts';
-import { localHostId, existingLocalHostId, persistenceHome, registerLocalWriter } from './identity.ts';
+import { persistenceHome, registerLocalWriter, hostIdFor, existingHostIdFor } from './identity.ts';
 import { nativeLockCapability, tryAcquireNativeLock, type NativeLockHandle } from './native-lock.ts';
 import { managedFilesystemDatastorePath, refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 import { assertWriterAdminState, WRITER_INSPECTION_HINT } from './admin-intent.ts';
@@ -118,7 +118,7 @@ async function configuredSources(engine: BrainEngine, lock = false): Promise<Sou
 /** #5206: a recorded source directory that vanished is a named blocker with its exits, never a bare ENOENT. */
 function sourcePathMissing(source: SourceRoot, claimedRoot: string | null): OperationError {
   const error = catalogueError('activation_source_path_missing',
-    `Source '${source.id}' records the local path ${source.root}, which does not exist on this host, so activation cannot verify its canonical directory.`,
+    `Source '${source.id}' records the ${source.root && !isAbsolute(source.root) ? `relative local path ${source.root}, which names whatever directory gbrain runs from (#7630)` : `local path ${source.root}, which does not exist on this host`}, so activation cannot verify its canonical directory.`,
     `Point it at its checkout with gbrain sources set-path ${source.id} ${claimedRoot ? JSON.stringify(claimedRoot) : '<directory>'}, or remove it with gbrain sources remove ${source.id} --confirm-destructive; then rerun gbrain sources writer activate --confirm-quiesced --dry-run.`);
   error.detail = 'source_path_missing';
   return error;
@@ -138,7 +138,7 @@ async function validatedBindings(engine: BrainEngine, sources: SourceRoot[], hos
   for (const source of sources) {
     let binding = await getWorktreeBinding(engine, source.id, hostId);
     if ((!source.root || source.connector) && !binding) continue;
-    if (!binding && !source.connector && !existsSync(resolve(source.root!))) throw sourcePathMissing(source, null);
+    if (!binding && !source.connector && (!isAbsolute(source.root!) || !existsSync(source.root!))) throw sourcePathMissing(source, null);
     // #6449: onboarding already reports this source database_only; activation agrees instead of demanding a claim.
     if (!binding && !writeThrough) { databaseOnly.push(source.id); continue; }
     if (!binding) throw unboundRootedSource(source);
@@ -158,7 +158,7 @@ async function validatedBindings(engine: BrainEngine, sources: SourceRoot[], hos
         { fix: writerStatusFix(`Shows source ${source.id}'s owner host and registration, read-only.`, source.id) });
     }
     if (binding.owner_host_id === hostId) {
-      if (source.root && !existsSync(resolve(source.root))) throw sourcePathMissing(source, binding.local_path && join(binding.local_path, binding.relative_path));
+      if (source.root && (!isAbsolute(source.root) || !existsSync(source.root))) throw sourcePathMissing(source, binding.local_path && join(binding.local_path, binding.relative_path));
       if (!binding.local_path || !binding.coordination_path
         || source.root && realpathSync(resolve(source.root)) !== realpathSync(join(binding.local_path, binding.relative_path))) {
         throw opError('source_changed', `Source '${source.id}' no longer matches its registered canonical directory.`,
@@ -192,7 +192,7 @@ export async function activatePersistence(engine: BrainEngine, opts: { confirmQu
       JOIN sources s ON s.id=b.source_id AND s.incarnation=b.source_incarnation WHERE NOT s.archived`);
     return { enabled: true, activated: false, filesystem_sources: count.count, native_lock: native, ...ALREADY_ENABLED };
   }
-  const hostId = opts.dryRun ? existingLocalHostId() : localHostId();
+  const hostId = opts.dryRun ? existingHostIdFor(engine) : hostIdFor(engine);
   const sources = await configuredSources(engine);
   const writeThrough = writeThroughConfigured(await engine.getConfig('sync.write_through'));
   const { bindings: initial, databaseOnly } = await validatedBindings(engine, sources, hostId, writeThrough);
@@ -243,7 +243,7 @@ export async function activatePersistence(engine: BrainEngine, opts: { confirmQu
       await tx.executeRaw('LOCK TABLE gbrain_cycle_locks IN SHARE ROW EXCLUSIVE MODE');
       const legacyLocks = await inspectLegacyWriterLocks(tx);
       if (legacyLocks.some(row => !opts.cleanupDeadLocalLocks || row.liveness !== 'dead_eligible')) throw quiescence();
-      if ((await tx.executeRaw(`SELECT id FROM persistence_requests WHERE state IN ('queued','running','recovering') OR recovery IS NOT NULL LIMIT 1`)).length
+      if ((await tx.executeRaw(`SELECT id FROM persistence_requests WHERE state IN ('queued','deferred','running','recovering') OR recovery IS NOT NULL LIMIT 1`)).length
         || (await tx.executeRaw('SELECT id FROM persistence_effects WHERE recovery IS NOT NULL LIMIT 1')).length) throw await notQuiescedError(tx, quiescence().message, { queuedEffects: false });
       if (opts.dryRun) return { enabled: false, activated: false, filesystem_sources: bindings.length, native_lock: native, legacy_locks: legacyLocks, drift_audit: driftAudit, git_durability: gitDurabilityListing(bindings), ...await gitDurabilityWarnings(bindings), ...databaseOnlyListing };
       for (const row of legacyLocks) {

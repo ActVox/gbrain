@@ -10,12 +10,15 @@
  * `put_pages` with only `request_id` reads the batch status without resending
  * any content.
  */
+import { randomUUID } from 'node:crypto';
 import { pageQuarantinedNotice } from '../quarantine.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { fenceNormalizedNotice, mergeFencesNormalized, type FencesNormalized } from '../fence-repair/report.ts';
 import { OperationError, opError } from '../ops/contract.ts';
+import { admitChangeReason } from './change-reason.ts';
 import { admitWriteGroupInTransaction, type WriteAdmission } from './journal.ts';
-import { retryWriteAdmission } from './admission-retry.ts';
+import { retryWriteAdmission, waitOutRefreshFence, withRefreshFenceBudget } from './admission-retry.ts';
+import { resolveAdmissionOrigin } from './admission-origin.ts';
 import { declareDurablePersistence } from './protocol.ts';
 import { digest } from './digest.ts';
 import { queueLinksReconcile } from './effect-journal.ts';
@@ -23,8 +26,10 @@ import { pageBatchChildRequestId, pageBatchChildRequestIds } from './page-batch-
 
 export { pageBatchChildRequestId };
 import { isTerminal, type WriteRequest } from './model.ts';
-import { estimatedRetryAfterMs, waitForWrites, writeResponse } from './service.ts';
-import { initializeLocalPersistence, pageMutationSource, preparePageAdmission, requestPrincipalForContext, withBatchAdmission } from './page-mutations.ts';
+import { estimatedRetryAfterMs, waitForWrite, waitForWrites, writeResponse } from './service.ts';
+import { emitFenceNotice, initializeLocalPersistence, pageMutationSource, pendingAwareResponse, preparePageAdmission, requestPrincipalForContext, withBatchAdmission,
+  withLiveSearchable } from './page-mutations.ts';
+import { throwIfHeld } from '../trust/gate-outcomes.ts';
 import type { PageTypeWarning } from './page-input.ts';
 import { clientRequestIdOf, parseWriteRequestId } from './preconditions.ts';
 import { parseWireWriteWaitMs } from './write-wait.ts';
@@ -36,8 +41,8 @@ export const PAGE_BATCH_DEFAULT_WAIT_MS = 25_000;
 const PREPARE_CONCURRENCY = 8;
 /** Batch admission is one transaction over every page; it gets more than a single write's budget. */
 const BATCH_ADMISSION_BUDGET_MS = 30_000;
-const PAGE_KEYS = new Set(['slug', 'content', 'expected_revision', 'allow_empty', 'allow_shrink', 'drop_timeline']);
-interface BatchPage { slug: string; content: string; expected_revision?: unknown; allow_empty?: unknown; allow_shrink?: unknown; drop_timeline?: unknown }
+const PAGE_KEYS = new Set(['slug', 'content', 'expected_revision', 'allow_empty', 'allow_shrink', 'drop_timeline', 'reason']);
+interface BatchPage { slug: string; content: string; expected_revision?: unknown; allow_empty?: unknown; allow_shrink?: unknown; drop_timeline?: unknown; reason?: string }
 interface PageResult { index: number; slug: string; row?: WriteRequest; refusal?: OperationError; typeWarning?: PageTypeWarning | null; repeatOf?: number }
 interface BatchMarker { id: string; index: number; size: number; repeats?: number[] }
 
@@ -57,7 +62,14 @@ function parsePages(value: unknown): BatchPage[] {
     if (typeof record.slug !== 'string' || !record.slug) throw invalid(`pages[${index}].slug must be a non-empty string; nothing was written.`, 'Give every page its slug, for example "notes/topic-name".');
     if (typeof record.content !== 'string') throw invalid(`pages[${index}].content must be a string; nothing was written.`, 'Pass the complete markdown page, frontmatter included, as content.');
     bytes += Buffer.byteLength(record.content);
-    return record as unknown as BatchPage;
+    if (!Object.hasOwn(record, 'reason')) return record as unknown as BatchPage;
+    const { reason: raw, ...rest } = record;
+    let reason: string | null;
+    try { reason = admitChangeReason(raw); } catch (error) {
+      if (error instanceof OperationError) error.message = `pages[${index}] (${record.slug}): ${error.message} No page of this batch was written.`;
+      throw error;
+    }
+    return (reason === null ? rest : { ...rest, reason }) as unknown as BatchPage;
   });
   if (bytes > PAGE_BATCH_MAX_BYTES) {
     throw invalid(`This batch carries ${bytes} bytes of content; the limit is ${PAGE_BATCH_MAX_BYTES} bytes per put_pages call. Nothing was written.`,
@@ -80,7 +92,7 @@ function findRepeats(pages: BatchPage[]): Repeats {
   pages.forEach((page, index) => bySlug.set(page.slug.toLowerCase(), [...(bySlug.get(page.slug.toLowerCase()) ?? []), index]));
   const repeatOf: (number | undefined)[] = new Array(pages.length);
   const refusals = new Map<number, OperationError>();
-  const same = (a: BatchPage, b: BatchPage) => a.slug === b.slug && a.content === b.content && a.expected_revision === b.expected_revision && a.allow_empty === b.allow_empty && a.allow_shrink === b.allow_shrink;
+  const same = (a: BatchPage, b: BatchPage) => a.slug === b.slug && a.content === b.content && a.expected_revision === b.expected_revision && a.allow_empty === b.allow_empty && a.allow_shrink === b.allow_shrink && a.reason === b.reason;
   for (const indexes of bySlug.values()) {
     if (indexes.length < 2) continue;
     const first = pages[indexes[0]!]!;
@@ -122,7 +134,8 @@ function pageEntry(result: PageResult): Record<string, unknown> {
       ...(outcome.embedding_state !== undefined ? { embedding_state: outcome.embedding_state } : {}), ...warning,
       ...(outcome.fences_normalized ? { fences_normalized: outcome.fences_normalized } : {}),
       ...(outcome.quarantined ? { quarantined: outcome.quarantined } : {}),
-      ...(outcome.timeline_rows_removed ? { timeline_rows_removed: outcome.timeline_rows_removed } : {}) };
+      ...(outcome.timeline_rows_removed ? { timeline_rows_removed: outcome.timeline_rows_removed } : {}),
+      ...(outcome.reason_recorded ? { reason_recorded: outcome.reason_recorded } : {}) };
   } catch (error) {
     if (!(error instanceof OperationError)) throw error;
     return { ...base, request_id: row.request_id, state: row.state, error: error.toJSON(), ...warning };
@@ -180,10 +193,10 @@ function batchReceipt(ctx: OperationContext, batchId: string, sourceId: string, 
 export async function admitBatch(ctx: OperationContext, batchId: string, admissions: WriteAdmission[]): Promise<WriteRequest[]> {
   const groups = new Map<string, number[]>();
   admissions.forEach((admission, index) => {
-    const key = digest(admission.authority);
+    const key = digest([admission.operation, admission.authority]);
     groups.set(key, [...(groups.get(key) ?? []), index]);
   });
-  return retryWriteAdmission(`batch ${batchId}`, remaining => ctx.engine.transaction(async tx => {
+  return waitOutRefreshFence(resolveAdmissionOrigin(admissions[0]?.origin) === 'interactive', () => retryWriteAdmission(`batch ${batchId}`, remaining => ctx.engine.transaction(async tx => {
     await declareDurablePersistence(tx, `${Math.min(1000, remaining)}ms`, `${remaining}ms`);
     const rows: WriteRequest[] = new Array(admissions.length);
     for (const indexes of groups.values()) {
@@ -191,7 +204,7 @@ export async function admitBatch(ctx: OperationContext, batchId: string, admissi
       indexes.forEach((index, position) => { rows[index] = admitted[position]!; });
     }
     return rows;
-  }), BATCH_ADMISSION_BUDGET_MS, error => ctx.engine.reconnect({ error }));
+  }), BATCH_ADMISSION_BUDGET_MS, error => ctx.engine.reconnect({ error })));
 }
 
 async function prepareAll(caller: OperationContext, batchId: string, sourceId: string, pages: BatchPage[], repeats: Repeats) {
@@ -210,6 +223,7 @@ async function preparePages(own: OperationContext, shared: OperationContext, bat
     if (page.allow_empty !== undefined) params.allow_empty = page.allow_empty;
     if (page.allow_shrink !== undefined) params.allow_shrink = page.allow_shrink;
     if (page.drop_timeline !== undefined) params.drop_timeline = page.drop_timeline;
+    if (page.reason !== undefined) params.reason = page.reason;
     try {
       prepared[index] = await preparePageAdmission(ctx, { operation: 'put_page', params,
         batch: { id: batchId, index, size: pages.length, requestId: pageBatchChildRequestId(batchId, index), ...(copies.length ? { repeats: copies } : {}) } });
@@ -285,11 +299,18 @@ export async function submitPageBatch(ctx: OperationContext, params: Record<stri
   if (admissions.length) {
     let admitted: WriteRequest[];
     try {
-      admitted = await admitBatch(ctx, batchId, admissions.map(entry => entry.admission));
+      admitted = await withRefreshFenceBudget(() => admitBatch(ctx, batchId, admissions.map(entry => entry.admission)), params.wait_ms !== undefined ? remaining() : undefined);
     } catch (error) {
       if (error instanceof OperationError && error.code === 'queue_capacity') {
         throw new OperationError('queue_capacity', `${error.message} No page of batch ${batchId} was admitted (it needs ${admissions.length} new write slots).`,
           `Wait for this connection's pending writes to finish, or send fewer pages per call; then retry the same put_pages call with the same request_id ${batchId}.`);
+      }
+      if (error instanceof OperationError && error.code === 'worktree_refreshing' && error.requestId) {
+        const child = error.requestId, own = String(params.request_id);
+        error.message = error.message.replaceAll(child, () => own);
+        error.suggestion = error.suggestion?.replaceAll(child, () => own);
+        if (error.fix) error.fix = { ...error.fix, why: error.fix.why.replaceAll(child, () => own) };
+        error.requestId = own;
       }
       throw error;
     }
@@ -307,3 +328,38 @@ export async function submitPageBatch(ctx: OperationContext, params: Record<stri
   return batchReceipt(ctx, batchId, sourceId, results, await batchLinks(ctx, sourceId, results), clientRequestIdOf(params.request_id));
 }
 
+/**
+ * G6: a trusted writer's page mutations (`put_page` and `add_timeline_entry`, one per page) as one batch: every
+ * request is prepared and admitted, in one transaction, before any is waited on, and each carries the batch marker,
+ * so the owner publishes them in groups of up to PAGE_BATCH_GROUP_MAX on Postgres (journal.ts publicationGroupKey).
+ * Each entry settles on its own: its reply as submitPageMutation returns it, or the error that refused it.
+ */
+export async function submitPageMutations(ctx: OperationContext, inputs: Array<{ operation: 'put_page' | 'add_timeline_entry'; params: Record<string, unknown> }>):
+  Promise<Array<{ response: Record<string, unknown> } | { error: unknown }>> {
+  const slugs = inputs.map(input => String(input.params.slug).toLowerCase());
+  if (new Set(slugs).size !== slugs.length) throw new TypeError('A page mutation batch writes each page once.');
+  const batchId = randomUUID();
+  const prepared = await withBatchAdmission(ctx, async (own, shared) => {
+    const out: Array<Awaited<ReturnType<typeof preparePageAdmission>> | { error: unknown }> = [];
+    for (const [index, input] of inputs.entries()) {
+      try {
+        out.push(await preparePageAdmission(index === 0 ? own : shared, { ...input,
+          batch: { id: batchId, index, size: inputs.length, requestId: pageBatchChildRequestId(batchId, index) } }));
+      } catch (error) { out.push({ error }); }
+    }
+    return out;
+  });
+  const admissions = prepared.flatMap(entry => 'admission' in entry && entry.admission ? [entry.admission] : []);
+  const admitted = admissions.length ? await admitBatch(ctx, batchId, admissions) : [];
+  let next = 0;
+  const rows = prepared.map(entry => 'error' in entry ? null : entry.prior ?? admitted[next++]!);
+  return Promise.all(prepared.map(async (entry, index) => {
+    if ('error' in entry) return { error: entry.error };
+    try {
+      const row = await waitForWrite(ctx.engine, rows[index]!, ctx.config, ctx.writeWaitMs);
+      const response = await withLiveSearchable(ctx, throwIfHeld(pendingAwareResponse(ctx, row), false));
+      emitFenceNotice(ctx, response, row.slug);
+      return { response };
+    } catch (error) { return { error }; }
+  }));
+}

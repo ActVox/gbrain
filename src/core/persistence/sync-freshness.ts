@@ -101,11 +101,11 @@ interface AggregateRow { samples: number | string; s50: unknown; s95: unknown; e
 
 /** The freshness of every bound managed source (or of `sourceIds`); a source without a binding is omitted. */
 export async function readSyncFreshness(engine: BrainEngine, opts: { sourceIds?: string[]; commitTimes?: CommitTimeReader; behind?: BehindReader } = {}): Promise<SourceFreshness[]> {
-  const { existingLocalHostId } = await import('./identity.ts');
+  const { existingHostIdFor } = await import('./identity.ts');
   const bindings = await engine.executeRaw<BindingRow>(`SELECT b.source_id, b.worktree_id::text AS worktree_id, b.source_incarnation::text AS source_incarnation, COALESCE(h.local_path, s.local_path) AS root, s.last_commit
     FROM persistence_source_bindings b JOIN sources s ON s.id=b.source_id AND s.incarnation=b.source_incarnation
     LEFT JOIN persistence_host_bindings h ON h.worktree_id=b.worktree_id AND h.host_id::text=$2
-    WHERE ($1::text[] IS NULL OR b.source_id=ANY($1::text[])) ORDER BY b.source_id`, [opts.sourceIds ?? null, existingLocalHostId()]);
+    WHERE ($1::text[] IS NULL OR b.source_id=ANY($1::text[])) ORDER BY b.source_id`, [opts.sourceIds ?? null, existingHostIdFor(engine)]);
   const commitTimes = opts.commitTimes ?? readGitCommitTimes;
   const behindOf = opts.behind ?? readGitBehind;
   const out: SourceFreshness[] = [];
@@ -123,9 +123,13 @@ export async function readSyncFreshness(engine: BrainEngine, opts: { sourceIds?:
     const commits = Object.keys(times).length;
     if (!commits) { out.push({ ...empty, unresolved_commits: targets.length }); continue; }
     const [row] = await engine.executeRaw<AggregateRow>(`WITH c AS (SELECT key AS target, to_timestamp(value::double precision) AS committed_at FROM jsonb_each_text($4::text::jsonb)),
-      s AS (SELECT r.completed_at, c.committed_at, COALESCE(r.page_id, (SELECT p.id FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug LIMIT 1)) AS page_id,
-          EXISTS (SELECT 1 FROM persistence_requests later WHERE later.source_id=r.source_id AND later.slug=r.slug AND later.sequence>r.sequence AND later.state='committed') AS superseded
+      sample AS (SELECT r.source_id, r.slug, r.sequence, r.page_id, r.completed_at, c.committed_at
         FROM persistence_requests r JOIN c ON c.target=r.intent->>'target' WHERE ${SAMPLE_WHERE}),
+      later AS MATERIALIZED (SELECT l.source_id, l.slug, max(l.sequence) AS sequence FROM persistence_requests l
+        WHERE l.state='committed' AND l.source_id IN (SELECT source_id FROM sample) AND l.sequence > (SELECT min(sequence) FROM sample) GROUP BY l.source_id, l.slug),
+      s AS (SELECT r.completed_at, r.committed_at, COALESCE(r.page_id, (SELECT p.id FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug LIMIT 1)) AS page_id,
+          COALESCE(later.sequence > r.sequence, false) AS superseded
+        FROM sample r LEFT JOIN later ON later.source_id=r.source_id AND later.slug=r.slug),
       e AS (SELECT s.completed_at, s.committed_at, s.superseded, ch.n, ch.missing, ch.last_at FROM s
         LEFT JOIN LATERAL (SELECT count(*) AS n, count(*) FILTER (WHERE cc.embedded_at IS NULL) AS missing, max(cc.embedded_at) AS last_at FROM content_chunks cc JOIN pages p ON p.id=cc.page_id
           WHERE cc.page_id=s.page_id AND ${chunkVisibleFilter('p', 'cc')}) ch ON true),

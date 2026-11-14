@@ -43,7 +43,7 @@ export async function requestIndexesCheck(engine: BrainEngine): Promise<Check> {
     const deferral = postprocess.length ? ` Dream synthesis postprocessing deferred on a statement timeout ${postprocess.map(d => `${d.consecutive_passes} passes in a row on source ${d.source_id} `
       + `(${d.read ? DEFERRED_READ_LABEL[d.read] : 'a request read'}, ${d.elapsed_ms ?? '?'} ms; ${d.pending_outputs} output(s) pending)`).join('; ')}.` : '';
     if (broken.length) return { name: 'persistence_request_indexes', status: 'warn', details,
-      message: `${broken.map(index => `${index.name} is ${index.state === 'invalid' ? 'INVALID' : 'missing'}`).join('; ')}: request-table reads (managed sync checkpoints, page purges, `
+      message: `${broken.map(index => `${index.name} is ${index.state === 'invalid' ? 'INVALID' : 'missing'}`).join('; ')}: request-table reads (managed sync checkpoints, write claims, page purges, `
         + `dream synthesis postprocessing) can time out on a large request table. Rebuild on the brain host: ${REQUEST_INDEXES_REPAIR_COMMAND}${deferral}` };
     if (building.length) return { name: 'persistence_request_indexes', status: 'warn', details,
       message: `Still building: ${building.map(index => `${index.name} (${index.progress?.phase ?? 'building'}${index.progress?.blocks_total
@@ -89,6 +89,7 @@ export async function requestGrowthCheck(engine: BrainEngine): Promise<Check> {
         WHERE created_at >= now() - interval '${WINDOW_DAYS} days'`, principal ? [principal[1], principal[2]] : []);
       const setting = principal ? 'principalLifetimeIds' : 'brainLifetimeIds';
       const used = Number(counter.lifetime_ids), limit = limits[setting];
+      if (!Number.isFinite(limit)) continue;
       const windowDays = sample.admissions >= SAMPLE && sample.oldest
         ? Math.max(1 / 24, (now - Date.parse(sample.oldest)) / 86_400_000) : WINDOW_DAYS;
       const perDay = sample.admissions / windowDays;

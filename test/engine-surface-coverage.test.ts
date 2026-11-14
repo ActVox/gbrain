@@ -51,7 +51,7 @@ const INTERFACE_METHODS: readonly string[] = [
   'connect', 'disconnect', 'reconnect', 'initSchema', 'transaction', 'transactionDirect', 'registerBeforeDisconnect', 'withReservedConnection',
   // Pages CRUD
   'getPage', 'readPageSnapshot', 'readPageSnapshotsBatch', 'lockPageKeys', 'putPage', 'findDuplicatePage', 'findDuplicatePages', 'deletePage', 'deletePages', 'resolveSlugsByPaths',
-  'softDeletePage', 'softDeletePages', 'restorePage', 'purgeDeletedPages', 'listPages', 'resolveSlugs', 'getAllSlugs',
+  'softDeletePage', 'softDeletePages', 'restorePage', 'purgeDeletedPages', 'listPages', 'findPages', 'countPagesBy', 'resolveSlugs', 'getAllSlugs',
   'listAllPageRefs', 'listAllSources', 'updateSourceConfig', 'listPrefixSampledPages', 'listCorpusSample',
   // Search
   'searchKeyword', 'countKeywordPages', 'searchKeywordPages', 'searchTitles', 'searchVector', 'getEmbeddingsByChunkIds',
@@ -117,6 +117,8 @@ const INTERFACE_METHODS: readonly string[] = [
   // Wave B segmented page bodies (src/core/engine-sql/page-body.ts; covered by test/large-pages/ and test/engine-sql-page-body.test.ts)
   'allocateBodyOccurrenceIds', 'stageSegmentTexts', 'readSegmentTexts', 'stageManifestRows', 'readManifest', 'stageSegmentChunks',
   'createSegmentedPageShell', 'flipBodyGeneration', 'openBodyStaging', 'setBodyStagingState', 'sweepSegments',
+  // Wave B PR 4 per-segment derivation rows (same SQL module; covered by test/engine-sql-segment-derivations.test.ts and its Postgres arm)
+  'readSegmentDerivations', 'upsertSegmentDerivations', 'retireSegmentDerivations',
 ];
 
 /**
@@ -139,6 +141,8 @@ const ENGINE_INTERNAL_HELPERS: readonly string[] = [
   // Engine graduation: PGLite close/open that keeps the kernel lock across the custody window.
   'closeRetainingLock',
   'connectWithHeldLock',
+  // #9227: whether this engine holds the datastore lock; the PGLite abandoned-claim release rests on it.
+  'holdsDatastoreLock',
 ];
 
 /**

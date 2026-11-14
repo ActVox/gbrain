@@ -57,6 +57,7 @@ import { sweepOrphanedRenameSentinels } from './rename-reconcile.ts';
 import type { SyncPlan, SyncActivePack } from './sync-run.ts';
 import { holdUnsupportedPaths, NO_BYTE_PATHS, selectBytePaths, type BytePaths } from './unsupported-paths.ts';
 import { formatUrlClonePullBlock, urlClonePullBlock } from '../../core/url-clone.ts';
+import { syncAccessPolicyAt } from '../../core/access/policy-git.ts';
 import { formatUpstreamNotice, recordUpstreamBeforeFetch, settleUpstreamAfterPull } from '../../core/sync-upstream-rewrite.ts';
 
 export type PreflightOutcome = { readonly done: SyncResult } | { readonly plan: SyncPlan };
@@ -70,6 +71,9 @@ export async function preflightIncrementalSync(engine: BrainEngine, opts: SyncOp
   const head = await pullAndResolveHead(engine, opts, company, repoPath, gitContextRoot);
   if ('done' in head) return head;
   const { detachedHead, lastCommit, pullFailed, headCommit } = head;
+  // GBRA-218 (A2): the source's folder rules at the synced commit apply before any page of it is imported, including
+  // when .gbrain/access.yml is the only changed path (the delta below skips dot paths).
+  if (!opts.dryRun) await syncAccessPolicyAt(engine, opts.sourceId ?? DEFAULT_SOURCE_ID, repoPath, headCommit, serr);
 
   opts = await applyPersistedScopeConfig(engine, opts);
 
@@ -293,17 +297,18 @@ async function resolveSyncRepo(engine: BrainEngine, opts: SyncOpts): Promise<{ d
   // Resolve repo path
   const rawRepoPath = opts.repoPath || await readSyncAnchor(engine, opts.sourceId, 'repo_path');
   if (!rawRepoPath) {
+    const connector = await runConnectorSync(engine, opts, false);
+    if (connector) return { done: connector };
     const hint = opts.sourceId
       ? `Source "${opts.sourceId}" has no local_path. Run: gbrain sources add ${opts.sourceId} --path <path>`
       : `No repo path specified. Use --repo or run gbrain init with --repo first.`;
     throw new Error(hint);
   }
-  // #3696: resolve to ABSOLUTE at entry. A relative path (legacy relative
-  // sources.local_path row, or a caller-passed `--repo .`) breaks the moment
-  // any consumer runs from a different cwd (launchd daemon at cwd=/). Since
-  // writeSyncAnchor('repo_path', anchorPath) re-persists this value below,
-  // one successful sync from the right cwd self-heals a legacy relative row
-  // to absolute.
+  // #3696: resolve to ABSOLUTE at entry. A caller-passed relative path
+  // (`--repo .`) breaks the moment any consumer runs from a different cwd
+  // (launchd daemon at cwd=/). A relative STORED anchor never reaches here:
+  // performSync refuses it `sync_anchor_relative` (#7630), because from an
+  // unrelated cwd it would make that folder the brain repo.
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- rawRepoPath is the local operator's --repo CLI arg or the operator-written sync anchor (sync.repo_path / sources.local_path); the sync_brain op is localOnly:true so no remote caller reaches this path, and absolutizing it here IS the #3696 fix
   const repoPath = pathResolve(rawRepoPath);
 

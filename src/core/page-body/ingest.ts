@@ -30,11 +30,11 @@ import { initialEntryState, readEntryState, timelineEntryState, type EntryState 
 import { ContentHashStream } from './content-hash-stream.ts';
 import { prepareSegmentChunks } from './segment-chunks.ts';
 import { reuseSegmentChunkVectors } from '../import-chunk-reuse.ts';
-import { newFenceChunkBudget } from '../markdown-chunks.ts';
+import { newFenceChunkBudget, type FenceChunkBudget } from '../markdown-chunks.ts';
 import { loadFenceChunkOverlay } from '../eligibility/fence-overlay.ts';
 import { withdrawalFenceBlocks } from '../facts/withdrawal-overlay.ts';
 import { overlaySegmentText, readBodyLedger, type BodyLedger } from './segment-ledger.ts';
-import { assertGenerationTiles } from './body-tiling.ts';
+import { readTiledManifest } from './body-tiling.ts';
 import { hasStaleChunks } from './projection.ts';
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -334,7 +334,7 @@ async function stageBody(engine: BrainEngine, input: SegmentedBodyInput, staging
   const chunkable = await occurrencesWithoutChunks(engine, input.live.id, expectedGeneration, rows);
   const chunks = await stageOccurrenceChunks(engine, { pageId: input.live.id, sourceId: input.sourceId, slug: input.slug, generation: newGeneration,
     occurrences: chunkable, title: input.title, frontmatter: input.frontmatter, flags: body.body_flags, chunking: input.chunking,
-    retiredOccurrences: retireChunkOccurrences });
+    retiredOccurrences: retireChunkOccurrences, truthLead: body.truth_lead });
   await faultPoint('segmented:chunks_staged', { sourceId: input.sourceId });
   const kept = new Set(rows.filter((_, i) => matched[i]).map(row => row.occurrenceId));
   retireChunkOccurrences.push(...chunkable.filter(row => kept.has(row.occurrenceId)).map(row => row.occurrenceId));
@@ -378,6 +378,8 @@ export const segmentChunkWork = { batches: 0, chunks: 0, heldBytes: 0 };
 export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId: number; sourceId: string; slug: string; generation: number;
   occurrences: readonly ManifestRowInput[]; title: string; frontmatter: JsonObject; flags: JsonObject; chunking: SegmentChunkingContext;
   retiredOccurrences: readonly number[];
+  /** The truth_lead the write stores, for the vector reuse onto a page stored under per-chunk synopsis; omitted, the stored one. */
+  truthLead?: string;
   /** Projection: each batch inserts under the page guard, at most PROJECTION_LOCK_HOLD_BYTES of occurrences per transaction, after re-reading which
    *  occurrences still lack rows, so two projections never both chunk one; a page whose generation moved past `generation` stops the projection before it inserts. */
   guarded?: boolean;
@@ -385,10 +387,12 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
   hold?: SegmentChunkInput[];
   /** Guarded: runs in each insert transaction before its insert (the projection renews its claim on the page's queue row);
    *  false when the caller lost its claim: that transaction inserts nothing and the staging stops. */
-  renew?: (tx: BrainEngine) => Promise<boolean> }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
+  renew?: (tx: BrainEngine) => Promise<boolean>;
+  /** The page's fence-chunk budget when one page is chunked over several calls (the re-chunk, page-body/rechunk.ts); default a new one. */
+  fenceBudget?: FenceChunkBudget }): Promise<{ rows: number; occurrences: number; indexes: number[] }> {
   if (input.chunking.quarantined || !input.occurrences.length) return { rows: 0, occurrences: 0, indexes: [] };
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
-  const fenceBudget = newFenceChunkBudget();
+  const fenceBudget = input.fenceBudget ?? newFenceChunkBudget();
   let ledger: BodyLedger | undefined;
   let rows = 0, done = 0;
   const indexes: number[] = [];
@@ -419,7 +423,8 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
       }
     }
     if (chunks.length && input.retiredOccurrences.length) await reuseSegmentChunkVectors(engine, { pageId: input.pageId,
-      retiredOccurrences: input.retiredOccurrences, chunks, title: input.title, corpusGeneration: input.chunking.corpusGeneration, tier: input.chunking.tier });
+      retiredOccurrences: input.retiredOccurrences, chunks, title: input.title, corpusGeneration: input.chunking.corpusGeneration, tier: input.chunking.tier,
+      truthLead: input.truthLead });
     segmentChunkWork.batches++;
     segmentChunkWork.chunks += chunks.length;
     if (input.hold) input.hold.push(...chunks);
@@ -460,9 +465,8 @@ export async function stageOccurrenceChunks(engine: BrainEngine, input: { pageId
 
 /** The stored body of `pageId` at `generation` (default live), region by region, one segment at a time. */
 export async function* readSegmentedBody(engine: BrainEngine, pageId: number, sourceId: string,
-  opts: { generation?: number } = {}): AsyncIterable<{ region: BodyRegion; bytes: Uint8Array }> {
-  const rows = await engine.readManifest(pageId, opts.generation === undefined ? {} : { generation: opts.generation });
-  await assertGenerationTiles(engine, pageId, opts.generation, rows);
+  opts: { generation?: number; bodyBytes?: number } = {}): AsyncIterable<{ region: BodyRegion; bytes: Uint8Array }> {
+  const { rows } = await readTiledManifest(engine, pageId, opts.generation, opts.bodyBytes);
   const batchBytes = STAGE_BATCH_BYTES[engine.kind];
   for (let start = 0; start < rows.length;) {
     let end = start, bytes = 0;
@@ -478,9 +482,13 @@ export async function* readSegmentedBody(engine: BrainEngine, pageId: number, so
   }
 }
 
-/** The whole body of a segmented page as strings. Only for pages within the single-string ceiling (callers check `body_bytes`). */
-export async function materializeSegmentedBody(engine: BrainEngine, pageId: number, sourceId: string): Promise<{ compiled_truth: string; timeline: string }> {
+/**
+ * The whole body of a segmented page as strings, at `opts.generation` (default live; `opts.bodyBytes` its known size).
+ * Only for pages within the single-string ceiling (callers check `body_bytes`).
+ */
+export async function materializeSegmentedBody(engine: BrainEngine, pageId: number, sourceId: string,
+  opts: { generation?: number; bodyBytes?: number } = {}): Promise<{ compiled_truth: string; timeline: string }> {
   const parts: Record<BodyRegion, string[]> = { truth: [], timeline: [] };
-  for await (const part of readSegmentedBody(engine, pageId, sourceId)) parts[part.region].push(utf8.decode(part.bytes));
+  for await (const part of readSegmentedBody(engine, pageId, sourceId, opts)) parts[part.region].push(utf8.decode(part.bytes));
   return { compiled_truth: parts.truth.join(''), timeline: parts.timeline.join('') };
 }

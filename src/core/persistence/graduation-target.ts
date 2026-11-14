@@ -15,6 +15,7 @@
  * automatic session-pooler fallback for this operation.
  */
 import postgres from '#postgres';
+import { withPgTls } from '../pg-tls.ts';
 import { createHash, randomInt } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { PostgresEngine } from '../postgres-engine.ts';
@@ -89,7 +90,7 @@ function classifyConnectError(error: unknown): { reachable: boolean; auth: boole
 }
 
 function probeClient(url: string, timeoutSeconds: number) {
-  return postgres(url, { max: 1, prepare: false, connect_timeout: timeoutSeconds, idle_timeout: 1, onnotice: () => {} });
+  return postgres(url, withPgTls(url, { max: 1, prepare: false, connect_timeout: timeoutSeconds, idle_timeout: 1, onnotice: () => {} }));
 }
 
 function versionAtLeast(version: string | null, min: string): boolean {
@@ -106,7 +107,7 @@ type Query = <T>(sql: string, params?: unknown[]) => Promise<T[]>;
 
 /** Tables a fresh initSchema seeds, and the most rows the seed leaves in each. */
 const SEED_ROW_LIMITS: Readonly<Record<string, number>> = {
-  op_checkpoints: 1, page_generation_clock: 1, persistence_brain: 1, shared_skill_state: 1, sources: 1,
+  git_canonical_brain: 1, op_checkpoints: 1, page_generation_clock: 1, persistence_brain: 1, shared_skill_state: 1, sources: 1,
 };
 /** Each engine's own schema writes these; they never count against emptiness. */
 const SCHEMA_OWNED_TABLES = new Set(['config', 'file_migration_ledger', 'persistence_graduation', 'trust_policy_state']);
@@ -292,7 +293,7 @@ export function targetProbeBlockers(probe: TargetProbe, routes: Pick<TargetRoute
 
 /** What a DBA runs once on a target whose gbrain role is not a superuser (the v35 objects, owned by that role). */
 function AUTO_RLS_DBA_SQL(role: string): string {
-  return `CREATE OR REPLACE FUNCTION public.auto_enable_rls() RETURNS event_trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $f$ DECLARE obj record; BEGIN FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands() WHERE object_type = 'table' AND schema_name = 'public' LOOP EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', obj.object_identity); END LOOP; END; $f$; `
+  return `CREATE OR REPLACE FUNCTION public.auto_enable_rls() RETURNS event_trigger LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $f$ DECLARE obj record; BEGIN FOR obj IN SELECT * FROM pg_event_trigger_ddl_commands() WHERE object_type = 'table' AND schema_name = 'public' LOOP EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', obj.object_identity); END LOOP; END; $f$; `
     + `ALTER FUNCTION public.auto_enable_rls() OWNER TO ${role}; `
     + `CREATE EVENT TRIGGER auto_rls_on_create_table ON ddl_command_end WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO') EXECUTE FUNCTION public.auto_enable_rls();`;
 }

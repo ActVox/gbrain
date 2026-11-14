@@ -6,8 +6,9 @@ import type { GBrainConfig } from '../config.ts';
 import { importFromContent, type ParsedPage } from '../import-file.ts';
 import { parseMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import { alignWithStored } from './align-stored.ts';
-import { parseFactsFence, renderFactsTable, replaceOrInsertFactsFence, restoreHiddenFactRows, type ParsedFact } from '../facts-fence.ts';
+import { parseFactsFenceFor, renderFactsTable, replaceOrInsertFactsFence, restoreHiddenFactRows, type ParsedFact } from '../facts-fence.ts';
 import { opError } from '../ops/contract.ts';
+import { privateRequestRefusal } from './visibility-request.ts';
 import { readFix, trustedCliRequired } from '../ops/op-fix.ts';
 import type { Action } from '../agent-output.ts';
 import { sealPageTextProjection } from '../page-state/projections.ts';
@@ -22,11 +23,13 @@ import { preserveProtectedTakes } from './protected-takes.ts';
 import { digest, sha256 } from './digest.ts';
 import { mergeReconcile, reconcileCanonical, type ReconcileDecision } from './reconcile-merge.ts';
 import { stabilizeSafetyAssessments } from './reconcile-safety.ts';
-import { ABSENT_FILE_HASH, assertReconcilePins, readReconcileState, reconcileFileReading, reconcileReadOptions, staleReconcile, validateReconcileArtifact, type ReconcileState } from './reconcile-state.ts';
+import { fileWinsContent } from './file-wins-content.ts';
+import { ABSENT_FILE_HASH, assertReconcilePins, readCanonicalFileText, readReconcileState, reconcileFileReading, reconcileReadOptions, staleReconcile, validateReconcileArtifact, type ReconcileState } from './reconcile-state.ts';
 import { verifyReconcileBackup } from './reconcile-backup.ts';
 import { assertAutoDecisions } from './reconcile-additive.ts';
 import { admissionAllows, readSyncAdmission } from './sync-admission.ts';
 import { bindOrigin } from './origin-guard.ts';
+import { materializedSnapshot } from './segmented-apply.ts';
 
 const pageFix = (sourceId: string, slug: string): Action => readFix(`Shows page ${slug} in source ${sourceId} as stored now, with its revision, read-only.`,
   { argv: ['gbrain', 'get', '--source', sourceId, '--', slug] });
@@ -74,7 +77,7 @@ export function privateFactViolation(next: readonly ParsedFact[], prior: readonl
 }
 
 function preservePrivateFacts(incoming: string, stored: string, section: string, sourceId: string, slug: string): string {
-  const next = parseFactsFence(incoming), prior = parseFactsFence(stored);
+  const next = parseFactsFenceFor(incoming, { slug }), prior = parseFactsFenceFor(stored, { slug });
   if (next.warnings.length || prior.warnings.length) throw opError('invalid_params', 'Fact fences must parse losslessly before reconciliation.',
     'The ## Facts table of the file or of the stored page has rows that do not parse cleanly, so reconciliation cannot prove its private facts are kept; nothing was written. Repair the malformed rows in the file, then generate a fresh preview and apply it.');
   const row = privateFactViolation(next.facts, prior.facts);
@@ -107,8 +110,9 @@ export async function prepareReconcileResult(engine: BrainEngine, state: Reconci
     filename: basename(state.path).replace(/\.mdx?$/i, ''), noEmbed: true, remote: false, preserveGateMarkers: true, allowEmptyOverwrite: true,
     overrideTier: (await ownerSourceGateInput(engine, state.pins.source_id, result.frontmatter)).tier,
     prepareFrontmatter: page => stabilizeSafetyAssessments(page.frontmatter, state.snapshot.page.frontmatter, state.pins.assessment_at),
-    prepare: async prepared => { ready = prepared; return prepared.result; },
+    prepare: async prepared => { ready = prepared; return prepared.result; }, holdNoncanonicalPrivate: true,
   });
+  if (imported.refusal?.code === 'visibility_noncanonical') throw privateRequestRefusal(state.pins, result.frontmatter);
   if (!ready || ready.slug !== state.pins.slug) throw opError('invalid_params', imported.error ?? 'Reconciliation cannot change page identity or deduplicate to another page.',
     `The reconciled content of ${state.pins.slug} in source ${state.pins.source_id} does not import as that same page (a changed frontmatter slug or a match to another page), and reconcile never changes page identity. Keep its slug as ${state.pins.slug} in the file. ${freshPreview(state.pins.source_id, state.pins.slug)}`,
     { fix: pageFix(state.pins.source_id, state.pins.slug) });
@@ -155,18 +159,20 @@ export async function prepareReconcileMutation(engine: BrainEngine, row: WriteRe
   assertAutoDecisions(artifact.auto_decisions ?? [], state.file, reconcileCanonical(state.snapshot.page, state.snapshot.tags), artifact.decisions);
   const prepared = await prepareReconcileResult(engine, state, artifact.decisions);
   if (!prepared.ready || digest(prepared.result) !== artifact.result_digest) staleReconcile('canonical policy result changed');
-  // #6643: a request that asks to keep the file's bytes (repair file-drift --prefer file) leaves a file that already parses to the
-  // reviewed result as it is; any other difference (a protected key, a tag union, a kept private row) renders the result.
+  // #6643 / GBRA-133: a request that asks to keep the file's bytes (repair file-drift --prefer file) leaves the file as it is plus
+  // the protected parts reconcile kept (appended keys and timeline rows), and refuses any result that would re-render the file.
   // #6712 wave: a preview that observed the file absent recreates it from the page and expects no bytes there.
   const absent = state.pins.raw_file_hash === ABSENT_FILE_HASH;
-  const keep = !absent && row.intent.keep_file_bytes === true && digest(reconcileCanonical(state.file, state.file.tags)) === artifact.result_digest;
-  const content = keep ? state.raw.toString('utf8') : serializePageToMarkdown({ ...state.snapshot.page, ...prepared.result }, prepared.result.tags);
+  const content = !absent && row.intent.keep_file_bytes === true
+    ? fileWinsContent(state.raw.toString('utf8'), state.file, prepared.result, text => readCanonicalFileText(state, row.slug, text), { sourceId: row.source_id, slug: row.slug })
+    : serializePageToMarkdown({ ...state.snapshot.page, ...prepared.result }, prepared.result.tags);
   const ready = prepared.ready;
   return {
     observedRevision: state.snapshot.revision, trust: await ownerImportTrust(engine, row, prepared.result.frontmatter, state.path),
     file: { path: state.path, root: state.root, content, expectedBeforeHash: absent ? null : state.pins.raw_file_hash },
     // A database-only page matched by its slug path always records that file as its origin.
     noop: ready.noop && sha256(content) === state.pins.raw_file_hash && state.origin === 'recorded',
+    ...(ready.afterCommit ? { afterCommit: (target: BrainEngine) => ready.afterCommit!(target) } : {}),
     validate: async tx => {
       await authorizeStoredRequest(tx, row, true);
       await assertKeepDbAdmission(tx, row);
@@ -175,15 +181,16 @@ export async function prepareReconcileMutation(engine: BrainEngine, row: WriteRe
       await ready.validate(tx);
     },
     apply: async tx => {
-      await ready.apply(tx);
+      const installed = await ready.apply(tx);
       if (state.originSourcePath) {
         await bindOrigin(tx, { sourceId: row.source_id, slug: row.slug, sourcePath: state.originSourcePath, onlyIfUnset: true, liveOnly: true });
       }
       // The page has a canonical origin (adopted above, or already recorded, #6536): drop the #5254 database-only classification.
       await tx.executeRaw(`UPDATE pages SET database_only_reason=NULL WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL
-        AND database_only_reason IN ('unbound_source', 'origin_twin') AND source_path IS NOT NULL`, [row.source_id, row.slug]);
-      if (!ready.noop) { await prepared.project!(tx); await sealPageTextProjection(tx, row.slug, row.source_id); }
-      const final = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id });
+        AND database_only_reason IN ('unbound_source', 'origin_twin', 'mirror_read_only') AND source_path IS NOT NULL`, [row.source_id, row.slug]);
+      // A body stored in segments was sealed by its import's apply when complete (sealSegmentedPage); the inline text seal reads the whole timeline.
+      if (!ready.noop) { await prepared.project!(tx); if (!installed?.segmented) await sealPageTextProjection(tx, row.slug, row.source_id); }
+      const final = await materializedSnapshot(tx, await tx.readPageSnapshot(row.slug, { sourceId: row.source_id }));
       const scanStateTransferred = final ? await transferLegacyAtomPageState(tx, state.snapshot, final) : false;
       const reading = reconcileFileReading(readFileSync(state.path, 'utf8'), state.importPath, final?.page ?? state.snapshot.page);
       const file = parseMarkdown(reading.content, row.slug);

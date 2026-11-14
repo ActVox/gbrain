@@ -4,7 +4,7 @@
 <!-- Regenerate: bun run scripts/generate-tool-catalog.ts -->
 <!-- Freshness-guarded by scripts/check-tool-catalog-fresh.sh (bun run verify). -->
 
-Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **Starter** marks membership in the ~40-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
+Every non-localOnly operation on the MCP surface: 172 tools across 26 areas. **Starter** marks membership in the ~41-op `starter` surface (`src/mcp/surface.ts`); **Gate** names the config key that must be true before remote callers see/call the op (`gbrain config set <key> true`). What a given token actually sees is further filtered per request by scope, bound-client fence, publish gates, and the per-client surface — see `docs/operations/mcp-surface-runbook.md`. Area names are non-contractual groupings.
 
 ## admin
 
@@ -20,7 +20,7 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 | `quarantine_list` | List quarantined (hidden) and optionally content-flagged pages by scanning page frontmatter, newest-updated first. | admin |  |  |
 | `run_doctor` | Run brain health checks and return a structured DoctorReport (thin-client doctor surface). | admin |  |  |
 | `run_onboard` | Probe brain health + optionally submit onboard remediations. | admin |  |  |
-| `run_skillopt` | Run SkillOpt against a single skill. | admin |  |  |
+| `run_skillopt` | Run SkillOpt against a single skill; its iterative loop (optimizer_mode "reflect") is deprecated. | admin |  |  |
 
 ## advisor
 
@@ -53,7 +53,7 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
-| `request_tools` | More tools: no arguments lists your catalog; {tools: [names]} returns schemas; {surface} widens it (per client or stdio session). | read | yes |  |
+| `request_tools` | More tools and params: no arguments lists your catalog; {tools: [names]} returns full schemas, every optional param included; {surface} widens it (per client or stdio session). | read | yes |  |
 
 ## entities
 
@@ -61,7 +61,7 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 |---|---|---|---|---|
 | `entity_identity_list` | List cross-source entity identity groups and their member pages. | read |  |  |
 | `extract_entities` | Extract entity names (people, companies) from text and create/update their brain stub pages. | write |  |  |
-| `extraction_pending` | List unverified auto-extracted entity stubs awaiting owner review (the quarantine lane from extract_entities). | read |  |  |
+| `extraction_pending` | List what waits for review: unverified auto-extracted entity stubs (pending; promote or reject them with extraction_review), facts saved without an entity (unattributed; relink each with remember entity + replaces, never forget first), and, when include names it, recently created entity pages whose name is one edit or one acronym letter from another entity (possible_duplicates; flag only, never merged). | read |  |  |
 
 ## facts
 
@@ -105,6 +105,7 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 | `get_job_progress` | Get structured progress for a running job. | admin |  |  |
 | `get_job_stats` | Job queue statistics. | admin |  |  |
 | `list_jobs` | List background jobs with optional status/queue/name filters; pass fields to project each job to the columns you need. | admin |  |  |
+| `list_watches` | List the jobs this connection is watching through Wakeshift (open watches, plus ones that ended in the last day) with their state: open, delivered, dead or ended. | admin |  | `mcp.publish_wakeshift` |
 | `pause_job` | Pause a waiting, active or delayed background job. | admin |  |  |
 | `replay_job` | Replay a completed/failed/dead job, optionally with modified data | admin |  |  |
 | `resume_job` | Resume a paused background job (back to waiting). | admin |  |  |
@@ -112,7 +113,9 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 | `send_job_message` | Send a sidechannel message to a running job's inbox (for jobs that read steering messages). | admin |  |  |
 | `submit_agent` | Submit an agent job (agent scope; tools and budget bound to your client). | agent | yes |  |
 | `submit_job` | Submit a background job. | admin |  |  |
+| `unwatch` | Stop watching a job: ends this connection's open Wakeshift watches on it, so no wake comes for it. | admin |  | `mcp.publish_wakeshift` |
 | `wait_job` | Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. | admin |  |  |
+| `watch_job` | This tool notifies you: it has gbrain wake this conversation through Wakeshift when job id finishes (completed, failed, dead or cancelled), so you can stop polling. | admin |  | `mcp.publish_wakeshift` |
 
 ## links
 
@@ -144,18 +147,29 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 | `confirm_memory` | Owner only: mark a fact, take or page as confirmed by the user (trust tier user_confirmed). | write |  |  |
 | `extract_facts` | Extract personal-knowledge facts (events, preferences, commitments, beliefs, ideas, and plain facts) from a conversation turn into the per-source hot memory. | write |  |  |
 | `forget_fact` | Forget a fact by recording a durable withdrawal in its source and visibility. | write |  |  |
+| `memory_propose` | Propose one timeline entry or link on a shared page for the person this call serves; the brain owner approves it before it is written. | write |  |  |
+| `memory_recall` | Facts for the person this call serves, one per line: their own recent facts first, then facts matching query. | read |  |  |
+| `memory_write` | Save facts for the person this call serves, readable by them alone. | write |  |  |
+
+## memory-settings
+
+| Tool | Description | Scope | Starter | Gate |
+|---|---|---|---|---|
+| `get_memory_settings` | Memory writeback settings: the mode agents follow, the exact rule text, every mode's rule, background capture state, and whether you may change it. | read |  |  |
+| `memory_conversation_mode` | Use when the user says "save everything from here" (all) or "stop saving" (off): returns this conversation's memory rule. | write | yes |  |
+| `set_memory_writeback` | Change the brain-wide writeback mode agents are told to follow (inherit uses the operator's setting). | admin |  | `mcp.publish_memory_settings` |
 
 ## memory-verbs
 
 | Tool | Description | Scope | Starter | Gate |
 |---|---|---|---|---|
-| `context_pack` | MEMORY VERB (v1): core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. | read | yes |  |
-| `delta` | MEMORY VERB (v1): pages, facts, thread events changed since a cursor, zero LLM. | read | yes |  |
-| `entity` | MEMORY VERB (v1): person/company/account card, zero LLM. | read | yes |  |
-| `forget` | MEMORY VERB (v1): expire a remembered fact by its fact_id (never a page slug). | write | yes |  |
-| `recall` | MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. | read | yes |  |
-| `remember` | MEMORY VERB (v1): save facts with provenance. | write | yes |  |
-| `synthesize` | [EXPENSIVE / SLOW: LLM calls, costs money] MEMORY VERB (v1): answer a broad question across pages with citations. | read | yes |  |
+| `context_pack` | Core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. | read | yes |  |
+| `delta` | Pages, facts, thread events changed since a cursor, zero LLM. | read | yes |  |
+| `entity` | Person/company/account card, zero LLM. | read | yes |  |
+| `forget` | Expire a remembered fact by its fact_id (never a page slug). | write | yes |  |
+| `recall` | Read facts by entity, since or session_id; `query` also searches pages. | read | yes |  |
+| `remember` | Save {fact, provenance (required), `entity` (subject; recall needs it)} or items[]. | write | yes |  |
+| `synthesize` | [EXPENSIVE / SLOW: LLM calls] Cited answer to a broad question across pages. | read | yes |  |
 
 ## ontology
 
@@ -179,8 +193,9 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 | `delete_page` | Soft-delete a page and remove its markdown file from the source working tree (the source local_path, or sync.repo_path when the source has none). | write |  |  |
 | `edit_page` | Change part of a page: prefer this over put_page for small changes. | write | yes |  |
 | `fetch` | Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). | read |  |  |
+| `find_pages` | Find pages by name or path (what ls/find would answer), sorted by slug. | read |  |  |
 | `get_chunks` | Return a page's indexed content chunks (the units search ranks), in chunk_index order, 50 at a time by default. | read |  |  |
-| `get_page` | Read a page; `section` or `grep` reads one part. | read | yes |  |
+| `get_page` | Read a page; `section`/`grep` reads one part. | read | yes |  |
 | `get_page_upload` | An upload's state and next_part, to resume after a lost reply. | write |  |  |
 | `get_raw_data` | Retrieve raw data for a page. | read |  |  |
 | `get_versions` | Page version history, newest snapshot first: metadata only (id, snapshot_at, title, type, tags, frontmatter) for the newest 20 versions by default. | read |  |  |
@@ -197,6 +212,7 @@ Every non-localOnly operation on the MCP surface: 161 tools across 25 areas. **S
 | `revert_version` | Restore a page to an earlier version from its history (a new revision; history is kept). | write |  |  |
 | `unpurge_page` | Owner-only (`gbrain pages unpurge <slug>`). | admin |  |  |
 | `upload_page_part` | Send the next part of an upload: part equals next_part, the whole call within part_max_frame_bytes, cut between code points. | write |  |  |
+| `whois` | Exact identity lookup: entity pages whose email, title or declared alias equals an email address or name, ignoring case, accents and quotes. | read |  |  |
 
 ## questions
 

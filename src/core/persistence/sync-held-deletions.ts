@@ -21,12 +21,14 @@ import { promisify } from 'node:util';
 import type { BrainEngine } from '../engine.ts';
 import { execFile } from '../spawn.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { HARDENED_GIT_ARGS, NO_LAZY_FETCH_ENV } from '../hardened-git.ts';
 import { ghostFileBacked } from '../repair/ghost-pages.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
 import { fileMatchesSnapshot } from './page-prepare.ts';
 import type { ManagedSyncContext } from './sync-discovery.ts';
 import { readBlobs } from './sync-git-stream.ts';
 import { readGitSourceHolds } from './sync-holds.ts';
+import { sourceDbOnlyVerdict } from './source-storage.ts';
 import { readDeletionProvenance } from './sync-origin-evidence.ts';
 import { levelReuseAllowed, SYNC_LEVEL_REUSE_KEY } from './sync-tree-reuse.ts';
 import type { ShadowLevel, ShadowPath } from './sync-pass.ts';
@@ -76,7 +78,7 @@ export async function applyHeldDeletions(engine: BrainEngine, level: ShadowLevel
       return hold?.code === 'file_drift' && hold.meta.state === 'file_gone' && !hold.meta.reason && hold.meta.held_deletion?.page_revision !== entry.revision;
     });
   }
-  const batch = [...fresh, ...held].filter(entry => !state.screened.has(entry.path)).slice(0, Math.max(0, PASS_HELD_DELETION_MAX - state.screened.size));
+  const batch = [...fresh, ...held].filter(entry => !state.screened.has(entry.path) && sourceDbOnlyVerdict(level.root, entry.slug!) === false).slice(0, Math.max(0, PASS_HELD_DELETION_MAX - state.screened.size));
   if (!batch.length) return;
   for (const entry of batch) state.screened.add(entry.path);
   const verdicts = await proveHeldDeletions(engine, level, context, batch, holdPath);
@@ -125,7 +127,7 @@ async function proveHeldDeletions(engine: BrainEngine, level: ShadowLevel, conte
 /** The blob `path` held in the deleting commit's first parent: the file's last committed bytes. */
 async function lastCommittedBlob(gitRoot: string, commit: string, path: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', gitRoot, 'rev-parse', '--verify', '--quiet', `${commit}^1:${path}`], { env: gitChildEnv(), encoding: 'utf8', timeout: 60_000 });
+    const { stdout } = await execFileAsync('git', [...HARDENED_GIT_ARGS, '-C', gitRoot, 'rev-parse', '--verify', '--quiet', `${commit}^1:${path}`], { env: gitChildEnv(NO_LAZY_FETCH_ENV), encoding: 'utf8', timeout: 60_000 });
     return stdout.trim() || null;
   } catch {
     return null;

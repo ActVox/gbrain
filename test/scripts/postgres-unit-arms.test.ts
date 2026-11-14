@@ -26,6 +26,13 @@ describe('postgres-unit-arms list', () => {
     expect(list.files.length).toBeGreaterThan(50);
   });
 
+  test('every weight in both committed weight files names a listed arm file', () => {
+    const listed = new Set(readArmsList(REPO).files);
+    for (const file of ['scripts/postgres-arm-weights.json', 'scripts/postgres-arm-weights-postgres-only.json']) {
+      expect(Object.keys(JSON.parse(readFileSync(join(REPO, file), 'utf8'))).filter(name => !listed.has(name))).toEqual([]);
+    }
+  });
+
   test('the two CI shards cover every listed file exactly once', () => {
     const all = cli('list').stdout.trim().split('\n');
     const shards = [1, 2].map(n => cli('shard', String(n), '2').stdout.trim().split('\n'));
@@ -40,7 +47,7 @@ describe('postgres-unit-arms list', () => {
     const shards = Array.from({ length: ARM_SHARDS }, (_, i) => i + 1);
     expect(job).toContain(`shard: [${shards.join(', ')}]`);
     expect(job).toContain(`Unit-lane PostgreSQL arms \${{ matrix.shard }}/${ARM_SHARDS}`);
-    expect(job).toContain(`run: bun scripts/postgres-unit-arms.ts run \${{ matrix.shard }} ${ARM_SHARDS} \${{ matrix.bun == '1.4.4' && '--postgres-only' || '' }}\n`);
+    expect(job).toContain(`run: bun scripts/postgres-unit-arms.ts run \${{ matrix.shard }} ${ARM_SHARDS}\n`);
     expect(job).toMatch(new RegExp(`- name: Require PostgreSQL arms of unit-lane suites\\n\\s+timeout-minutes: ${ARM_STEP_TIMEOUT_MS / 60_000}\\n`));
     const ports = [...job.matchAll(/ports: \['(\d+):5432'\]/g)].map(m => m[1]);
     const urls = [...job.matchAll(/postgres:\/\/gbrain_test:gbrain_test@127\.0\.0\.1:(\d+)\/gbrain_test/g)].map(m => m[1]);
@@ -49,7 +56,7 @@ describe('postgres-unit-arms list', () => {
     expect(urls).toEqual(ports);
   });
 
-  test('every CI shard\'s two-worker makespan fits the step twice over, with a minute to spare, in both Bun cells', () => {
+  test('every CI shard\'s two-worker makespan fits the step twice over, with a minute to spare, in both arm modes', () => {
     const files = readArmsList(REPO).files;
     expect(2 * ARM_SHARD_BUDGET_MS + 60_000).toBe(ARM_STEP_TIMEOUT_MS);
     for (const postgresOnly of [false, true]) {
@@ -58,6 +65,15 @@ describe('postgres-unit-arms list', () => {
       const makespans = armShards(REPO, files, ARM_SHARDS, postgresOnly).map(shard => armMakespan(shard, f => weights.get(f) ?? p75));
       expect({ postgresOnly, over: makespans.filter(ms => ms > ARM_SHARD_BUDGET_MS).map(Math.round) }).toEqual({ postgresOnly, over: [] });
     }
+  });
+
+  test('the job runs both arms: the unit shards skip *.slow.test.ts, so it is the only GitHub lane for the PGLite side of listed slow suites', () => {
+    const slow = readArmsList(REPO).files.filter(f => f.endsWith('.slow.test.ts'));
+    expect(slow.length).toBeGreaterThan(0);
+    expect(readFileSync(join(REPO, 'scripts', 'run-unit-shard.sh'), 'utf8')).toContain("-not -name '*.slow.test.ts'");
+    const workflow = readFileSync(join(REPO, '.github', 'workflows', 'persistence-validation.yml'), 'utf8');
+    const job = workflow.slice(workflow.indexOf('  unit-postgres-arms:'), workflow.indexOf('\n  invariants:'));
+    expect(job).not.toContain('--postgres-only');
   });
 
   test('a shard\'s makespan is the busiest worker when each takes the next heaviest file as it frees up', () => {
@@ -121,8 +137,8 @@ describe('postgres-unit-arms list', () => {
       `2026-10-05T18:44:00.0000000Z ##[group]test/a.test.ts`,
       `2026-10-05T18:44:${String(seconds).padStart(2, '0')}.0000000Z ##[endgroup]`,
     ].join('\n');
-    expect(mineArmWeights([log(10), log(50), log(12)]).get('test/a.test.ts')).toBe(12000);
-    expect(mineArmWeights([log(10), log(50), log(12), log(14)]).get('test/a.test.ts')).toBe(13000);
+    expect(mineArmWeights([log(10), log(50), log(16)]).get('test/a.test.ts')).toBe(16000);
+    expect(mineArmWeights([log(10), log(50), log(16), log(14)]).get('test/a.test.ts')).toBe(15000);
   });
 });
 

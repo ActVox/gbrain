@@ -29,6 +29,7 @@ import { buildSegmentedProjection } from '../page-body/projection.ts';
 import { maintenanceAttribution } from './attribution.ts';
 import { readPageBodyPolicy, chooseBodyStorage, SEGMENTED_DEMOTE_AT_OR_BELOW_BYTES, type PageBodyPolicy } from '../page-body/limits.ts';
 import { SEGMENTED_CHUNKER_VERSION } from '../page-body/segment-chunks.ts';
+import { SAFE_FENCE_CHUNKER_VERSION } from '../search/safe-chunks.ts';
 import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 import { pageSearchVectorSql } from '../fts-language.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
@@ -39,6 +40,8 @@ import { segmentedPageSearchable } from './searchable.ts';
 import { stableJson } from './digest.ts';
 import { pageBodyOverCeilingError } from '../page-body/page-shape.ts';
 import { assertOriginUnclaimed } from './origin-guard.ts';
+import { OperationError } from '../ops/contract.ts';
+import { PAGE_CHANGED_DURING_PREPARATION_MESSAGE } from '../page-state/types.ts';
 
 const BODY_KEYS = new Set(['compiled_truth', 'timeline', 'content']);
 
@@ -69,18 +72,19 @@ export async function segmentedLivePage(engine: Pick<BrainEngine, 'executeRaw'>,
  * files within the ceiling) that compare against or merge into the stored
  * body. A body above the single-string ceiling is returned as is: any step
  * that reads it refuses with `page_body_segmented` (its throwing getters), so
- * such a page is rewritten only by a streamed import.
+ * such a page is rewritten only by a streamed import. `generation` reads that body generation (a snapshot's) instead
+ * of the live one.
  */
-export async function materializedPage<T extends Page>(engine: BrainEngine, page: T): Promise<T>;
-export async function materializedPage<T extends Page>(engine: BrainEngine, page: T | null): Promise<T | null>;
-export async function materializedPage<T extends Page>(engine: BrainEngine, page: T | null): Promise<T | null> {
+export async function materializedPage<T extends Page>(engine: BrainEngine, page: T, generation?: number): Promise<T>;
+export async function materializedPage<T extends Page>(engine: BrainEngine, page: T | null, generation?: number): Promise<T | null>;
+export async function materializedPage<T extends Page>(engine: BrainEngine, page: T | null, generation?: number): Promise<T | null> {
   if (!page || bodyStorageOf(page) !== 'segmented' || typeof Object.getOwnPropertyDescriptor(page, 'compiled_truth')?.value === 'string') return page;
   const bytes = (page as { body_bytes?: number | string | null }).body_bytes
     ?? (await engine.executeRaw<{ body_bytes: string }>('SELECT body_bytes::text AS body_bytes FROM pages WHERE id=$1', [page.id]))[0]?.body_bytes;
   if (Number(bytes ?? 0) > PAGE_MAX_BYTES) return page;
   const copy: Record<string, unknown> = { body_storage: 'segmented' };
   for (const key of Object.keys(page)) if (!BODY_KEYS.has(key)) copy[key] = (page as Record<string, unknown>)[key];
-  Object.assign(copy, await materializeSegmentedBody(engine, Number(page.id), page.source_id));
+  Object.assign(copy, await materializeSegmentedBody(engine, Number(page.id), page.source_id, generation === undefined ? {} : { generation, bodyBytes: Number(bytes ?? 0) }));
   return copy as T;
 }
 
@@ -93,10 +97,18 @@ export function segmentedOverCeiling(page: { body_storage?: string | null; body_
  * `materializedPage` over a snapshot (null passes through), with the read-back body under the snapshot's withdrawal
  * ledger, as readPageSnapshot gives an inline page's body: a facts row the ledger withdraws is struck (or, purged,
  * dropped), so the body a write merges into or the drift check compares a file with is the one an inline page has.
+ * The body is the snapshot's generation (#8492), never one published after it, checked against the snapshot's
+ * body_bytes. A generation the page has moved past that no longer reads whole refuses `revision_conflict` (prepare
+ * again on a fresh snapshot); an unreadable live generation refuses `page_body_rows_unreadable`.
  */
 export async function materializedSnapshot(engine: BrainEngine, snapshot: PageSnapshot | null): Promise<PageSnapshot | null> {
   if (!snapshot || bodyStorageOf(snapshot.page) !== 'segmented') return snapshot;
-  const page = await materializedPage(engine, snapshot.page);
+  const page = await materializedPage(engine, snapshot.page, snapshot.bodyGeneration).catch(async error => {
+    if (!(error instanceof OperationError) || error.code !== 'page_body_rows_unreadable' || snapshot.bodyGeneration === undefined) throw error;
+    const [live] = await engine.executeRaw<{ body_generation: unknown }>('SELECT body_generation FROM pages WHERE id=$1', [snapshot.page.id]);
+    if (live && Number(live.body_generation) === snapshot.bodyGeneration) throw error;
+    throw new OperationError('revision_conflict', PAGE_CHANGED_DURING_PREPARATION_MESSAGE, 'Read its current revision and submit the updated intent with a new request_id.');
+  });
   if (page === snapshot.page) return snapshot;
   Object.assign(page, await overlayCanonicalBodies(engine.executeRaw.bind(engine), page.compiled_truth, page.timeline ?? '', snapshot.withdrawals,
     { sourceId: page.source_id, marker: snapshot.globalPurges }));
@@ -145,16 +157,24 @@ export interface SegmentedApplied { pageId: number; complete: boolean; retireDef
 /**
  * Seal a segmented page's text projection at its current revision (chunks visible, title + timeline lead searchable).
  * The lead is indexed as the inline seal indexes a snapshot's timeline: after the page's withdrawal overlay, sanitized.
+ * `chunker_version` is the oldest segmented chunker among the live chunks: a page sealed at an older one keeps it while
+ * any chunk row from before this generation is still stored (a write re-chunks only the occurrences it changed), so
+ * `gbrain reindex --segmented` still lists it.
  */
 export async function sealSegmentedPage(tx: Pick<BrainEngine, 'executeRaw'>, pageId: number, timelineLead?: string): Promise<void> {
-  const [page] = await tx.executeRaw<{ slug: string; source_id: string; timeline_lead: string | null }>('SELECT slug, source_id, timeline_lead FROM pages WHERE id=$1', [pageId]);
+  const [page] = await tx.executeRaw<{ slug: string; source_id: string; timeline_lead: string | null; chunker_version: number | null; body_generation: number | string }>(
+    'SELECT slug, source_id, timeline_lead, chunker_version, body_generation FROM pages WHERE id=$1', [pageId]);
   if (!page) return;
+  const stamped = Number(page.chunker_version ?? 0);
+  const older = stamped >= SAFE_FENCE_CHUNKER_VERSION && stamped < SEGMENTED_CHUNKER_VERSION && (await tx.executeRaw(
+    `-- chunk-visibility-ok: a sealing page stores only live rows; any one older than this generation predates the write
+    SELECT 1 FROM content_chunks WHERE page_id=$1 AND body_generation < $2 LIMIT 1`, [pageId, page.body_generation])).length > 0;
   const query = <T>(sql: string, params?: unknown[]) => tx.executeRaw<T>(sql, params);
   const ledger = await readPageSnapshot(query, page.slug, { sourceId: page.source_id, includeDeleted: true });
   const { timeline } = await overlayCanonicalBodies(query, '', timelineLead ?? page.timeline_lead ?? '', ledger?.withdrawals ?? [],
     { sourceId: page.source_id, marker: ledger?.globalPurges });
   await tx.executeRaw(`UPDATE pages SET text_projection_revision=knowledge_revision, chunker_version=$3,
-    search_vector=${pageSearchVectorSql('title', '$2')} WHERE id=$1`, [pageId, sanitizeRemoteBody(timeline), SEGMENTED_CHUNKER_VERSION]);
+    search_vector=${pageSearchVectorSql('title', '$2')} WHERE id=$1`, [pageId, sanitizeRemoteBody(timeline), older ? stamped : SEGMENTED_CHUNKER_VERSION]);
 }
 
 /** The segmented branch of a page write's apply, inside the publication transaction. */
@@ -192,8 +212,9 @@ export async function applySegmentedBody(tx: BrainEngine, input: SegmentedApplyI
  * Demotion: turn a segmented page row into an inline row with an empty body
  * (the caller's inline write fills it in the same transaction). The live
  * manifest rows close at the next generation, so versions that pin earlier
- * generations keep theirs; the page's segmented chunk rows are deleted here,
- * before the inline write stages its chunks. The write holds the page row FOR
+ * generations keep theirs; the page's segmented chunk rows and every
+ * page_segment_derivations row (outputs of segments no body holds any more)
+ * are deleted here, before the inline write stages its chunks. The write holds the page row FOR
  * UPDATE (lockPageKeys), so a chunk batch in flight (FOR KEY SHARE) commits
  * before this delete, and a later batch of a racing preparation refuses
  * (stageSegmentChunks: an inline page at the generation it targets).
@@ -205,6 +226,7 @@ export async function demoteSegmentedPage(tx: Pick<BrainEngine, 'executeRaw'>, p
     body_bytes=NULL, truth_bytes=NULL, body_lines=NULL, segment_count=NULL, segmenter_version=NULL, body_flags=NULL,
     body_generation=body_generation+1 WHERE id=$1 AND body_storage='segmented'`, [pageId]);
   await tx.executeRaw('DELETE FROM content_chunks WHERE page_id=$1 AND occurrence_id IS NOT NULL', [pageId]);
+  await tx.executeRaw('DELETE FROM page_segment_derivations WHERE page_id=$1', [pageId]);
 }
 
 /** Abort a staging whose write will not publish (best effort: expiry collects it anyway). */

@@ -38,7 +38,7 @@ import type {
 import type { BrainEngine } from '../../engine.ts';
 import type { GBrainConfig } from '../../config.ts';
 import { loadConfig, isConfigTruthy } from '../../config.ts';
-import { buildBrainTools, selectAllowedTools } from '../tools/brain-allowlist.ts';
+import { buildBrainPutPagesTool, buildBrainTools, selectAllowedTools } from '../tools/brain-allowlist.ts';
 import {
   acquireLease,
   releaseLease,
@@ -51,7 +51,9 @@ import {
 } from './subagent-audit.ts';
 import { resolveModel, isAnthropicProvider, isOpenRouterSubagentFamily, TIER_DEFAULTS } from '../../model-config.ts';
 import { splitProviderModelId, normalizeModelId } from '../../model-id.ts';
-import { resolveAnthropicKey } from '../../ai/anthropic-key.ts';
+import { anthropicClientOptions } from '../../ai/anthropic-key.ts';
+import { withEngineScope } from '../../engine-scope.ts';
+import { redactProviderKeys } from '../../ai/key-redact.ts';
 import { buildSystemPrompt, DEFAULT_SUBAGENT_SYSTEM } from '../system-prompt.ts';
 import { toolLoop as gatewayToolLoop, isThinkingModel, THINKING_MODEL_MAX_OUTPUT_TOKENS } from '../../ai/gateway.ts';
 import type { ChatToolDef, ChatMessage, ChatBlock, ChatResult, ToolHandler } from '../../ai/gateway.ts';
@@ -248,6 +250,19 @@ async function runLoopConvertingLeaseLoss<T>(
   }
 }
 
+/** The legacy path's client: #2048 key (env, then config; an embedded engine's own key and endpoint, in its scope) on first use; #5137 scrubbed errors. */
+function legacyMessagesClient(engine: BrainEngine, make?: () => Anthropic): MessagesClient {
+  let messages: MessagesClient | undefined, env: Record<string, string | undefined> = {};
+  return { async create(params, opts) {
+    if (!messages) { const options = make ? undefined : withEngineScope(engine, anthropicClientOptions); env = { ANTHROPIC_API_KEY: options?.apiKey }; messages = (make ? make() : new Anthropic(options)).messages; }
+    try { return await messages.create(params, opts); } catch (err) {
+      if (err instanceof Error) for (const field of ['message', 'stack'] as const) err[field] = redactProviderKeys(err[field] ?? '', env);
+      if (err && typeof err === 'object' && 'error' in err) (err as { error: unknown }).error = JSON.parse(redactProviderKeys(JSON.stringify((err as { error: unknown }).error) ?? 'null', env));
+      throw err;
+    }
+  } };
+}
+
 export function makeSubagentHandler(deps: SubagentDeps) {
   const engine = deps.engine;
   // sdk.messages IS the MessagesClient-shaped object. The v0.16.0 bug was
@@ -255,11 +270,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
   // lives at sdk.messages.create. Assigning sdk.messages directly gets the
   // right object; JS method-call semantics preserve `this` at the call
   // site (subagent.ts invokes client.create(...) with client === sdk.messages).
-  // Resolve the key env-first, then config (anthropic_api_key) — a bare
-  // new Anthropic() only reads env, so launchd/MCP workers whose key lives
-  // in the gbrain config file would fail auth (#2048).
-  const makeAnthropic = deps.makeAnthropic ?? (() => new Anthropic({ apiKey: resolveAnthropicKey() }));
-  const client: MessagesClient = deps.client ?? makeAnthropic().messages;
+  const client: MessagesClient = deps.client ?? legacyMessagesClient(engine, deps.makeAnthropic);
   const config = deps.config ?? loadConfig() ?? ({ engine: 'postgres' } as GBrainConfig);
   const rateLeaseKey = deps.rateLeaseKey ?? DEFAULT_RATE_KEY;
   const maxConcurrent = deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -330,6 +341,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     if (!data.prompt || typeof data.prompt !== 'string') {
       throw new Error('subagent job data.prompt is required (string)');
     }
+    if (!submitted) await (await import('../../cycle/synthesize-source-routing.ts')).refuseChangedSessionSource(engine, data); // #7850
 
     // v0.38 (S1.5 + S1.7) — capability-based gate replaces the v0.31.12
     // Anthropic-only check. The handler now routes between two paths:
@@ -472,7 +484,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       brainId: data.brain_id,
       allowedSlugPrefixes: data.allowed_slug_prefixes,
       // #1586: cycle-resolved source scope for tool-call OperationContexts.
-      sourceId: data.source_id, readBudgetBytes: data.read_budget_bytes,
+      sourceId: data.source_id, readBudgetBytes: data.read_budget_bytes, stageWrites: data.stage_writes === true && !submitted, // GBRA-60: trusted local jobs only
     });
     const selectedTools = selectAllowedTools(registry, data.allowed_tools);
     const guardTools = (tools: ToolDef[], deferEmbeds = false) => guardDelegatedTools(engine, config, submitted, ctx.id, tools, deps.toolRegistry !== undefined, deferEmbeds);
@@ -531,7 +543,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       if (dispatchOneshot) {
         // Rebuild put_page with deferEmbeds so the embed network call leaves
         // the model path (the standing embed machinery backfills).
-        const oneshotRegistry = deps.toolRegistry ?? buildBrainTools({
+        const oneshotToolOpts = {
           subagentId: ctx.id,
           engine,
           config,
@@ -539,7 +551,8 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           allowedSlugPrefixes: data.allowed_slug_prefixes,
           sourceId: data.source_id,
           deferEmbeds: true, readBudgetBytes: data.read_budget_bytes,
-        });
+        };
+        const oneshotRegistry = deps.toolRegistry ?? buildBrainTools(oneshotToolOpts);
         // Honor allowed_tools EXACTLY like the loop registry — a submitter
         // that scoped its job read-only must not gain write capability by
         // setting mode: oneshot (put_page filtered out → no_put_page_tool
@@ -554,6 +567,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           maxOutputTokens,
           turnTimeoutMs,
           putPageTool: oneshotTools.find(t => t.name === 'brain_put_page'),
+          putPagesTool: data.dream_output && !submitted && !deps.toolRegistry && oneshotTools.some(t => t.name === 'brain_put_page') ? buildBrainPutPagesTool(oneshotToolOpts) : undefined,
           leaseKey: gatewayLeaseKey,
           maxConcurrent,
           leaseTtlMs,

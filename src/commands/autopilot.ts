@@ -19,6 +19,8 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, chmodSync, statSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { exitCliError } from '../cli/cli-error.ts';
+import { autopilotNoRepoRefusal, autopilotPgliteRefusal } from './autopilot-refusals.ts';
 import { readGlobalMaintenanceVerdict } from '../core/minions/global-maintenance-stall.ts';
 import { readDaemonStaleAfter } from '../core/autopilot-heartbeat.ts';
 import { detectExecutionEnvironment } from '../core/execution-env.ts';
@@ -377,7 +379,7 @@ export function reconcileSelfUpgradeAtBoot(): void {
 
 /** Conservative idle: no cycle running AND (Postgres) no active/waiting jobs.
  * Any ambiguity / error → NOT idle (we'd rather skip an upgrade window). */
-async function computeAutopilotIdle(engine: BrainEngine, engineType: string): Promise<boolean> {
+export async function computeAutopilotIdle(engine: BrainEngine, engineType: string): Promise<boolean> {
   try {
     const cycle = await inspectLock(engine, 'gbrain-cycle');
     if (cycle) return false; // a cycle (sync/extract/embed/...) is running
@@ -448,7 +450,7 @@ export async function attemptAutopilotSelfUpgrade(
         /* fail-open */
       }
     }
-    if (!entry || entry.marker.kind !== 'upgrade_available' || !entry.marker.latest) return;
+    if (!entry || entry.error || entry.marker?.kind !== 'upgrade_available' || !entry.marker.latest) return;
     const latestVersion = entry.marker.latest;
 
     const idle = await computeAutopilotIdle(engine, engineType);
@@ -861,9 +863,9 @@ export function writeWrapperScript(repoPath: string, target: InstallTarget, job:
 # or which init file the OS loaded.
 export PATH=${runtimePathPrefix}"$HOME/.bun/bin:$PATH"
 ${process.env.GBRAIN_HOME ? `# Baked at install: the supervisor does not pass the installer's env, and\n# without this the daemon would read/write a different home than the\n# install that configured it.\nexport GBRAIN_HOME='${(process.env.GBRAIN_HOME).replace(/'/g, "'\\''")}'\n` : ''}
-${generateSelfDisableGuard(repoPath, target, job)}# #3696: daemon cwd = the repo, so any legacy RELATIVE sources.local_path /
-# sync.repo_path row resolves against it instead of a phantom path under the
-# supervisor's cwd. Done HERE — after the guard has proven the repo exists —
+${generateSelfDisableGuard(repoPath, target, job)}# #3696: daemon cwd = the repo. Sync refuses a legacy RELATIVE local_path /
+# sync.repo_path row and guarded readers skip it (#7630); the few readers #7646
+# tracks still resolve one against this cwd, so the cd stays. Done HERE — after the guard has proven the repo exists —
 # and NOT via launchd's plist WorkingDirectory: launchd chdir()s before exec,
 # so a deleted repo would fail every respawn and the self-disable guard above
 # could never run. Fail-open (|| true): a repo deleted between the guard and
@@ -902,15 +904,9 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
   // sweep, embed) then fails to connect. Refuse with guidance; --force for
   // operators who genuinely want a daemon-owned brain.
   const guardMsg = pgliteDaemonGuardMessage(engine.kind, args.includes('--force'));
-  if (guardMsg) {
-    console.error(guardMsg);
-    process.exit(1);
-  }
+  if (guardMsg) exitCliError(autopilotPgliteRefusal(guardMsg), 'autopilot');
   const rawRepoPath = parseArg(args, '--repo') || await installRepoFallback(engine);
-  if (!rawRepoPath) {
-    console.error('No repo path. Use --repo or run gbrain sync --repo first.');
-    process.exit(1);
-  }
+  if (!rawRepoPath) exitCliError(autopilotNoRepoRefusal(engine.kind), 'autopilot');
   // #3696: the daemon runs with an arbitrary cwd (launchd: `/`), so a
   // relative `--repo .` baked into the wrapper script resolves to a phantom
   // path at daemon runtime. Resolve NOW, against the installer's cwd.
@@ -1006,9 +1002,9 @@ export function pgliteDaemonGuardMessage(engineKind: string, force: boolean): st
 // self-disable guard — would never run again, leaving a zombie KeepAlive
 // job that can never take itself out of rotation. $HOME exists for the
 // job's whole lifetime; the WRAPPER cd's into the repo AFTER the guard has
-// proven it exists (writeWrapperScript), which is what makes legacy
-// RELATIVE sources.local_path / sync.repo_path rows resolve against the
-// repo instead of a phantom path.
+// proven it exists (writeWrapperScript). Sync refuses a legacy RELATIVE
+// sources.local_path / sync.repo_path row and the guarded readers skip it
+// (#7630); the few readers #7646 tracks still resolve one against that cwd.
 export function generateLaunchdPlist(wrapperPath: string, home: string, job?: AutopilotJob): string {
   const logPath = job?.logPath ?? `${home}/.gbrain/autopilot.log`;
   const errPath = job?.errPath ?? `${home}/.gbrain/autopilot.err`;
@@ -1018,7 +1014,7 @@ export function generateLaunchdPlist(wrapperPath: string, home: string, job?: Au
 <dict>
   <key>Label</key><string>${escapeXml(job?.launchdLabel ?? autopilotLaunchdLabel())}</string>
   <key>ProgramArguments</key><array>
-    <string>${escapeXml(wrapperPath)}</string>
+${(job?.launchdViaBash ? ['/bin/bash', wrapperPath] : [wrapperPath]).map(arg => `    <string>${escapeXml(arg)}</string>`).join('\n')}
   </array>
   <key>WorkingDirectory</key><string>${escapeXml(home)}</string>
   <key>RunAtLoad</key><true/>
@@ -1044,7 +1040,7 @@ function installLaunchd(wrapperPath: string, home: string, repoPath: string, job
 
   try {
     const agentsDir = join(home, 'Library', 'LaunchAgents');
-    mkdirSync(agentsDir, { recursive: true });
+    for (const dir of [agentsDir, dirname(job.logPath)]) mkdirSync(dir, { recursive: true });
     replaceLegacySharedJob(job, 'macos');
     writeFileSync(plistPath(job.launchdLabel), plist, { mode: 0o644 });
     // launchd rejects group/world-writable agent plists: bootstrap/load fails

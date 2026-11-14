@@ -32,7 +32,7 @@ in this shape.
 ## What `gbrain mcp expose` does
 
 ```bash
-gbrain mcp expose                # tailnet-only, port 3131, full surface, service installed
+gbrain mcp expose                # tailnet-only, port 3131, full surface listing the memory verbs, service installed
 gbrain mcp expose --funnel       # also reachable by cloud agents (public HTTPS)
 gbrain mcp expose --dry-run      # print the plan, change nothing
 ```
@@ -83,7 +83,7 @@ alone. Which exit 2 it is matters:
 The wrapper reads the admin token from its file at run time, sources your
 shell profile and `~/.gbrain/env`, prepends the Bun directory to `PATH`, and
 `exec`s `gbrain serve --http --port N --public-url URL [--surface X]
-[--enable-dcr]`. The token never lands in the plist, unit or wrapper.
+[--advertise verbs] [--enable-dcr]`. The token never lands in the plist, unit or wrapper.
 
 Paths above use the default GBrain home. Use the receipt's `admin_token_file`
 and `mcp_url` for the intended server, especially with a custom `GBRAIN_HOME`.
@@ -146,7 +146,7 @@ gbrain mcp expose --remove [--yes] [--json]
 | --- | --- |
 | `--port N` | Local port for `gbrain serve --http` (default `3131`). Tailscale proxies `:443` on your MagicDNS name to it. With `--status` or `--remove` and no receipt, the port whose leftover `:443` handler is looked for and cleaned up. |
 | `--funnel` | Public HTTPS via Tailscale Funnel instead of tailnet-only Serve. Required for cloud agents. |
-| `--surface verbs\|starter\|full` | Tool surface of the served MCP server (default `full`, same as `serve --http`). |
+| `--surface verbs\|starter\|full` | Tool surface, listed in full. Default: `full` with `--advertise verbs` (lists the memory verbs and `request_tools`; all stays callable). Older exposures keep their listing. |
 | `--enable-dcr` | Turn on self-service client registration on the served server (off by default; every self-registered connection still stops for your approval in the admin dashboard). |
 | `--no-tailscale` | Skip Tailscale entirely: install the service on loopback only, publish nothing. Exclusive with `--funnel`. |
 | `--no-service` | Do not create a user service; only publish a server you run yourself. Also the way to publish from a host with no brain config (`no_brain_config`). |
@@ -157,7 +157,7 @@ gbrain mcp expose --remove [--yes] [--json]
 | `--json` | One JSON document on stdout: `{ status, receipt, checks: [{name, status, detail}], next_actions, reason?, message? }`; prose goes to stderr. |
 
 `--status` and `--remove` are exclusive with each other. Defaults: port
-3131, tailnet-only, `--surface full`, DCR off, service installed whenever a
+3131, tailnet-only, `--surface full --advertise verbs`, DCR off, service installed whenever a
 supervisor exists.
 
 ### `--status`
@@ -418,8 +418,8 @@ put_pages with one request_id per batch and wait_ms 25000."*
   immediately and by meaning once its embedding effect finishes.
 - **Request size.** HTTP carries less than the 24 MiB page ceiling:
   `gbrain serve --http` reads at most 4 MiB per request (the MCP SDK
-  default), and the simpler HTTP transport caps a request at
-  `GBRAIN_HTTP_MAX_BODY_BYTES`. A batch goes in smaller `put_pages` calls; a
+  default) and the simpler HTTP transport 1 MiB; `GBRAIN_HTTP_MAX_BODY_BYTES`
+  sets either cap. A batch goes in smaller `put_pages` calls; a
   page over the transport limit goes by file on the brain host (sync,
   `gbrain import` or `gbrain put`), never split by hand. Every limit is in
   [limits per entry point](memory-boundaries.md#large-page-limits).
@@ -515,6 +515,12 @@ dedupe off) in the serve wrapper's environment.
   client on the host when it should stop. Self-service registration stays
   off unless you pass `--enable-dcr`, and even then every new connection waits
   for your approval in the admin dashboard.
+- **Remote `think` runs your think model.** Every `think` answer is a paid
+  call on the host's key, so a connected client's `model` is used only when it
+  is your think model (`models.think`) or you allow it with
+  `gbrain config set think.remote_models <model>,<model>`. Any other model
+  answers on your think model, with a `model_override_ignored` notice instead
+  of an error.
 - **Loopback bind.** The server keeps `127.0.0.1`; never pass
   `--bind 0.0.0.0` for this shape. Tailscale is the only way in.
 - **No secrets in chat or config.** The admin token lives in a 0600 file the

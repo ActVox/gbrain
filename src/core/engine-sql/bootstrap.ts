@@ -11,6 +11,9 @@
  *     caller's connection, which MUST hold the initSchema advisory lock (key
  *     42) so concurrent bootstraps can't race on a transaction pooler.
  *
+ * Before any DDL it refuses (`foreign_table`, owned-table-shapes.ts) when a table gbrain owns by name was
+ * created by another application, so the blob never adopts and alters it (#9190).
+ *
  * The blob forward-references state that older brains don't have yet (a
  * column-with-index or FK target that a migration adds later). One probe
  * round-trip finds every gap; fresh installs and modern brains no-op.
@@ -39,6 +42,7 @@
 import type { PGlite } from '@electric-sql/pglite';
 import type postgres from '#postgres';
 import { GRANT_COLUMNS_SQL } from '../grants/schema.ts';
+import { assertOwnedTableShapes } from '../owned-table-shapes.ts';
 
 type ProbeRow = Record<string, boolean>;
 
@@ -165,6 +169,10 @@ const FORWARD_REFERENCE_PROBES: readonly Probe[] = [
   ['facts_exists', 'facts'],
   ['facts_embedding_model_exists', 'facts', 'embedding_model'],
   ['facts_embedded_text_hash_exists', 'facts', 'embedded_text_hash'],
+  ['derived_generation_items_exists', 'derived_generation_items'],
+  ['derived_generation_items_pending_exists', 'derived_generation_items', 'pending'],
+  ['link_transitions_exists', 'link_transitions'],
+  ['link_transitions_link_source_exists', 'link_transitions', 'link_source'],
 ];
 
 // Probed only where `dreamVerdictsForwardReference` (the Postgres blob).
@@ -307,6 +315,16 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
     && probe.dream_verdicts_exists && !probe.dream_verdicts_expires_at_exists;
   const needsFactEmbeddingIdentity = probe.facts_exists
     && (!probe.facts_embedding_model_exists || !probe.facts_embedded_text_hash_exists);
+  // v266 (#7645): the blob's partial index derived_generation_items_pending
+  // (`WHERE pending`) references a column only v266 adds, so a brain at v265
+  // (the table exists since v265) wedged on the replay before any migration ran.
+  const needsDerivedGenerationItemsPending = probe.derived_generation_items_exists
+    && !probe.derived_generation_items_pending_exists;
+  // v302 (GST-2228): the blob's link_transitions_identity_idx includes
+  // link_source, a column only v302 adds, so a brain at v204-v301 would wedge on
+  // the replay (CREATE INDEX IF NOT EXISTS checks columns before the name).
+  const needsLinkTransitionsLinkSource = probe.link_transitions_exists
+    && !probe.link_transitions_link_source_exists;
   return {
     needsPagesBootstrap, needsLinksBootstrap, needsChunksBootstrap, needsPagesDeletedAt,
     needsMcpLogBootstrap, needsSubagentProviderId, needsChunksEmbeddingImage, needsPagesRecency,
@@ -315,7 +333,8 @@ export function forwardReferenceGaps(probe: ProbeRow, dialect: ForwardReferenceB
     needsContextualRetrievalColumns, needsPagesGeneration, needsPagesEmbeddingSignature,
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
-    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity,
+    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
+    needsLinkTransitionsLinkSource,
   };
 }
 
@@ -323,6 +342,7 @@ type ForwardReferenceGaps = ReturnType<typeof forwardReferenceGaps>;
 
 /** Probe once, then add every missing forward-referenced piece of state in master's order. */
 export async function applyForwardReferenceBootstrap(target: ForwardReferenceBootstrapTarget): Promise<void> {
+  await assertOwnedTableShapes(sql => target.probe(sql));
   const gaps = forwardReferenceGaps(await target.probe(forwardReferenceProbeSql(target.dialect)), target.dialect);
   const {
     needsPagesBootstrap, needsLinksBootstrap, needsChunksBootstrap, needsPagesDeletedAt,
@@ -332,7 +352,8 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
     needsContextualRetrievalColumns, needsPagesGeneration, needsPagesEmbeddingSignature,
     needsPagesLinksExtractedAt, needsTimelineEventPageId, needsMinionJobsTimeoutAt,
     needsMinionJobsIdempotencyKey, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
-    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity,
+    needsDreamVerdictsExpiresAt, needsFactEmbeddingIdentity, needsDerivedGenerationItemsPending,
+    needsLinkTransitionsLinkSource,
   } = gaps;
 
   if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -349,7 +370,9 @@ export async function applyForwardReferenceBootstrap(target: ForwardReferenceBoo
       && !needsTimelineEventPageId
       && !needsMinionJobsTimeoutAt && !needsMinionJobsIdempotencyKey
       && !needsMinionJobsPrivateQueue && !needsMinionJobsAuthority
-      && !needsDreamVerdictsExpiresAt && !needsFactEmbeddingIdentity) return;
+      && !needsDreamVerdictsExpiresAt && !needsFactEmbeddingIdentity
+      && !needsDerivedGenerationItemsPending
+      && !needsLinkTransitionsLinkSource) return;
 
   process.stderr.write('  Schema forward-reference gap detected, applying bootstrap\n');
 
@@ -582,6 +605,7 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
     needsPagesGeneration, needsPagesEmbeddingSignature, needsPagesLinksExtractedAt,
     needsTimelineEventPageId, needsMinionJobsTimeoutAt, needsMinionJobsIdempotencyKey,
     needsDreamVerdictsExpiresAt, needsMinionJobsPrivateQueue, needsMinionJobsAuthority,
+    needsDerivedGenerationItemsPending, needsLinkTransitionsLinkSource,
   } = gaps;
 
   if (needsPagesLastRetrievedAt) {
@@ -711,6 +735,22 @@ async function applyLaterColumnGaps(target: ForwardReferenceBootstrapTarget, gap
     await exec(`
       ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS submission_authority JSONB;
       ALTER TABLE minion_jobs ADD COLUMN IF NOT EXISTS claim_generation BIGINT NOT NULL DEFAULT 0;
+    `);
+  }
+
+  if (needsDerivedGenerationItemsPending) {
+    // Column only, exactly as v266 adds it (existing items are not pending);
+    // v266 still runs and owns the index and the activations table.
+    await exec(`
+      ALTER TABLE derived_generation_items ADD COLUMN IF NOT EXISTS pending BOOLEAN NOT NULL DEFAULT false;
+    `);
+  }
+
+  if (needsLinkTransitionsLinkSource) {
+    // Column only, exactly as v302 adds it (nullable, no default: metadata only);
+    // v302 still runs and swaps the identity index online.
+    await exec(`
+      ALTER TABLE link_transitions ADD COLUMN IF NOT EXISTS link_source TEXT;
     `);
   }
 }

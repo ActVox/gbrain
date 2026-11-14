@@ -3,19 +3,24 @@ import { PoolStallWatch } from '../core/postgres-engine/pool-stall-watch.ts';
 import { installRestartRequiredExit, recordServeTransport, resolveRestartRequiredExitSeconds, SERVE_RESTART_REQUIRED_EXIT_ENV } from './serve-health.ts';
 import { SERVE_UNHEALTHY_EXIT_CODE } from '../core/exit-codes.ts';
 import type { BrainEngine } from '../core/engine.ts';
+import type { IdleUpkeep } from '../core/maintenance/idle.ts';
 // C10: `--fail-fast` / GBRAIN_SERVE_FAIL_FAST=1 — exit with the classified envelope instead of status-only/degraded mode (decided in src/cli.ts's connect path; F4's status mode consults it too).
 export { serveFailFastRequested, writeServeFailFastEnvelope } from '../core/serve-fail-fast.ts';
 import { isEngineDegraded as isEngineDegradedForServe } from '../core/degraded-marker.ts';
 import { startMcpServer, stdioRpcsInFlightCount, resolveMcpStdioSourceScope } from '../mcp/server.ts';
 import { VERB_NAMES } from '../core/verbs.ts';
+import { parseStdioMemberFlag } from '../core/stdio-member-flag.ts';
 import { RESIDENT_POOL_FLOOR } from '../core/pg-access-classify.ts';
 import { redirectStdoutLoggingToStderr } from '../core/console-prefix.ts';
 import { startFactsDrainScheduler, type FactsDrainScheduler, type FactsDrainSchedulerOpts } from '../core/facts/drain-scheduler.ts';
 import { startMovementWatch, type MovementWatch } from '../core/persistence/sync-movement.ts';
 import { startServeHeadWatcher } from '../core/serve-head-watcher.ts';
+import { startMcpLogPruneTicker, type McpLogPruneTicker, type McpLogPruneTickerOpts } from '../core/mcp-request-log-retention.ts';
+import { isReadOnlyServeArgs, readOnlyServeSkipsResidentDuties } from '../core/direct-pool-profile.ts';
 import { onForwardProgress } from '../core/forward-progress.ts';
-import { foregroundWindow } from '../core/foreground-activity.ts';
+import { foregroundWindow, onForegroundRequest } from '../core/foreground-activity.ts';
 import { graduationHandoffRequested, writeServeGraduationEnvelope } from '../core/persistence/graduation-serve-guard.ts';
+import { withLocalScope } from '../core/engine-scope-store.ts';
 import {
   installLoopStallWatchdog,
   resolveServeStallWatchdogMs,
@@ -76,6 +81,38 @@ function idleSweepIntervalMs(): number {
   return Number.isFinite(n) && n >= 1_000 ? Math.floor(n) : IDLE_SWEEP_INTERVAL_MS;
 }
 
+/** GBRA-438: idle upkeep, skipped while a delegated sync owns the event loop (the sweep's rule); loaded lazily, off the boot path. */
+function defaultIdleUpkeep(log: (line: string) => void): IdleUpkeep {
+  return async (engine, signal, retryParked) => {
+    if ((await loadSyncRunner()).isDelegatedSyncRunning()) return;
+    const { runIdleUpkeep } = await import('../core/maintenance/idle.ts');
+    await runIdleUpkeep(engine, { runner: 'serve', signal, retryParked, log });
+  };
+}
+
+/**
+ * GBRA-438: the stdio serve's idle upkeep, one run at a time. abort() (stdin data), a foreground request or stop()
+ * (shutdown) aborts the run in flight. run() never throws.
+ */
+function idleUpkeepSlot(upkeep: IdleUpkeep): { run(engine: BrainEngine): Promise<void>; abort(): void; stop(): void } {
+  let running: AbortController | null = null;
+  let first = true;
+  const abort = (): void => { running?.abort(); };
+  const unsubscribe = onForegroundRequest(abort);
+  return {
+    async run(engine) {
+      if (running) return;
+      const controller = new AbortController();
+      running = controller;
+      const retryParked = first;
+      first = false;
+      try { await upkeep(engine, controller.signal, retryParked); } catch { /* idle upkeep is best-effort; never kill serve */ } finally { running = null; }
+    },
+    abort,
+    stop() { unsubscribe(); abort(); },
+  };
+}
+
 /** GBRA-156: each idle sweep names its start and its duration on stderr, so slow requests can be lined up with it. */
 async function loggedIdleSweep(log: (line: string) => void, run: () => Promise<unknown>): Promise<void> {
   const startedAt = Date.now();
@@ -106,7 +143,7 @@ export interface ServeOptions {
   // (which unconditionally attaches a 'data' listener to real
   // process.stdin and would pollute the test runner's stdin handle).
   // Defaults to the real implementation when omitted.
-  startMcpServer?: (engine: BrainEngine, opts?: { surface?: 'verbs' | 'starter' | 'full'; surfaceSource?: 'env' | 'flag' | 'config' | 'default'; invalidSurfaceEnv?: string; sourceGuard?: boolean; onBootPhase?: (phase: string) => void; access?: 'full' | 'read-only' }) => Promise<void>;
+  startMcpServer?: (engine: BrainEngine, opts?: { surface?: 'verbs' | 'starter' | 'full'; surfaceSource?: 'env' | 'flag' | 'config' | 'default'; invalidSurfaceEnv?: string; sourceGuard?: boolean; onBootPhase?: (phase: string) => void; access?: 'full' | 'read-only'; advertise?: 'verbs' | 'starter' | 'full' }) => Promise<void>;
   // Test seam for the parent-process watchdog. The default
   // (`readLiveParentPid`) reads the live kernel PPID via `ps` on POSIX
   // because `process.ppid` is captured at process creation and does not
@@ -149,6 +186,10 @@ export interface ServeOptions {
   // sweep core (which opens engine work). Defaults to a lazy-imported
   // runMaintenanceSweep with a small budget.
   sweep?: (engine: BrainEngine) => Promise<unknown>;
+  // Test seam for idle upkeep (GBRA-438): one run with the abort signal stdin
+  // data or a foreground request trips. Defaults to runIdleUpkeep as runner
+  // 'serve' (on and due only, small budget, never at boot); retryParked is true on the process's first run.
+  upkeep?: IdleUpkeep;
   // Kill switch seam for the idle sweep. Defaults to
   // `process.env.GBRAIN_SWEEP !== '0'` when omitted.
   sweepEnabled?: boolean;
@@ -177,6 +218,8 @@ export interface ServeOptions {
   // Test seam for the automatic facts drain (src/core/facts/drain-scheduler.ts):
   // false disables it; an object overrides its timer and run body.
   factsDrain?: false | Pick<FactsDrainSchedulerOpts, 'run' | 'tickMs' | 'maxGapMs' | 'now'>;
+  // Test seam for the request-log retention ticker (src/core/mcp-request-log-retention.ts): false disables it; an object overrides its timer.
+  mcpLogPrune?: false | Pick<McpLogPruneTickerOpts, 'setInterval' | 'clearInterval' | 'tickMs'>;
 }
 
 /**
@@ -232,10 +275,15 @@ export async function finishHttpServe(
   exitOnce(0);
 }
 
-export async function runServe(
+/** gbrain serve (stdio and --http) runs in a local scope, so its own AI calls use the process gateway (engine-scope.ts). */
+export function runServe(engine: BrainEngine, args: string[] = [], opts: ServeOptions = {}) {
+  return withLocalScope(() => serveBrain(engine, args, opts));
+}
+
+async function serveBrain(
   engine: BrainEngine,
-  args: string[] = [],
-  opts: ServeOptions = {},
+  args: string[],
+  opts: ServeOptions,
 ) {
   // v0.26+: --http dispatches to the full OAuth 2.1 server (serve-http.ts)
   // with admin dashboard, scope enforcement, SSE feed, and the requireBearerAuth
@@ -244,15 +292,18 @@ export async function runServe(
   // verifyAccessToken with legacy access_tokens fallback (so v0.22.7 callers
   // that used `gbrain auth create` keep working unchanged).
   const isHttp = args.includes('--http');
+  // Wakeshift (docs/guides/wakeshift.md): the 5 s wake drainer for stdio and HTTP alike; a no-op tick while reporting back is off.
+  (await import('../core/wakeshift/drain.ts')).startWakeDrain(engine);
 
   // MEMORY_VERBS v1: tool-surface mode. stdio: GBRAIN_SURFACE > --surface >
   // config `mcp_surface` > 'full'; --http ignores GBRAIN_SURFACE (an HTTP
   // ceiling never widens without an explicit --surface restart).
   // 'verbs' exposes exactly the seven protocol verbs (the quickstart surface);
   // 'starter' the ~20-op daily-driver set; 'full' keeps every operation.
-  const { parseSurfaceFlag, resolveSurfaceWithSource, resolveStdioSurface, parseAccessFlag, SURFACE_SOURCE_LABEL } = await import('../mcp/surface.ts');
+  const { parseSurfaceFlag, parseAdvertiseFlag, resolveSurfaceWithSource, resolveStdioSurface, parseAccessFlag, SURFACE_SOURCE_LABEL } = await import('../mcp/surface.ts');
   const { loadConfig, MERGED_CONFIG_BY_ENGINE } = await import('../core/config.ts');
   const surfaceFlag = parseSurfaceFlag(args);
+  const advertise = parseAdvertiseFlag(args);
   const resolved = isHttp ? resolveSurfaceWithSource(surfaceFlag, loadConfig()) : resolveStdioSurface(surfaceFlag, loadConfig());
   const surface = resolved.surface;
   if (isHttp && process.env.GBRAIN_SURFACE) {
@@ -261,7 +312,7 @@ export async function runServe(
   if (resolved.invalidEnv !== undefined) {
     console.error(`[gbrain serve] ignoring GBRAIN_SURFACE="${resolved.invalidEnv}" (use verbs | starter | full)`);
   }
-  console.error(`[gbrain serve] surface=${surface} (source: ${SURFACE_SOURCE_LABEL[resolved.source]})`);
+  console.error(`[gbrain serve] surface=${surface} (source: ${SURFACE_SOURCE_LABEL[resolved.source]})${advertise ? ` advertise=${advertise}` : ''}`);
   void (await import('../core/serve-behavior-notice.ts')).logServeBehaviorNotice(engine, loadConfig());
   // #6543 (A6): serve's stuck, desync and recovery events go to the pool-recovery audit `doctor --only pool_reap_health` reads.
   if (engine.kind === 'postgres') {
@@ -284,6 +335,16 @@ export async function runServe(
     throw new Error('--access read-only applies to stdio serve only; for HTTP narrow each token with ' +
       'gbrain auth rescope-token <name> --operations <op,...> (see docs/mcp/ADMIN.md#read-only-stdio-serve)');
   }
+  // GST-363: --stdio-member binds this one stdio server (the harness entry that starts it) to one member.
+  const stdioMember = parseStdioMemberFlag(args);
+  if (stdioMember !== undefined && isHttp) {
+    throw new Error('--stdio-member binds a stdio serve only; over HTTP bind each key to its person with ' +
+      'gbrain auth create <name> --member <id> (or gbrain auth rescope --token <name> --member <id>)');
+  }
+  const sharedHarness = stdioMember !== undefined ? (await import('./setup-serves.ts')).sharedStdioHarness() : null;
+  if (sharedHarness) {
+    throw new Error(`--stdio-member refused: ${sharedHarness} is installed on this host, and its sessions serve several people, so serve does not start a stdio server bound to one member here; remove the flag from this harness entry (gbrain setup claude-code|codex --no-stdio-member) and give each person their own key over HTTP (gbrain serve --http with gbrain auth create <name> --member <id>)`);
+  }
 
   // --source-guard (plugin lanes, EV1): fail-closed write routing for
   // user-global serves whose cwd is meaningless (plugin snapshots). Write/
@@ -293,6 +354,10 @@ export async function runServe(
   const sourceGuard = args.includes('--source-guard');
   // Opt-in warm CLI socket (core/cli-socket/server.ts): off, the serve loads nothing and reads nothing for it.
   const cliSocketOn = args.includes('--cli-socket') || MERGED_CONFIG_BY_ENGINE.get(engine)?.serve_cli_socket === true;
+  // Opt-in vector index prewarm (core/vector-prewarm.ts): off, the serve loads nothing and reads nothing for it.
+  if (MERGED_CONFIG_BY_ENGINE.get(engine)?.serve_vector_prewarm === true) {
+    void import('../core/vector-prewarm.ts').then(m => m.prewarmAtServeStart(engine, opts.log ?? ((msg: string) => console.error(msg))));
+  }
   if (sourceGuard && isHttp) {
     // Loud posture warning (the --log-full-params precedent): the guard is a
     // stdio-lane mechanism; HTTP writes are scoped per token instead. An
@@ -382,13 +447,24 @@ export async function runServe(
     // waited for a hand-run sweep and then for retention GC.
     const { armCorpusDrain } = await import('../core/sweep.ts');
     const corpusDrain = (opts.armCorpusDrain ?? armCorpusDrain)(engine, { sourceId: process.env.GBRAIN_SOURCE || undefined });
+    // GBRA-438: the HTTP serve's idle tick (it had none): free upkeep when due, keyed on /mcp request activity.
+    // Same kill switch as the stdio serve's idle tick (GBRAIN_SWEEP=0); HTTP refuses --access read-only, so it is never lean.
+    const idleUpkeep = (opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0')) ? (await import('../core/maintenance/idle.ts')).armIdleUpkeep(engine, {
+      intervalMs: idleSweepIntervalMs(),
+      setInterval: opts.setInterval ?? ((fn, ms) => setInterval(fn, ms)),
+      clearInterval: opts.clearInterval ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>)),
+      upkeep: opts.upkeep ?? defaultIdleUpkeep(httpLog),
+    }) : null;
+    const mcpLogPrune = installMcpLogPrune(engine, opts, httpLog, () => false);
 
     const cliSocket = cliSocketOn ? await (await import('../core/cli-socket/server.ts')).startCliSocket(engine, httpLog) : null;
     try {
-      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface, adoptServer: opts.adoptServer });
+      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface, ...(advertise ? { advertise } : {}), adoptServer: opts.adoptServer });
     } finally {
       stallWatchdog?.dispose();
       corpusDrain?.cancel();
+      idleUpkeep?.stop();
+      mcpLogPrune?.stop();
       cliSocket?.close();
     }
 
@@ -463,7 +539,7 @@ export async function runServe(
   }
 
   try {
-    await start(engine, { surface, surfaceSource: resolved.source, ...(resolved.invalidEnv !== undefined ? { invalidSurfaceEnv: resolved.invalidEnv } : {}), ...(sourceGuard ? { sourceGuard } : {}), onBootPhase: phase => { bootPhase = phase; bootProgressAt = Date.now(); }, ...(access === 'read-only' ? { access } : {}) });
+    await start(engine, { surface, surfaceSource: resolved.source, ...(resolved.invalidEnv !== undefined ? { invalidSurfaceEnv: resolved.invalidEnv } : {}), ...(sourceGuard ? { sourceGuard } : {}), onBootPhase: phase => { bootPhase = phase; bootProgressAt = Date.now(); }, ...(access === 'read-only' ? { access } : {}), ...(advertise ? { advertise } : {}), ...(stdioMember !== undefined ? { stdioMember } : {}) });
     // `--stdio-idle-timeout` arms its timer during lifecycle installation,
     // but its stdin activity listener must wait until startMcpServer has
     // attached the MCP SDK transport listener. Attaching any `data` listener
@@ -617,12 +693,20 @@ function installFactsDrain(engine: BrainEngine, opts: ServeOptions, deps: StdioL
  * the on-commit HEAD watcher (`sync.on_commit`, core/serve-head-watcher.ts)
  * stops with them, before shutdownDelegatedSync aborts the sync it started.
  */
+/** #6770: the PGLite lock owner's request-log retention prune, hourly (a no-op on Postgres or while retention is off). */
+function installMcpLogPrune(engine: BrainEngine, opts: ServeOptions, log: (line: string) => void, shuttingDown: () => boolean): McpLogPruneTicker | null {
+  if (opts.mcpLogPrune === false) return null;
+  return startMcpLogPruneTicker(engine, { log, ...(opts.mcpLogPrune ?? {}),
+    canRun: async () => !shuttingDown() && !isEngineDegradedForServe(engine) && !(await loadSyncRunner()).isDelegatedSyncRunning() });
+}
+
 function installResidentTickers(engine: BrainEngine, opts: ServeOptions, deps: StdioLifecycleDeps, shuttingDown: () => boolean): { stop(): Promise<void> } {
   const factsDrain = installFactsDrain(engine, opts, deps, shuttingDown);
+  const mcpLogPrune = installMcpLogPrune(engine, opts, deps.log, shuttingDown);
   // The watch keeps its own unref'd timer: the injected lifecycle timers are the parent watchdog's and the idle sweep's, which tests count.
   const movementWatch: MovementWatch = startMovementWatch(engine, { log: deps.log });
   const headWatcher = startServeHeadWatcher(engine, { log: deps.log });
-  return { stop: async () => { const settled = headWatcher.stop(); movementWatch.stop(); await settled; await factsDrain?.stop(); } };
+  return { stop: async () => { const settled = headWatcher.stop(); movementWatch.stop(); mcpLogPrune?.stop(); await settled; await factsDrain?.stop(); } };
 }
 
 function installStdioLifecycle(
@@ -644,6 +728,7 @@ function installStdioLifecycle(
   let shuttingDown = false;
   let parentWatchdog: unknown = null;
   let idleSweepTimer: unknown = null;
+  const idleUpkeep = idleUpkeepSlot(opts.upkeep ?? defaultIdleUpkeep(deps.log)); // GBRA-438
   let activateIdleActivityTracking = (): void => {};
   let factsDrain: { stop(): Promise<void> } | null = null;
   const beginShutdown = (reason: string): void => {
@@ -664,6 +749,7 @@ function installStdioLifecycle(
       deps.clearInterval(idleSweepTimer);
       idleSweepTimer = null;
     }
+    idleUpkeep.stop();
 
     deps.log(`GBrain MCP server: graceful exit (${reason})`);
 
@@ -847,9 +933,9 @@ function installStdioLifecycle(
   // budget). SEPARATE timer from the parent watchdog, through the same
   // injectable deps.setInterval seam, unref'd per the serve convention so
   // it can never hold the process open. Cleared in beginShutdown. Kill
-  // switch: GBRAIN_SWEEP=0 (seam: opts.sweepEnabled). Chunk-level stdin
-  // 'data' granularity is sufficient — same rationale as armIdle below.
-  const sweepEnabled = opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0');
+  // switch: GBRAIN_SWEEP=0 (seam: opts.sweepEnabled). Chunk-level stdin 'data' granularity is sufficient (see armIdle).
+  const lean = readOnlyServeSkipsResidentDuties(isReadOnlyServeArgs(args), engine.kind); // #7599: a read-only Postgres serve
+  const sweepEnabled = !lean && (opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0')); // runs no sweep
   if (sweepEnabled) {
     const runIdleSweep = opts.sweep ?? (async (e: BrainEngine) => {
       // #4409: the runner loads lazily here too — the sweep fires after
@@ -889,7 +975,7 @@ function installStdioLifecycle(
         // unlike the opt-in --stdio-idle-timeout listener below). By the
         // first tick the transport is long live. No activity signal exists
         // for this first window yet, so treat it as active and re-arm.
-        deps.stdin.on('data', () => { stdinSawData = true; });
+        deps.stdin.on('data', () => { stdinSawData = true; idleUpkeep.abort(); });
         dataListenerAttached = true;
         return;
       }
@@ -901,13 +987,14 @@ function installStdioLifecycle(
       Promise.resolve()
         .then(() => loggedIdleSweep(deps.log, () => runIdleSweep(engine)))
         .catch(() => { /* idle sweep is best-effort; never kill serve */ })
+        .then(() => shuttingDown || stdinSawData || sawForeground() ? undefined : idleUpkeep.run(engine)) // GBRA-438: after the sweep, never beside it
         .finally(() => { sweepInFlight = false; });
     }, idleSweepIntervalMs());
     (idleSweepTimer as { unref?: () => void } | null)?.unref?.();
   }
 
   // Automatic facts drain (Lane D) and the #6317 movement watch: see installResidentTickers.
-  factsDrain = installResidentTickers(engine, opts, deps, () => shuttingDown);
+  factsDrain = lean ? null : installResidentTickers(engine, opts, deps, () => shuttingDown); // #7599: nor its resident tickers
 
   // Optional idle-timeout safety net. Default OFF; opt-in via
   // `--stdio-idle-timeout <seconds>`. The flag is for the rare case where

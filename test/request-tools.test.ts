@@ -199,6 +199,18 @@ describe('request_tools {tools: [...]} descriptor fetch (D5)', () => {
     const raw = res.content[0].text;
     expect(raw).not.toContain('no_such_tool_xyz');
   });
+
+  test('a starter ceiling still returns every parameter the starter tool list omits (GBRA-156)', async () => {
+    const res = await dispatchToolCall(engine, 'request_tools', { tools: ['get_page', 'capture', 'query'] }, {
+      ...HTTP, surfaceCeiling: 'starter',
+    });
+    const body = parsed(res);
+    const byName = new Map(body.tools.map((t: { name: string; inputSchema: { properties: Record<string, unknown> } }) => [t.name, t.inputSchema.properties]));
+    for (const name of ['get_page', 'capture', 'query']) {
+      const op = operations.find(o => o.name === name)!;
+      expect(Object.keys(byName.get(name) as Record<string, unknown>).sort(), name).toEqual(Object.keys(op.params).sort());
+    }
+  });
 });
 
 describe('D1: request_tools with an empty or unknown-only list returns the catalog', () => {
@@ -359,19 +371,19 @@ describe('request_tools {surface} persist branch', () => {
     expect(parsed(other).persisted).toBe(true);
   });
 
-  test('{surface, tools} together → invalid_params, never a persist (D5 branch exclusivity)', async () => {
+  test('{surface, tools} together → the surface persists and the descriptors come back (GBRA-449; was refused under D5)', async () => {
     await seedClient('cl-both');
     const res = await dispatchToolCall(engine, 'request_tools', { surface: 'starter', tools: ['query'] }, {
       ...HTTP, surfaceCeiling: 'full', auth: authFor('cl-both', ['read']),
     });
-    expect(res.isError).toBe(true);
+    expect(res.isError ?? false).toBe(false);
     const body = parsed(res);
-    expect(body.error).toBe('invalid_params');
-    expect(body.message).toContain('not both');
+    expect(body.surface_change).toEqual({ persisted: true, surface: 'starter', note: 're-issue tools/list to see the new catalog' });
+    expect(body.tools.map((t: { name: string }) => t.name)).toEqual(['query']);
     const rows = await engine.executeRaw(
-      `SELECT surface FROM oauth_clients WHERE client_id = $1`, ['cl-both'],
+      `SELECT surface, surface_set_by FROM oauth_clients WHERE client_id = $1`, ['cl-both'],
     );
-    expect(rows[0].surface).toBe(null);
+    expect(rows[0]).toEqual({ surface: 'starter', surface_set_by: 'self' });
   });
 
   test('RateLimiter.refund returns a token so a race-lost persist never burns budget (adversarial fix)', async () => {

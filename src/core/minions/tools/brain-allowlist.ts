@@ -33,6 +33,15 @@ import { validateSourceId } from '../../utils.ts';
 import type { ToolCtx, ToolDef } from '../types.ts';
 import { putPageRejection, rethrowWithCurrentRevision } from './put-page-result.ts';
 import { BRAIN_TOOL_ALLOWLIST } from './brain-tool-allowlist.ts';
+import { stagePutPage } from './staged-put-page.ts';
+import { withCallerAccess } from '../../search/private-visibility.ts';
+import { folderAccessFor, remoteCallerAccess } from '../../access/caller.ts';
+import { credentialScopeFor, requesterScopeGate, requiresRequesterScope, withServesReread } from '../../access/requester-scope.ts';
+import { attestedCallerAccess, attestRightOf, storedActorIdentity } from '../../access/actor.ts';
+import { attestedReadMode, SCOPE_READ_ACCESS, withReadMode } from '../../access/scope-read.ts';
+import { attestedReadScope } from '../../access/member-sources.ts';
+import type { AudiencePrincipal } from '../../access/audience.ts';
+import { currentSubmissionAuthority } from '../submission-authority.ts';
 
 // The allow-list itself lives in a handler-free module so the MCP surface
 // tiers (src/mcp/surface.ts) can read it without this module's operations import.
@@ -177,6 +186,8 @@ export interface BuildBrainToolsOpts {
   delegatedAuth?: Pick<AuthInfo, 'clientId' | 'scopes' | 'sourceId' | 'allowedSources' | 'allowedOperations'>;
   /** #6297: byte budget on this job's get_page results (SubagentHandlerData.read_budget_bytes); unset = none. */
   readBudgetBytes?: number;
+  /** GBRA-60: put_page stages its page in the tool-execution ledger instead of writing it (SubagentHandlerData.stage_writes). */
+  stageWrites?: boolean;
 }
 
 interface OpContextDeps {
@@ -240,62 +251,109 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   // through the job payload).
   if (opts.sourceId !== undefined) validateSourceId(opts.sourceId);
 
-  return picked.map<ToolDef>(op => {
-    const schema = op.name === 'put_page'
-      ? namespacedPutPageSchema(op, opts.subagentId, opts.allowedSlugPrefixes)
-      : paramsToInputSchema(op);
+  return picked.map(op => brainTool(op, opts));
+}
 
-    const toolName = sanitizeToolName(op.name);
-    if (!ANTHROPIC_NAME_RE.test(toolName)) {
-      throw new Error(`brain tool name ${toolName} does not match Anthropic constraint`);
-    }
+/**
+ * GBRA-60: the `put_pages` tool of a trusted dream synthesis child's oneshot runner, which writes its validated pages
+ * as one batch so a Postgres consumer publishes them as one group (one commit on a strict source). It is never in
+ * the registry a model sees: BRAIN_TOOL_ALLOWLIST keeps put_pages out, and the oneshot runner is its only caller.
+ */
+export function buildBrainPutPagesTool(opts: BuildBrainToolsOpts): ToolDef {
+  if (opts.sourceId !== undefined) validateSourceId(opts.sourceId);
+  return brainTool(operations.find(op => op.name === 'put_pages')!, opts);
+}
 
-    return {
-      name: toolName,
-      description: op.description,
-      input_schema: schema,
-      // The persisted tool dispatcher binds mutations to a stable request UUID;
-      // a replay returns the original durable receipt without another write.
-      idempotent: true,
-      // v0.41 Approach C: surface usage_hint to the system-prompt renderer.
-      // Keyed by the unprefixed op name. Undefined when no hint is registered.
-      usage_hint: BRAIN_TOOL_USAGE_HINTS[op.name],
-      async execute(input: unknown, ctx: ToolCtx): Promise<unknown> {
-        if (op.localOnly) throw new Error(`${toolName}: local-only operations cannot be delegated`);
-        const opCtx = buildOpContext({
-          engine: ctx.engine,
-          config: opts.config,
-          subagentId: opts.subagentId,
-          jobId: ctx.jobId,
-          signal: ctx.signal,
-          brainId: opts.brainId,
-          allowedSlugPrefixes: opts.allowedSlugPrefixes,
-          sourceId: opts.sourceId,
-          deferEmbeds: opts.deferEmbeds,
-          delegatedAuth: opts.delegatedAuth,
-        });
-        const raw = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
-        // Same order the MCP dispatchers keep: normalize the optional-param
-        // absent idioms (`null`, `''` on a string) FIRST — the validator's
-        // header calls this load-bearing — then validate, so a missing
-        // required param (or wrong type / unknown enum) is named back to the
-        // model instead of crashing inside the handler, and `since: ""` never
-        // reaches a handler raw.
-        const params = normalizeOptionalParams(op, raw);
-        // #6297: a subagent's full-content read returns the round-trip fields only, not the body twice.
-        if (op.name === 'get_page' && params.include_content === true) params.content_only = true;
-        const validationError = validateParams(op, params);
-        if (validationError) throw new Error(`${toolName}: ${validationError}`);
-        const output = op.name === 'put_page'
-          ? await op.handler(opCtx, params).catch(e => rethrowWithCurrentRevision(ctx.engine, opCtx.sourceId ?? 'default', params.slug, e))
-          : await op.handler(opCtx, params);
-        const rejection = op.name === 'put_page' ? putPageRejection(output) : null;
-        if (rejection) throw new Error(rejection);
-        if (op.name === 'get_page' && opts.readBudgetBytes) return budgetedPageRead(ctx.engine, ctx.jobId, opts.readBudgetBytes, params.slug, output);
-        return output;
-      },
-    };
-  });
+/** One subagent tool: `op` under a subagent-tagged OperationContext, with a namespace-wrapped schema for put_page. */
+function brainTool(op: Operation, opts: BuildBrainToolsOpts): ToolDef {
+  const schema = op.name === 'put_page'
+    ? namespacedPutPageSchema(op, opts.subagentId, opts.allowedSlugPrefixes)
+    : paramsToInputSchema(op);
+
+  const toolName = sanitizeToolName(op.name);
+  if (!ANTHROPIC_NAME_RE.test(toolName)) {
+    throw new Error(`brain tool name ${toolName} does not match Anthropic constraint`);
+  }
+
+  return {
+    name: toolName,
+    description: op.description,
+    input_schema: schema,
+    // The persisted tool dispatcher binds mutations to a stable request UUID;
+    // a replay returns the original durable receipt without another write.
+    idempotent: true,
+    // v0.41 Approach C: surface usage_hint to the system-prompt renderer.
+    // Keyed by the unprefixed op name. Undefined when no hint is registered.
+    usage_hint: BRAIN_TOOL_USAGE_HINTS[op.name],
+    async execute(input: unknown, ctx: ToolCtx): Promise<unknown> {
+      if (op.localOnly) throw new Error(`${toolName}: local-only operations cannot be delegated`);
+      const opCtx = buildOpContext({
+        engine: ctx.engine,
+        config: opts.config,
+        subagentId: opts.subagentId,
+        jobId: ctx.jobId,
+        signal: ctx.signal,
+        brainId: opts.brainId,
+        allowedSlugPrefixes: opts.allowedSlugPrefixes,
+        sourceId: opts.sourceId,
+        deferEmbeds: opts.deferEmbeds,
+        delegatedAuth: opts.delegatedAuth,
+      });
+      const raw = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
+      // Same order the MCP dispatchers keep: normalize the optional-param
+      // absent idioms (`null`, `''` on a string) FIRST — the validator's
+      // header calls this load-bearing — then validate, so a missing
+      // required param (or wrong type / unknown enum) is named back to the
+      // model instead of crashing inside the handler, and `since: ""` never
+      // reaches a handler raw.
+      const params = normalizeOptionalParams(op, raw);
+      // #6297: a subagent's full-content read returns the round-trip fields only, not the body twice.
+      if (op.name === 'get_page' && params.include_content === true) params.content_only = true;
+      const validationError = validateParams(op, params);
+      if (validationError) throw new Error(`${toolName}: ${validationError}`);
+      const write = op.name === 'put_page' && opts.stageWrites ? stagePutPage : op.handler;
+      const run = (c: typeof opCtx = opCtx) => op.name === 'put_page'
+        ? write(c, params).catch(e => rethrowWithCurrentRevision(ctx.engine, c.sourceId ?? 'default', params.slug, e))
+        : op.handler(c, params);
+      // GBRA-218: a remote-owned job reads as its client's member, looked up live on every call (a disabled member or
+      // removed binding takes effect at the next tool call); never a GBRA-156 private-pages grant.
+      // GBRA-231: a job a shared agent submitted for an audience reads as that audience, re-checked the same way.
+      const submitted = currentSubmissionAuthority();
+      const actingFor = submitted?.kind === 'remote_agent' ? submitted.grant.actingFor as AudiencePrincipal[] | undefined : undefined;
+      // GST-359 C1: a job submitted for an attested actor reads as that member only while actorCoverage still covers it.
+      const agent = submitted?.kind === 'remote_agent' ? submitted : undefined;
+      const actor = agent?.grant.actor;
+      // GST-1158 E1: and a job tool call that names sources reads them as the scope, exactly as the same call through MCP dispatch.
+      const output = agent && actor
+        ? await (async () => {
+          const identity = await storedActorIdentity(ctx.engine, agent.principal, actor, op.name);
+          const readMode = attestedReadMode(op.name, params, (await attestRightOf(ctx.engine, { principal: agent.principal }))?.read);
+          const access = readMode === 'scope' ? { ...SCOPE_READ_ACCESS, folderCoverage: (await folderAccessFor(ctx.engine, [])).folderCoverage } : await attestedCallerAccess(ctx.engine, actor, identity);
+          return withCallerAccess(access, () => withReadMode(readMode, async () => run(await attestedReadScope(ctx.engine, opCtx, actor.member, readMode === 'scope'))));
+        })()
+        : opCtx.auth
+        ? await withCallerAccess(await scopedJobAccess(ctx.engine, op, opCtx.auth, actingFor), run)
+        : await run();
+      const rejection = op.name === 'put_page' ? putPageRejection(output) : null;
+      if (rejection) throw new Error(rejection);
+      if (op.name === 'get_page' && opts.readBudgetBytes) return budgetedPageRead(ctx.engine, ctx.jobId, opts.readBudgetBytes, params.slug, output);
+      return output;
+    },
+  };
+}
+
+/**
+ * The caller access of a remote-owned job's tool call. GST-363: the same requester-scope gate as dispatch, read live
+ * on every call: on a brain that serves several people, a read by a job whose credential is bound to nobody (and that
+ * names no audience) is refused with requester_scope_required once the grace ends; during it the call runs.
+ */
+async function scopedJobAccess(engine: BrainEngine, op: Operation, auth: NonNullable<OperationContext['auth']>, actingFor: AudiencePrincipal[] | undefined) {
+  const access = await remoteCallerAccess(engine, auth, [], undefined, actingFor, undefined, op.mutating === false);
+  if (!requiresRequesterScope(op, auth)) return access;
+  const credential = await credentialScopeFor(engine, auth);
+  const resolved = await withServesReread(engine, access, credential);
+  requesterScopeGate(op, resolved, credential, 'http');
+  return resolved;
 }
 
 /**

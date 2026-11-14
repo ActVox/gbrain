@@ -26,6 +26,7 @@ SETUP
   migrate --to <postgres|pglite>     Move the brain between engines (PGLite -> Postgres graduates: plan, then --yes --expect)
   migrate embeddings --to <p:model>  Re-embed onto another embedding provider
   embeddings enable --embedding-model <p:model>  Turn on embeddings in place (keeps pages/facts)
+  embeddings prewarm [--dry-run]     Load the vector indexes into shared_buffers when they fit (Postgres)
   upgrade                            Self-update
   check-update [--json]              Check for new versions
   repair [<kind>] [--apply]          Preview/apply residual repairs (timeline, visibility, safe-chunks)
@@ -45,6 +46,8 @@ PAGES
   delete <slug>                      Delete a page
   list [--type T] [--tag T] [--limit N]
                                      List pages
+  find <glob|prefix|name> [--type T] [--source S] [--limit N]
+                                     Find pages by slug, path or title
 
 SEARCH
   search <query>                     Keyword search (tsvector)
@@ -120,6 +123,7 @@ TOOLS
   compile-context --target <t>       Compile a deterministic, scanned, budgeted context
         [--budget N] [--check]       file (claude-code | codex | openclaw)
   decide <status|probe|enable|...>   System One decision support (Jev); every slot off by default
+  memory-proposals list|show|approve|deny  QM's proposed timeline entries and links awaiting your decision
   facts relink [--dry-run]           Link facts saved without an entity to the entity they name
   check-resolvable [--json] [--fix]  Validate skill tree (reachability/MECE/DRY)
   report --type <name> --content ... Save timestamped report to brain/reports/
@@ -169,7 +173,7 @@ CODE INDEXING (v0.19.0 / v0.20.0 Cathedral II)
   code-callees <symbol>              What does this symbol call? (v0.20.0 A1)
   query <q> --lang <l>               Filter hybrid search to one language (v0.20.0)
   query <q> --symbol-kind <k>        Filter to symbol type (function|class|method|...) (v0.20.0)
-  reconcile-links [--dry-run]        Batch-recompute doc↔impl edges (v0.20.0)
+  reconcile-links [--source id] [--dry-run] Batch-recompute doc↔impl edges in one source
   reindex-code [--source id] [--yes] [--force] Explicit code-page reindex (v0.20.0; --force re-chunks unchanged pages)
   reindex-search-vector [--dry-run] [--yes] [--json]
                                 Recreate FTS triggers + backfill under
@@ -190,6 +194,8 @@ JOBS (Minions)
 
 ADMIN
   stats                              Brain statistics
+  stats --by source,type [--since 30d] [--collapse-aliases]
+                                     Live page counts per source and type
   health                             Brain health dashboard
   history <slug> [--json]            Page version history
   revert <slug> <version-id>         Revert to version
@@ -205,6 +211,8 @@ ADMIN
     --surface verbs|starter|full     Tool surface: the 7 memory verbs, the ~20-op
                                      starter set, or every op (default full).
                                      On --http this is the per-client CEILING.
+    --advertise verbs|starter|full   List only this surface in tools/list (plus
+                                     request_tools); the rest stays callable.
     --access read-only|full          stdio: list and dispatch only read operations
   serve --http [--port N]            HTTP MCP server with OAuth 2.1
     --token-ttl N                    Access token TTL in seconds, 60-7776000 (default: 3600)
