@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 import { Dialog } from '../components/Dialog';
 import { startVisibilityPoll } from '../lib/visibility-poll';
@@ -17,7 +17,9 @@ export function DashboardPage() {
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   const [events, setEvents] = useState<FeedEvent[]>([]);
-  const [sseStatus, setSseStatus] = useState('Connecting');
+  // #8913 state values match upstream; the labels below are the ActVox display text.
+  const [sseStatus, setSseStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const everConnected = useRef(false);
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
   const [detail, setDetail] = useState<FeedEvent | null>(null);
@@ -41,9 +43,9 @@ export function DashboardPage() {
   }, [retry]);
 
   useEffect(() => {
-    setSseStatus('Connecting');
+    setSseStatus('connecting');
     const es = new EventSource('/admin/events', { withCredentials: true });
-    es.onopen = () => setSseStatus('Connected');
+    es.onopen = () => { everConnected.current = true; setSseStatus('connected'); };
     es.onmessage = e => {
       try {
         const event = JSON.parse(e.data) as FeedEvent;
@@ -53,10 +55,11 @@ export function DashboardPage() {
       } catch { /* Ignore malformed frames without interrupting subsequent events. */ }
     };
     // An open EventSource owns its retry lifecycle. Closing on error disables it.
-    es.onerror = () => setSseStatus(es.readyState === EventSource.CLOSED ? 'Disconnected' : 'Reconnecting');
+    es.onerror = () => setSseStatus(es.readyState === EventSource.CLOSED ? 'disconnected' : 'connecting');
     return () => { es.onopen = null; es.onmessage = null; es.onerror = null; es.close(); };
   }, [retry]);
 
+  const sseLabel = sseStatus === 'connected' ? 'Connected' : sseStatus === 'disconnected' ? 'Disconnected' : everConnected.current ? 'Reconnecting' : 'Connecting';
   const successful = (event: FeedEvent) => ['success', 'success_with_warnings'].includes(event.status);
   const visible = events.filter(event => (filter === 'all' || (filter === 'success' ? successful(event) : !successful(event)))
     && `${event.agent} ${event.operation}`.toLowerCase().includes(query.trim().toLowerCase()));
@@ -79,11 +82,11 @@ export function DashboardPage() {
     </div>
     <div className="attention-panel"><div><strong>Token health</strong><p className="muted">{snapshot ? `${snapshot.health.expiring_soon} access tokens expire within 24 hours.` : 'Token expiry data is not available yet.'} Machine clients can renew automatically.</p></div><a className="btn btn-secondary" href="#agents">Review agents</a></div>
     <section aria-labelledby="activity-heading">
-      <div className="activity-heading"><h2 id="activity-heading">Request activity</h2><span role="status" className={`stream-status ${sseStatus === 'Connected' ? 'is-connected' : ''}`}>{sseStatus}</span></div>
+      <div className="activity-heading"><h2 id="activity-heading">Request activity</h2><span role="status" className={`stream-status ${sseStatus === 'connected' ? 'is-connected' : ''}`}>{sseLabel}</span></div>
       <p className="muted activity-help">Latest 50 received events since this page was opened. <a href="#log">Open the request log</a> for history.</p>
       <div className="activity-controls"><div className="activity-filters" role="group" aria-label="Filter by result">{[['all', 'All'], ['error', 'Errors'], ['success', 'Successful']].map(([value, label]) => <button className="btn btn-secondary" key={value} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}</div><label className="activity-search">Find a request<input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Agent or operation" /></label></div>
       <div className="feed" tabIndex={0} role="region" aria-label="Request activity table">
-        {visible.length === 0 ? <div className="feed-empty">{events.length ? 'No matching requests. Clear the search or choose All.' : sseStatus === 'Connected' ? 'No events received yet. New requests will appear here.' : 'Activity is unavailable until the connection is restored.'}</div> : <table><caption className="sr-only">Latest received requests, newest first</caption><thead><tr>{['Agent', 'Operation', 'Scopes', 'Duration', 'Result', 'Time', 'Details'].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead><tbody>{visible.map((event, index) => <tr key={`${event.timestamp}-${index}`}>
+        {visible.length === 0 ? <div className="feed-empty">{events.length ? 'No matching requests. Clear the search or choose All.' : sseStatus === 'connected' ? 'No events received yet. New requests will appear here.' : 'Activity is unavailable until the connection is restored.'}</div> : <table><caption className="sr-only">Latest received requests, newest first</caption><thead><tr>{['Agent', 'Operation', 'Scopes', 'Duration', 'Result', 'Time', 'Details'].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead><tbody>{visible.map((event, index) => <tr key={`${event.timestamp}-${index}`}>
           <td className="mono">{event.agent}</td><td className="mono">{event.operation}</td><td className="muted">{event.scopes.split(',').join(' · ')}</td><td className="mono">{event.latency_ms} ms</td><td><span className={`badge badge-${successful(event) ? 'success' : 'error'}`}>{event.status}</span></td><td className="muted"><time dateTime={event.timestamp}>{timeAgo(event.timestamp)}</time></td><td><button className="btn btn-secondary" aria-label={`Details for ${event.operation} from ${event.agent}`} onClick={() => setDetail(event)}>View</button></td>
         </tr>)}</tbody></table>}
       </div>
